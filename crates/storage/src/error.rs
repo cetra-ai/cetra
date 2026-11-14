@@ -286,6 +286,19 @@ pub enum GcError {
     Fault,
 }
 
+impl GcError {
+    /// The variant name in snake case. GC logs print this instead of the error
+    /// text: [`GcError::Object`] displays a staged path, and staged rows include
+    /// media paths, which hold the blob's hash (spec 03 §9).
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Catalog(_) => "catalog",
+            Self::Object(_) => "object",
+            Self::Fault => "fault",
+        }
+    }
+}
+
 impl CatalogError {
     pub(crate) fn db(source: sqlx::Error) -> Self {
         Self::Db { source }
