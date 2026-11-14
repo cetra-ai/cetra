@@ -9,6 +9,7 @@ export const projectSettingsNav = [
   { to: "/$org/$project/settings/api-keys", label: "API keys", adminOnly: true },
   { to: "/$org/$project/settings/data", label: "Data", adminOnly: true },
   { to: "/$org/$project/settings/members", label: "Members", adminOnly: false },
+  { to: "/$org/$project/settings/channels", label: "Channels", adminOnly: false },
 ] as const;
 
 /** True on `/<org>/<project>/settings` and every path below it. Slugs are `[a-z0-9-]`. */

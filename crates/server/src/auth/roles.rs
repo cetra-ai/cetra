@@ -100,6 +100,8 @@ pub(crate) enum ProjectPerm {
     ManageMembers,
     /// Write and delete scores (spec 08: member and above).
     Annotate,
+    /// Alert rules and notification channels (spec 08: member and above; D-K-9).
+    ManageAlerts,
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
@@ -205,7 +207,7 @@ impl ProjectPerm {
     pub(crate) fn min_role(self) -> Role {
         match self {
             Self::View | Self::Query => Role::Viewer,
-            Self::Annotate => Role::Member,
+            Self::Annotate | Self::ManageAlerts => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -215,7 +217,7 @@ impl ProjectPerm {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
             Self::Annotate | Self::Delete => Some(KeyScope::Write),
-            Self::ManageSettings | Self::ManageMembers | Self::Drop => None,
+            Self::ManageSettings | Self::ManageMembers | Self::ManageAlerts | Self::Drop => None,
         }
     }
 }
@@ -287,6 +289,8 @@ mod tests {
         // Score writes: viewer no; member, admin and owner yes.
         assert_eq!(ProjectPerm::Annotate.min_role(), Role::Member);
         assert_eq!(ProjectPerm::Annotate.key_scope(), Some(KeyScope::Write));
+        assert_eq!(ProjectPerm::ManageAlerts.min_role(), Role::Member);
+        assert!(ProjectPerm::ManageAlerts.key_scope().is_none());
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());

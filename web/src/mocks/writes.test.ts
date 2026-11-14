@@ -1,5 +1,12 @@
 import { beforeEach, expect, it } from "vitest";
-import { ADA_ID, BOB_ID, NEW_USER_ID, TOKEN_ID } from "@/test/fixtures";
+import {
+  ADA_ID,
+  BOB_ID,
+  FIRING_RULE_ID,
+  NEW_USER_ID,
+  SLACK_CHANNEL_ID,
+  TOKEN_ID,
+} from "@/test/fixtures";
 import openapiDocument from "../../../crates/server/openapi.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
@@ -61,7 +68,9 @@ it("lists every account and admin write of the contract", () => {
         path === "/api/v1/projects/{project}" ||
         path.startsWith("/api/v1/projects/{project}/api-keys") ||
         path.startsWith("/api/v1/projects/{project}/deletions") ||
-        path.startsWith("/api/v1/projects/{project}/members");
+        path.startsWith("/api/v1/projects/{project}/members") ||
+        path.startsWith("/api/v1/projects/{project}/channels") ||
+        path.startsWith("/api/v1/projects/{project}/alert-rules");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
       }
@@ -152,6 +161,54 @@ it("accepts an org drop", async () => {
   const response = await send("DELETE", "/api/v1/orgs/acme?confirm=acme");
   expect(response.status).toBe(202);
   expect(response.json?.kind).toBe("org");
+});
+
+it("answers the channel and alert rule writes", async () => {
+  const channel = await send(
+    "POST",
+    `${PROJECT}/channels`,
+    JSON.stringify({ name: "  Pager  ", kind: "webhook" }),
+  );
+  expect(channel.status).toBe(201);
+  expect(channel.json?.name).toBe("Pager");
+
+  const renamedChannel = await send(
+    "PATCH",
+    `${PROJECT}/channels/${SLACK_CHANNEL_ID}`,
+    JSON.stringify({ name: "Renamed" }),
+  );
+  expect(renamedChannel.status).toBe(200);
+  expect(renamedChannel.json?.name).toBe("Renamed");
+
+  const tested = await send("POST", `${PROJECT}/channels/${SLACK_CHANNEL_ID}/test`);
+  expect(tested.status).toBe(200);
+  expect(tested.json).toEqual({ ok: true });
+
+  const rule = await send(
+    "POST",
+    `${PROJECT}/alert-rules`,
+    JSON.stringify({
+      name: "Errors",
+      condition: { metric: "error_rate", window: "5m", comparator: "gt", threshold: 0.05 },
+      enabled: false,
+    }),
+  );
+  expect(rule.status).toBe(201);
+  expect(rule.json?.name).toBe("Errors");
+  expect(rule.json?.enabled).toBe(false);
+  expect(rule.json?.state).toBe("ok");
+  expect("last_value" in (rule.json ?? {})).toBe(false);
+
+  const renamedRule = await send(
+    "PATCH",
+    `${PROJECT}/alert-rules/${FIRING_RULE_ID}`,
+    JSON.stringify({ name: "Errors 2" }),
+  );
+  expect(renamedRule.status).toBe(200);
+  expect(renamedRule.json?.name).toBe("Errors 2");
+
+  expect((await send("DELETE", `${PROJECT}/channels/${SLACK_CHANNEL_ID}`)).status).toBe(204);
+  expect((await send("DELETE", `${PROJECT}/alert-rules/${FIRING_RULE_ID}`)).status).toBe(204);
 });
 
 it("answers 204 for deletes", async () => {
