@@ -863,6 +863,62 @@ it("refetches the first page instead of growing it past the cap", async () => {
   }
 });
 
+it("keeps one first-page refetch in flight and queues one trailing refetch", async () => {
+  setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: 5 });
+  const { emit } = await openLive("/acme/support-bot/traces?live=1");
+  expect(screen.getByText("5 loaded")).toBeInTheDocument();
+  let requests = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let aborted = 0;
+  let release: (() => void) | undefined;
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      requests += 1;
+      const call = requests;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      request.signal.addEventListener("abort", () => {
+        aborted += 1;
+      });
+      try {
+        if (call === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        const name = call === 1 ? "first refresh" : "after the burst";
+        return HttpResponse.json({
+          data: [liveTrace(`c10000000000000000000000000000${call}0`, name, LATER)],
+          next_cursor: null,
+        });
+      } finally {
+        inFlight -= 1;
+      }
+    }),
+  );
+  try {
+    emit.trace(liveTrace("c1000000000000000000000000000021", "burst one", LATER));
+    await waitFor(() => expect(requests).toBe(1));
+    emit.trace(liveTrace("c1000000000000000000000000000022", "burst two", LATER));
+    emit.trace(liveTrace("c1000000000000000000000000000023", "burst three", LATER));
+    emit.resync();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requests).toBe(1);
+    expect(release).toBeDefined();
+    release?.();
+    expect(await screen.findByText("after the burst")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requests).toBe(2);
+    expect(maxInFlight).toBe(1);
+    expect(aborted).toBe(0);
+    expect(screen.queryByText("first refresh")).not.toBeInTheDocument();
+  } finally {
+    release?.();
+    setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  }
+});
+
 const LATER = "2026-11-11T21:00:00.000000000Z";
 const LATER_STILL = "2026-11-11T21:00:01.000000000Z";
 

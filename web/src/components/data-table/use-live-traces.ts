@@ -53,6 +53,7 @@ export function useLiveTraces({
   const [overflowed, setOverflowed] = useState(false);
   const [highlighted, setHighlighted] = useState<ReadonlySet<string>>(() => new Set());
   const timers = useRef<number[]>([]);
+  const refetchQueued = useRef(false);
   const pinTop = useRef(false);
   const scrollAdjust = useRef(0);
 
@@ -93,14 +94,39 @@ export function useLiveTraces({
     setPending(next.length);
   }
 
-  /** Drops every page after the first and refetches page 1 from the server, with a correct cursor. */
+  /**
+   * Drops every page after the first and refetches page 1 from the server, with a correct
+   * cursor. At most one refetch runs at a time: a call during one only queues a single
+   * trailing refetch, so the traces that arrived meanwhile are still fetched.
+   */
   function refetchFirstPage() {
     const key = queryKeyRef.current;
     queryClient.setQueryData<TracePages>(key, (current) =>
       current ? firstPageOnly(current) : current,
     );
-    void queryClient.invalidateQueries({ queryKey: key, exact: true });
+    if (queryClient.isFetching({ queryKey: key, exact: true }) > 0) {
+      refetchQueued.current = true;
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: key, exact: true }, { cancelRefetch: false });
   }
+
+  const refetchFirstPageRef = useRef(refetchFirstPage);
+  refetchFirstPageRef.current = refetchFirstPage;
+
+  // When the running refetch settles, run the queued one. Watching the query cache also
+  // covers a page-1 fetch this hook did not start (for example a next-page load).
+  useEffect(() => {
+    return queryClient.getQueryCache().subscribe(() => {
+      if (
+        refetchQueued.current &&
+        queryClient.isFetching({ queryKey: queryKeyRef.current, exact: true }) === 0
+      ) {
+        refetchQueued.current = false;
+        refetchFirstPageRef.current();
+      }
+    });
+  }, [queryClient]);
 
   function insertBuffered(rows: readonly Schema<"TraceSummary">[]) {
     const current = queryClient.getQueryData<TracePages>(queryKeyRef.current);
