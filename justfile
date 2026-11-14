@@ -268,9 +268,14 @@ release-verify tag:
 release-notes version:
     tools/packaging/release-notes.sh {{version}}
 
-# Packaging checks on x86_64 Linux: what CI's packaging job runs (D-N-13)
-check-packaging: versions-check helm-check js-install
+# Cheap packaging checks: versions, chart, compose files, Biome on tools/packaging (CI's packaging job, D-N-13)
+check-packaging-lint: versions-check helm-check js-install
     pnpm exec biome check tools/packaging
+    cd deploy/compose && docker compose config --quiet
+    cd deploy/compose && GARAGE_RPC_SECRET=x GARAGE_ADMIN_TOKEN=x GARAGE_ACCESS_KEY_ID=x GARAGE_SECRET_ACCESS_KEY=x docker compose -f compose.yaml -f compose.s3.yaml config --quiet
+
+# Full packaging checks on x86_64 Linux: the lint checks, the archive, binary, install, image and compose smokes (packaging.yml, D-N-13)
+check-packaging: check-packaging-lint
     just dist x86_64-unknown-linux-musl
     just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
     just install-smoke
