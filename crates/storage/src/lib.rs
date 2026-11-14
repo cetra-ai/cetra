@@ -73,7 +73,7 @@ mod views;
 pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-pub use crate::error::CompactionError;
+pub use crate::error::{CompactionError, FlushNowError};
 pub use crate::gc::ObsoleteReport;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
@@ -189,8 +189,7 @@ pub struct Storage {
     /// Shared with the flush tasks and staged-object collection.
     #[cfg_attr(not(test), allow(dead_code))]
     objects: Arc<Objects>,
-    /// Kept so tests can read `flushed_seq`. The flush tasks hold their own clones.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Read by [`Self::flush_now`] and the tests. The flush tasks hold their own clones.
     committer: Arc<Committer>,
     runtime: Arc<RuntimeEnv>,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
@@ -782,6 +781,77 @@ impl Storage {
             scores_wal_failed: self.scores.shared().failed(),
             memtable_bytes: spans.saturating_add(scores),
             memtable_hard_limit: self.hard_limit,
+        }
+    }
+
+    /// Flushes both tables up to what was acknowledged before this call and
+    /// waits for the catalog commit (N M2, D-N-18). Appends continue meanwhile;
+    /// rows acknowledged after the call are not waited for.
+    ///
+    /// One caller at a time: the server's backup slot serialises calls, and
+    /// returning clears both tables' force flags.
+    ///
+    /// # Errors
+    ///
+    /// [`FlushNowError`] when a WAL writer has failed, when the storage is
+    /// shutting down, or when a table's flush has not committed within `timeout`.
+    pub async fn flush_now(&self, timeout: std::time::Duration) -> Result<(), FlushNowError> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(FlushNowError::ShuttingDown);
+        }
+        let _clear = ForceFlushGuard(self);
+        // The target is the highest seq held when the call starts. It is a
+        // one-shot snapshot: rows appended later are never waited for.
+        let mut targets: Vec<(Table, u64)> = Vec::with_capacity(2);
+        for table in [Table::Spans, Table::Scores] {
+            let shared = self.writer(table).shared();
+            let target = shared
+                .memtable()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .max_seq();
+            if target == 0 {
+                continue;
+            }
+            shared.set_force_flush(true);
+            // `notify_one` keeps a permit for a flush task between two waits.
+            shared.flush_notify.notify_one();
+            targets.push((table, target));
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut done = vec![false; targets.len()];
+        loop {
+            for (index, (table, target)) in targets.iter().enumerate() {
+                if done[index] {
+                    continue;
+                }
+                let table = *table;
+                // A failed writer is checked first, so the answer does not depend
+                // on whether a flush happened to commit before this poll.
+                if self.writer(table).shared().failed() {
+                    return Err(FlushNowError::WriterFailed {
+                        table: table.name(),
+                    });
+                }
+                if self.committer.flushed_seq(table).await >= *target {
+                    self.writer(table).shared().set_force_flush(false);
+                    done[index] = true;
+                    continue;
+                }
+                if self.shutting_down.load(Ordering::Acquire) {
+                    return Err(FlushNowError::ShuttingDown);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(FlushNowError::Timeout {
+                        table: table.name(),
+                        timeout,
+                    });
+                }
+            }
+            if done.iter().all(|finished| *finished) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -1592,6 +1662,17 @@ fn share_hooks(hooks: &Hooks) -> Hooks {
     // Production hooks are `Copy`. Tests share one value and have to clone it.
     #[allow(clippy::clone_on_copy)]
     hooks.clone()
+}
+
+/// Clears both tables' force flags when [`Storage::flush_now`] returns, and
+/// also when its future is dropped.
+struct ForceFlushGuard<'a>(&'a Storage);
+
+impl Drop for ForceFlushGuard<'_> {
+    fn drop(&mut self) {
+        self.0.spans.shared().set_force_flush(false);
+        self.0.scores.shared().set_force_flush(false);
+    }
 }
 
 #[cfg(test)]
@@ -2728,6 +2809,204 @@ mod tests {
         let report = storage.verify_pass().await;
         assert_eq!(report.healthy, 1, "{report:?}");
         assert_eq!(report.quarantined, 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A storage whose flush tasks do nothing on their own: one hour of age
+    /// and 1 MiB of size. Only [`Storage::flush_now`] flushes.
+    fn quiet_config_in(dir: &Path) -> StorageConfig {
+        StorageConfig {
+            flush: FlushConfig {
+                max_age: Duration::from_secs(3600),
+                max_bytes: ByteSize::mib(1),
+                ..FlushConfig::default()
+            },
+            ..config_in(dir)
+        }
+    }
+
+    /// Spans rows that `project` sees through a query.
+    async fn span_count(storage: &Storage) -> i64 {
+        let query = storage
+            .query(project(), QueryOptions::default())
+            .await
+            .unwrap();
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            Arc::clone(&query.runtime),
+        );
+        ctx.register_table("spans_t", query.spans).unwrap();
+        let counted = ctx
+            .sql("SELECT count(*) FROM spans_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        counted[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_commits_everything_acknowledged() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        let spans = storage
+            .append_spans(project(), spans_at(&[1, 2]))
+            .await
+            .unwrap();
+        let scores = storage
+            .append_scores(project(), score_batch("accuracy"))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(storage.flushed_seq(Table::Spans).await >= spans.seq);
+        assert!(storage.flushed_seq(Table::Scores).await >= scores.seq);
+        assert_eq!(storage.spans.shared().memtable_bytes(), 0);
+        assert_eq!(storage.scores.shared().memtable_bytes(), 0);
+        assert_eq!(span_count(&storage).await, 2);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_with_nothing_to_flush_returns_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        let before = (
+            storage.flushed_seq(Table::Spans).await,
+            storage.flushed_seq(Table::Scores).await,
+        );
+        let started = std::time::Instant::now();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let after = (
+            storage.flushed_seq(Table::Spans).await,
+            storage.flushed_seq(Table::Scores).await,
+        );
+        assert_eq!(before, after);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_does_not_wait_for_later_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let first = storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let appender = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut start = 2_i64;
+                while !stop.load(Ordering::Acquire) {
+                    match storage.append_spans(project(), spans_at(&[start])).await {
+                        Ok(_) | Err(AppendError::Backpressure) => {}
+                        Err(error) => panic!("append failed: {error}"),
+                    }
+                    start += 1;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(storage.flushed_seq(Table::Spans).await >= first.seq);
+        stop.store(true, Ordering::Release);
+        appender.await.unwrap();
+        let storage = Arc::try_unwrap(storage).unwrap();
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_clears_the_force_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(!storage.spans.shared().force_flush());
+        assert!(!storage.scores.shared().force_flush());
+        storage
+            .append_spans(project(), spans_at(&[2]))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Nothing forces the flush now, so the append waits in the memtable.
+        assert!(storage.spans.shared().memtable_bytes() > 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_after_shutdown_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage.shutdown().await.unwrap();
+        let error = storage.flush_now(Duration::from_secs(1)).await.unwrap_err();
+        assert!(matches!(error, FlushNowError::ShuttingDown), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_reports_a_failed_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.hooks().arm_fail(HookPoint::WalWrite);
+        let mut failed = false;
+        for start in 2..12 {
+            if storage
+                .append_spans(project(), spans_at(&[start]))
+                .await
+                .is_err()
+            {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "an append failed after the armed fault");
+        let error = storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FlushNowError::WriterFailed { table: "spans" }),
+            "{error}"
+        );
+        let shutdown = storage.shutdown().await.unwrap_err();
+        assert!(matches!(
+            shutdown,
+            StorageError::WalFailed { table: "spans" }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage.hooks().hold(HookPoint::FlushAfterFreeze);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let error = storage
+            .flush_now(Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FlushNowError::Timeout { table: "spans", .. }),
+            "{error}"
+        );
+        storage.hooks().release(HookPoint::FlushAfterFreeze);
         storage.shutdown().await.unwrap();
     }
 }

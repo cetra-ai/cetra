@@ -139,6 +139,28 @@ pub enum StorageError {
     Media(#[from] MediaError),
 }
 
+/// Why [`crate::Storage::flush_now`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum FlushNowError {
+    /// A WAL writer has stopped on an I/O error; nothing more will flush.
+    #[error("the {table} WAL writer has failed")]
+    WriterFailed {
+        /// `spans` or `scores`.
+        table: &'static str,
+    },
+    /// The flush did not commit within the timeout.
+    #[error("the {table} flush did not commit within {timeout:?}")]
+    Timeout {
+        /// `spans` or `scores`.
+        table: &'static str,
+        /// The timeout the caller passed.
+        timeout: std::time::Duration,
+    },
+    /// The storage is shutting down.
+    #[error("storage is shutting down")]
+    ShuttingDown,
+}
+
 /// `Storage::query` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
