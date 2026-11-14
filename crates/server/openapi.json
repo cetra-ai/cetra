@@ -719,6 +719,83 @@
         "security": []
       }
     },
+    "/api/internal/v1/memberships/lookup": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Look up a user's memberships",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+        "operationId": "post_internal_membership_lookup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MembershipLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The user's active memberships.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipLookup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/v1/orgs": {
       "post": {
         "tags": [
@@ -892,6 +969,104 @@
           }
         },
         "security": []
+      }
+    },
+    "/api/internal/v1/orgs/{org_id}/members": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List an org's members",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+        "operationId": "list_internal_org_members",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every\nmember.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's members.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalMembers"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     },
     "/api/internal/v1/usage": {
@@ -13168,6 +13343,50 @@
           }
         }
       },
+      "InternalMember": {
+        "type": "object",
+        "description": "One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it.",
+        "required": [
+          "user_id",
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The user's email. Sent to the control plane only; never logged."
+          },
+          "name": {
+            "type": "string",
+            "description": "The user's display name, when it has one."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The member's org role."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user id."
+          }
+        }
+      },
+      "InternalMembers": {
+        "type": "object",
+        "description": "Answer of `GET /api/internal/v1/orgs/{org_id}/members`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalMember"
+            },
+            "description": "The members, ordered by email."
+          }
+        }
+      },
       "InternalOrg": {
         "type": "object",
         "description": "The created or existing org.",
@@ -13732,6 +13951,70 @@
           "name": {
             "type": "string",
             "description": "Display name. Omitted when the user has not set one."
+          }
+        }
+      },
+      "MembershipLookup": {
+        "type": "object",
+        "description": "Answer of `POST /api/internal/v1/memberships/lookup`.",
+        "required": [
+          "orgs"
+        ],
+        "properties": {
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MembershipOrg"
+            },
+            "description": "The user's active orgs, sorted by slug."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user's id. Absent when no user matches."
+          }
+        }
+      },
+      "MembershipLookupRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;\nthe email only when no identity has the subject.",
+        "required": [
+          "subject",
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email, normalized like every email (D136), for a user the subject does not find."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The OIDC subject at `entitlements.control_plane_provider`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipOrg": {
+        "type": "object",
+        "description": "One active org the user belongs to.",
+        "required": [
+          "org_id",
+          "slug",
+          "role"
+        ],
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org id."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The user's role in the org."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The org slug."
           }
         }
       },

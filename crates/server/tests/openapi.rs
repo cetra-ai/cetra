@@ -92,6 +92,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/internal/v1/users/delete",
         "post_internal_user_delete",
     ),
+    (
+        "post",
+        "/api/internal/v1/memberships/lookup",
+        "post_internal_membership_lookup",
+    ),
+    (
+        "get",
+        "/api/internal/v1/orgs/{org_id}/members",
+        "list_internal_org_members",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -390,6 +400,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_internal_usage",
     "post_internal_user_revoke",
     "post_internal_user_disable",
+    "post_internal_membership_lookup",
+    "list_internal_org_members",
     "list_alert_events",
     "list_org_members",
     "list_org_invites",
@@ -520,6 +532,8 @@ fn document_lint() {
                 | "post_internal_user_revoke"
                 | "post_internal_user_disable"
                 | "post_internal_user_delete"
+                | "post_internal_membership_lookup"
+                | "list_internal_org_members"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -597,8 +611,13 @@ fn document_lint() {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
             expected_errors.extend(["400", "401", "403", "422", "429"]);
-        } else if *id == "list_internal_usage" || *id == "post_internal_user_delete" {
+        } else if *id == "list_internal_usage"
+            || *id == "post_internal_user_delete"
+            || *id == "post_internal_membership_lookup"
+        {
             expected_errors.extend(["400", "401", "403", "429"]);
+        } else if *id == "list_internal_org_members" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);
         } else if *id == "post_email_verify" {

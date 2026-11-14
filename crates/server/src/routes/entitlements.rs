@@ -69,8 +69,8 @@ async fn get_entitlements(
 }
 
 #[derive(Debug, Deserialize)]
-struct OrgIdPath {
-    org_id: Uuid,
+pub(crate) struct OrgIdPath {
+    pub(crate) org_id: Uuid,
 }
 
 /// What the store transaction did.

@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/memberships/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Look up a user's memberships
+         * @description Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.
+         */
+        post: operations["post_internal_membership_lookup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/orgs": {
         parameters: {
             query?: never;
@@ -281,6 +301,26 @@ export interface paths {
          * @description The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.
          */
         put: operations["put_org_entitlements_token"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an org's members
+         * @description Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.
+         */
+        get: operations["list_internal_org_members"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -2779,6 +2819,25 @@ export interface components {
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
         };
+        /** @description One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it. */
+        InternalMember: {
+            /** @description The user's email. Sent to the control plane only; never logged. */
+            email: string;
+            /** @description The user's display name, when it has one. */
+            name?: string;
+            /** @description The member's org role. */
+            role: components["schemas"]["OrgRole"];
+            /**
+             * Format: uuid
+             * @description The user id.
+             */
+            user_id: string;
+        };
+        /** @description Answer of `GET /api/internal/v1/orgs/{org_id}/members`. */
+        InternalMembers: {
+            /** @description The members, ordered by email. */
+            data: components["schemas"]["InternalMember"][];
+        };
         /** @description The created or existing org. */
         InternalOrg: {
             /**
@@ -3074,6 +3133,38 @@ export interface components {
             id: string;
             /** @description Display name. Omitted when the user has not set one. */
             name?: string;
+        };
+        /** @description Answer of `POST /api/internal/v1/memberships/lookup`. */
+        MembershipLookup: {
+            /** @description The user's active orgs, sorted by slug. */
+            orgs: components["schemas"]["MembershipOrg"][];
+            /**
+             * Format: uuid
+             * @description The user's id. Absent when no user matches.
+             */
+            user_id?: string;
+        };
+        /**
+         * @description Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;
+         *     the email only when no identity has the subject.
+         */
+        MembershipLookupRequest: {
+            /** @description Email, normalized like every email (D136), for a user the subject does not find. */
+            email: string;
+            /** @description The OIDC subject at `entitlements.control_plane_provider`. */
+            subject: string;
+        };
+        /** @description One active org the user belongs to. */
+        MembershipOrg: {
+            /**
+             * Format: uuid
+             * @description The org id.
+             */
+            org_id: string;
+            /** @description The user's role in the org. */
+            role: components["schemas"]["OrgRole"];
+            /** @description The org slug. */
+            slug: string;
         };
         /** @description One message in a conversation. Spec 01 § Canonical message format. */
         Message: {
@@ -5600,6 +5691,66 @@ export interface operations {
             };
         };
     };
+    post_internal_membership_lookup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MembershipLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description The user's active memberships. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembershipLookup"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_internal_org: {
         parameters: {
             query?: never;
@@ -5721,6 +5872,80 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_org_members: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every
+                 *     member.
+                 */
+                role?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's members. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalMembers"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

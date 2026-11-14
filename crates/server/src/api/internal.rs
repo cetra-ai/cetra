@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::api::account::OrgRole;
+
 /// `POST /api/internal/v1/orgs` (D-P-29).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -80,4 +82,66 @@ pub struct InternalUsageQuery {
     pub limit: Option<u32>,
     /// Opaque cursor from a previous page.
     pub cursor: Option<String>,
+}
+
+/// Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;
+/// the email only when no identity has the subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MembershipLookupRequest {
+    /// The OIDC subject at `entitlements.control_plane_provider`.
+    pub subject: String,
+    /// Email, normalized like every email (D136), for a user the subject does not find.
+    pub email: String,
+}
+
+/// One active org the user belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MembershipOrg {
+    /// The org id.
+    pub org_id: Uuid,
+    /// The org slug.
+    pub slug: String,
+    /// The user's role in the org.
+    pub role: OrgRole,
+}
+
+/// Answer of `POST /api/internal/v1/memberships/lookup`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MembershipLookup {
+    /// The user's id. Absent when no user matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<Uuid>,
+    /// The user's active orgs, sorted by slug.
+    pub orgs: Vec<MembershipOrg>,
+}
+
+/// One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InternalMember {
+    /// The user id.
+    pub user_id: Uuid,
+    /// The user's email. Sent to the control plane only; never logged.
+    pub email: String,
+    /// The user's display name, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The member's org role.
+    pub role: OrgRole,
+}
+
+/// Answer of `GET /api/internal/v1/orgs/{org_id}/members`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InternalMembers {
+    /// The members, ordered by email.
+    pub data: Vec<InternalMember>,
+}
+
+/// Query of `GET /api/internal/v1/orgs/{org_id}/members`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct InternalMembersQuery {
+    /// Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every
+    /// member.
+    pub role: Option<String>,
 }

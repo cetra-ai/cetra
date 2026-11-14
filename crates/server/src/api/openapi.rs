@@ -58,8 +58,9 @@ use super::evaluators::{
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::internal::{
-    CreateInternalOrgRequest, InternalOrg, InternalOwner, InternalUsageQuery, InternalUsageRow,
-    InternalUserDeleted, InternalUserRef,
+    CreateInternalOrgRequest, InternalMember, InternalMembers, InternalMembersQuery, InternalOrg,
+    InternalOwner, InternalUsageQuery, InternalUsageRow, InternalUserDeleted, InternalUserRef,
+    MembershipLookup, MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
@@ -174,6 +175,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<InternalOrg>();
     set.insert::<InternalUserRef>();
     set.insert::<InternalUserDeleted>();
+    set.insert::<MembershipLookupRequest>();
+    set.insert::<MembershipOrg>();
+    set.insert::<MembershipLookup>();
+    set.insert::<InternalMember>();
+    set.insert::<InternalMembers>();
     set.insert_page::<InternalUsageRow>("InternalUsagePage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
@@ -1311,6 +1317,41 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 429],
     ))
     .build();
+    let post_membership_lookup = operation(
+        "post_internal_membership_lookup",
+        "internal",
+        "Look up a user's memberships",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("MembershipLookupRequest")))
+    .responses(responses(
+        "200",
+        json_of::<MembershipLookup>("The user's active memberships."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let list_internal_org_members = operation(
+        "list_internal_org_members",
+        "internal",
+        "List an org's members",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .parameters(Some(with_query::<InternalMembersQuery>(vec![path_uuid(
+        "org_id",
+        "Org UUID.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<InternalMembers>("The org's members."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     org.delete = Some(delete_org);
@@ -1368,6 +1409,14 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/internal/v1/users/delete",
             PathItem::new(HttpMethod::Post, post_internal_user_delete),
+        )
+        .path(
+            "/api/internal/v1/memberships/lookup",
+            PathItem::new(HttpMethod::Post, post_membership_lookup),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}/members",
+            PathItem::new(HttpMethod::Get, list_internal_org_members),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)

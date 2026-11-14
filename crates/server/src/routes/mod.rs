@@ -11,6 +11,7 @@ pub(crate) mod deletions;
 pub(crate) mod entitlements;
 pub(crate) mod evaluators;
 pub(crate) mod feedback;
+pub(crate) mod internal_members;
 pub(crate) mod internal_orgs;
 pub(crate) mod internal_usage;
 pub(crate) mod internal_users;

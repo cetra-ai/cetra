@@ -665,7 +665,9 @@ async fn assert_lists_omit_secrets(app: &TestApp, world: &World) {
 }
 
 fn is_list(route: &RouteDef) -> bool {
+    // Control-plane lists (`/api/internal/...`) answer only the control plane's token.
     route.method == Method::GET
+        && !matches!(route.access, Access::ControlPlane { .. })
         && matches!(
             route.path.rsplit('/').next(),
             Some("orgs" | "projects" | "members" | "api-keys" | "tokens" | "llm-connections")
