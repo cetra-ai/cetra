@@ -3,7 +3,9 @@
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
+use llmobs_core::ids::ProjectId;
 use serde::Deserialize;
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
@@ -20,7 +22,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::alerts::{self, ChannelPatch, ChannelRow, LastDelivery, NewChannel};
-use crate::meta::orgs;
+use crate::meta::{MetaError, orgs};
 
 /// Channel routes. Reads need `view`; writes need `manage_alerts` (D-K-9).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -170,39 +172,19 @@ async fn update_channel(
 ) -> Result<error::Json<NotificationChannel>, ApiError> {
     let user_id = principal::session_user(&principal)?.id;
     let project_id = access.project.id;
-    let Some(current) = alerts::channel_by_id(state.meta.reader(), project_id, id).await? else {
-        return Err(ApiError::NotFound);
-    };
-    let name = body.name.as_deref().map(checked_name).transpose()?;
-    let config = if body.url.is_some()
-        || body.secret.is_some()
-        || body.headers.is_some()
-        || body.recipients.is_some()
-    {
-        let stored = open_config(&state.secrets, &current.id, &current.config_enc)
-            .map_err(|error| ApiError::Internal(Box::new(error)))?;
-        let next = apply_update(stored, &body)?;
-        next.validate().map_err(|errors| ApiError::BadRequest {
-            detail: None,
-            errors,
-        })?;
-        let sealed = seal_config(&state.secrets, &current.id, &next)
-            .map_err(|error| ApiError::Internal(Box::new(error)))?;
-        Some((sealed, next.target_hint()))
-    } else {
-        None
-    };
-    let patch = ChannelPatch { name, config };
     let now = state.clock.now_ns();
-    let Some(row) = state
+    // The read, the open, the apply, the validation, the seal and the write share one
+    // transaction, so two PATCHes never start from the same stored config.
+    let handle = state.clone();
+    let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { alerts::update_channel(conn, project_id, id, patch, now).await })
+            Box::pin(
+                async move { patch_channel_on(conn, &handle, project_id, id, &body, now).await },
+            )
         })
-        .await?
-    else {
-        return Err(ApiError::NotFound);
-    };
+        .await?;
+    let row = outcome?.ok_or(ApiError::NotFound)?;
     let last = alerts::last_deliveries(state.meta.reader(), project_id).await?;
     tracing::info!(
         target: "audit",
@@ -420,6 +402,56 @@ fn apply_update(
             }),
         },
     })
+}
+
+/// Reads the channel, plans the PATCH and writes it, all on the caller's transaction. The outer
+/// `Err` is a database failure, which rolls the transaction back. The inner `Err` is a refusal
+/// found before any write; `Ok(None)` means the channel is not in the project.
+async fn patch_channel_on(
+    conn: &mut SqliteConnection,
+    handle: &AppState,
+    project_id: ProjectId,
+    id: Uuid,
+    body: &UpdateChannelRequest,
+    now: i64,
+) -> Result<Result<Option<ChannelRow>, ApiError>, MetaError> {
+    let Some(current) = alerts::channel_by_id_on(conn, project_id, id).await? else {
+        return Ok(Ok(None));
+    };
+    let patch = match planned_patch(handle, &current, body) {
+        Ok(patch) => patch,
+        Err(error) => return Ok(Err(error)),
+    };
+    let row = alerts::update_channel(conn, project_id, id, patch, now).await?;
+    Ok(Ok(row))
+}
+
+/// The patch of a PATCH: the trimmed name, and the sealed config when a config field is sent.
+fn planned_patch(
+    handle: &AppState,
+    current: &ChannelRow,
+    body: &UpdateChannelRequest,
+) -> Result<ChannelPatch, ApiError> {
+    let name = body.name.as_deref().map(checked_name).transpose()?;
+    let config = if body.url.is_some()
+        || body.secret.is_some()
+        || body.headers.is_some()
+        || body.recipients.is_some()
+    {
+        let stored = open_config(&handle.secrets, &current.id, &current.config_enc)
+            .map_err(|error| ApiError::Internal(Box::new(error)))?;
+        let next = apply_update(stored, body)?;
+        next.validate().map_err(|errors| ApiError::BadRequest {
+            detail: None,
+            errors,
+        })?;
+        let sealed = seal_config(&handle.secrets, &current.id, &next)
+            .map_err(|error| ApiError::Internal(Box::new(error)))?;
+        Some((sealed, next.target_hint()))
+    } else {
+        None
+    };
+    Ok(ChannelPatch { name, config })
 }
 
 /// A trimmed channel name of 1 to 100 characters.
@@ -813,6 +845,53 @@ mod tests {
             panic!("the channel is a webhook");
         };
         assert_eq!(secret, SECRET);
+    }
+
+    #[tokio::test]
+    async fn concurrent_patches_keep_each_change() {
+        // Two PATCHes of different fields sent at once must both persist: each reads,
+        // edits and re-seals the config inside one write transaction. The requests can
+        // interleave at every await, so several rounds make a lost update show up.
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let new_url = "https://hooks.example.com/y";
+        let new_secret = "fedcba9876543210";
+        for round in 0..20 {
+            let mut body = pager();
+            body["name"] = json!(format!("Pager {round}"));
+            let created = create_ok(&app, &seeded, body).await;
+            let path = format!("{}/{}", channels(&seeded), created.id);
+            let (by_url, by_secret) = tokio::join!(
+                send(
+                    &app,
+                    Method::PATCH,
+                    &path,
+                    &seeded.cookie,
+                    Some(json!({"url": new_url})),
+                ),
+                send(
+                    &app,
+                    Method::PATCH,
+                    &path,
+                    &seeded.cookie,
+                    Some(json!({"secret": new_secret})),
+                ),
+            );
+            assert_eq!(by_url.status, 200);
+            assert_eq!(by_secret.status, 200);
+
+            let row = alerts::channel_by_id(app.state.meta.reader(), seeded.project.id, created.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let ChannelConfig::Webhook { url, secret, .. } =
+                open_config(&app.state.secrets, &row.id, &row.config_enc).unwrap()
+            else {
+                panic!("the channel is a webhook");
+            };
+            assert_eq!(url, new_url, "round {round}");
+            assert_eq!(secret, new_secret, "round {round}");
+        }
     }
 
     #[tokio::test]

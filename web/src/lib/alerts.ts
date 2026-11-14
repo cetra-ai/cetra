@@ -279,21 +279,31 @@ export function previewCondition(form: RuleFormValues): Condition {
   return buildCondition(form, threshold, Number.isFinite(minCount) ? minCount : 0);
 }
 
-/** The condition-related form fields of `a` and `b` differ (metric, window, trimmed filter,
- *  comparator, threshold, minCount, target, trimmed scoreName, aggregation, compared as
- *  strings after trimming). Used to decide whether a PATCH sends `condition`. */
+/** The condition-related form fields of `a` and `b` differ, compared as strings after trimming.
+ *  Metric, window, filter, comparator and threshold always count. minCount counts for every
+ *  metric but cost. target counts only for latency_p95; scoreName and aggregation only for
+ *  score. A field the metric does not use is ignored, so switching metric and back is not a
+ *  change. Used to decide whether a PATCH sends `condition`. */
 export function conditionChanged(a: RuleFormValues, b: RuleFormValues): boolean {
-  return (
+  if (
     a.metric !== b.metric ||
     a.window !== b.window ||
     a.filter.trim() !== b.filter.trim() ||
     a.comparator !== b.comparator ||
-    a.threshold.trim() !== b.threshold.trim() ||
-    a.minCount.trim() !== b.minCount.trim() ||
-    a.target !== b.target ||
-    a.scoreName.trim() !== b.scoreName.trim() ||
-    a.aggregation !== b.aggregation
-  );
+    a.threshold.trim() !== b.threshold.trim()
+  ) {
+    return true;
+  }
+  if (a.metric !== "cost" && a.minCount.trim() !== b.minCount.trim()) {
+    return true;
+  }
+  if (a.metric === "latency_p95") {
+    return a.target !== b.target;
+  }
+  if (a.metric === "score") {
+    return a.scoreName.trim() !== b.scoreName.trim() || a.aggregation !== b.aggregation;
+  }
+  return false;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
