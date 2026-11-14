@@ -17,5 +17,6 @@ expression: "serde_json::to_string_pretty(&config).unwrap()"
     }
   ],
   "smtp_enabled": false,
-  "email_verification_required": false
+  "email_verification_required": false,
+  "org_create_allowed": true
 }
