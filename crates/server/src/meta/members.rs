@@ -160,6 +160,24 @@ pub(crate) async fn count_owners(
         .map_err(MetaError::from)
 }
 
+/// Members whose role is owner, admin or member (viewers take no seat, D176).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn seat_members_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<u64, MetaError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = ? AND role != ?")
+            .bind(org_id.to_string())
+            .bind(org_role_str(OrgRole::Viewer))
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// Members of the org, ordered by email.
 ///
 /// # Errors

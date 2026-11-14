@@ -125,10 +125,10 @@ web/src/routes/$org/$project/settings/general.tsx                               
 
 ### The migration number
 
-The next free number when you start I4.2, which is M3's `eval_queue` number plus one. `main` has `0008_entitlements.sql` (track P's M2), so M3's is `0009` and M4's is `0010`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `MM` below. Everything that depends on it:
+The next free number on `origin/main` when you start I4.2; renumber when you rebase if another track takes it first. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `MM` below. Everything that depends on it:
 - the file name `crates/server/migrations/meta/00MM_pending_traces.sql`;
 - the `meta_schema` snapshot;
-- `docs/spec/04-metadata-db.md` (the table), and `00-design.md` § Modules and § Tables, which name the file `0010_pending_traces.sql` (edit them only when `MM` is not `0010`).
+- `docs/spec/04-metadata-db.md` (the table), and `00-design.md` § Modules and § Tables, which name the migration file: give them the number you used.
 
 The migration tests need no edit: `open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` (`meta/mod.rs`) and `schema_mismatch_names_the_versions` (`admin.rs`) all compute the version with `expected_version()`, which reads the highest embedded migration.
 
@@ -262,7 +262,7 @@ The cost described in that last sentence is accepted by this plan. Do not bound 
 
 **Goal:** migration `00MM_pending_traces.sql`; `meta/pending_traces.rs` to load and write the table; `meta::online_rules::trigger_rules`, the one query the sweeper runs each tick; `meta::eval_jobs::insert_rule_job`, a rule enqueue that does nothing when the rule is gone or disabled.
 
-**Edit only:** `crates/server/migrations/meta/00MM_pending_traces.sql` (new), `crates/server/src/meta/pending_traces.rs` (new), `crates/server/src/meta/mod.rs` (module list), `crates/server/src/meta/online_rules.rs` (one struct and one function, with tests), `crates/server/src/meta/eval_jobs.rs` (one function, with tests), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `MM` is not `0010`).
+**Edit only:** `crates/server/migrations/meta/00MM_pending_traces.sql` (new), `crates/server/src/meta/pending_traces.rs` (new), `crates/server/src/meta/mod.rs` (module list), `crates/server/src/meta/online_rules.rs` (one struct and one function, with tests), `crates/server/src/meta/eval_jobs.rs` (one function, with tests), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name).
 
 **Commit:** `Store pending traces and read the rules the trigger needs`
 

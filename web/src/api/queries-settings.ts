@@ -70,3 +70,7 @@ export function deletionsKey(org: string, project: string) {
 export function orgEntitlementsQuery(org: string) {
   return $api.queryOptions("get", "/api/v1/orgs/{org}/entitlements", orgInit(org));
 }
+
+export function orgUsageQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/usage", orgInit(org));
+}

@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/memberships/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Look up a user's memberships
+         * @description Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.
+         */
+        post: operations["post_internal_membership_lookup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/orgs": {
         parameters: {
             query?: never;
@@ -282,6 +302,106 @@ export interface paths {
          */
         put: operations["put_org_entitlements_token"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an org's members
+         * @description Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.
+         */
+        get: operations["list_internal_org_members"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List org usage by day
+         * @description Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.
+         */
+        get: operations["list_internal_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Delete a user
+         * @description Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
+         */
+        post: operations["post_internal_user_delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable a user
+         * @description Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         */
+        post: operations["post_internal_user_disable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/users/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * End a user's sessions and personal tokens
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         */
+        post: operations["post_internal_user_revoke"];
         delete?: never;
         options?: never;
         head?: never;
@@ -728,6 +848,26 @@ export interface paths {
         put?: never;
         /** Create a project */
         post: operations["post_project"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's usage by day
+         * @description Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.
+         */
+        get: operations["get_org_usage"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2947,6 +3087,25 @@ export interface components {
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
         };
+        /** @description One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it. */
+        InternalMember: {
+            /** @description The user's email. Sent to the control plane only; never logged. */
+            email: string;
+            /** @description The user's display name, when it has one. */
+            name?: string;
+            /** @description The member's org role. */
+            role: components["schemas"]["OrgRole"];
+            /**
+             * Format: uuid
+             * @description The user id.
+             */
+            user_id: string;
+        };
+        /** @description Answer of `GET /api/internal/v1/orgs/{org_id}/members`. */
+        InternalMembers: {
+            /** @description The members, ordered by email. */
+            data: components["schemas"]["InternalMember"][];
+        };
         /** @description The created or existing org. */
         InternalOrg: {
             /**
@@ -2963,6 +3122,50 @@ export interface components {
             email: string;
             /** @description Display name for a new user. Ignored when the user exists. */
             name?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalUsagePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalUsageRow"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One org's usage on one UTC day, summed over its projects (D-P-24). */
+        InternalUsageRow: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`, UTC. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: uuid */
+            org_id: string;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
+        };
+        /** @description Answer of `POST /api/internal/v1/users/delete`. */
+        InternalUserDeleted: {
+            /**
+             * @description Orgs the user was the only owner of. They are kept without an owner; the control
+             *     plane resolves them.
+             */
+            sole_owner_of: string[];
+        };
+        /** @description Body of the `users` routes (D-P-39): the user's subject at the control plane's provider. */
+        InternalUserRef: {
+            /** @description The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`. */
+            subject: string;
         };
         /**
          * @description One pending invitation.
@@ -3227,6 +3430,38 @@ export interface components {
             /** @description Display name. Omitted when the user has not set one. */
             name?: string;
         };
+        /** @description Answer of `POST /api/internal/v1/memberships/lookup`. */
+        MembershipLookup: {
+            /** @description The user's active orgs, sorted by slug. */
+            orgs: components["schemas"]["MembershipOrg"][];
+            /**
+             * Format: uuid
+             * @description The user's id. Absent when no user matches.
+             */
+            user_id?: string;
+        };
+        /**
+         * @description Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;
+         *     the email only when no identity has the subject.
+         */
+        MembershipLookupRequest: {
+            /** @description Email, normalized like every email (D136), for a user the subject does not find. */
+            email: string;
+            /** @description The OIDC subject at `entitlements.control_plane_provider`. */
+            subject: string;
+        };
+        /** @description One active org the user belongs to. */
+        MembershipOrg: {
+            /**
+             * Format: uuid
+             * @description The org id.
+             */
+            org_id: string;
+            /** @description The user's role in the org. */
+            role: components["schemas"]["OrgRole"];
+            /** @description The org slug. */
+            slug: string;
+        };
         /** @description One message in a conversation. Spec 01 § Canonical message format. */
         Message: {
             /** @description Why generation stopped. Omitted when absent. An explicit `null` from the source is kept (D65). */
@@ -3459,7 +3694,7 @@ export interface components {
             /** @description Enabled rules of the whole org, counted for the plan's active-rule limit. */
             org_enabled_rules: number;
         };
-        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
+        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
             features: components["schemas"]["Feature"][];
@@ -3469,6 +3704,8 @@ export interface components {
             plan: components["schemas"]["OrgPlan"];
             /** @description Where an Upgrade button goes. Omitted when the instance sets none. */
             upgrade_url?: string;
+            /** @description The org's units this month (D-P-16). */
+            usage: components["schemas"]["OrgMonthUsage"];
         };
         /**
          * Format: uuid
@@ -3563,6 +3800,22 @@ export interface components {
             /** @description URL slug. */
             slug: string;
         };
+        /** @description This UTC month's units (D-P-16, D-P-38). */
+        OrgMonthUsage: {
+            /** @description `YYYY-MM`. */
+            month: string;
+            notice: components["schemas"]["UsageNotice"];
+            /**
+             * Format: date-time
+             * @description 00:00 UTC on the 1st of the next month.
+             */
+            resets_at: string;
+            /**
+             * Format: int64
+             * @description Units so far this month, flushed or not.
+             */
+            units: number;
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         OrgPage: {
             /** @description Items in this page. */
@@ -3601,6 +3854,13 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
+        /** @description `GET /api/v1/orgs/{org}/usage`. */
+        OrgUsage: {
+            /** @description Days with usage, oldest first. Days without usage are absent. */
+            days: components["schemas"]["UsageDay"][];
+            from: string;
+            to: string;
+        };
         /** @description The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`. */
         OutputScoreBody: {
             /** @description Category labels of a categorical score. Omitted otherwise. */
@@ -3721,7 +3981,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -5219,6 +5479,33 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description One UTC day of an org's usage, summed over its projects. */
+        UsageDay: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
+        };
+        /**
+         * @description Usage level against `units_included`.
+         * @enum {string}
+         */
+        UsageNotice: "none" | "warning" | "reached";
         /**
          * @description A user account.
          *
@@ -5857,6 +6144,66 @@ export interface operations {
             };
         };
     };
+    post_internal_membership_lookup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MembershipLookupRequest"];
+            };
+        };
+        responses: {
+            /** @description The user's active memberships. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembershipLookup"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_internal_org: {
         parameters: {
             query?: never;
@@ -5996,6 +6343,339 @@ export interface operations {
             };
         };
     };
+    list_internal_org_members: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every
+                 *     member.
+                 */
+                role?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's members. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalMembers"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_usage: {
+        parameters: {
+            query: {
+                /** @description First day, inclusive, `YYYY-MM-DD`. Required. */
+                from: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD`. Required. `to - from` is at most 92 days. */
+                to: string;
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of org usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalUsagePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user is deleted, with the orgs it solely owned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalUserDeleted"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_disable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user is disabled and its access is revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_user_revoke: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalUserRef"];
+            };
+        };
+        responses: {
+            /** @description The user's sessions and tokens were revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_feedback: {
         parameters: {
             query?: never;
@@ -6029,6 +6709,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8391,6 +9080,79 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_usage: {
+        parameters: {
+            query?: {
+                /** @description First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month. */
+                from?: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days. */
+                to?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgUsage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12446,6 +13208,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
             403: {
                 headers: {
@@ -13674,6 +14445,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets. */
+            402: {
                 headers: {
                     [name: string]: unknown;
                 };

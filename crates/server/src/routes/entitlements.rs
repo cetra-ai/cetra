@@ -7,10 +7,10 @@ use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use crate::api::entitlements::{OrgEntitlements, PutOrgTokenRequest};
+use crate::api::entitlements::{OrgEntitlements, OrgMonthUsage, PutOrgTokenRequest};
 use crate::auth::roles::OrgPerm;
 use crate::entitlements::tokens::{OrgGrant, OrgTokenError, grant_from_token};
-use crate::entitlements::{self, Limits};
+use crate::entitlements::{self, Limits, units};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::client_ip::ClientIp;
@@ -18,6 +18,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::entitlements::{StoredToken, put_token, record_window_end, token_of_tx};
 use crate::meta::orgs::org_by_id_tx;
+use crate::usage::month_bounds;
 use llmobs_core::ids::OrgId;
 
 /// `GET /api/v1/orgs/{org}/entitlements`; `PUT /api/internal/v1/orgs/{org_id}/entitlements`.
@@ -50,17 +51,26 @@ async fn get_entitlements(
     let org = access.org.id;
     let now = state.clock.now_ns();
     let resolved = state.entitlements.resolve(org, now);
+    let units = state.usage.month_units(&state.meta, org, now).await?;
+    let (month, _) = month_bounds(now);
+    let usage = OrgMonthUsage {
+        month: month.format("%Y-%m").to_string(),
+        units,
+        resets_at: units::month_reset_ns(now),
+        notice: units::notice(units, resolved.limits.units_included),
+    };
     Ok(error::Json(OrgEntitlements {
         features: resolved.features(),
         plan: state.entitlements.plan_at(org, now).into(),
         limits: resolved.limits.into(),
+        usage,
         upgrade_url: entitlements::upgrade_url(&state, org),
     }))
 }
 
 #[derive(Debug, Deserialize)]
-struct OrgIdPath {
-    org_id: Uuid,
+pub(crate) struct OrgIdPath {
+    pub(crate) org_id: Uuid,
 }
 
 /// What the store transaction did.
@@ -246,7 +256,7 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::users::{NewUser, insert_user};
     use crate::test_support::{
-        TestApp, TestResponse, capture_logs, license_key, org_token, sign_token,
+        TestApp, TestResponse, capture_logs, license_key, org_token, set_limits, sign_token,
     };
     use llmobs_core::ids::OrgId;
 
@@ -809,5 +819,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(window, None);
+    }
+
+    #[tokio::test]
+    async fn usage_block() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .usage
+            .add(org, seeded.project.id, now, 1200, 0, 40);
+
+        let (status, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
+        assert_eq!(status, 200);
+        assert_eq!(body["usage"]["month"], json!("2026-01"));
+        assert_eq!(body["usage"]["units"], json!(1240));
+        assert_eq!(body["usage"]["notice"], json!("none"));
+        assert!(
+            body["usage"]["resets_at"]
+                .as_str()
+                .is_some_and(|at| at.starts_with("2026-02-01T00:00:00")),
+            "{body}"
+        );
+
+        set_limits(
+            &app,
+            org,
+            "2025-12-01T00:00:00Z",
+            &json!({"units_included": 1500}),
+        );
+        let (_, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
+        assert_eq!(body["usage"]["notice"], json!("warning"));
+
+        set_limits(
+            &app,
+            org,
+            "2025-12-02T00:00:00Z",
+            &json!({"units_included": 1000}),
+        );
+        let (_, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
+        assert_eq!(body["usage"]["notice"], json!("reached"));
     }
 }

@@ -125,6 +125,33 @@ pub(crate) async fn replace_invite(
     })
 }
 
+/// Pending (not accepted, not expired at `now`) invitations of the org whose role is not
+/// viewer, excluding the pending invitation of `except_email` when given.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn seat_invites_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+    now: i64,
+    except_email: Option<&str>,
+) -> Result<u64, MetaError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM invites \
+         WHERE org_id = ? AND accepted_at IS NULL AND expires_at > ? AND role != ? \
+           AND (? IS NULL OR email != ?)",
+    )
+    .bind(org_id.to_string())
+    .bind(now)
+    .bind(org_role_str(OrgRole::Viewer))
+    .bind(except_email)
+    .bind(except_email)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// Pending, unexpired invitations for one org, ordered by email then id.
 ///
 /// # Errors

@@ -90,8 +90,8 @@ pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, Met
     let now = state.clock.now_ns();
     let mut run = RetentionRun::default();
     for (_org, project, own) in crate::meta::projects::projects_for_retention(state.meta.reader()).await? {
-        // D175, D-M-15: track P replaces `None` with the org's cap
-        // (`state.entitlements.of(_org).retention_cap_days()`: data-access window + 30 days).
+        // D175, D-M-15, D-P-45: track P's M4 replaces `None` with the org's cap: the
+        // largest window of the last 30 days plus 30 (`retention_window_at` plus 30).
         let cap: Option<u32> = None;
         let Some(days) = effective_days(own, cap) else {
             continue;

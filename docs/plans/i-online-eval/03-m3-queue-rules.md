@@ -146,10 +146,10 @@ web/src/components/trace/run-evaluator-dialog.tsx (+ test), scores-tab.tsx      
 
 ### The migration number
 
-The next free number when you start I3.2. `main` has `0008_entitlements.sql` (track P's M2), so the number is `0009`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `NN` below. Everything that depends on it:
+The next free number on `origin/main` when you start I3.2; renumber when you rebase if another track takes it first. M3 landed as `0010` (after track P's `0008` and `0009`). Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `NN` below. Everything that depends on it:
 - the file name `crates/server/migrations/meta/00NN_eval_queue.sql`;
 - the `meta_schema` snapshot (`crates/server/tests/snapshots/meta_schema.snap`, written by `insta::assert_snapshot!("meta_schema", …)`);
-- `docs/spec/04-metadata-db.md` (the new tables), and `00-design.md` § Modules and § Tables, which name the file `0009_eval_queue.sql` (edit them only when `NN` is not `0009`).
+- `docs/spec/04-metadata-db.md` (the new tables), and `00-design.md` § Modules and § Tables, which name the migration file: give them the number you used.
 
 The migration tests need no edit: `open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` (`meta/mod.rs`) and `schema_mismatch_names_the_versions` (`admin.rs`) all compute the version with `expected_version()`, which reads the highest embedded migration.
 
@@ -443,7 +443,7 @@ Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its
 
 **Goal:** migration `00NN_eval_queue.sql` with `online_rules`, `eval_jobs` and `rule_spend`, and the three `meta` modules that read and write them.
 
-**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `NN` is not `0009`).
+**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name).
 
 **Commit:** `Store online rules, eval jobs and rule spend`
 

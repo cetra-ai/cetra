@@ -191,7 +191,33 @@ impl From<Limits> for OrgLimits {
     }
 }
 
-/// `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.
+/// Usage level against `units_included`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageNotice {
+    /// Below 80 % of `units_included`, or no included units.
+    None,
+    /// At least 80 % of `units_included`, below 100 %.
+    Warning,
+    /// At least `units_included` (D-P-38).
+    Reached,
+}
+
+/// This UTC month's units (D-P-16, D-P-38).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OrgMonthUsage {
+    /// `YYYY-MM`.
+    pub month: String,
+    /// Units so far this month, flushed or not.
+    pub units: u64,
+    /// 00:00 UTC on the 1st of the next month.
+    #[serde(with = "llmobs_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub resets_at: i64,
+    pub notice: UsageNotice,
+}
+
+/// `GET /api/v1/orgs/{org}/entitlements` (D-P-15).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OrgEntitlements {
     /// Features the org may use now, in a fixed order.
@@ -200,6 +226,8 @@ pub struct OrgEntitlements {
     pub plan: OrgPlan,
     /// The org's limits (D-P-13).
     pub limits: OrgLimits,
+    /// The org's units this month (D-P-16).
+    pub usage: OrgMonthUsage,
     /// Where an Upgrade button goes. Omitted when the instance sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade_url: Option<String>,
