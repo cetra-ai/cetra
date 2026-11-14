@@ -13,5 +13,6 @@ web/src/routeTree.gen.ts
 .env
 .env.*
 !.env.example
+deploy/compose/llmobs.env
 .DS_Store
 *.swp

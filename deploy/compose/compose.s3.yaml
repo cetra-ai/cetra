@@ -1,0 +1,55 @@
+# Overlay of compose.yaml: Parquet files and media go to a bucket on a local single-node Garage
+# (S3-compatible) instead of the llmobs volume, which keeps the WAL, catalog.db, meta.db and
+# secret.key (D-N-9). Set the four GARAGE_* values in .env first (.env.example).
+#   docker compose -f compose.yaml -f compose.s3.yaml up -d
+# To use another S3-compatible service instead, drop this file and set LLMOBS_OBJECT_STORE,
+# LLMOBS_STORAGE__S3__* and AWS_* in llmobs.env (docs/self-hosting/s3.md).
+services:
+  garage:
+    image: dxflrs/garage:v2.5.0
+    restart: unless-stopped
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:?set GARAGE_RPC_SECRET in .env}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
+    volumes:
+      - ./garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      start_interval: 1s
+      retries: 3
+
+  garage-init:
+    image: curlimages/curl:8.23.0
+    restart: "no"
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN:?set GARAGE_ADMIN_TOKEN in .env}
+      GARAGE_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env}
+      GARAGE_SECRET_ACCESS_KEY: ${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY in .env}
+    volumes:
+      - ./garage-init.sh:/garage-init.sh:ro
+    entrypoint: ["/bin/sh", "/garage-init.sh"]
+
+  llmobs:
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+    environment:
+      LLMOBS_OBJECT_STORE: s3://llmobs
+      LLMOBS_STORAGE__S3__ENDPOINT: http://garage:3900
+      LLMOBS_STORAGE__S3__FORCE_PATH_STYLE: "true"
+      LLMOBS_STORAGE__S3__ALLOW_HTTP: "true"
+      AWS_REGION: garage
+      AWS_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID:?set GARAGE_ACCESS_KEY_ID in .env}
+      AWS_SECRET_ACCESS_KEY: ${GARAGE_SECRET_ACCESS_KEY:?set GARAGE_SECRET_ACCESS_KEY in .env}
+
+volumes:
+  garage-meta:
+  garage-data:

@@ -239,3 +239,7 @@ image-smoke tag="llmobs:dev":
 # Run deploy/install.sh against target/dist served on loopback (D-N-15)
 install-smoke:
     tools/packaging/install-smoke.sh
+
+# Run deploy/compose with an image and smoke-test it; `just compose-smoke llmobs:dev s3` adds Garage (D-N-9)
+compose-smoke tag="llmobs:dev" *mode:
+    tools/packaging/compose-smoke.sh {{tag}} {{mode}}

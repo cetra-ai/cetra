@@ -42,7 +42,8 @@ Read [README.md](README.md) first, especially § Design › docker-compose.
   - `garage-init` (`curlimages/curl:8.23.0`, which has `/bin/sh`) runs `garage-init.sh` against
     the admin API v2 on port 3903. The calls are `GetClusterStatus`, `GetNodeInfo`,
     `UpdateClusterLayout`, `ApplyClusterLayout`, `GetKeyInfo`, `ImportKey`, `GetBucketInfo`,
-    `CreateBucket` and `AllowBucketKey`. Each step checks what exists, so a second `up` succeeds.
+    `CreateBucket` and `AllowBucketKey`. Each step checks what exists, so a second `up` succeeds. Garage pretty-prints its JSON (`"layoutVersion": 0`), so each
+    answer goes through `tr -d ' \n'` before the `grep -o` that reads a field.
   - The access key is imported from `.env`. Garage's documentation reserves `ImportKey` for
     migrations because a hand-made key ID can collide. The commands in `.env.example` generate
     random IDs in Garage's own format (`GK` + 24 hex, secret 64 hex), which is equivalent.
@@ -218,13 +219,13 @@ until call GET /v2/GetClusterStatus >/dev/null 2>&1; do
   sleep 1
 done
 
-layout_version="$(call GET /v2/GetClusterStatus | grep -o '"layoutVersion":[0-9]*' | cut -d: -f2)"
+layout_version="$(call GET /v2/GetClusterStatus | tr -d ' \n' | grep -o '"layoutVersion":[0-9]*' | cut -d: -f2)"
 if [ -z "$layout_version" ]; then
   echo "garage-init: no layoutVersion in the GetClusterStatus answer" >&2
   exit 1
 fi
 if [ "$layout_version" = "0" ]; then
-  node="$(call GET '/v2/GetNodeInfo?node=self' | grep -o '"nodeId":"[0-9a-f]*"' | head -n1 | cut -d'"' -f4)"
+  node="$(call GET '/v2/GetNodeInfo?node=self' | tr -d ' \n' | grep -o '"nodeId":"[0-9a-f]*"' | head -n1 | cut -d'"' -f4)"
   call POST /v2/UpdateClusterLayout \
     "{\"roles\":[{\"id\":\"${node}\",\"zone\":\"dc1\",\"capacity\":100000000000,\"tags\":[]}]}" >/dev/null
   call POST /v2/ApplyClusterLayout '{"version":1}' >/dev/null
@@ -237,9 +238,9 @@ if ! call GET "/v2/GetKeyInfo?id=${GARAGE_ACCESS_KEY_ID}" >/dev/null 2>&1; then
   echo "garage-init: access key imported"
 fi
 
-bucket="$(call GET '/v2/GetBucketInfo?globalAlias=llmobs' 2>/dev/null | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
+bucket="$(call GET '/v2/GetBucketInfo?globalAlias=llmobs' 2>/dev/null | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4 || true)"
 if [ -z "$bucket" ]; then
-  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"llmobs"}' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
+  bucket="$(call POST /v2/CreateBucket '{"globalAlias":"llmobs"}' | tr -d ' \n' | grep -o '"id":"[0-9a-f]\{64\}"' | head -n1 | cut -d'"' -f4)"
   echo "garage-init: bucket llmobs created"
 fi
 
@@ -397,7 +398,7 @@ fi
 if [[ "$mode" == "s3" ]]; then
   # The span is flushed to Parquet in the bucket within flush.max_age (5 s here).
   # shellcheck disable=SC2016 # expanded by the container's shell
-  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=llmobs" | grep -q "\"objects\":[1-9]"'
+  check='curl -sSf -H "Authorization: Bearer $GARAGE_ADMIN_TOKEN" "http://garage:3903/v2/GetBucketInfo?globalAlias=llmobs" | tr -d " \n" | grep -q "\"objects\":[1-9]"'
   for _ in $(seq 1 60); do
     if compose run --rm --no-deps --entrypoint /bin/sh garage-init -c "$check" >/dev/null 2>&1; then
       echo "compose-smoke: objects written to the Garage bucket"
