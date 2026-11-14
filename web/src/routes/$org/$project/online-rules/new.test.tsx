@@ -7,6 +7,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import createFixture from "../../../../../../fixtures/api/requests/online-rule-create.json";
 import evaluatorsFixture from "../../../../../../fixtures/api/static/evaluators.json";
+import ruleFixture from "../../../../../../fixtures/api/static/online-rule.json";
 
 const RELEVANCE = evaluatorsFixture.data[0];
 if (!RELEVANCE) {
@@ -53,8 +54,13 @@ function captureCreate(answer?: () => Response): { body: () => unknown; calls: (
   return { body: () => body, calls: () => calls };
 }
 
-it("creates a judge rule with a budget and opens the list", async () => {
+it("creates a judge rule with a budget and opens its rule page", async () => {
   const created = captureCreate();
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () =>
+      HttpResponse.json({ ...ruleFixture, id: "01900000-0000-7000-8000-000000000799" }),
+    ),
+  );
   const { user, router } = await renderApp("/acme/support-bot/online-rules/new");
   await screen.findByLabelText("Name");
 
@@ -73,7 +79,9 @@ it("creates a judge rule with a budget and opens the list", async () => {
 
   await waitFor(() => expect(created.body()).toEqual(createFixture));
   await waitFor(() =>
-    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules"),
+    expect(router.state.location.pathname).toBe(
+      "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000799",
+    ),
   );
 });
 
