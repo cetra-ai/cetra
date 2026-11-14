@@ -13,6 +13,7 @@ pub(crate) mod evaluators;
 pub(crate) mod feedback;
 pub(crate) mod internal_orgs;
 pub(crate) mod internal_usage;
+pub(crate) mod internal_users;
 pub(crate) mod invites;
 pub(crate) mod me;
 pub(crate) mod media;

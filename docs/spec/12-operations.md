@@ -27,6 +27,7 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 | `orgs.user_create` | | `true`; `false` on a cloud cell: users cannot create orgs, the control plane does (D-P-31) |
 | `orgs.create_url` | | unset: where "New organization" links when `orgs.user_create` is false (D-P-31) |
 | `entitlements.upgrade_url` | | unset: no Upgrade button. `{org}` is replaced by the org id (D-P-15) |
+| `entitlements.control_plane_provider` | | `"oidc:cloud"`: the identity provider whose subjects the control plane uses (D-P-39) |
 | `smtp_url`, `email_from` | `LLMOBS_SMTP_URL`, `LLMOBS_EMAIL_FROM` | unset (email off) |
 | `auth.*` | see 08 | |
 | `init.admin_email` | `LLMOBS_INIT_ADMIN_EMAIL` | unset |

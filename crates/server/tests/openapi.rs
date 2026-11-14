@@ -77,6 +77,21 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
     ("get", "/api/internal/v1/usage", "list_internal_usage"),
+    (
+        "post",
+        "/api/internal/v1/users/revoke",
+        "post_internal_user_revoke",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/disable",
+        "post_internal_user_disable",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/delete",
+        "post_internal_user_delete",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -373,6 +388,8 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 const QUERY_OR_BODY: &[&str] = &[
     "get_org_usage",
     "list_internal_usage",
+    "post_internal_user_revoke",
+    "post_internal_user_disable",
     "list_alert_events",
     "list_org_members",
     "list_org_invites",
@@ -496,7 +513,13 @@ fn document_lint() {
         let operation_security = operation.get("security").and_then(Value::as_array);
         if matches!(
             *id,
-            "create_key_scores" | "post_feedback" | "post_internal_org" | "list_internal_usage"
+            "create_key_scores"
+                | "post_feedback"
+                | "post_internal_org"
+                | "list_internal_usage"
+                | "post_internal_user_revoke"
+                | "post_internal_user_disable"
+                | "post_internal_user_delete"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -574,7 +597,7 @@ fn document_lint() {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
             expected_errors.extend(["400", "401", "403", "422", "429"]);
-        } else if *id == "list_internal_usage" {
+        } else if *id == "list_internal_usage" || *id == "post_internal_user_delete" {
             expected_errors.extend(["400", "401", "403", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);

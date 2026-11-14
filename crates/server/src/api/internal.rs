@@ -36,6 +36,22 @@ pub struct InternalOrg {
     pub slug: String,
 }
 
+/// Body of the `users` routes (D-P-39): the user's subject at the control plane's provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InternalUserRef {
+    /// The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`.
+    pub subject: String,
+}
+
+/// Answer of `POST /api/internal/v1/users/delete`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InternalUserDeleted {
+    /// Orgs the user was the only owner of. They are kept without an owner; the control
+    /// plane resolves them.
+    pub sole_owner_of: Vec<Uuid>,
+}
+
 /// One org's usage on one UTC day, summed over its projects (D-P-24).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct InternalUsageRow {
