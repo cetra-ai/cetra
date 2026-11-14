@@ -61,7 +61,7 @@ GitHub Actions. ยง Design below is the whole design. The decisions are `D-N-1`โ€
 | Helm | `deploy/helm/llmobs/` (one StatefulSet), lint, kubeconform, a kind install test | N6 |
 | Install | `deploy/install.sh` (`curl \| sh`) and its smoke test | N7 |
 | Versions | `CHANGELOG.md`, `just release-prep`, `just release-verify`, release notes, image tags | N8 |
-| CI | the `packaging` job in `ci.yml` (part of `ci-ok`) and `just check-packaging` | N9 |
+| CI | the `packaging` job in `ci.yml` (cheap checks, part of `ci-ok`) and `packaging.yml` (the full `just check-packaging` on `main` and weekly) | N9 |
 | Release | `.github/workflows/release.yml`: tag-triggered build, smoke, publish, attest | N10 |
 | Docs | `docs/self-hosting/` (install, compose, Kubernetes, configuration, S3, backup, upgrade) | N11 |
 
@@ -252,12 +252,16 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
     stays clean. With `s3`, it also checks that a flush wrote objects to the Garage bucket;
   - `helm-smoke.sh` creates a kind cluster, installs the chart and port-forwards;
   - `install-smoke.sh` serves `target/dist` and runs `install.sh`.
-- PR CI: a `packaging` job on `ubuntu-24.04` (x86_64 only) runs `just check-packaging`:
-  - `versions-check`, `helm-check` and Biome on `tools/packaging`;
-  - `dist`;
-  - the binary, install, image, compose and compose-S3 smokes.
+- PR CI: a `packaging` job on `ubuntu-24.04` (x86_64 only) runs `just check-packaging-lint`, with no
+  Rust build:
+  - `versions-check`, `helm-check`, the compose files and Biome on `tools/packaging`.
 
   It is in `ci-ok`. Kind is not in PR CI.
+- `packaging.yml` runs the full `just check-packaging` on `ubuntu-24.04` (x86_64 only) on pushes to
+  `main`, weekly (Mondays) and on manual dispatch. It is not in `ci-ok`:
+  - `check-packaging-lint`;
+  - `dist`;
+  - the binary, install, image, compose and compose-S3 smokes.
 - The release workflow runs every smoke on every artifact before publishing:
   - each Linux architecture: binary, install, image, compose, compose-S3, helm-check and the
     kind install;
@@ -320,6 +324,7 @@ CHANGELOG.md                                                                    
 .github/actions/packaging/action.yml      musl-tools, cargo-auditable, cargo-about, helm, kubeconform (N9)
 .github/workflows/ci.yml                  + packaging job                              (N9)
 .github/workflows/release.yml             the release workflow                         (N10)
+.github/workflows/packaging.yml           full packaging checks on main and weekly      (N9, D-N-13)
 docs/self-hosting/*.md                    user docs                                    (N11)
 crates/cli/src/health.rs                  llmobs health                                (N1)
 ```

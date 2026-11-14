@@ -1,0 +1,53 @@
+name: Packaging
+
+# The full packaging checks (D-N-13): the static musl release archive, then the binary, install,
+# image, compose and compose-S3 smoke tests (`just check-packaging`). They need a release build,
+# so they run on pushes to main and weekly, outside ci-ok. Pull requests run only the cheap
+# checks (`just check-packaging-lint`) in ci.yml. release.yml repeats all of it before publishing.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 4 * * 1" # Mondays 04:41 UTC; off the hour to avoid the scheduler rush
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: short
+  # Kache permits PR uploads only to a separate prefix; protected main ignores it.
+  KACHE_PULL_REQUEST_PREFIX: kache-pr-v2
+  # Main pushes and the weekly run on main may read and save the S3 compiler cache;
+  # manual runs do not (.github/README.md).
+  CI_CACHE_ALLOWED: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule') }}
+
+jobs:
+  check-packaging:
+    runs-on: ubuntu-24.04
+    environment:
+      name: s3-cache
+      deployment: false
+    timeout-minutes: 75
+    env:
+      # Build the archive exactly as release.yml does: the default linker, not ci.yml's mold.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+        with:
+          cache: ${{ env.CI_CACHE_ALLOWED }}
+          s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
+          s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - uses: ./.github/actions/packaging # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - run: just check-packaging
+      - run: just assert-clean
