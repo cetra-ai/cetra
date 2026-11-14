@@ -232,7 +232,9 @@ All three tracks answer count limits with `403 plan_limit` and features with `40
 
 5. **Org deletions (M4, Q's R5 and R17, D-P-43).** `GET /api/internal/v1/deletions?kind=org&status=applied&cursor=…` (scope `deletions`) lists applied org drops `{id, org_id, applied_at}` oldest first; `DELETE /api/internal/v1/orgs/{org_id}` (scope `orgs`) starts track M's org drop.
 
-6. **Not P's.** Org → cell routing, signup, `deletion::on_dropped` (track M's hook for Q, D-M-17), and Stripe itself.
+6. **Instance defaults.** Q generates a cloud cell's `[entitlements.defaults]` from its plan catalog: always `plan_name` and `features = []`, the Free plan's limits, and no `data_access_days` (see § Open items).
+
+7. **Not P's.** Org → cell routing, signup, `deletion::on_dropped` (track M's hook for Q, D-M-17), and Stripe itself.
 
 ## Milestones
 
@@ -251,4 +253,4 @@ M1 can start now. M4 waits for K and I's M3, whose hooks it fills.
 - **Copyright holder** in the `LICENSE` files: M1 writes "Copyright (c) 2026 the llmobs authors". The user confirms the legal name before the first release.
 - **Audit logs and SCIM** (D178, Enterprise): no track owns them yet. They go in `ee` and add their features to D-P-12 when built.
 - **SDK messages** for `402`: M3 changes both SDKs' exporters to log the cap once; track F's owners review.
-- **Q's token lifetime** and the plan values (units, rates, windows) are Q's to choose; the instance defaults of a cloud cell are its Free plan.
+- **Q's token lifetime** and the plan values (units, rates, windows) are Q's to choose; a cloud cell's `[entitlements.defaults]` is its Free plan without `data_access_days` (Q's decision, llmobs-control PR #3): an org without a token keeps unlimited visibility, so a lapse longer than D-P-30's 30-day history never hides data.
