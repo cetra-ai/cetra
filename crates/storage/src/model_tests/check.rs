@@ -41,19 +41,11 @@ pub(super) fn check_full(h: &Harness, model: &Model, index: usize) {
 
 /// Reads in small pages return exactly the rows of one page, in the same order.
 fn check_paging(h: &Harness, project: P, index: usize) {
-    // Finding M1-1: span_list keeps duplicate copies and its cursor can't tell them apart, so
-    // paging may drop a copy. Tighten to exact equality once M1-1 is fixed.
     let paged = observe_spans(h, project, 7);
     let single = observe_spans(h, project, MAX_PAGE);
-    let keys_of = |rows: &[(i64, String, String)]| -> BTreeSet<(String, String)> {
-        rows.iter()
-            .map(|(_, trace, span)| (trace.clone(), span.clone()))
-            .collect()
-    };
     assert_eq!(
-        keys_of(&paged),
-        keys_of(&single),
-        "op {index}, project {project:?}: span keys read in pages of 7 differ from one page"
+        paged, single,
+        "op {index}, project {project:?}: span rows read in pages of 7 differ from one page"
     );
     let sort_key = |row: &(i64, String, String)| (row.0, row.2.clone(), row.1.clone());
     assert!(
@@ -62,15 +54,6 @@ fn check_paging(h: &Harness, project: P, index: usize) {
             .all(|pair| sort_key(&pair[0]) <= sort_key(&pair[1])),
         "op {index}, project {project:?}: span rows are not in (start_time, span_id, trace_id) order"
     );
-    // Every paged row, in order, is a later row of the single page: a subsequence. That gives
-    // the same order and a multiset subset at once.
-    let mut candidates = single.iter();
-    for row in &paged {
-        assert!(
-            candidates.any(|candidate| candidate == row),
-            "op {index}, project {project:?}: span rows read in pages of 7 are not a subsequence of the one-page rows"
-        );
-    }
     assert_eq!(
         observe_traces(h, project, ALL_ROWS, 2),
         observe_traces(h, project, ALL_ROWS, MAX_PAGE),
@@ -186,37 +169,32 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
     (!differing.is_empty()).then(|| format!("differing fields: {differing:?}"))
 }
 
-/// The `(trace, span)` keys of `span_list` equal the visible keys, and each key appears at
-/// least once and at most once per visible copy.
+/// `span_list` shows each visible span key exactly once: the keys read equal the visible keys,
+/// and no key repeats.
 fn check_span_keys(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     let mut observed: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (_, trace, span) in observe_spans(h, project, MAX_PAGE) {
         *observed.entry((trace, span)).or_default() += 1;
     }
-    let expected: BTreeMap<(String, String), usize> = state
+    let expected: BTreeSet<(String, String)> = state
         .visible_spans()
-        .into_iter()
-        .map(|((trace, span_no), ingests)| {
+        .into_keys()
+        .map(|(trace, span_no)| {
             (
-                (
-                    hex(trace_id(trace).as_bytes()),
-                    hex(span_id(span_no).as_bytes()),
-                ),
-                ingests.len(),
+                hex(trace_id(trace).as_bytes()),
+                hex(span_id(span_no).as_bytes()),
             )
         })
         .collect();
     assert_eq!(
-        observed.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>(),
+        observed.keys().cloned().collect::<BTreeSet<_>>(),
+        expected,
         "op {index}, project {project:?}: the span keys read differ from the model's visible keys"
     );
     for (key, count) in &observed {
-        let copies = expected[key];
-        assert!(
-            *count >= 1 && *count <= copies,
-            "op {index}, project {project:?}: span {key:?} is read {count} times, \
-             the model has {copies} visible copies"
+        assert_eq!(
+            *count, 1,
+            "op {index}, project {project:?}: span {key:?} is listed {count} times, expected once"
         );
     }
 }

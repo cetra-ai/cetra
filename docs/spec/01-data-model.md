@@ -96,7 +96,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `ingest_time` | Timestamp(ns, UTC) | | Server receive time. Used by deletion cut-offs. |
 | `schema_version` | UInt16 | | Row-level normalization version. |
 
-Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`.
+Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`. Known limit: `span_list` de-duplicates adjacent copies of a span (same `start_time`, `span_id`, `trace_id`), keeping the newest `ingest_time`; a re-send that changed `start_time` stays a duplicate until compaction, which keeps such copies (spec 03 §5).
 
 ### Payloads (`input` / `output`)
 
