@@ -522,7 +522,7 @@ Decisions of track P (`docs/plans/p-entitlements/00-design.md`), numbered `D-P-<
 | D-P-31 | User-created orgs | **(user; Q's R4).** `orgs.user_create = false` → `POST /api/v1/orgs` is 403 and the UI links to `orgs.create_url`; bootstrap still creates the first org. |
 | D-P-32 | Plan page | **(user).** The entitlements response carries the plan (name, add-ons, source, token status, dates) and the limits; org settings get a read-only Plan page; `llmobs admin entitlements show <org>`. M3 adds usage. |
 | D-P-33 | Token push limiter | **(Q's R15, amends D-P-11).** Only tokens that fail verification count against the per-IP limiter; the path is `/api/internal/v1/orgs/{org_id}/entitlements`. |
-| D-P-34 | SDK pause on 402 | **(user).** After a 402, exporters log once and drop spans until `Retry-After` (default 1 h); score writes log once and drop. |
+| D-P-34 | SDK pause on 402 | **(user).** After a 402, exporters and score writes drop data for `Retry-After`, at most 1 h at a time (then re-probe), with one warning per pause. |
 | D-P-35 | gRPC rate limit | **`UNAVAILABLE` (amends D-P-19).** Retried by OTel exporters without `RetryInfo`; HTTP keeps 429; the cap stays `RESOURCE_EXHAUSTED` without `RetryInfo`. |
 | D-P-36 | Month counters | Per org and month in `Usage`, loaded from `usage_daily` plus unflushed counts under a flush lock, incremented by `Usage::add`; load errors fail open. |
 | D-P-37 | Cap response | `402` with `Retry-After` = seconds to 00:00 UTC on the 1st; checked before reading the body (HTTP), before reserving (gRPC), and in `scores::write`. |
