@@ -78,7 +78,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 
 ## Scope
 
-**In I:** everything in the decisions above. That means migrations `0004`, `0006` and `0009`–`0011` in `meta.db` (other tracks took `0005`, `0007` and `0008`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
+**In I:** everything in the decisions above. That means migrations `0004`, `0006` and `0010`–`0012` in `meta.db` (other tracks took `0005` and `0007`–`0009`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
 
 **Not in I:**
 - datasets, experiments and their server evaluators [J] (J calls the executor, § Interfaces);
@@ -147,7 +147,7 @@ crates/server/src/
   routes/ same split
 crates/server/src/admin.rs  rotate_encryption_key (M1)
 crates/server/migrations/meta/
-  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0009_eval_queue.sql (M3)  0010_pending_traces.sql (M4)  0011_backfills.sql (M6)
+  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0010_eval_queue.sql (M3)  0011_pending_traces.sql (M4)  0012_backfills.sql (M6)
 ```
 
 Every background loop exposes a `*_once(&AppState)` function that tests call directly, with `Clock::Manual`. The loops themselves only call `*_once` on a tokio interval from `EvalTiming`. The end-to-end test in M6 uses `EvalTiming::TEST` and real time.
@@ -197,7 +197,7 @@ CREATE TABLE score_definitions (
 );
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL;
 
--- 0009_eval_queue.sql (M3)
+-- 0010_eval_queue.sql (M3)
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -243,7 +243,7 @@ CREATE TABLE rule_spend (
   PRIMARY KEY (rule_id, day)
 );
 
--- 0010_pending_traces.sql (M4)
+-- 0011_pending_traces.sql (M4)
 CREATE TABLE pending_traces (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   trace_id BLOB NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
@@ -251,7 +251,7 @@ CREATE TABLE pending_traces (
   PRIMARY KEY (project_id, trace_id)
 );
 
--- 0011_backfills.sql (M6)
+-- 0012_backfills.sql (M6)
 CREATE TABLE backfills (
   id TEXT PRIMARY KEY,
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,

@@ -3,7 +3,6 @@
 //! A flood of distinct keys can evict a real user's bucket. That user then
 //! starts again with a full bucket, so the flood never refuses someone who
 //! still had tokens, and it never locks an email that was not already locked.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::hash::Hash;

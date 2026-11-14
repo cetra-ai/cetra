@@ -28,4 +28,5 @@ pub mod scores;
 pub mod sessions;
 pub mod sql;
 pub mod traces;
+pub mod usage;
 pub mod users;

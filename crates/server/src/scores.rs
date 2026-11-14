@@ -15,6 +15,7 @@ use crate::api::common::FieldError;
 use crate::api::convert;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::scores::ScoreCreate;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::ingest::IngestError;
@@ -125,6 +126,9 @@ pub(crate) async fn write(
     writer: Writer,
     items: Vec<ScoreCreate>,
 ) -> Result<Vec<Uuid>, ApiError> {
+    check_cap(state, project.org_id)
+        .await
+        .map_err(ApiError::from)?;
     let now = state.clock.now_ns();
     let definitions = state.definitions.live(&state.meta, project.id, now).await?;
     let mut errors = Vec::new();
@@ -506,8 +510,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::api::common::ProblemCode;
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
-    use crate::test_support::TestApp;
+    use crate::test_support::{TestApp, set_limits};
     use llmobs_core::enums::ScoreDataType;
     use llmobs_storage::ScoreListRequest;
 
@@ -1516,5 +1521,78 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_cannot_write_scores() {
+        use crate::api::scores::ScoreBatch;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let scores_path = format!("/api/v1/projects/{}/scores", seeded.project.id);
+        let score = |id: &str| ScoreCreate {
+            score_id: Some(id.parse().unwrap()),
+            target: span_target(),
+            session_id: None,
+            user_id: None,
+            name: "tone".to_owned(),
+            value: ScoreValue::Numeric(1.0),
+            reason: None,
+            source: None,
+            metadata: BTreeMap::new(),
+        };
+        let id = "01900000-0000-7000-8000-000000000402";
+        let before_cap = app
+            .request(axum::http::Method::POST, &scores_path)
+            .header("cookie", &seeded.cookie)
+            .json(&ScoreBatch {
+                scores: vec![score(id)],
+            })
+            .send()
+            .await;
+        assert_eq!(before_cap.status, axum::http::StatusCode::OK);
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+
+        let refused = app
+            .request(axum::http::Method::POST, &scores_path)
+            .header("cookie", &seeded.cookie)
+            .json(&ScoreBatch {
+                scores: vec![score("01900000-0000-7000-8000-000000000403")],
+            })
+            .send()
+            .await;
+        assert_eq!(refused.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert!(refused.header("retry-after").is_some());
+        assert_eq!(refused.problem().code, ProblemCode::QuotaExceeded);
+
+        let feedback = app
+            .request(axum::http::Method::POST, "/api/public/feedback")
+            .header("authorization", &format!("Bearer {}", seeded.public_key))
+            .header("content-type", "application/json")
+            .body(include_bytes!("../../../fixtures/api/requests/feedback.json").to_vec())
+            .send()
+            .await;
+        assert_eq!(feedback.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(feedback.problem().code, ProblemCode::QuotaExceeded);
+
+        let deleted = app
+            .request(axum::http::Method::DELETE, &format!("{scores_path}/{id}"))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
     }
 }

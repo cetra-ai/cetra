@@ -4,6 +4,75 @@ import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 import entitlementsFixture from "../../../../../fixtures/api/static/org-entitlements.json";
+import usageFixture from "../../../../../fixtures/api/static/org-usage.json";
+
+it("shows the month's units against the included units and the reset date", async () => {
+  await renderApp("/acme/settings/plan");
+
+  const meter = await screen.findByRole("meter", { name: "Units this month" });
+  expect(meter).toHaveAttribute("aria-valuenow", "1240");
+  expect(meter).toHaveAttribute("aria-valuemax", "200000");
+  expect(screen.getByText("1,240 of 200,000 units")).toBeInTheDocument();
+  expect(screen.getByText("Resets on 2026-02-01 (UTC).")).toBeInTheDocument();
+  expect(screen.queryByText(/Ingest pauses at/)).toBeNull();
+  expect(await screen.findByRole("img", { name: "Daily units" })).toBeInTheDocument();
+});
+
+it("measures against the cap and says when ingest pauses without an included value", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () => {
+      const { units_included: _omitted, ...limits } = entitlementsFixture.limits;
+      return HttpResponse.json({
+        ...entitlementsFixture,
+        limits: { ...limits, units_cap: 250_000 },
+      });
+    }),
+  );
+
+  await renderApp("/acme/settings/plan");
+
+  const meter = await screen.findByRole("meter", { name: "Units this month" });
+  expect(meter).toHaveAttribute("aria-valuemax", "250000");
+  expect(screen.getByText("1,240 of 250,000 units")).toBeInTheDocument();
+  expect(screen.getByText("Ingest pauses at 250,000 units.")).toBeInTheDocument();
+});
+
+it("shows only the usage text when neither an included value nor a cap is set", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () => {
+      const { units_included: _omitted, ...limits } = entitlementsFixture.limits;
+      return HttpResponse.json({ ...entitlementsFixture, limits });
+    }),
+  );
+
+  await renderApp("/acme/settings/plan");
+
+  expect(await screen.findByText("1,240 units")).toBeInTheDocument();
+  expect(screen.queryByRole("meter")).toBeNull();
+});
+
+it("totals the daily usage", async () => {
+  await renderApp("/acme/settings/plan");
+
+  const totals = await screen.findByRole("table", { name: "Usage totals" });
+  expect(within(totals).getByRole("cell", { name: "2,000" })).toBeInTheDocument();
+  expect(within(totals).getByRole("cell", { name: "50" })).toBeInTheDocument();
+  expect(within(totals).getByRole("cell", { name: "2,050" })).toBeInTheDocument();
+  expect(within(totals).getByRole("cell", { name: "5.6 MB" })).toBeInTheDocument();
+  expect(within(totals).getByRole("cell", { name: "$0.42" })).toBeInTheDocument();
+});
+
+it("says when there is no usage this month", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/usage", () => HttpResponse.json({ ...usageFixture, days: [] })),
+  );
+
+  await renderApp("/acme/settings/plan");
+
+  expect(await screen.findByText("No usage this month.")).toBeInTheDocument();
+  expect(screen.queryByRole("table", { name: "Usage totals" })).toBeNull();
+  expect(screen.queryByRole("img", { name: "Daily units" })).toBeNull();
+});
 
 it("shows the plan, features, limits and upgrade link", async () => {
   await renderApp("/acme/settings/plan");
@@ -21,7 +90,7 @@ it("shows the plan, features, limits and upgrade link", async () => {
   expect(sso).toHaveTextContent("Available with an enterprise licence");
   expect(sso).not.toHaveTextContent("Included");
 
-  const limits = screen.getByRole("table");
+  const limits = screen.getByRole("region", { name: "Limits" });
   expect(
     within(limits).getByRole("row", { name: /Units per month \(included\)/ }),
   ).toHaveTextContent("200,000");
@@ -44,6 +113,7 @@ it("says instance defaults apply and lists unlimited limits", async () => {
         features: [],
         plan: { name: "Self-hosted", add_ons: [], source: "defaults" },
         limits: {},
+        usage: { ...entitlementsFixture.usage, units: 0, notice: "none" },
       }),
     ),
   );

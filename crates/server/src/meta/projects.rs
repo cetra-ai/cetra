@@ -164,6 +164,23 @@ pub(crate) async fn mark_project_deleting(
     Ok(changed == 1)
 }
 
+/// Active projects of the org (a deleting project takes no slot).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn active_projects_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<u64, MetaError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE org_id = ? AND state = 'active'")
+            .bind(org_id.to_string())
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(u64::try_from(count).unwrap_or(0))
+}
+
 /// Every project id of the org, whatever its state, ordered by id.
 ///
 /// # Errors

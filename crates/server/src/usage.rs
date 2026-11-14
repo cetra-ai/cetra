@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, Datelike, Months, NaiveDate};
 use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::SqliteConnection;
 
@@ -64,10 +64,43 @@ impl UsageCounts {
     }
 }
 
+/// Units (spans + scores) of one org in one UTC month (D-P-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonthUnits {
+    /// `year * 12 + (month - 1)` of the month counted.
+    month: i32,
+    /// Units since 00:00 UTC on the 1st, flushed or not.
+    units: u64,
+}
+
 /// In-memory usage counters, upserted into `usage_daily` (D-G-11).
 #[derive(Debug, Default)]
 pub(crate) struct Usage {
     counts: Mutex<HashMap<UsageKey, UsageCounts>>,
+    /// Loaded month counters. Always locked while `counts` is held (lock order: counts, then months).
+    months: Mutex<HashMap<OrgId, MonthUnits>>,
+    /// Held by `flush` from taking the counts to the end of its write, and by
+    /// `month_units` while it loads, so a load never misses counts in flight.
+    flush_lock: tokio::sync::Mutex<()>,
+}
+
+/// `year * 12 + (month - 1)` of the UTC month of `now_ns`.
+fn month_key(now_ns: i64) -> i32 {
+    let day = DateTime::from_timestamp_nanos(now_ns).date_naive();
+    day.year() * 12 + day.month0() as i32
+}
+
+/// The first day of the UTC month of `now_ns` and the first day of the next month.
+#[allow(clippy::expect_used)]
+pub(crate) fn month_bounds(now_ns: i64) -> (NaiveDate, NaiveDate) {
+    let day = DateTime::from_timestamp_nanos(now_ns).date_naive();
+    // Invariant: every month has a day 1, and the month after any date a timestamp can
+    // express is still inside chrono's date range.
+    let first = day.with_day(1).expect("every month has a day 1");
+    let next = first
+        .checked_add_months(Months::new(1))
+        .expect("the month after a timestamp's month is in chrono's range");
+    (first, next)
 }
 
 impl Usage {
@@ -75,6 +108,26 @@ impl Usage {
         self.counts
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn lock_months(&self) -> std::sync::MutexGuard<'_, HashMap<OrgId, MonthUnits>> {
+        self.months
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The org's loaded units of `month`, if loaded for that month.
+    /// Forgets every loaded month, so the next `month_units` loads again. Tests only.
+    #[cfg(test)]
+    fn forget_loaded_months(&self) {
+        self.lock_months().clear();
+    }
+
+    fn loaded_units(&self, org_id: OrgId, month: i32) -> Option<u64> {
+        self.lock_months()
+            .get(&org_id)
+            .filter(|loaded| loaded.month == month)
+            .map(|loaded| loaded.units)
     }
 
     /// Adds counts to the day of `now_ns` (UTC). All-zero counts change nothing.
@@ -142,7 +195,61 @@ impl Usage {
             project_id,
             day: DateTime::from_timestamp_nanos(now_ns).date_naive(),
         };
-        self.lock().entry(key).or_default().merge(counts);
+        let units = counts.spans.saturating_add(counts.scores);
+        let mut rows = self.lock();
+        rows.entry(key).or_default().merge(counts);
+        // Still under the counts lock, so `month_units` never sees a count twice or not at all.
+        let mut months = self.lock_months();
+        if let Some(loaded) = months
+            .get_mut(&org_id)
+            .filter(|loaded| loaded.month == month_key(now_ns))
+        {
+            loaded.units = loaded.units.saturating_add(units);
+        }
+    }
+
+    /// The org's units this UTC month at `now_ns` (D-P-16, D-P-36): `usage_daily` from the 1st
+    /// plus counts not flushed yet. Loads once per org and month, then follows `add`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetaError`] when the load query fails.
+    pub(crate) async fn month_units(
+        &self,
+        meta: &MetaDb,
+        org_id: OrgId,
+        now_ns: i64,
+    ) -> Result<u64, MetaError> {
+        let month = month_key(now_ns);
+        if let Some(units) = self.loaded_units(org_id, month) {
+            return Ok(units);
+        }
+        let _flush = self.flush_lock.lock().await;
+        if let Some(units) = self.loaded_units(org_id, month) {
+            return Ok(units);
+        }
+        let (first, next) = month_bounds(now_ns);
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(spans + scores), 0) FROM usage_daily \
+             WHERE org_id = ? AND day >= ? AND day < ?",
+        )
+        .bind(org_id.to_string())
+        .bind(first.format("%Y-%m-%d").to_string())
+        .bind(next.format("%Y-%m-%d").to_string())
+        .fetch_one(meta.reader())
+        .await?;
+        let mut units = u64::try_from(stored).unwrap_or(0);
+        {
+            let counts = self.lock();
+            for (key, pending) in counts.iter() {
+                if key.org_id == org_id && key.day >= first && key.day < next {
+                    units = units.saturating_add(pending.spans.saturating_add(pending.scores));
+                }
+            }
+            self.lock_months()
+                .insert(org_id, MonthUnits { month, units });
+        }
+        Ok(units)
     }
 
     /// Upserts the counted sums into `usage_daily` and clears them, in one transaction.
@@ -153,6 +260,7 @@ impl Usage {
     ///
     /// Returns [`MetaError`] when the write fails.
     pub(crate) async fn flush(&self, meta: &MetaDb) -> Result<(), MetaError> {
+        let _flush = self.flush_lock.lock().await;
         let rows = {
             let mut counts = self.lock();
             if counts.is_empty() {
@@ -206,13 +314,16 @@ impl Usage {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::meta::test_db;
 
+    const DAY: i64 = 86_400_000_000_000;
     /// 2026-01-01T12:00:00Z.
     const DAY_ONE: i64 = 1_767_268_800_000_000_000;
     /// 2026-01-02T12:00:00Z.
-    const DAY_TWO: i64 = DAY_ONE + 86_400_000_000_000;
+    const DAY_TWO: i64 = DAY_ONE + DAY;
 
     /// `(day, spans, bytes, scores)` of every `usage_daily` row of `project`, by day.
     async fn stored(meta: &MetaDb, project: ProjectId) -> Vec<(String, i64, i64, i64)> {
@@ -411,5 +522,96 @@ mod tests {
         assert_eq!(judge.len(), 1);
         assert_eq!((judge[0].0, judge[0].1), (5, 7));
         assert!((judge[0].2 - 0.25).abs() < 1e-12, "{judge:?}");
+    }
+
+    /// Writes `spans` and `scores` of `org` at `now_ns` into `usage_daily`, through a flush.
+    async fn seed(meta: &MetaDb, org: OrgId, now_ns: i64, spans: u64, scores: u64) {
+        let usage = Usage::default();
+        usage.add(org, ProjectId::new_v7(), now_ns, spans, 0, scores);
+        usage.flush(meta).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn month_units_loads_and_follows_adds() {
+        let (_dir, meta) = test_db().await;
+        let (org, other, project) = (OrgId::new_v7(), OrgId::new_v7(), ProjectId::new_v7());
+        seed(&meta, org, DAY_ONE, 10, 5).await;
+        seed(&meta, org, DAY_TWO, 1, 0).await;
+        seed(&meta, org, DAY_ONE - 17 * DAY, 100, 0).await;
+        seed(&meta, other, DAY_ONE, 50, 0).await;
+        let usage = Usage::default();
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 16);
+        usage.add(org, project, DAY_ONE, 3, 0, 2);
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 21);
+        usage.add(other, project, DAY_ONE, 9, 0, 0);
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 21);
+    }
+
+    #[tokio::test]
+    async fn unflushed_counts_are_included_at_load() {
+        let (_dir, meta) = test_db().await;
+        let (org, project) = (OrgId::new_v7(), ProjectId::new_v7());
+        let usage = Usage::default();
+        usage.add(org, project, DAY_ONE, 4, 0, 0);
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 4);
+        usage.flush(&meta).await.unwrap();
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_new_month_starts_at_zero() {
+        let (_dir, meta) = test_db().await;
+        let org = OrgId::new_v7();
+        // 2026-01-15T12:00:00Z.
+        let jan_15 = DAY_ONE + 14 * DAY;
+        // 2026-02-01T00:00:00Z.
+        let feb_1 = 1_769_904_000_000_000_000;
+        seed(&meta, org, jan_15, 7, 0).await;
+        let usage = Usage::default();
+        assert_eq!(usage.month_units(&meta, org, jan_15).await.unwrap(), 7);
+        seed(&meta, org, feb_1, 3, 0).await;
+        assert_eq!(usage.month_units(&meta, org, feb_1).await.unwrap(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_flush_load_and_add_lose_nothing() {
+        let (_dir, meta) = test_db().await;
+        let meta = Arc::new(meta);
+        let usage = Arc::new(Usage::default());
+        let (org, project) = (OrgId::new_v7(), ProjectId::new_v7());
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let usage = Arc::clone(&usage);
+            tasks.push(tokio::task::spawn(async move {
+                for _ in 0..500 {
+                    usage.add(org, project, DAY_ONE, 1, 0, 0);
+                }
+            }));
+        }
+        let flusher = {
+            let (usage, meta) = (Arc::clone(&usage), Arc::clone(&meta));
+            tokio::task::spawn(async move {
+                for _ in 0..50 {
+                    usage.flush(&meta).await.unwrap();
+                }
+            })
+        };
+        let loader = {
+            let (usage, meta) = (Arc::clone(&usage), Arc::clone(&meta));
+            tokio::task::spawn(async move {
+                for _ in 0..50 {
+                    // Forget the loaded counter each round so every call really loads
+                    // against the flushes and adds in flight.
+                    usage.forget_loaded_months();
+                    usage.month_units(&meta, org, DAY_ONE).await.unwrap();
+                }
+            })
+        };
+        for task in tasks {
+            task.await.unwrap();
+        }
+        flusher.await.unwrap();
+        loader.await.unwrap();
+        assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 2_000);
     }
 }

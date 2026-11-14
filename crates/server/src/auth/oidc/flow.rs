@@ -14,6 +14,7 @@ use super::{ExchangeError, LoginClaims, ProviderRef};
 use crate::api::account::SignupPolicy;
 use crate::auth::OrgRole;
 use crate::auth::secret::{constant_time_eq, new_opaque_token};
+use crate::entitlements::over_limit;
 use crate::http::AppState;
 use crate::meta::identities::{self, identity_user};
 use crate::meta::users::{self, NewUser, normalize_email};
@@ -540,12 +541,22 @@ async fn provision_org(
     };
     let org_id = org.id;
     let now = state.clock.now_ns();
+    let max_seats = state.entitlements.resolve(org_id, now).limits.max_seats;
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 if members::org_role_tx(conn, org_id, user_id).await?.is_some() {
                     return Ok(());
+                }
+                if let Some(limit) = max_seats.filter(|_| role != OrgRole::Viewer) {
+                    let seats = members::seat_members_tx(conn, org_id).await?
+                        + invites::seat_invites_tx(conn, org_id, now, None).await?;
+                    if over_limit(Some(limit), seats, 1) {
+                        // The login still succeeds; the user is not added (D-P-20).
+                        tracing::info!(org_id = %org_id, "auto-provision skipped: seat limit");
+                        return Ok(());
+                    }
                 }
                 match members::add_org_member(conn, org_id, user_id, role, now).await {
                     Ok(()) | Err(MetaError::Conflict(_)) => Ok(()),

@@ -513,15 +513,11 @@ The image's tags are release builds only, so they trust only the compiled-in lic
 - **Q:** § Requests for Q. Q's own repository holds its deploy tooling. N's chart and compose
   files are for self-hosters, and Q may use either.
 
-## After M1 (N M2, a later plan)
+## After M1 (N M2)
 
-- `llmobs admin backup --to <dir> [--meta-only]`, online. It needs a server-side trigger, because
-  the running server holds the data directory's lock. It flushes, pauses compaction, deletion and
-  retention, copies `meta.db` and `catalog.db` with `VACUUM INTO`, copies the listed files, and
-  writes a manifest.
-- `gc.object_retention`, so that a metadata-only backup stays restorable in S3 mode.
-- `llmobs admin gc-orphans`.
-- `meta.db.pre-<version>` and `catalog.db.pre-<version>` before migrations.
+Planned in [`m2/`](m2/00-design.md): online `llmobs admin backup` through a control socket,
+`gc.grace` up to 30 days for S3-mode metadata backups, `llmobs admin gc-orphans`, and pre-migration
+copies of `meta.db` and `catalog.db` (D-N-17–D-N-24).
 
 ## Open items
 

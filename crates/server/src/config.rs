@@ -499,13 +499,26 @@ pub struct SecurityConfig {
 }
 
 /// `[entitlements]` (D-P-15).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EntitlementsConfig {
     /// Where Upgrade buttons go. `{org}` is replaced by the org id. Unset: no button.
     pub upgrade_url: Option<String>,
     /// What an org without a valid token gets (D-P-10, D-P-13).
     pub defaults: EntitlementDefaults,
+    /// The `identities.provider` of the control plane's OIDC provider, whose subjects
+    /// the control plane uses to name users (D-P-39). Default `"oidc:cloud"`.
+    pub control_plane_provider: String,
+}
+
+impl Default for EntitlementsConfig {
+    fn default() -> Self {
+        Self {
+            upgrade_url: None,
+            defaults: EntitlementDefaults::default(),
+            control_plane_provider: "oidc:cloud".to_owned(),
+        }
+    }
 }
 
 /// `[entitlements.defaults]`: what an org without a valid token gets (D-P-10, D-P-13).
@@ -873,19 +886,27 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_auth(&mut config.auth)?;
     validate_init(&config.init)?;
-    if config.otlp_http_addr == Some(config.http_addr) {
+    if config
+        .otlp_http_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "otlp_http_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr == Some(config.http_addr) {
+    if config
+        .grpc_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr.is_some() && config.grpc_addr == config.otlp_http_addr {
+    if let (Some(grpc), Some(otlp)) = (config.grpc_addr, config.otlp_http_addr)
+        && same_listener(grpc, otlp)
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from otlp_http_addr",
@@ -1000,6 +1021,12 @@ fn normalize_domains(key: &'static str, domains: &mut [String]) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// Two listen addresses collide when they are equal; port 0 asks the OS for a distinct free
+/// port per listener, so it never collides.
+fn same_listener(a: SocketAddr, b: SocketAddr) -> bool {
+    a == b && a.port() != 0
 }
 
 fn validate_auth(auth: &mut AuthSettings) -> Result<(), ConfigError> {
@@ -1333,6 +1360,14 @@ fn validate_entitlements(entitlements: &mut EntitlementsConfig) -> Result<(), Co
     if let Some(template) = entitlements.upgrade_url.as_deref() {
         validate_upgrade_url(template)?;
     }
+    let provider = entitlements.control_plane_provider.trim().to_owned();
+    if provider.is_empty() {
+        return Err(ConfigError::Invalid {
+            key: "entitlements.control_plane_provider",
+            reason: "must not be empty",
+        });
+    }
+    entitlements.control_plane_provider = provider;
     validate_entitlement_defaults(&mut entitlements.defaults)
 }
 
@@ -2180,6 +2215,41 @@ mod tests {
     }
 
     #[test]
+    fn control_plane_provider_defaults_to_oidc_cloud() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.entitlements.control_plane_provider, "oidc:cloud");
+    }
+
+    #[test]
+    fn control_plane_provider_takes_a_custom_value() {
+        let config = load_from(
+            Some("[entitlements]\ncontrol_plane_provider = \"oidc:acme\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.entitlements.control_plane_provider, "oidc:acme");
+    }
+
+    #[test]
+    fn control_plane_provider_refuses_an_empty_value() {
+        let error = load_from(
+            Some("[entitlements]\ncontrol_plane_provider = \"  \"\n"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "entitlements.control_plane_provider",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn orgs_default_allows_user_created_orgs_without_a_link() {
         let config = load_from(None, &[]).unwrap();
         assert_eq!(config.orgs, OrgsConfig::default());
@@ -2889,6 +2959,16 @@ link_existing_by_email = true
             assert_eq!(text, expected, "{toml}");
             assert!(!text.contains(rejected), "{text}");
         }
+    }
+
+    #[test]
+    fn port_zero_on_every_listener_is_accepted() {
+        let config = load_from(
+            Some("http_addr = \"127.0.0.1:0\"\notlp_http_addr = \"127.0.0.1:0\"\ngrpc_addr = \"127.0.0.1:0\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.http_addr.port(), 0);
     }
 
     #[test]

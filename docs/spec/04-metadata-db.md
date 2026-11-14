@@ -509,6 +509,13 @@ CREATE TABLE org_window_ends (            -- data windows that stopped applying,
   data_access_days INTEGER,               -- NULL = unlimited
   PRIMARY KEY (org_id, ended_at)
 );
+CREATE TABLE usage_notices (              -- one row per org, month and threshold: each notice is sent once (D-P-18, D-P-38)
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,                    -- YYYY-MM, UTC
+  threshold INTEGER NOT NULL,             -- 80 or 100
+  sent_at INTEGER NOT NULL,
+  PRIMARY KEY (org_id, month, threshold)
+);
 ```
 
 `orgs` has no `limits` column: track P's M2 drops it (D179, D-P-9).

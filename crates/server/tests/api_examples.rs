@@ -43,6 +43,7 @@ use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
 use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
 use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
 use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use llmobs_server::api::usage::OrgUsage;
 use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -373,6 +374,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<OrgMembership>>("static/orgs.json");
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
+    roundtrip::<OrgUsage>("static/org-usage.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
@@ -530,6 +532,7 @@ fn generated_files_roundtrip() {
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }
@@ -603,7 +606,9 @@ fn manifest_covers_the_read_operations() {
                 .unwrap_or_else(|| panic!("operation id"));
             known.insert(id.to_owned());
             // Streams and the OAuth redirects have no JSON body to fixture.
+            // Internal operations are called by the control plane and have no examples.
             if method == "get"
+                && operation["tags"][0].as_str() != Some("internal")
                 && id != "stream_traces"
                 && id != "stream_trace"
                 && id != "get_oauth_authorize"

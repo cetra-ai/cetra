@@ -1,0 +1,14 @@
+{%- if paid -%}
+{%- if threshold == 100 -%}
+Your organization {{ org_name }} has used all {{ included }} units included in its plan this month. Additional units are billed as overage.
+{%- else -%}
+Your organization {{ org_name }} has used {{ units }} of the {{ included }} units included in its plan this month. Additional units are billed as overage.
+{%- endif -%}
+{%- else -%}
+{%- if threshold == 100 -%}
+Your organization {{ org_name }} reached its {{ included }} monthly units. Ingest is paused until the 1st of next month (UTC).
+{%- else -%}
+Your organization {{ org_name }} has used {{ units }} of its {{ included }} monthly units. At {{ included }} units, ingest stops until the 1st of next month (UTC).
+{%- endif -%}
+{%- endif %}
+See your plan: {{ url }}

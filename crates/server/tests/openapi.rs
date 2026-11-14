@@ -69,12 +69,39 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/entitlements",
         "get_org_entitlements",
     ),
+    ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
         "put_org_entitlements_token",
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
+    ("get", "/api/internal/v1/usage", "list_internal_usage"),
+    (
+        "post",
+        "/api/internal/v1/users/revoke",
+        "post_internal_user_revoke",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/disable",
+        "post_internal_user_disable",
+    ),
+    (
+        "post",
+        "/api/internal/v1/users/delete",
+        "post_internal_user_delete",
+    ),
+    (
+        "post",
+        "/api/internal/v1/memberships/lookup",
+        "post_internal_membership_lookup",
+    ),
+    (
+        "get",
+        "/api/internal/v1/orgs/{org_id}/members",
+        "list_internal_org_members",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -414,6 +441,12 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
+    "get_org_usage",
+    "list_internal_usage",
+    "post_internal_user_revoke",
+    "post_internal_user_disable",
+    "post_internal_membership_lookup",
+    "list_internal_org_members",
     "list_alert_events",
     "list_org_members",
     "list_org_invites",
@@ -539,7 +572,15 @@ fn document_lint() {
         let operation_security = operation.get("security").and_then(Value::as_array);
         if matches!(
             *id,
-            "create_key_scores" | "post_feedback" | "post_internal_org"
+            "create_key_scores"
+                | "post_feedback"
+                | "post_internal_org"
+                | "list_internal_usage"
+                | "post_internal_user_revoke"
+                | "post_internal_user_disable"
+                | "post_internal_user_delete"
+                | "post_internal_membership_lookup"
+                | "list_internal_org_members"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -617,6 +658,13 @@ fn document_lint() {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
             expected_errors.extend(["400", "401", "403", "422", "429"]);
+        } else if *id == "list_internal_usage"
+            || *id == "post_internal_user_delete"
+            || *id == "post_internal_membership_lookup"
+        {
+            expected_errors.extend(["400", "401", "403", "429"]);
+        } else if *id == "list_internal_org_members" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);
         } else if *id == "post_email_verify" {
@@ -662,14 +710,14 @@ fn document_lint() {
         } else if *id == "post_logout" {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "delete_score" || *id == "delete_saved_view" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_saved_view" || *id == "update_saved_view" {
             // 409: unsharing a view whose owner was deleted.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
         } else if *id == "post_llm_connection"
@@ -1060,6 +1108,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertEventPage",
         "OnlineRulePage",
         "EvalJobPage",
+        "InternalUsagePage",
     ];
     let expected: BTreeSet<String> = pages
         .iter()

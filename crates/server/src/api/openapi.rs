@@ -49,7 +49,8 @@ use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
 use super::entitlements::{
-    Feature, OrgEntitlements, OrgLimits, OrgPlan, PlanSource, PlanStatus, PutOrgTokenRequest,
+    Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
+    PutOrgTokenRequest, UsageNotice,
 };
 use super::eval_jobs::{
     EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
@@ -59,7 +60,11 @@ use super::evaluators::{
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
-use super::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
+use super::internal::{
+    CreateInternalOrgRequest, InternalMember, InternalMembers, InternalMembersQuery, InternalOrg,
+    InternalOwner, InternalUsageQuery, InternalUsageRow, InternalUserDeleted, InternalUserRef,
+    MembershipLookup, MembershipLookupRequest, MembershipOrg,
+};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -87,6 +92,7 @@ use super::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
+use super::usage::{OrgUsage, UsageDay, UsageParams};
 use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
@@ -162,6 +168,10 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<OrgMonthUsage>();
+    set.insert::<UsageNotice>();
+    set.insert::<OrgUsage>();
+    set.insert::<UsageDay>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -170,6 +180,14 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateInternalOrgRequest>();
     set.insert::<InternalOwner>();
     set.insert::<InternalOrg>();
+    set.insert::<InternalUserRef>();
+    set.insert::<InternalUserDeleted>();
+    set.insert::<MembershipLookupRequest>();
+    set.insert::<MembershipOrg>();
+    set.insert::<MembershipLookup>();
+    set.insert::<InternalMember>();
+    set.insert::<InternalMembers>();
+    set.insert_page::<InternalUsageRow>("InternalUsagePage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -1201,6 +1219,20 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let get_usage = operation("get_org_usage", "orgs", "Read the org's usage by day")
+        .description(Some(
+            "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        ))
+        .parameters(Some(with_query::<UsageParams>(vec![path_string(
+            "org",
+            "Org UUID or slug.",
+        )])))
+        .responses(responses(
+            "200",
+            json_of::<OrgUsage>("The org's usage by day."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let put_entitlements = operation(
         "put_org_entitlements_token",
         "internal",
@@ -1240,6 +1272,109 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 422, 429],
         ))
         .build();
+    let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(with_query::<InternalUsageQuery>(Vec::new())))
+        .responses(responses(
+            "200",
+            json_named("InternalUsagePage", "One page of org usage by day."),
+            &[400, 401, 403, 429],
+        ))
+        .build();
+    let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
+    let post_internal_user_revoke = operation(
+        "post_internal_user_revoke",
+        "internal",
+        "End a user's sessions and personal tokens",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The user's sessions and tokens were revoked.")
+            .build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let post_internal_user_disable = operation(
+        "post_internal_user_disable",
+        "internal",
+        "Disable a user",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The user is disabled and its access is revoked.")
+            .build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let post_internal_user_delete = operation(
+        "post_internal_user_delete",
+        "internal",
+        "Delete a user",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("InternalUserRef")))
+    .responses(responses(
+        "200",
+        json_of::<InternalUserDeleted>("The user is deleted, with the orgs it solely owned."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let post_membership_lookup = operation(
+        "post_internal_membership_lookup",
+        "internal",
+        "Look up a user's memberships",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+    ))
+    .securities(Some(internal_user_security()))
+    .request_body(Some(json_body("MembershipLookupRequest")))
+    .responses(responses(
+        "200",
+        json_of::<MembershipLookup>("The user's active memberships."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let list_internal_org_members = operation(
+        "list_internal_org_members",
+        "internal",
+        "List an org's members",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+    ))
+    .securities(Some(internal_user_security()))
+    .parameters(Some(with_query::<InternalMembersQuery>(vec![path_uuid(
+        "org_id",
+        "Org UUID.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<InternalMembers>("The org's members."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     org.delete = Some(delete_org);
@@ -1271,12 +1406,40 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Get, get_entitlements),
         )
         .path(
+            "/api/v1/orgs/{org}/usage",
+            PathItem::new(HttpMethod::Get, get_usage),
+        )
+        .path(
             "/api/internal/v1/orgs/{org_id}/entitlements",
             PathItem::new(HttpMethod::Put, put_entitlements),
         )
         .path(
             "/api/internal/v1/orgs",
             PathItem::new(HttpMethod::Post, post_internal_org),
+        )
+        .path(
+            "/api/internal/v1/usage",
+            PathItem::new(HttpMethod::Get, list_internal_usage),
+        )
+        .path(
+            "/api/internal/v1/users/revoke",
+            PathItem::new(HttpMethod::Post, post_internal_user_revoke),
+        )
+        .path(
+            "/api/internal/v1/users/disable",
+            PathItem::new(HttpMethod::Post, post_internal_user_disable),
+        )
+        .path(
+            "/api/internal/v1/users/delete",
+            PathItem::new(HttpMethod::Post, post_internal_user_delete),
+        )
+        .path(
+            "/api/internal/v1/memberships/lookup",
+            PathItem::new(HttpMethod::Post, post_membership_lookup),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}/members",
+            PathItem::new(HttpMethod::Get, list_internal_org_members),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)
@@ -1786,7 +1949,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-            &[400, 401, 403, 404, 413, 429, 503],
+            &[400, 401, 402, 403, 404, 413, 429, 503],
         ))
         .build();
     let delete = operation("delete_score", "scores", "Delete a score")
@@ -1819,7 +1982,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
     .responses(responses(
         "200",
         json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-        &[400, 401, 403, 404, 413, 429, 503],
+        &[400, 401, 402, 403, 404, 413, 429, 503],
     ))
     .build();
     let feedback = operation("post_feedback", "scores", "Send end-user feedback")
@@ -1834,7 +1997,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<FeedbackResult>("The stored feedback score."),
-            &[400, 401, 403, 404, 413, 429],
+            &[400, 401, 402, 403, 404, 413, 429],
         ))
         .build();
     let schema = operation("get_schema", "schema", "Get the schema")
@@ -2790,6 +2953,9 @@ fn problem(code: u16) -> Response {
     let description = match code {
         400 => "The request is malformed or a filter is invalid.",
         401 => "No credentials, or the credentials are invalid.",
+        402 => {
+            "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets."
+        }
         403 => {
             "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required)."
         }

@@ -10,8 +10,9 @@
  */
 
 import { currentValues } from "./context.js";
-import { debug, warnOnce } from "./log.js";
+import { debug, warn, warnOnce } from "./log.js";
 import { applyMask } from "./mask.js";
+import { QuotaState } from "./quota.js";
 import { currentRuntime } from "./runtime.js";
 import { serialize } from "./serialize.js";
 import { uuid7 } from "./uuid.js";
@@ -214,10 +215,6 @@ function mintScoreId(): string | undefined {
   return uuid7();
 }
 
-function warn(message: string): void {
-  runtimeGlobals().console?.warn(message);
-}
-
 export interface ScoreQueueOptions {
   /** `<baseUrl>/api/v1/scores`. */
   url: string;
@@ -228,6 +225,8 @@ export interface ScoreQueueOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tests inject a clock; the default is `Date.now`. */
   now?: () => number;
+  /** Shared with the trace exporter; the default is a new one on `now`. */
+  quota?: QuotaState;
 }
 
 /**
@@ -242,6 +241,7 @@ export class ScoreQueue {
   private readonly fetcher: FetchLike | undefined;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly quota: QuotaState;
   private sending: Promise<void> | undefined;
   private timer: unknown;
   private stopped = false;
@@ -254,6 +254,7 @@ export class ScoreQueue {
     this.fetcher = options.fetch ?? getFetch();
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
+    this.quota = options.quota ?? new QuotaState(this.now);
   }
 
   /** Queue one score; `false` when it was dropped (buffer full, or stopped). */
@@ -359,6 +360,10 @@ export class ScoreQueue {
     const count = batch.length;
     try {
       for (let attempt = 0; ; attempt++) {
+        if (this.quota.paused()) {
+          // D-P-34: over the units cap; drop the batch without sending it.
+          return;
+        }
         let status: number | undefined;
         let retryAfter: string | null = null;
         const fetch = this.fetcher;
@@ -383,6 +388,11 @@ export class ScoreQueue {
           }
         }
         // A missing fetch counts as a network failure: retried, then dropped.
+        if (status === 402) {
+          // D-P-34: pause every exporter; the batch is dropped with no other warning.
+          this.quota.on402(retryAfter);
+          return;
+        }
         if (status !== undefined && status !== 429 && status < 500) {
           warn(
             `llmobs: score batch rejected with status ${String(status)}; dropped ${String(count)} scores`,
