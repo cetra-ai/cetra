@@ -1,5 +1,4 @@
 //! `rule_spend` rows: one row per rule and UTC day (D-I-15). A month is the sum of its days.
-#![cfg_attr(not(test), allow(dead_code))] // I3.6 to I3.9 call these.
 
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;

@@ -752,11 +752,7 @@ There is no batch read: the rules list calls `spent_between` once per budgeted r
 
 ### Dead code
 
-Nothing outside the tests calls the three modules before I3.6–I3.9. Start each of `meta/online_rules.rs`, `meta/eval_jobs.rs` and `meta/rule_spend.rs` with the repo's pattern for meta modules (`meta/api_keys.rs` line 2):
-```rust
-#![cfg_attr(not(test), allow(dead_code))] // I3.6 to I3.9 call these.
-```
-I3.6, I3.7, I3.8 and I3.9 each try to remove these attributes (§ Conventions › Dead code): a sub-phase removes a module's attribute when `just check-rust` passes without it, and reports what it removed. After I3.9, an item that is still unused gets an item-level `#[allow(dead_code)]` naming its M4 caller, and the module attribute goes.
+Nothing outside the tests calls the three modules before I3.6–I3.9. `meta/mod.rs` already allows dead code for its whole tree, so the three modules need no attribute of their own.
 
 ### Spec
 
@@ -793,7 +789,7 @@ With `crate::meta::test_db()`, an org, a project, a connection, an evaluator (`m
 
 ### Done when
 
-`just check` passes at this commit, with the three modules' `cfg_attr(not(test), allow(dead_code))` in place (§ Dead code above).
+`just check` passes at this commit, with `meta/mod.rs`'s `cfg_attr(not(test), allow(dead_code))` covering the three modules (§ Dead code above).
 
 ---
 
@@ -1701,7 +1697,7 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 ### Done when
 
-`just check` passes. Every documented M3 operation has a route. None of `meta/{online_rules,eval_jobs,rule_spend}.rs` keeps its module-level `dead_code` attribute; any item still unused has an item-level allow naming its M4 caller.
+`just check` passes. Every documented M3 operation has a route. Temporarily delete the `#![cfg_attr(not(test), allow(dead_code))]` in `meta/mod.rs`, run `cargo clippy -p llmobs-server --all-targets -- -D warnings`, delete any unused `online_rules`/`eval_jobs`/`rule_spend` item it reports, then restore the attribute. Any item still unused has an item-level allow naming its M4 caller.
 
 ---
 

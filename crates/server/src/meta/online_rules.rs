@@ -1,6 +1,5 @@
 //! `online_rules` rows (spec 04, D-I-30, D-I-32). `target`, `budget_period` and
 //! `paused_reason` are stored as text; a stored value outside its list is corrupt.
-#![cfg_attr(not(test), allow(dead_code))] // I3.6 to I3.9 call these.
 
 use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};

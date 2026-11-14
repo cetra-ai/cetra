@@ -111,6 +111,12 @@ impl Reservation<'_> {
             && entry.period_start == self.period_start
         {
             entry.reserved = (entry.reserved - self.amount).max(0.0);
+            // A NaN, infinite or negative cost must not corrupt the spend: it adds nothing.
+            let actual = if actual.is_finite() && actual > 0.0 {
+                actual
+            } else {
+                0.0
+            };
             entry.spent += actual;
         }
     }
@@ -368,5 +374,23 @@ mod tests {
         ));
         budgets.forget(RULE);
         assert_eq!(budgets.view(RULE, 0), None);
+    }
+
+    #[test]
+    fn settle_adds_only_a_finite_positive_cost() {
+        let budgets = Budgets::default();
+        budgets.load(RULE, 0, 1.0);
+        for actual in [f64::NAN, f64::INFINITY, -3.0] {
+            let Reserve::Reserved(guard) = budgets.try_reserve(RULE, 0, 5.0, 2.0) else {
+                panic!("reserve");
+            };
+            guard.settle(actual);
+            assert_eq!(budgets.view(RULE, 0), Some((1.0, 0.0)), "actual {actual}");
+        }
+        let Reserve::Reserved(guard) = budgets.try_reserve(RULE, 0, 5.0, 2.0) else {
+            panic!("reserve");
+        };
+        guard.settle(0.25);
+        assert_eq!(budgets.view(RULE, 0), Some((1.25, 0.0)));
     }
 }

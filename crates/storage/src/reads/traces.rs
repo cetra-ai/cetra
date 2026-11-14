@@ -1972,6 +1972,25 @@ mod tests {
         ]
     }
 
+    /// Like `trace_pair(trace, environment, true)`, but only the root carries the experiment
+    /// key. The child has none, so a span-level default exclusion keeps it and only a
+    /// trace-level test (strict) drops it.
+    fn root_tagged_pair(trace: u16, environment: &str) -> Vec<Span> {
+        let mut spans = trace_pair(trace, environment, false);
+        spans[0]
+            .metadata
+            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
+        spans
+    }
+
+    /// Like [`strict_spans`], but trace 2 is tagged on its root span only.
+    fn root_tagged_spans() -> Vec<Span> {
+        let mut spans = trace_pair(0, "production", false);
+        spans.extend(trace_pair(1, environment::EVAL, false));
+        spans.extend(root_tagged_pair(2, "production"));
+        spans
+    }
+
     #[tokio::test]
     async fn refresh_strict_drops_eval_and_experiment_traces() {
         let spans = strict_spans();
@@ -2147,6 +2166,79 @@ mod tests {
             pairs(&json_rows(&batches), "trace_id", "span_id"),
             [(owned[0].clone(), "0202020202020202".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn span_list_keeps_a_child_of_a_root_tagged_experiment_unless_strict() {
+        let spans = root_tagged_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let scope = ListScope {
+            window: None,
+            include_eval: true,
+            include_experiments: false,
+        };
+        let default = span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50);
+        let page = span_list(&ctx, default).await.expect("default");
+        let mut kept = pairs(&rows(&page), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+            (owned[1].clone(), "0101010101010101".to_owned()),
+            (owned[1].clone(), "0202020202020202".to_owned()),
+            (owned[2].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+
+        let strict = SpanListRequest {
+            strict_exclusions: true,
+            ..span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50)
+        };
+        let page = span_list(&ctx, strict).await.expect("strict");
+        let mut kept = pairs(&rows(&page), "trace_id", "span_id");
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                (owned[0].clone(), "0101010101010101".to_owned()),
+                (owned[0].clone(), "0202020202020202".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn span_refresh_keeps_a_child_of_a_root_tagged_experiment_unless_strict() {
+        let spans = root_tagged_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
+
+        let batches = span_refresh(&ctx, span_refresh_request(None, &ids, 10, false))
+            .await
+            .expect("default");
+        let mut kept = pairs(&json_rows(&batches), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+            (owned[2].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+
+        let batches = span_refresh(&ctx, span_refresh_request(None, &ids, 10, true))
+            .await
+            .expect("strict");
+        let mut kept = pairs(&json_rows(&batches), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
     }
 
     #[tokio::test]

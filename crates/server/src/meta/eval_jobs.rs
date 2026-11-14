@@ -1,7 +1,6 @@
 //! `eval_jobs` rows: the durable evaluation queue (spec 04 § Evaluation; D-I-11, D-I-12,
 //! D-I-28). `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and
 //! there is no lease: startup and the janitor re-queue interrupted `running` jobs.
-#![cfg_attr(not(test), allow(dead_code))] // I3.6 to I3.9 call these.
 
 use std::collections::HashMap;
 
