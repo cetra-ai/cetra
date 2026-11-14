@@ -97,8 +97,10 @@ async fn pre_migration_copy(
     let io = |source: std::io::Error| CatalogError::PreMigrationCopy {
         source: sqlx::Error::Io(source),
     };
-    let target = dir.join(format!("{name}.pre-{}", env!("CARGO_PKG_VERSION")));
-    let staging = dir.join(format!("{name}.pre-{}.tmp", env!("CARGO_PKG_VERSION")));
+    // Keyed by the schema being left, not the package version, which stays
+    // the same between releases while commit-pinned builds migrate (D-N-22).
+    let target = dir.join(format!("{name}.pre-m{applied:04}"));
+    let staging = dir.join(format!("{name}.pre-m{applied:04}.tmp"));
     // An existing copy is kept: a failed upgrade must not replace the good
     // pre-upgrade copy with a half-migrated database.
     let copied = !target.exists();
@@ -607,9 +609,7 @@ mod tests {
         let connection = open_catalog_db(dir.path()).await.unwrap();
         drop(connection);
 
-        let copy = dir
-            .path()
-            .join(format!("catalog.db.pre-{}", env!("CARGO_PKG_VERSION")));
+        let copy = dir.path().join("catalog.db.pre-m0001");
         assert!(copy.is_file());
         assert_eq!(
             pre_copies(dir.path()),
@@ -642,9 +642,7 @@ mod tests {
             .unwrap();
         first_only.run(&mut older).await.unwrap();
         drop(older);
-        let copy = dir
-            .path()
-            .join(format!("catalog.db.pre-{}", env!("CARGO_PKG_VERSION")));
+        let copy = dir.path().join("catalog.db.pre-m0001");
         std::fs::write(&copy, b"known content").unwrap();
 
         drop(open_catalog_db(dir.path()).await.unwrap());

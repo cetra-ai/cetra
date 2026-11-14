@@ -312,8 +312,10 @@ async fn pre_migration_copy(
     if applied == 0 || applied >= expected {
         return Ok(());
     }
-    let target = dir.join(format!("{name}.pre-{}", env!("CARGO_PKG_VERSION")));
-    let staging = dir.join(format!("{name}.pre-{}.tmp", env!("CARGO_PKG_VERSION")));
+    // Keyed by the schema being left, not the package version, which stays
+    // the same between releases while commit-pinned builds migrate (D-N-22).
+    let target = dir.join(format!("{name}.pre-m{applied:04}"));
+    let staging = dir.join(format!("{name}.pre-m{applied:04}.tmp"));
     // An existing copy is kept: a failed upgrade must not replace the good
     // pre-upgrade copy with a half-migrated database.
     let copied = !target.exists();
@@ -475,13 +477,12 @@ mod tests {
         let path = dir.path().join("meta.db");
         let mut first_only = migrator();
         let first = first_only.migrations[..1].to_vec();
+        let first_version = first[0].version;
         first_only.migrations = std::borrow::Cow::Owned(first);
         let mut older = connect(&path, true).await.unwrap();
         first_only.run(&mut older).await.unwrap();
         older.close().await.unwrap();
-        let copy = dir
-            .path()
-            .join(format!("meta.db.pre-{}", env!("CARGO_PKG_VERSION")));
+        let copy = dir.path().join(format!("meta.db.pre-m{first_version:04}"));
         std::fs::write(&copy, b"known content").unwrap();
 
         MetaDb::open(dir.path()).await.unwrap().close().await;
@@ -515,7 +516,7 @@ mod tests {
         let db = MetaDb::open(dir.path()).await.unwrap();
         db.close().await;
 
-        let copy_name = format!("meta.db.pre-{}", env!("CARGO_PKG_VERSION"));
+        let copy_name = format!("meta.db.pre-m{first_version:04}");
         assert_eq!(pre_copies(dir.path()), vec![copy_name.clone()]);
         let mut copy = connect(&dir.path().join(copy_name), false).await.unwrap();
         let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
