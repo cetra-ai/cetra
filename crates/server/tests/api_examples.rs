@@ -411,6 +411,7 @@ fn static_files_match_their_types() {
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
     roundtrip::<OnlineRule>("static/online-rule.json");
+    roundtrip::<OnlineRule>("static/online-rule-resumed.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");

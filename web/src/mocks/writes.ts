@@ -16,6 +16,7 @@ import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.j
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
 import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
+import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
@@ -488,7 +489,8 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...onlineRuleDocument, ...named(body) }, { status: 201 }),
   patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
   delete_online_rule: () => noContent(),
-  post_online_rule_resume: () => HttpResponse.json(onlineRuleDocument),
+  post_online_rule_resume: ({ params }) =>
+    HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
 };
 
