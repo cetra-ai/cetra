@@ -295,6 +295,20 @@ it("ignores the hidden minCount of a cost form", () => {
   expect(conditionChanged(base, { ...base, minCount: "5" })).toBe(false);
 });
 
+it("sees the fields a metric uses, and a metric switch, as changes", () => {
+  const latency = formWith({ metric: "latency_p95", threshold: "5000", target: "trace" });
+  expect(conditionChanged(latency, { ...latency, target: "llm_span" })).toBe(true);
+  const score = formWith({
+    metric: "score",
+    comparator: "lt",
+    threshold: "0.7",
+    scoreName: "helpfulness",
+    aggregation: "avg",
+  });
+  expect(conditionChanged(score, { ...score, aggregation: "pass_rate" })).toBe(true);
+  expect(conditionChanged(latency, { ...latency, metric: "error_rate" })).toBe(true);
+});
+
 it("previews over buckets as wide as the window", () => {
   const now = Date.parse("2026-01-04T00:00:00Z");
   expect(previewParams("6h", now)).toEqual({

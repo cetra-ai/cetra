@@ -848,44 +848,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successive_patches_keep_each_change() {
+    async fn concurrent_patches_keep_each_change() {
+        // Two PATCHes of different fields sent at once must both persist: each reads,
+        // edits and re-seals the config inside one write transaction. The requests can
+        // interleave at every await, so several rounds make a lost update show up.
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let created = create_ok(&app, &seeded, pager()).await;
-        let path = format!("{}/{}", channels(&seeded), created.id);
         let new_url = "https://hooks.example.com/y";
         let new_secret = "fedcba9876543210";
+        for round in 0..20 {
+            let mut body = pager();
+            body["name"] = json!(format!("Pager {round}"));
+            let created = create_ok(&app, &seeded, body).await;
+            let path = format!("{}/{}", channels(&seeded), created.id);
+            let (by_url, by_secret) = tokio::join!(
+                send(
+                    &app,
+                    Method::PATCH,
+                    &path,
+                    &seeded.cookie,
+                    Some(json!({"url": new_url})),
+                ),
+                send(
+                    &app,
+                    Method::PATCH,
+                    &path,
+                    &seeded.cookie,
+                    Some(json!({"secret": new_secret})),
+                ),
+            );
+            assert_eq!(by_url.status, 200);
+            assert_eq!(by_secret.status, 200);
 
-        let by_url = send(
-            &app,
-            Method::PATCH,
-            &path,
-            &seeded.cookie,
-            Some(json!({"url": new_url})),
-        )
-        .await;
-        assert_eq!(by_url.status, 200);
-        let by_secret = send(
-            &app,
-            Method::PATCH,
-            &path,
-            &seeded.cookie,
-            Some(json!({"secret": new_secret})),
-        )
-        .await;
-        assert_eq!(by_secret.status, 200);
-
-        let row = alerts::channel_by_id(app.state.meta.reader(), seeded.project.id, created.id)
-            .await
-            .unwrap()
-            .unwrap();
-        let ChannelConfig::Webhook { url, secret, .. } =
-            open_config(&app.state.secrets, &row.id, &row.config_enc).unwrap()
-        else {
-            panic!("the channel is a webhook");
-        };
-        assert_eq!(url, new_url);
-        assert_eq!(secret, new_secret);
+            let row = alerts::channel_by_id(app.state.meta.reader(), seeded.project.id, created.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let ChannelConfig::Webhook { url, secret, .. } =
+                open_config(&app.state.secrets, &row.id, &row.config_enc).unwrap()
+            else {
+                panic!("the channel is a webhook");
+            };
+            assert_eq!(url, new_url, "round {round}");
+            assert_eq!(secret, new_secret, "round {round}");
+        }
     }
 
     #[tokio::test]

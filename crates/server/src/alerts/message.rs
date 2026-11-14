@@ -145,7 +145,12 @@ fn slack_traces_url(notice: &Notice) -> String {
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
     url.query_pairs_mut().clear().extend_pairs(kept);
-    url.into()
+    let short: String = url.into();
+    // A very long public URL or slug can still be over the cap: use the rule page.
+    if short.len() > SLACK_URL_MAX {
+        return notice.rule_url.clone();
+    }
+    short
 }
 
 /// The Slack Block Kit body (D-K-8). The sender serializes it.
