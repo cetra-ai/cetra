@@ -19,3 +19,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   access tokens as well as their web sessions, as a password change already did.
 - A categorical webhook evaluator must list its categories; one saved without them is refused with
   400 (`output_score.categories`) instead of failing every run with `unknown label`.
+- A webhook evaluator answering 402 now pauses its rule, as D160 says for every other evaluator
+  (it was permanent, so each run failed until the error breaker tripped).

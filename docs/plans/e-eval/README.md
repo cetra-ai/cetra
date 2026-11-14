@@ -169,7 +169,6 @@ Needs a decision:
 - **D164 wording.** This README's D164 says an empty `values` list is invalid; spec 06 and the code compare with `expected` when both `value` and `values` are absent.
 
 Recorded, settled by earlier sub-phases and not changed:
-- Webhook status classes (E15) differ from D160: 408, 425, 429 and 5xx retry; 401, 403, 404 and 410 pause; 3xx and every other 4xx, 402 included, are permanent. Judges follow D160 (402 pause; 403 pause unless the type or code names a content filter).
 - D158 extra tolerance: the `score` and `reason` aliases, 0/1 as booleans, and one trailing `.` on labels (E9).
 - `anthropic-version: 2026-10-21`.
 - The experiment origin writes `llmobs.eval.experiment_id`, not the dataset item id.

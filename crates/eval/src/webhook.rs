@@ -240,12 +240,13 @@ fn optional_json<T: Serialize>(value: Option<T>) -> Result<Value, WebhookError> 
     }
 }
 
-/// 408, 425, 429, and 5xx retry. 401, 403, 404, and 410 pause. 3xx and other 4xx are permanent.
+/// 408, 425, 429, and 5xx retry. 401, 402, 403, 404, and 410 pause (D160 and D165).
+/// 3xx and other 4xx are permanent.
 fn classify_status(status: u16) -> ErrorClass {
     match status {
         408 | 425 | 429 => ErrorClass::Retryable,
         500..=599 => ErrorClass::Retryable,
-        401 | 403 | 404 | 410 => ErrorClass::Pause,
+        401 | 402 | 403 | 404 | 410 => ErrorClass::Pause,
         _ => ErrorClass::Permanent,
     }
 }
