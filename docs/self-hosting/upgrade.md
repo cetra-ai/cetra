@@ -8,15 +8,23 @@ What happens on upgrade:
 
 - Database migrations (`meta.db`, `catalog.db`) run automatically when the new version starts.
   They only go forward.
+- Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named
+  `meta.db.pre-m<N>` and `catalog.db.pre-m<N>` in the data directory, where `<N>` is the highest
+  migration applied before the upgrade (for example `meta.db.pre-m12`). Only the copy from the last
+  upgrade is kept.
+  Delete the `*.pre-m*` files once the upgrade is verified. Until then they are copies of your data,
+  like a backup, and count against your backup retention (GDPR).
 - Parquet files are never rewritten for an upgrade; new columns are added, old files stay readable.
 - The new version replays a WAL written by the previous one.
 - Downgrading is not supported: after a new version has started on the data, the old version
-  may refuse it. To go back, restore the backup taken before the upgrade.
+  may refuse it. To go back, restore the pre-upgrade backup, or the `*.pre-m*` copies, and run the old
+  binary. Deletions requested after the upgrade are not in that copy, and `reapply-deletions` cannot
+  read a newer database: repeat those deletions by hand after a rollback.
 
 Procedure:
 
 1. Read the release notes of every version between yours and the new one.
-2. Take a backup ([backup.md](backup.md)).
+2. Take a backup: `llmobs admin backup` ([backup.md](backup.md)).
 3. Replace the binary, image or chart version (below) and start it.
 4. Check `/readyz` and the UI.
 
