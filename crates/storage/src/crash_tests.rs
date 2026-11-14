@@ -284,37 +284,10 @@ async fn child() {
     panic!("shutdown finished without reaching {name}");
 }
 
-/// Sets this process's soft core-size limit to 0, which the crash children
-/// inherit: each of them aborts on purpose, and on a host whose `core_pattern`
-/// is a plain file name every abort would leave a `core.<pid>` file in the
-/// crate directory.
-fn disable_core_dumps() {
-    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let maximum = getrlimit(Resource::Core).maximum;
-    setrlimit(
-        Resource::Core,
-        Rlimit {
-            current: Some(0),
-            maximum,
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn crash_children_inherit_no_core_dumps() {
-    disable_core_dumps();
-    assert_eq!(
-        rustix::process::getrlimit(rustix::process::Resource::Core).current,
-        Some(0)
-    );
-}
-
 /// Spawns the `test` crash child with `dir` and `name`, and returns only once
 /// it has aborted by signal. A point the child's operations never reach exits
 /// with a code (its `panic!`) and fails the assertion.
 fn run_child(test: &str, dir_var: &str, point_var: &str, name: &str, dir: &Path) {
-    disable_core_dumps();
     let mut child = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg(test)
