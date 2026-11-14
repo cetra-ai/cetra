@@ -29,6 +29,8 @@ Unless the request opts in (`include_eval=true` / `include_experiments=true`, or
 
 The exclusions apply to the view the request reads: `traces` and `spans` directly; session and user lists through the traces they aggregate; span-based and score-based metrics through a semi-join on the excluded traces.
 
+**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'llmobs-eval' OR metadata['llmobs.experiment_id'] IS NOT NULL)`.
+
 The SQL console applies **no** implicit exclusion (users see raw data; the schema docs explain the reserved environments).
 
 ## Filter DSL

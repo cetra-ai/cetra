@@ -10067,6 +10067,10 @@ export interface operations {
                 name?: string;
                 /** @description Who wrote the score. */
                 source?: components["schemas"]["ScoreSource"];
+                /** @description Scores written by this evaluator. */
+                evaluator_id?: string;
+                /** @description Scores written by this online rule. */
+                rule_id?: string;
                 /** @description Inclusive `created_at` start. RFC 3339 or epoch milliseconds. */
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive `created_at` end. RFC 3339 or epoch milliseconds. */

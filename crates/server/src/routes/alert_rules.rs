@@ -374,7 +374,7 @@ async fn checked_condition(
     })?;
     if let Some(text) = &condition.filter {
         let ctx = open_query(state, project, None).await?;
-        llmobs_storage::check_alert_filter(&ctx, text)?;
+        llmobs_storage::validate_filter(&ctx, llmobs_storage::ViewName::Traces, text)?;
     }
     Ok(condition)
 }

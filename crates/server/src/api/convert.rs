@@ -1176,6 +1176,7 @@ mod tests {
             TraceListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, include_eval, false).unwrap(),
                 sort: TraceSort::StartTime,
                 order: StorageSortOrder::Desc,
@@ -1195,6 +1196,7 @@ mod tests {
             SpanListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, false, false).unwrap(),
                 sort: SpanSort::StartTime,
                 order: StorageSortOrder::Desc,
