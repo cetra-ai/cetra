@@ -56,6 +56,15 @@ impl MetaDb {
     pub(crate) async fn open(data_dir: &Path) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
         let mut writer = connect(&path, true).await?;
+        let applied = applied_version(&mut writer).await?;
+        pre_migration_copy(
+            &mut writer,
+            data_dir,
+            "meta.db",
+            applied,
+            expected_version(),
+        )
+        .await?;
         migrator()
             .run(&mut writer)
             .await
@@ -176,6 +185,12 @@ pub enum MetaError {
     /// `open_existing` found no `meta.db`.
     #[error("meta.db is not initialized")]
     NotInitialized,
+    /// The pre-migration copy of `meta.db` could not be written or cleaned up (D-N-22).
+    #[error("meta.db pre-migration copy: {0}")]
+    PreMigrationIo(std::io::Error),
+    /// `VACUUM INTO` for the pre-migration copy of `meta.db` failed (D-N-22).
+    #[error("meta.db pre-migration copy: {0}")]
+    PreMigrationDb(sqlx::Error),
     /// The latest applied migration is not the one this binary embeds.
     #[error("meta.db schema version {found}, binary expects {expected}")]
     SchemaMismatch {
@@ -283,6 +298,62 @@ async fn reader_pool(path: &Path) -> Result<SqlitePool, MetaError> {
         })
 }
 
+/// Before migrations that change an existing database, copies `<name>` to
+/// `<name>.pre-<binary version>` with `VACUUM INTO`, and removes the other
+/// `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
+/// current one (`applied >= expected`) get no copy.
+async fn pre_migration_copy(
+    connection: &mut SqliteConnection,
+    dir: &Path,
+    name: &str,
+    applied: i64,
+    expected: i64,
+) -> Result<(), MetaError> {
+    if applied == 0 || applied >= expected {
+        return Ok(());
+    }
+    let target = dir.join(format!("{name}.pre-{}", env!("CARGO_PKG_VERSION")));
+    let staging = dir.join(format!("{name}.pre-{}.tmp", env!("CARGO_PKG_VERSION")));
+    // An existing copy is kept: a failed upgrade must not replace the good
+    // pre-upgrade copy with a half-migrated database.
+    if !target.exists() {
+        let staging_text = staging.to_str().ok_or_else(|| {
+            MetaError::PreMigrationIo(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "data directory path is not UTF-8",
+            ))
+        })?;
+        if staging.exists() {
+            std::fs::remove_file(&staging).map_err(MetaError::PreMigrationIo)?;
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(staging_text)
+            .execute(&mut *connection)
+            .await
+            .map_err(MetaError::PreMigrationDb)?;
+        std::fs::rename(&staging, &target).map_err(MetaError::PreMigrationIo)?;
+    }
+    let prefix = format!("{name}.pre-");
+    for entry in std::fs::read_dir(dir).map_err(MetaError::PreMigrationIo)? {
+        let path = entry.map_err(MetaError::PreMigrationIo)?.path();
+        let stale = path != target
+            && path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.starts_with(&prefix));
+        if stale {
+            std::fs::remove_file(&path).map_err(MetaError::PreMigrationIo)?;
+        }
+    }
+    tracing::info!(
+        database = name,
+        applied,
+        expected,
+        "copied the database before migrating"
+    );
+    Ok(())
+}
+
 async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, MetaError> {
     let present: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
@@ -303,9 +374,9 @@ async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, MetaE
 mod tests {
     use std::sync::Arc;
 
-    use sqlx::SqliteConnection;
+    use sqlx::{Connection, SqliteConnection};
 
-    use super::{MetaDb, expected_version};
+    use super::{MetaDb, connect, expected_version, migrator};
     use crate::meta::MetaError;
 
     async fn pragmas(connection: &mut SqliteConnection) -> (String, i64, i64, i64) {
@@ -380,6 +451,70 @@ mod tests {
         }, {
             insta::assert_snapshot!("meta_schema", text);
         });
+    }
+
+    #[tokio::test]
+    async fn an_existing_pre_migration_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let mut first_only = migrator();
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = connect(&path, true).await.unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+        let copy = dir
+            .path()
+            .join(format!("meta.db.pre-{}", env!("CARGO_PKG_VERSION")));
+        std::fs::write(&copy, b"known content").unwrap();
+
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+
+        assert_eq!(std::fs::read(&copy).unwrap(), b"known content");
+    }
+
+    /// Lists the `meta.db.pre-*` files in `dir`.
+    fn pre_copies(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("meta.db.pre-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_meta_db_keeps_a_pre_migration_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        // An older binary left only the first migration applied.
+        let mut first_only = migrator();
+        let first = first_only.migrations[..1].to_vec();
+        let first_version = first[0].version;
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = connect(&path, true).await.unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+        std::fs::write(dir.path().join("meta.db.pre-0.0.0-old"), b"old").unwrap();
+
+        let db = MetaDb::open(dir.path()).await.unwrap();
+        db.close().await;
+
+        let copy_name = format!("meta.db.pre-{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(pre_copies(dir.path()), vec![copy_name.clone()]);
+        let mut copy = connect(&dir.path().join(copy_name), false).await.unwrap();
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut copy)
+            .await
+            .unwrap();
+        assert_eq!(version, first_version);
+    }
+
+    #[tokio::test]
+    async fn a_new_or_current_meta_db_gets_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert!(pre_copies(dir.path()).is_empty());
     }
 
     #[tokio::test]
