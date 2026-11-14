@@ -186,7 +186,7 @@ Timeouts: `RESOLVE_TIMEOUT = 600 s` for each resolution read; the `POST` count a
 - Retention does not clear the metrics cache or send a live `resync`: dropped days are old data, and the 10 s cache and the next refetch catch up.
 - What it covers:
   - spans, traces and scores: whole days, in storage;
-  - judge traces: they are spans of the project;
+  - judge traces: they are spans of the project, dropped by their own day. A judge trace or score written later about an old trace (a manual or backfill run, a late score) lives at most the retention plus the target's age when it was written; retention does not follow the target, deletions do (D-M-10, cross-track review X19);
   - media: daily media GC, so a blob outlives its last span by at most a day.
 
   `deletions` rows are audit and are kept. `eval_jobs` are pruned by I after 7 days. `usage_daily` is aggregate and is kept.
@@ -220,7 +220,7 @@ Three call sites for tracks P and Q. Each is one plain function call in M's code
 |---|---|---|---|
 | Retention cap (D175) | `retention::retention_once`: `let cap: Option<u32> = None;` passed to `effective_days` | no cap | P (M4, D-P-45): the largest data window of the last 30 days plus 30 days, `state.entitlements.retention_window_at(&state.meta, org, now).await?` plus 30 (`None` when unlimited, e.g. self-hosted without a licence) |
 | Retention management (D177) | `routes/projects.rs::may_manage_retention(state, org) -> bool`, called by `create_project` and `update_project` when the body sets `retention_days` to a number | returns `true` | P: the body becomes `state.entitlements.of(org).allows(Feature::RetentionManagement)` (free when self-hosted, Pro on the cloud) |
-| Dropped (D170) | `deletion::on_dropped(state, &Dropped)`, called once by the worker after a project or org drop committed (at most once: a crash right after the commit skips it) | emits the audit event `org dropped` / `project dropped` | Q: also sends the control-plane notification (org → cell mapping cleanup); for durability Q reconciles from `deletions` rows of kind `project`/`org` in status `applied`, which are never deleted |
+| Dropped (D170) | `deletion::on_dropped(&Dropped)`, called once by the worker after a project or org drop committed (at most once: a crash right after the commit skips it) | emits the audit event `org dropped` / `project dropped` | none: the control plane pulls the `deletions` rows of kind `project`/`org` in status `applied`, which are never deleted (R5, P's M4; D-M-17) |
 
 ### Code layout (end state)
 
@@ -314,7 +314,7 @@ These go to the coordinating session, which forwards them. They are also in the 
   - replace the body of `routes/projects.rs::may_manage_retention` with the entitlement check, and the matching UI state: the settings page already shows `plan_required` (D177, D-M-16);
   - P's hidden data-access window is enforced in A2's query time window, not by M. It must **not** apply to M's scope reads (`filter_trace_ids`, `user_deletion_scope`, `eval_trace_ids`) or to the deletion preview: an erasure must also cover hidden-but-kept data. P adds a test for that;
   - ingest's D85 age check uses the project's `retention_days` today; P switches it to `retention::effective_days`, and drops spec 12's `orgs.limits.max_retention_days` in favour of the cap.
-- **Q (cloud)**: add the control-plane notification to `deletion::on_dropped` (D170, D-M-17). `on_dropped` runs after the `meta.db` rows are deleted, at most once per drop; it receives the deletion id, the org id, the dropped project ids and whether the whole org went. For durability Q reconciles from `deletions` rows of kind `project`/`org` in status `applied` (kept forever), so a crash or a failed call is caught up.
+- **Q (cloud)**: nothing to add in M. The control plane learns of drops by pulling the `deletions` rows of kind `project`/`org` in status `applied` (kept forever) through Q's request R5, which track P's M4 builds (D-P-43, D-M-17). `on_dropped` only emits the audit event.
 - **N (packaging)**: the backup docs must say to keep the pre-restore data directory, or a copy of its `meta.db`, and to run `llmobs admin reapply-deletions --from <it>` after a restore (D-M-9).
 
 ## API contract gaps

@@ -126,9 +126,10 @@ pub enum AdminError {
     /// `--from` holds no `meta.db`.
     #[error("no meta.db in the --from directory")]
     SourceNotInitialized,
-    /// The `--from` database is at another schema version.
+    /// The `--from` database is at an older schema version. A newer one is read as it is
+    /// (D-M-9).
     #[error(
-        "the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs serve` on a copy of it first"
+        "the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs serve` on a copy of it first"
     )]
     SourceSchema {
         /// Migration version embedded in this binary.
@@ -295,6 +296,9 @@ pub struct ReapplyReport {
 
 /// Copies the deletions of `<from>/meta.db` that `config`'s `meta.db` lacks (D-M-9).
 ///
+/// The source may be at this binary's schema or a newer one (a rollback: the old binary
+/// reapplies from the kept, already migrated directory). An older source is refused.
+///
 /// Each copied row keeps its id, scope and cut-off and is opened again: the running
 /// (or next) `llmobs serve` registers or drops it through its worker. Each row is one
 /// transaction, so an interrupted run leaves whole rows, and a second run copies nothing
@@ -311,7 +315,8 @@ pub async fn reapply_deletions(
     from: &Path,
 ) -> Result<ReapplyReport, AdminError> {
     let target = open_meta(config).await?;
-    let source = match MetaDb::open_existing(from).await {
+    // A newer source is the rollback case (D-M-9): read it by column name.
+    let source = match MetaDb::open_existing_or_newer(from).await {
         Ok(db) => db,
         Err(error) => {
             target.close().await;
@@ -1945,21 +1950,20 @@ mod tests {
         assert!(matches!(error, AdminError::SourceNotInitialized), "{error}");
     }
 
-    #[tokio::test]
-    async fn source_at_another_schema_is_refused() {
-        let (_dir, config) = ready_config().await;
-        let source = tempfile::tempdir().unwrap();
-        let db = MetaDb::open(source.path()).await.unwrap();
-        let expected = crate::meta::expected_version();
-        let future = expected + 1;
+    /// Adds a fake migration row `version` to `db` (a source written by another binary).
+    async fn set_schema(db: &MetaDb, version: i64) {
         db.write(move |connection| {
             Box::pin(async move {
+                sqlx::query("DELETE FROM _sqlx_migrations WHERE version > ?")
+                    .bind(version)
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query(
-                    "INSERT INTO _sqlx_migrations \
+                    "INSERT OR IGNORE INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (?, 'future', 1, ?, 0)",
+                     VALUES (?, 'other binary', 1, ?, 0)",
                 )
-                .bind(future)
+                .bind(version)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -1968,14 +1972,46 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_at_an_older_schema_is_refused() {
+        let (_dir, config) = ready_config().await;
+        let source = tempfile::tempdir().unwrap();
+        let db = MetaDb::open(source.path()).await.unwrap();
+        let expected = crate::meta::expected_version();
+        let older = expected - 1;
+        set_schema(&db, older).await;
         db.close().await;
         let error = reapply_deletions(&config, source.path()).await.unwrap_err();
         assert!(
             matches!(
                 error,
-                AdminError::SourceSchema { expected: e, found } if e == expected && found == future
+                AdminError::SourceSchema { expected: e, found } if e == expected && found == older
             ),
             "{error}"
+        );
+        assert!(error.to_string().contains("older than"), "{error}");
+    }
+
+    /// The rollback case (D-M-9, cross-track review X18): the kept directory was migrated
+    /// by a newer binary, and this one reads its deletions by column name.
+    #[tokio::test]
+    async fn source_at_a_newer_schema_is_copied() {
+        let (_dir, config) = ready_config().await;
+        let ids = target_with_projects(&config).await;
+        let source = build_source(&ids).await;
+        let db = MetaDb::open_existing(source.path()).await.unwrap();
+        set_schema(&db, crate::meta::expected_version() + 1).await;
+        db.close().await;
+        let report = reapply_deletions(&config, source.path()).await.unwrap();
+        assert_eq!(
+            report,
+            ReapplyReport {
+                reopened: 5,
+                failed_copied: 1,
+                present: 0
+            }
         );
     }
 

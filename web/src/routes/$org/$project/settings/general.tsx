@@ -168,7 +168,7 @@ function ProjectGeneralPage() {
           value={days}
           error={daysError}
           disabled={forever || !canEdit || mutation.isPending}
-          description="Lowering retention drops older data right away. Deleted data cannot be recovered."
+          description="Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score."
           onChange={(value) => {
             setDays(value);
             setSaved(false);

@@ -332,6 +332,43 @@ async fn a_user_deletion_hides_user_rows_and_session_scores_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_does_not_show_an_erased_users_identifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = flushed_with_score(&dir, &[(1, 0)]).await;
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST,
+            scope: DeletionScope::User {
+                user_id: "erased@example.com".to_owned(),
+                trace_ids: Vec::new(),
+                session_ids: vec!["erased-session".to_owned()],
+            },
+        })
+        .await
+        .unwrap();
+
+    for table in ["spans", "scores"] {
+        let plan = text(&storage, &format!("EXPLAIN SELECT * FROM {table}")).await;
+        assert!(
+            plan.contains("user_id IN (<1 redacted>)"),
+            "the {table} plan shows the redacted term:\n{plan}"
+        );
+        assert!(
+            !plan.contains("erased@example.com") && !plan.contains("erased-session"),
+            "the {table} plan hides the identifiers:\n{plan}"
+        );
+    }
+    let scores = text(&storage, "EXPLAIN SELECT * FROM scores").await;
+    assert!(
+        scores.contains("session_id IN (<1 redacted>)"),
+        "the scores plan redacts the session ids:\n{scores}"
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_raised_file_escapes_the_tombstone_filter() {
     let dir = tempfile::tempdir().unwrap();
     let storage = flushed_with_score(&dir, &[(1, 0)]).await;
