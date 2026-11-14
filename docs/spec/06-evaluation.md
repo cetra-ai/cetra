@@ -18,13 +18,15 @@ The caller decides `source` (D-G-27): a session on the project route writes `hum
 
 **Deterministic score IDs** (one row per annotator, as Opik's `authored_feedback_scores`): when the client does not provide `score_id`, the server derives it as a UUIDv8 (the first 16 bytes of SHA-256 over the ASCII tag `llmobs.score.v1` followed by the project id, target kind, trace id, span id or session id, name, source and author, each as a big-endian `u32` byte length then its UTF-8 bytes; D-G-28) where `author` = `author_user_id` for `human`, `rule_id` for online judges, `experiment_id + dataset_item_id` for experiments, the key or PAT id for `api`/`sdk`/`end_user`. The SDKs always send a `score_id` (a UUIDv7 per `score()` call, D-F-2), so this applies to other clients that omit it. Consequences: re-annotating replaces your own score instead of adding a duplicate; two reviewers scoring the same trace keep two rows; a backfill re-run overwrites instead of duplicating. Aggregations (`score()` in the DSL, dashboards) average across authors.
 
-Validation: `data_type` ∈ {numeric, boolean, categorical, text}; numeric must be finite; boolean must be 0/1/true/false; categorical requires `value_str`; target must have the matching ID fields; `name`, a session target's id and a categorical label are 1–255 bytes. A batch is all-or-nothing. If a score definition with the same name exists, values are validated against it (range, categories) — otherwise accepted as is.
+Validation: `data_type` ∈ {numeric, boolean, categorical, text}; numeric must be finite; boolean must be 0/1/true/false; categorical requires `value_str`; target must have the matching ID fields; `name`, a session target's id and a categorical label are 1–255 bytes. A batch is all-or-nothing. If a score definition with the same name exists, values are validated against it (range, categories) — otherwise accepted as is. Only live (non-archived) definitions count; definitions are cached 10 s per project (D-I-26).
 
 **End-user feedback** (`pk` key, browser-safe): body `{trace_id, span_id?, name? = "user_feedback", value (number|boolean|string), comment?}`. A number is `numeric`, a boolean `boolean`, a string a `categorical` label; `comment` is the `reason`; the id is derived with the key as author, so a second answer for the same trace and name replaces the first. CORS allowed from any origin; rate limit 10 req/s per key+IP; payload ≤ 4 KiB. The trace is not required to exist yet (feedback can arrive before the trace is flushed).
 
 ## Evaluators
 
 Stored in SQLite `evaluators` (04). Three kinds.
+
+**Test runs** (D-I-21): `POST /evaluators/test` runs a saved or unsaved evaluator once on a stored trace with a mapping, or on literal variables. It writes the judge trace and the judge usage, writes no score, and answers the outcome, the resolved variables, the rendered prompt and the usage; 10 per minute per user.
 
 ### `llm_judge`
 
@@ -53,7 +55,7 @@ Stored in SQLite `evaluators` (04). Three kinds.
   - a root `evaluator` span named after the evaluator; a judge adds one `llm` span (full prompt, response, tokens, cost); a webhook adds one child of kind `span` named `webhook` (there is no `http` span kind);
   - metadata `llmobs.eval.target_trace_id`, `llmobs.eval.target_span_id`, `llmobs.eval.rule_id` | `llmobs.eval.experiment_id`, `llmobs.eval.evaluator_id`.
 - The trace is built as an OTLP `ExportTraceServiceRequest` and passed through `llmobs_otel::normalize` with the caller's ingest context and price table, so previews, truncation, media extraction and cost match SDK spans (D161). The caller supplies the trace id (the job's, so a retry reuses it). Span ids are the first 8 bytes of SHA-256(trace id ‖ span index). `judge.cost_usd` is the `llm` span's `cost_total`; when the judge model has no price, the outcome says so.
-- The score links back: `metadata['judge.trace_id']`, plus the usage summary `judge.model`, `judge.input_tokens`, `judge.output_tokens`, `judge.cost_usd`, `judge.latency_ms` (so score lists show cost without opening the trace). `eval_jobs.cost_usd` and `usage_daily.judge_*` are updated too.
+- The score links back: `metadata['judge.trace_id']`, plus the usage summary `judge.model`, `judge.input_tokens`, `judge.output_tokens`, `judge.cost_usd`, `judge.latency_ms` (so score lists show cost without opening the trace). `eval_jobs.cost_usd` and `usage_daily.judge_*` are updated too; judge-trace spans are not billable units (D-I-31, D178).
 - **Isolation of `llmobs-eval` traces:** never selected by online rules (no recursion); excluded by default from trace/span/session lists, user aggregates, the dashboard and alert queries (05, 07); visible with the "Show evaluation traces" toggle or an explicit `environment = 'llmobs-eval'` filter; the dashboard has a separate "Evaluation cost" series. The environment name is reserved: ingestion from external sources rewrites it to `llmobs-eval-external` with a warning attribute. The OTLP handler does the rewrite after normalization; evaluation spans are built in process and keep the name.
 - UI: "View judge trace" link on every evaluator-produced score; the evaluator test panel shows the same trace inline.
 
@@ -75,8 +77,10 @@ Checks compare `output` against `expected` (or the param value).
 ### `webhook`
 
 ```json
-{"url": "https://…", "secret_enc": "…", "timeout_ms": 10000, "headers": {…}}
+{"url": "https://…", "timeout_ms": 10000, "headers": {…}}
 ```
+
+The URL, the headers and the signing secret are sealed in `evaluators.secret_enc`; the stored config and API responses show only `url_host`, `timeout_ms` and the header names (D-I-19).
 
 Request: `POST url` with `Content-Type: application/json`, the configured headers, and JSON `{evaluator: {id, name}, project_id, trace_id, span_id, variables: {…}}`. The signature header is `X-Llmobs-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, t + "." + body)>` (D165). `timeout_ms` defaults to 10 000 and is at most 60 000. Redirects are not followed. A response body over 64 KiB is an error. A `200` whose JSON object `{value?: number|boolean, label?: string, reason?: string}` fits the output definition is a score. Any other status is classified by D160. A `200` with a body that is not that object is a permanent error.
 

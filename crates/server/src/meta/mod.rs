@@ -11,6 +11,7 @@ pub(crate) mod api_keys;
 pub(crate) mod connections;
 pub(crate) mod deletions;
 pub(crate) mod email_verifications;
+pub(crate) mod evaluators;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
@@ -20,6 +21,7 @@ pub(crate) mod password_resets;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
 pub(crate) mod saved_views;
+pub(crate) mod score_definitions;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
 
