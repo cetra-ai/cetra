@@ -432,6 +432,17 @@ mod tests {
     }
 
     #[test]
+    fn cloud_keys_cannot_sign_licences() {
+        for kid in ["cloud-1", "cloud-2"] {
+            let key = built_in_keys().find(|key| key.kid == kid).unwrap();
+            assert!(!key.kinds.contains(&Kind::License), "{kid} signs licences");
+            assert_eq!(key.kinds, &[Kind::Org, Kind::ControlPlane]);
+        }
+        let prod = built_in_keys().find(|key| key.kid == "prod-1").unwrap();
+        assert_eq!(prod.kinds, &[Kind::License]);
+    }
+
+    #[test]
     fn dev_seed_matches_dev_key() {
         let public = dev_key().verifying_key().to_bytes();
         let dev = built_in_keys().find(|key| key.kid == "dev-1").unwrap();

@@ -19,12 +19,26 @@ pub struct BuiltInKey {
 }
 
 /// Keys every build trusts. `prod-1` signs licences only and stays offline (D-P-27).
-/// P11 adds `cloud-1` and `cloud-2` for org and control-plane tokens.
-const RELEASE_KEYS: &[BuiltInKey] = &[BuiltInKey {
-    kid: "prod-1",
-    public: "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=",
-    kinds: &[Kind::License],
-}];
+/// `cloud-1` and `cloud-2` sign org and control-plane tokens and never licences.
+const RELEASE_KEYS: &[BuiltInKey] = &[
+    BuiltInKey {
+        kid: "prod-1",
+        public: "AvIxTEduiC/amifl8QFxLYjXjPYON8LsreI7sL7UDWE=",
+        kinds: &[Kind::License],
+    },
+    BuiltInKey {
+        kid: "cloud-1",
+        public: "9Dd2255sYAaeYOUWa2tJOlDMFCDXBT0csdSVVrU4zYY=",
+        kinds: &[Kind::Org, Kind::ControlPlane],
+    },
+    // Offline spare (D-P-27): the control plane switches to it if `cloud-1` leaks; the next
+    // release then removes `cloud-1`.
+    BuiltInKey {
+        kid: "cloud-2",
+        public: "hhDDxpReDC1t83KURe1Yp09DXXmupihoMUm7YYqKWZY=",
+        kinds: &[Kind::Org, Kind::ControlPlane],
+    },
+];
 
 /// Keys only debug builds trust. The private half is `fixtures/license/dev-1.key`.
 const DEV_KEYS: &[BuiltInKey] = &[BuiltInKey {
