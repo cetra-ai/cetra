@@ -74,9 +74,10 @@ mod views;
 pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-pub use crate::error::CopyObjectsError;
-pub use crate::error::{CompactionError, FlushNowError, SnapshotError};
-pub use crate::gc::ObsoleteReport;
+pub use crate::error::{
+    CompactionError, CopyObjectsError, FlushNowError, OrphanError, SnapshotError,
+};
+pub use crate::gc::{ObsoleteReport, OrphanReport};
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
@@ -897,6 +898,25 @@ impl Storage {
             grace,
         )
         .await
+    }
+
+    /// Lists the object store under `tables/` and `media/`. Deletes the objects the
+    /// catalog does not know that are older than `min_age` (unless `dry_run`), and
+    /// counts the objects the catalog needs that are missing (N M2, D-N-21).
+    ///
+    /// For an operator after a restore or a crash, with the server stopped: the
+    /// periodic GC never lists the store. Holds `object_gc_gate` for write while it
+    /// runs, so no object deletion runs concurrently.
+    ///
+    /// # Errors
+    ///
+    /// [`OrphanError`] when listing, deleting or reading the catalog fails.
+    pub async fn collect_orphans(
+        &self,
+        min_age: std::time::Duration,
+        dry_run: bool,
+    ) -> Result<OrphanReport, OrphanError> {
+        gc::collect_orphans(&self.committer, &self.objects, min_age, dry_run).await
     }
 
     /// Writes a consistent copy of `catalog.db` to `path` and pins every object it
