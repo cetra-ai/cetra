@@ -13,7 +13,7 @@ Everything compiles to DataFusion plans over the project-scoped providers of 03 
 | `experiment_items` | experiment results | SQLite rows for the project, exposed via a `MemTable` built per query (bounded to 1M rows). The server owns the schema, the rows and the column catalog, and registers the table through `QueryContext::register_sqlite_view` (D93) |
 | `dataset_items` | current version items | same approach |
 
-Cost totals of `sessions` and of the user list are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
+Cost totals of `sessions`, of the user list, and of the dashboard and alert queries (§ Dashboard metrics; spec 07) are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
 
 Each view exposes the stored columns of its table in spec 01 order, without `project_id`. `traces` also drops `last_ingest_time` and `partial_count`. Binary IDs (`trace_id`, `span_id`, `parent_span_id`, `root_span_id`) are lowercase hex `Utf8`. `duration_ms` follows `duration_ns`: on `spans`, `duration_ns` is stored; on `traces` and `sessions`, `duration_ns = end_time − start_time` in nanoseconds, placed after `end_time`, and `duration_ms = duration_ns / 1e6`. `events` and `links` keep their native list-of-struct types. They are listed as `json` in the schema endpoint because clients receive them as JSON.
 
@@ -129,11 +129,13 @@ Returns time series:
 | latency p50/p95/p99 (traces) | `approx_percentile_cont(duration_ns, q)` on `traces` |
 | LLM latency p50/p95 by model | on `spans WHERE span_kind='llm'` |
 | tokens (input/output/cache) | sums on `spans WHERE span_kind IN ('llm','embedding')` |
-| cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model |
-| top models by cost | `llm` spans with a non-null model, at most 10, by `cost_total` descending (nulls last), then model ascending |
+| cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model, as `Decimal128(38, 18)` |
+| top models by cost | `llm` spans with a non-null model, at most 10, by their `Decimal128(38, 18)` cost sum descending (nulls last), then model ascending |
 | scores | `avg(value_num)` per score name per bucket on `scores` |
-| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'llmobs-eval'` |
+| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'llmobs-eval'`, as `Decimal128(38, 18)` |
 | TTFT p50/p95 | spans `ttft_ns` |
+
+Every cost series and KPI above (total, by model, top models, evaluation) and the alert cost value (`cost`, spec 07) are summed as `Decimal128(38, 18)` (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
 
 The filter is a `traces`-view DSL expression. Span series keep spans whose trace passes it, and score series keep scores whose trace passes it, through a semi-join on `trace_id` over traces with `start_time ∈ [from − 1 day, to)` and `end_time ≥ from`. Session-target scores are not in the score series.
 

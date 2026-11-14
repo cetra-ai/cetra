@@ -9,7 +9,7 @@ Per-project alert rules over four metrics, evaluated in the background over slid
 | `metric` | Fields | Computed over the window |
 |---|---|---|
 | `error_rate` | `filter?`, `window`, `comparator`, `threshold` (fraction 0–1), `min_count` (default 20) | traces with `error_count > 0` / traces |
-| `cost` | `filter?`, `window`, `comparator`, `threshold` (USD ≥ 0) | `sum(cost_total)` on traces (0 when none) |
+| `cost` | `filter?`, `window`, `comparator`, `threshold` (USD ≥ 0) | `sum(cost_total)` on traces as `Decimal128(38, 18)` (0 when none; a non-finite cost fails the query, D-A2-4) |
 | `latency_p95` | `filter?`, `window`, `target` (`trace` default, or `llm_span`), `comparator`, `threshold` (ms > 0), `min_count` (default 20) | `approx_percentile_cont(duration_ns, 0.95)` in ms, of traces or of `llm` spans |
 | `score` | `filter?`, `window`, `score_name`, `aggregation` (`avg` default, or `pass_rate`), `comparator`, `threshold` (`pass_rate`: 0–1), `min_count` (default 10) | `avg(value_num)` of live trace/span scores of that name; `pass_rate` keeps boolean scores only |
 
