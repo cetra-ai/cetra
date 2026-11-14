@@ -1,10 +1,10 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { evaluatorsInit } from "@/api/queries-evaluation";
+import { evaluatorQuery, evaluatorsInit } from "@/api/queries-evaluation";
 import { onlineRuleKey, onlineRulesKey } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -115,7 +115,7 @@ function sampleRateOf(percent: string): number | undefined {
   if (percent.trim().length === 0 || !Number.isFinite(value) || value <= 0 || value > 100) {
     return undefined;
   }
-  return value / 100;
+  return Number((value / 100).toPrecision(12));
 }
 
 /** The client errors that block a save, keyed by the request field they belong to. */
@@ -237,6 +237,9 @@ function placeErrors(caught: unknown): { placed: Errors; unplaced: string[] } {
     placed.filter = filterMessageOf(problem);
     return { placed, unplaced };
   }
+  if (problem?.status === 409 && problem.detail !== undefined && /name/i.test(problem.detail)) {
+    placed.name = problem.detail;
+  }
   for (const item of problem?.errors ?? []) {
     const shown = SHOWN_FIELDS.has(item.field) || item.field.startsWith("variable_mapping.");
     if (shown) {
@@ -291,6 +294,16 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
     "/api/v1/projects/{project}/evaluators",
     evaluatorsInit(org, project),
   );
+  // A saved rule's evaluator may be past the first page of the list: fetch it by id then.
+  const savedEvaluatorId = rule?.evaluator_id ?? "";
+  const fetchMissing =
+    saved &&
+    evaluators.data !== undefined &&
+    !evaluators.data.data.some((item) => item.id === savedEvaluatorId);
+  const missing = useQuery({
+    ...evaluatorQuery(org, project, savedEvaluatorId),
+    enabled: fetchMissing,
+  });
   const create = $api.useMutation("post", "/api/v1/projects/{project}/online-rules", {
     gcTime: 0,
   });
@@ -303,11 +316,15 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   if (evaluators.error) {
     throw evaluators.error;
   }
-  if (evaluators.isPending) {
+  if (missing.error) {
+    throw missing.error;
+  }
+  if (evaluators.isPending || (fetchMissing && missing.isPending)) {
     return <Skeleton className="h-64 w-full" />;
   }
 
-  const evaluatorList = evaluators.data.data;
+  const evaluatorList =
+    fetchMissing && missing.data ? [...evaluators.data.data, missing.data] : evaluators.data.data;
   const evaluator = evaluatorList.find((item) => item.id === values.evaluatorId);
   const judge = evaluator?.kind === "llm_judge";
 
@@ -379,10 +396,15 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
       );
       return;
     }
+    const body = patchBodyOf(values, rule, judge, sample);
+    if (Object.keys(body).length === 0) {
+      void navigate({ to: "/$org/$project/online-rules", params: { org, project } });
+      return;
+    }
     patch.mutate(
       {
         params: { path: { project: ref, id: rule.id } },
-        body: patchBodyOf(values, rule, judge, sample),
+        body,
       },
       {
         onSuccess: () => {

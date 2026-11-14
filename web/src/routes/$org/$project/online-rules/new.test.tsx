@@ -195,3 +195,39 @@ it("shows the plan limit with its hint", async () => {
     ),
   ).toBeInTheDocument();
 });
+
+it("sends the sample rate as a fraction without float noise", async () => {
+  const created = captureCreate();
+  const { user } = await renderApp("/acme/support-bot/online-rules/new");
+  await screen.findByLabelText("Name");
+
+  await user.type(screen.getByLabelText("Name"), "Relevance");
+  await choose(user, "Evaluator", RELEVANCE_OPTION);
+  await user.clear(screen.getByLabelText("Sample rate (%)"));
+  await user.type(screen.getByLabelText("Sample rate (%)"), "33.3");
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  await waitFor(() => expect(created.body()).toMatchObject({ sample_rate: 0.333 }));
+});
+
+it("shows a name that is taken under the Name field", async () => {
+  captureCreate(() =>
+    problemResponse(409, "conflict", {
+      detail: "an online rule with this name already exists",
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/online-rules/new");
+  await screen.findByLabelText("Name");
+
+  await user.type(screen.getByLabelText("Name"), "Relevance");
+  await choose(user, "Evaluator", RELEVANCE_OPTION);
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  expect(
+    await screen.findByText("an online rule with this name already exists"),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("Name")).toHaveAccessibleDescription(
+    "an online rule with this name already exists",
+  );
+  expect(screen.queryByRole("alert")).toBeNull();
+});

@@ -92,3 +92,31 @@ it("shows a viewer a read-only form", async () => {
   expect(save).toBeDisabled();
   expect(save.parentElement).toHaveAccessibleDescription("Only members can edit online rules");
 });
+
+it("saves an unchanged rule without a PATCH and opens the list", async () => {
+  const patched = capturePatch();
+  const { user, router } = await renderApp(EDIT_URL);
+
+  await screen.findByLabelText("Name");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() =>
+    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules"),
+  );
+  expect(patched.calls()).toBe(0);
+});
+
+it("edits a rule whose evaluator is missing from the list", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/evaluators", () =>
+      HttpResponse.json({ data: [], next_cursor: null }),
+    ),
+  );
+  await renderApp(EDIT_URL);
+
+  const evaluator = await screen.findByRole("combobox", { name: "Evaluator" });
+  expect(evaluator).toHaveTextContent("Relevance (LLM judge)");
+  expect(evaluator).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "Limit spend" })).toBeChecked();
+  expect(screen.queryByText("Budgets apply to LLM judge evaluators only.")).toBeNull();
+});
