@@ -1,11 +1,17 @@
 name: Packaging tools
 description: Install the release-build and packaging tools (musl-gcc, cargo-auditable, cargo-about; on Linux also helm and kubeconform)
 
+inputs:
+  rust-tools:
+    description: Install musl-gcc, cargo-auditable and cargo-about (needed to build release archives).
+    required: false
+    default: "true"
+
 runs:
   using: composite
   steps:
     - name: Install musl-gcc
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.rust-tools == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -13,6 +19,7 @@ runs:
         sudo apt-get install -y -q musl-tools
 
     - name: Install cargo-auditable and cargo-about
+      if: inputs.rust-tools == 'true'
       uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
       with:
         tool: cargo-auditable@0.7.7,cargo-about@0.9.3
