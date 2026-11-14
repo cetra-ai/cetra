@@ -1,9 +1,12 @@
+import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveConfig } from "./config.js";
 import { withContext } from "./context.js";
+import { FetchTraceExporter } from "./exporter.js";
+import { QuotaState } from "./quota.js";
 import { flush, installRuntime, Runtime, resetForTests, shutdown } from "./runtime.js";
-import { type ScoreBody, type ScoreOptions, score } from "./scores.js";
+import { type ScoreBody, type ScoreOptions, ScoreQueue, score } from "./scores.js";
 import type { FetchLike, ResponseLike } from "./web.js";
 
 const BASE_URL = "http://127.0.0.1:9";
@@ -486,5 +489,74 @@ describe("the score queue", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toHaveLength(1);
     expect(score({ name: "late", value: 1, sessionId: "s" })).toBeUndefined();
+  });
+});
+
+describe("score 402 pause (D-P-34)", () => {
+  const body: ScoreBody = {
+    score_id: "0190d0a8-0000-7000-8000-000000000001",
+    target: { type: "trace", trace_id: TRACE_ID },
+    name: "accuracy",
+    value: { data_type: "boolean", value: true },
+    source: "sdk",
+  };
+
+  it("drops a batch that gets 402 with one warning, and sends nothing while paused", async () => {
+    const { fetch, calls } = scriptedFetch([response(402, { "Retry-After": "60" })]);
+    const warn = spyWarn();
+    try {
+      startScores(fetch);
+      score({ name: "first", value: true, traceId: TRACE_ID });
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      score({ name: "second", value: true, traceId: TRACE_ID });
+      await flush();
+      expect(calls).toHaveLength(1);
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain("the organization reached its monthly units cap");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("pauses the trace exporter sharing the queue's QuotaState, and both resume", async () => {
+    const { fetch, calls } = scriptedFetch([response(402, { "Retry-After": "60" })]);
+    const quota = new QuotaState();
+    const queue = new ScoreQueue({
+      url: SCORE_URL,
+      apiKey: "sk-llmobs-test",
+      fetch,
+      sleep: () => Promise.resolve(),
+      quota,
+    });
+    const exporter = new FetchTraceExporter({
+      url: `${BASE_URL}/v1/traces`,
+      apiKey: "sk-llmobs-test",
+      fetch,
+      quota,
+    });
+    const warn = spyWarn();
+    try {
+      queue.put(body);
+      await queue.flush();
+      expect(calls).toHaveLength(1);
+
+      const paused = await new Promise<ExportResult>((resolve) => {
+        exporter.export([], resolve);
+      });
+      expect(paused.code).toBe(ExportResultCode.SUCCESS);
+      expect(calls).toHaveLength(1);
+      expect(calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      queue.put(body);
+      await queue.flush();
+      expect(calls).toHaveLength(2);
+      await queue.shutdown();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
