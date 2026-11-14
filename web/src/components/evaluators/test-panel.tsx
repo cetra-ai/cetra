@@ -5,6 +5,13 @@ import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import type { Schema } from "@/api/types";
+import { ERROR_HINTS } from "@/components/evaluators/error-hints";
+import {
+  initialMapping,
+  type MappingRow,
+  MappingTable,
+  nextRowId,
+} from "@/components/evaluators/mapping-table";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
@@ -15,22 +22,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 type Mapping = Schema<"TemplateMapping">;
 type Body = Schema<"TestEvaluatorBody">;
 
-const HINTS: Record<Schema<"TestErrorClass">, string> = {
-  pause:
-    "The key, quota or model access was refused. Check the connection in Settings › LLM connections.",
-  retryable: "The provider or webhook did not answer in time or is overloaded. Try again.",
-  permanent:
-    "The request was rejected or the answer did not fit. Check the model, the prompt and the output type.",
-};
-
 const TRACE_ID = /^[0-9a-fA-F]{32}$/;
 const SPAN_ID = /^[0-9a-fA-F]{16}$/;
-
-interface MappingRow {
-  id: number;
-  variable: string;
-  expression: string;
-}
 
 interface VariableRow {
   id: number;
@@ -38,46 +31,8 @@ interface VariableRow {
   value: string;
 }
 
-let rowId = 0;
-
-function newMappingRow(variable: string, expression: string): MappingRow {
-  rowId += 1;
-  return { id: rowId, variable, expression };
-}
-
 function newVariableRow(): VariableRow {
-  rowId += 1;
-  return { id: rowId, name: "", value: "" };
-}
-
-/** `{{ name }}` variables of a prompt, as in evaluator-form.tsx. */
-function variableNames(prompt: string): string[] {
-  const names = new Set<string>();
-  for (const match of prompt.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)/g)) {
-    const name = match[1];
-    if (name !== undefined) {
-      names.add(name);
-    }
-  }
-  return [...names];
-}
-
-/** The usual expression of a prompt variable; other variables start empty. */
-function expressionFor(variable: string): string {
-  if (variable === "input") {
-    return "trace.input";
-  }
-  if (variable === "output") {
-    return "trace.output";
-  }
-  return "";
-}
-
-function initialMapping(defaults: Mapping[], prompt: string): MappingRow[] {
-  if (defaults.length > 0) {
-    return defaults.map((row) => newMappingRow(row.variable, row.expression));
-  }
-  return variableNames(prompt).map((variable) => newMappingRow(variable, expressionFor(variable)));
+  return { id: nextRowId(), name: "", value: "" };
 }
 
 /** A variable value that parses as JSON is sent as that JSON, otherwise as a string. */
@@ -338,60 +293,7 @@ export function TestPanel({
               description="Optional. Targets one span of the trace."
               onChange={setSpanId}
             />
-            <div className="flex flex-col gap-2">
-              <span className="text-sm leading-none font-medium">Variable mapping</span>
-              {mapping.map((row, index) => (
-                <div key={row.id} className="flex items-center gap-2">
-                  <Input
-                    aria-label={`Mapping variable ${index + 1}`}
-                    placeholder="Variable"
-                    value={row.variable}
-                    onChange={(event) => {
-                      const variable = event.target.value;
-                      editMapping(
-                        mapping.map((item) => (item.id === row.id ? { ...item, variable } : item)),
-                      );
-                    }}
-                  />
-                  <Input
-                    aria-label={`Mapping expression ${index + 1}`}
-                    placeholder="trace.input"
-                    value={row.expression}
-                    onChange={(event) => {
-                      const expression = event.target.value;
-                      editMapping(
-                        mapping.map((item) =>
-                          item.id === row.id ? { ...item, expression } : item,
-                        ),
-                      );
-                    }}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`Remove mapping ${index + 1}`}
-                    onClick={() => {
-                      editMapping(mapping.filter((item) => item.id !== row.id));
-                    }}
-                  >
-                    <X />
-                  </Button>
-                </div>
-              ))}
-              <div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    editMapping([...mapping, newMappingRow("", "")]);
-                  }}
-                >
-                  Add variable
-                </Button>
-              </div>
-            </div>
+            <MappingTable rows={mapping} onChange={editMapping} />
           </TabsContent>
           <TabsContent value="variables" className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
@@ -500,7 +402,7 @@ function TestResult({
           <p className="font-medium text-destructive">Test failed</p>
           <p>{result.error?.message}</p>
           {result.error ? (
-            <p className="text-xs text-muted-foreground">{HINTS[result.error.class]}</p>
+            <p className="text-xs text-muted-foreground">{ERROR_HINTS[result.error.class]}</p>
           ) : null}
         </div>
       ) : null}
