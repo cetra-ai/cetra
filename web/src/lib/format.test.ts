@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatBytes,
   formatCost,
   formatDuration,
   formatRelative,
@@ -56,6 +57,23 @@ describe("formatCost", () => {
     expect(formatCost(0.00306)).toBe("$0.00306");
     expect(formatCost(1.2)).toBe("$1.20");
     expect(formatCost(1_200)).toBe("$1.2k");
+  });
+});
+
+describe("formatBytes", () => {
+  it("uses base 1000 and one decimal above bytes", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(999)).toBe("999 B");
+    expect(formatBytes(1_000)).toBe("1.0 KB");
+    expect(formatBytes(1_500)).toBe("1.5 KB");
+    expect(formatBytes(3_500_000)).toBe("3.5 MB");
+    expect(formatBytes(5_600_000)).toBe("5.6 MB");
+    expect(formatBytes(2_500_000_000)).toBe("2.5 GB");
+    expect(formatBytes(4_000_000_000_000)).toBe("4.0 TB");
+  });
+
+  it("rolls over when rounding reaches 1000 of the smaller unit", () => {
+    expect(formatBytes(999_950)).toBe("1.0 MB");
   });
 });
 

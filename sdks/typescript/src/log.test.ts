@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { debug, resetWarningsForTests, warnOnce } from "./log.js";
+import { debug, resetWarningsForTests, warn, warnOnce } from "./log.js";
 
 describe("warnOnce", () => {
   beforeEach(() => {
@@ -41,6 +41,18 @@ describe("warnOnce", () => {
       expect(warn).toHaveBeenCalledTimes(2);
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it("warn is not deduplicated", () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      warn("same message");
+      warn("same message");
+      expect(consoleWarn).toHaveBeenCalledTimes(2);
+      expect(consoleWarn).toHaveBeenCalledWith("same message");
+    } finally {
+      consoleWarn.mockRestore();
     }
   });
 

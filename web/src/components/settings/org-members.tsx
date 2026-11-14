@@ -10,6 +10,8 @@ import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,6 +81,10 @@ export function OrgMembers({
     },
     onError: (error) => {
       const status = problemOf(error)?.status;
+      if (problemOf(error)?.code === "plan_limit") {
+        setActionError(problemMessage(error, "Your plan does not allow another seat."));
+        return;
+      }
       setActionError(
         status === 409
           ? "An organization needs at least one owner. Make someone else an owner first."
@@ -89,6 +95,8 @@ export function OrgMembers({
     },
   });
   const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/members/{user}");
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const planLimited = problemOf(patch.error)?.code === "plan_limit";
 
   if (query.error) {
     throw query.error;
@@ -108,6 +116,7 @@ export function OrgMembers({
   return (
     <div className="flex flex-col gap-3">
       <FormError message={actionError} />
+      {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
       {query.isPending ? (
         <>
           <Skeleton className="h-8 w-full" />

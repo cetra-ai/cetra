@@ -37,6 +37,7 @@ import { disableInstrumentations, enableInstrumentations } from "./instrument.js
 import { debug, resetWarningsForTests, warnOnce } from "./log.js";
 import { MaskingExporter } from "./mask.js";
 import { LlmobsSpanProcessor } from "./processor.js";
+import { QuotaState } from "./quota.js";
 import { ScoreQueue } from "./scores.js";
 import { type FetchLike, runtimeGlobals } from "./web.js";
 
@@ -88,12 +89,15 @@ export class Runtime {
         "llmobs: a global tracer provider is already registered; llmobs keeps its own provider. Add spanProcessor() to your provider to send its spans to llmobs",
       );
     }
+    // D-P-34: one 402 pause shared by the trace exporter and the score queue.
+    const quota = new QuotaState();
     const innerExporter =
       seams?.exporter ??
       new FetchTraceExporter({
         url: `${config.baseUrl}/v1/traces`,
         apiKey: requireApiKey(config),
         fetch: seams?.fetch,
+        quota,
       });
     const scores = new ScoreQueue({
       url: `${config.baseUrl}/api/v1/scores`,
@@ -101,6 +105,7 @@ export class Runtime {
       fetch: seams?.fetch,
       sleep: seams?.scoreSleep,
       now: seams?.scoreNow,
+      quota,
     });
     // The export-time masking pass exists only with a mask or capture off
     // (D-F-6); otherwise spans reach the exporter untouched.

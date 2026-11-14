@@ -82,6 +82,8 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// Per-org span rate (D-P-19, D-P-35).
+    pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
 }
 
 impl AppState {
@@ -407,6 +409,13 @@ mod tests {
             403
         );
         assert_eq!(status_of(ApiError::PlanRequired { detail: "x" }), 403);
+        let quota = ApiError::QuotaExceeded {
+            detail: "over the cap".to_owned(),
+            retry_after_s: 90,
+        }
+        .into_response();
+        assert_eq!(quota.status(), 402);
+        assert_eq!(quota.headers().get("retry-after").unwrap(), "90");
         assert_eq!(status_of(ApiError::NotFound), 404);
         assert_eq!(
             status_of(ApiError::Conflict {

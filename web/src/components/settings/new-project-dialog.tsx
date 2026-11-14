@@ -8,6 +8,8 @@ import type { Schema } from "@/api/types";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -91,6 +93,8 @@ function NewProjectForm({
   const [slugError, setSlugError] = useState<string | undefined>();
   const [retentionError, setRetentionError] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const planLimited = problemOf(create.error)?.code === "plan_limit";
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -133,6 +137,10 @@ function NewProjectForm({
           void navigate({ to: "/$org/$project/traces", params: { org, project: data.slug } });
         },
         onError: (caught) => {
+          if (problemOf(caught)?.code === "plan_limit") {
+            setError(problemMessage(caught, "Your plan does not allow another project."));
+            return;
+          }
           if (problemOf(caught)?.status === 409) {
             setSlugError("This slug is taken.");
             return;
@@ -191,6 +199,7 @@ function NewProjectForm({
         onChange={setRetention}
       />
       <FormError message={error} />
+      {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
       <DialogFooter>
         <Button type="button" variant="outline" disabled={create.isPending} onClick={onDone}>
           Cancel

@@ -95,6 +95,14 @@ pub(crate) enum ApiError {
         /// Static reason. Stores choose it (P6).
         detail: &'static str,
     },
+    /// The org reached its monthly units cap (D-P-17). `Retry-After` is the seconds to the reset.
+    #[error("quota exceeded")]
+    QuotaExceeded {
+        /// Names the cap and the reset; never holds payload.
+        detail: String,
+        /// Seconds until the org's units reset. At least 1.
+        retry_after_s: u64,
+    },
     /// Too many requests.
     ///
     /// `RateLimit-Limit` and `RateLimit-Reset` are both this many seconds.
@@ -175,6 +183,9 @@ impl ApiError {
                         .to_owned(),
                 ),
             ),
+            Self::QuotaExceeded { detail, .. } => {
+                Problem::new(ProblemCode::QuotaExceeded, Some(detail.clone()))
+            }
             Self::RateLimited { .. } => Problem::new(ProblemCode::RateLimited, None),
             Self::RangeNotSatisfiable { .. } => {
                 Problem::new(ProblemCode::RangeNotSatisfiable, None)
@@ -237,6 +248,9 @@ impl IntoResponse for ApiError {
         self.log();
         let mut headers = HeaderMap::new();
         match self {
+            Self::QuotaExceeded { retry_after_s, .. } => {
+                headers.insert(axum::http::header::RETRY_AFTER, header_u64(retry_after_s));
+            }
             Self::RateLimited { retry_after_s } => {
                 let seconds = header_u64(retry_after_s);
                 headers.insert(axum::http::header::RETRY_AFTER, seconds.clone());

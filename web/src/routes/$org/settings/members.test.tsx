@@ -11,6 +11,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import authConfigFixture from "../../../../../fixtures/api/static/auth-config.json";
 import inviteCreated from "../../../../../fixtures/api/static/invite-created.json";
+import entitlementsFixture from "../../../../../fixtures/api/static/org-entitlements.json";
 
 const ADA = { id: ADA_ID, email: "ada@example.com", name: "Ada Example" };
 const BOB = { id: BOB_ID, email: "bob@example.com", name: "Bob Example" };
@@ -95,6 +96,26 @@ it("explains the last-owner rule", async () => {
       "An organization needs at least one owner. Make someone else an owner first.",
     ),
   ).toBeInTheDocument();
+});
+
+it("explains a seat limit on a role change and offers an upgrade", async () => {
+  server.use(
+    http.patch("/api/v1/orgs/:org/members/:user", () =>
+      problemResponse(403, "plan_limit", { detail: "Your plan allows 1 seat." }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme/settings/members");
+  await screen.findByRole("table", { name: "Members" });
+  await user.click(screen.getByRole("combobox", { name: "Role of bob@example.com" }));
+  await user.click(await screen.findByRole("option", { name: "Admin" }));
+
+  expect(await screen.findByText("Your plan allows 1 seat.")).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+  expect(screen.queryByText("You can't give that role.")).toBeNull();
 });
 
 it("explains a role above the caller's", async () => {
@@ -360,6 +381,28 @@ it("shows the server's email error", async () => {
   await user.click(within(dialog).getByRole("button", { name: "Send invitation" }));
 
   expect(await screen.findByText("invalid email")).toBeInTheDocument();
+});
+
+it("explains a seat limit on invite and offers an upgrade", async () => {
+  server.use(
+    http.post("/api/v1/orgs/:org/invites", () =>
+      problemResponse(403, "plan_limit", { detail: "Your plan allows 1 seat." }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme/settings/members");
+  await screen.findByRole("table", { name: "Members" });
+  await user.click(screen.getByRole("button", { name: "Invite member" }));
+  const dialog = await screen.findByRole("dialog", { name: "Invite member" });
+  await user.type(within(dialog).getByLabelText("Email"), "guest@example.com");
+  await user.click(within(dialog).getByRole("button", { name: "Send invitation" }));
+
+  expect(await within(dialog).findByText("Your plan allows 1 seat.")).toBeInTheDocument();
+  expect(await within(dialog).findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+  expect(within(dialog).queryByText("You can't invite with that role.")).toBeNull();
 });
 
 it("drops the link when the dialog closes", async () => {

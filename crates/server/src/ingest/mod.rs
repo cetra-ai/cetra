@@ -132,6 +132,8 @@ pub(crate) enum IngestError {
     Decode(#[source] DecodeError),
     #[error("ingest budget is full")]
     Busy,
+    #[error("ingest rate limit")]
+    RateLimited { retry_after_s: u64 },
     #[error("storage refused the append")]
     Append(#[source] AppendError),
     #[error("storage refused a media blob")]
@@ -441,6 +443,28 @@ fn bad_request(detail: &str) -> ApiError {
     }
 }
 
+/// Takes the batch's spans from the org's ingest rate (D-P-19). Called after `accept` and
+/// before `commit`, so a refused batch stores nothing.
+pub(crate) fn check_rate(
+    state: &AppState,
+    org: OrgId,
+    spans: usize,
+    now_ns: i64,
+) -> Result<(), IngestError> {
+    let limits = state.entitlements.resolve(org, now_ns).limits;
+    let Some(rate) = limits.ingest_spans_per_sec else {
+        return Ok(());
+    };
+    let spans = u64::try_from(spans).unwrap_or(u64::MAX);
+    let burst = limits.ingest_burst.unwrap_or(rate);
+    state
+        .ingest_rate
+        .take(org, spans, rate, burst, now_ns)
+        .map_err(|retry| IngestError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })
+}
+
 /// The mapping of spec 02 § Endpoints and the design's error table.
 impl From<IngestError> for ApiError {
     fn from(error: IngestError) -> Self {
@@ -463,6 +487,7 @@ impl From<IngestError> for ApiError {
             IngestError::Media(MediaError::Invalid { .. }) => {
                 bad_request("invalid media in the request")
             }
+            IngestError::RateLimited { retry_after_s } => ApiError::RateLimited { retry_after_s },
             IngestError::Busy | IngestError::Append(AppendError::Backpressure) => {
                 ApiError::Unavailable {
                     detail: "server is busy, retry later",
@@ -1264,6 +1289,13 @@ mod tests {
                 "bad_request",
                 Some("invalid media in the request"),
                 None,
+            ),
+            (
+                IngestError::RateLimited { retry_after_s: 3 },
+                429,
+                "rate_limited",
+                None,
+                Some("3"),
             ),
             (
                 IngestError::Busy,

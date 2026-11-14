@@ -15,7 +15,10 @@ use crate::http::error::ApiError;
 use crate::meta::entitlements::window_ends_since;
 use crate::meta::{MetaDb, MetaError};
 
+pub(crate) mod notices;
+pub(crate) mod rate;
 pub(crate) mod tokens;
+pub(crate) mod units;
 
 pub(crate) use crate::api::entitlements::Feature;
 use tokens::{OrgGrant, OrgTokenError, grant_from_token};
@@ -344,6 +347,21 @@ pub(crate) fn require(state: &AppState, org: OrgId, feature: Feature) -> Result<
         Err(ApiError::PlanRequired {
             detail: feature.locked_detail(),
         })
+    }
+}
+
+/// Whether `count + adding` would exceed `limit` (D-P-20). `None` never does.
+pub(crate) fn over_limit(limit: Option<u64>, count: u64, adding: u64) -> bool {
+    limit.is_some_and(|limit| count.saturating_add(adding) > limit)
+}
+
+/// The `plan_limit` error for `limit` (D-P-14). `noun` is (singular, plural).
+pub(crate) fn plan_limit(limit: u64, noun: (&str, &str)) -> ApiError {
+    ApiError::PlanLimit {
+        detail: format!(
+            "Your plan allows {limit} {}.",
+            if limit == 1 { noun.0 } else { noun.1 }
+        ),
     }
 }
 

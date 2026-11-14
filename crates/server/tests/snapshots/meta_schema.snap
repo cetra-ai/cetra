@@ -461,6 +461,8 @@ index sqlite_autoindex_score_definitions_1
 
 index sqlite_autoindex_usage_daily_1
 
+index sqlite_autoindex_usage_notices_1
+
 index sqlite_autoindex_users_1
 
 index sqlite_autoindex_users_2
@@ -475,6 +477,15 @@ CREATE TABLE usage_daily (
   judge_input_tokens INTEGER NOT NULL DEFAULT 0, judge_output_tokens INTEGER NOT NULL DEFAULT 0,
   judge_cost_usd REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (org_id, project_id, day)
+)
+
+table usage_notices
+CREATE TABLE usage_notices (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    month TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    PRIMARY KEY (org_id, month, threshold)
 )
 
 table users

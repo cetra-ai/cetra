@@ -11,6 +11,7 @@ use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectR
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectPerm, Role};
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -96,6 +97,12 @@ async fn list_projects(
     )?))
 }
 
+enum ProjectCreate {
+    Created(ProjectRow),
+    /// The org's project limit, which is what the caller hit.
+    OverLimit(u64),
+}
+
 async fn create_project(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
@@ -114,11 +121,18 @@ async fn create_project(
     let org_id = access.org.id;
     let slug = body.slug;
     let now = state.clock.now_ns();
-    let project = state
+    let max_projects = state.entitlements.resolve(org_id, now).limits.max_projects;
+    let created = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                match &slug {
+                if let Some(limit) = max_projects {
+                    let active = projects::active_projects_tx(conn, org_id).await?;
+                    if over_limit(Some(limit), active, 1) {
+                        return Ok(ProjectCreate::OverLimit(limit));
+                    }
+                }
+                let project = match &slug {
                     Some(slug) => {
                         projects::insert_project(conn, org_id, &name, slug, retention, now).await
                     }
@@ -128,10 +142,17 @@ async fn create_project(
                         )
                         .await
                     }
-                }
+                }?;
+                Ok(ProjectCreate::Created(project))
             })
         })
         .await?;
+    let project = match created {
+        ProjectCreate::Created(project) => project,
+        ProjectCreate::OverLimit(limit) => {
+            return Err(plan_limit(limit, ("project", "projects")));
+        }
+    };
     // CreateProject requires an org admin, whose effective project role is admin.
     Ok((
         StatusCode::CREATED,
@@ -279,7 +300,7 @@ mod tests {
     use crate::auth::session::start_session;
     use crate::meta::members::{add_org_member, set_project_override};
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
+    use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span, set_limits};
 
     #[test]
     fn only_a_set_retention_needs_the_entitlement() {
@@ -337,6 +358,48 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn projects_are_limited() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org: OrgMembership = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await
+            .json();
+        let create = |name: &'static str| {
+            app.request(Method::POST, "/api/v1/orgs/acme/projects")
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+        };
+        assert_eq!(create("one").await.status, 201);
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_projects": 1}),
+        );
+        let refused = create("two").await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 project.")
+        );
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_projects": 2}),
+        );
+        assert_eq!(create("two").await.status, 201);
     }
 
     #[tokio::test]

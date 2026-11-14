@@ -15,16 +15,20 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
 use prost::Message;
+use tonic::Code;
 use tonic::codec::CompressionEncoding;
 
-use super::commit_in_task;
 use super::otlp::partial_success;
-use super::{Accepted, CommitTarget, IngestError};
+use super::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::auth::principal::{Principal, bearer_principal};
 use crate::auth::roles::KeyScope;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
+
+/// The status message of a rate refusal. The wrapper logs it at `debug`.
+const RATE_LIMITED_MESSAGE: &str = "rate limited";
 
 /// The tonic service. Cloning shares the state.
 #[derive(Clone)]
@@ -48,14 +52,28 @@ impl TraceService for GrpcTraces {
         match export_request(&self.state, request, started).await {
             Ok(response) => Ok(tonic::Response::new(response)),
             Err(status) => {
-                tracing::warn!(
-                    target: "ingest",
-                    transport = "grpc",
-                    code = ?status.code(),
-                    duration_ms = elapsed_ms(started),
-                    reason = status.message(),
-                    "request refused"
-                );
+                // Rate and cap refusals are expected for a client over its limit: `debug`.
+                if status.code() == Code::ResourceExhausted
+                    || status.message() == RATE_LIMITED_MESSAGE
+                {
+                    tracing::debug!(
+                        target: "ingest",
+                        transport = "grpc",
+                        code = ?status.code(),
+                        duration_ms = elapsed_ms(started),
+                        reason = status.message(),
+                        "request refused"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "ingest",
+                        transport = "grpc",
+                        code = ?status.code(),
+                        duration_ms = elapsed_ms(started),
+                        reason = status.message(),
+                        "request refused"
+                    );
+                }
                 Err(status)
             }
         }
@@ -96,6 +114,9 @@ async fn export_request(
     let project = key_only_project(state, project_id)
         .await
         .map_err(|error| api_status(&error))?;
+    if let Err(cap) = check_cap(state, project.org_id).await {
+        return Err(tonic::Status::resource_exhausted(cap.detail));
+    }
     let message = request.into_inner();
     let bytes = u64::try_from(message.encoded_len()).unwrap_or(u64::MAX);
     let reservation = state.ingest.reserve_exact(bytes)?;
@@ -108,6 +129,7 @@ async fn export_request(
         .ingest
         .accept_request(message, reservation, bytes, bytes, &project, now)
         .await?;
+    check_rate(state, project.org_id, normalized.spans.len(), now)?;
     let rejected = normalized.rejections.total();
     let partial = partial_success(&normalized.rejections).map(|(rejected_spans, error_message)| {
         ExportTracePartialSuccess {
@@ -163,6 +185,7 @@ impl From<IngestError> for tonic::Status {
             IngestError::Media(MediaError::Invalid { .. }) => {
                 tonic::Status::invalid_argument("invalid media in the request")
             }
+            IngestError::RateLimited { .. } => tonic::Status::unavailable(RATE_LIMITED_MESSAGE),
             IngestError::Busy
             | IngestError::Append(
                 AppendError::Backpressure
@@ -209,7 +232,7 @@ mod tests {
     use tonic::Code;
 
     use super::*;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, set_limits};
 
     const TRACES: &str =
         include_str!("../../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
@@ -343,5 +366,61 @@ mod tests {
         );
 
         assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_gets_resource_exhausted() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+        let service = GrpcTraces {
+            state: app.state.clone(),
+        };
+        let status = service
+            .export(with_key(traces(), &seeded.ingest_key))
+            .await
+            .expect_err("the org is at its cap");
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert!(status.message().contains("10 units"), "{status:?}");
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_org_gets_unavailable() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"ingest_spans_per_sec": 1, "ingest_burst": 1}),
+        );
+        let service = GrpcTraces {
+            state: app.state.clone(),
+        };
+        // The first export spends the one token: the bucket holds one span's worth.
+        service
+            .export(with_key(traces(), &seeded.ingest_key))
+            .await
+            .expect("the first export is within the rate");
+        let status = service
+            .export(with_key(traces(), &seeded.ingest_key))
+            .await
+            .expect_err("the bucket is empty");
+        assert_eq!(status.code(), Code::Unavailable);
+        assert_eq!(status.message(), "rate limited");
     }
 }
