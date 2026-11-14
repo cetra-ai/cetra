@@ -69,6 +69,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/entitlements",
         "get_org_entitlements",
     ),
+    ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
@@ -369,6 +370,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
+    "get_org_usage",
     "list_alert_events",
     "list_org_members",
     "list_org_invites",

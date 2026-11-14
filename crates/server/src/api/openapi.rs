@@ -49,7 +49,8 @@ use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
 use super::entitlements::{
-    Feature, OrgEntitlements, OrgLimits, OrgPlan, PlanSource, PlanStatus, PutOrgTokenRequest,
+    Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
+    PutOrgTokenRequest, UsageNotice,
 };
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
@@ -80,6 +81,7 @@ use super::traces::{
     SpanDetail, SpanListParams, SpanSort, SpanSummary, TraceDetail, TraceDetailParams,
     TraceListParams, TraceSort, TraceStreamParams, TraceSummary,
 };
+use super::usage::{OrgUsage, UsageDay, UsageParams};
 use super::users::{EndUserDetail, EndUserSummary, UserListParams, UserSort};
 
 const PROJECT: &str = "/api/v1/projects/{project}";
@@ -155,6 +157,10 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<OrgMonthUsage>();
+    set.insert::<UsageNotice>();
+    set.insert::<OrgUsage>();
+    set.insert::<UsageDay>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1178,6 +1184,20 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let get_usage = operation("get_org_usage", "orgs", "Read the org's usage by day")
+        .description(Some(
+            "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        ))
+        .parameters(Some(with_query::<UsageParams>(vec![path_string(
+            "org",
+            "Org UUID or slug.",
+        )])))
+        .responses(responses(
+            "200",
+            json_of::<OrgUsage>("The org's usage by day."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let put_entitlements = operation(
         "put_org_entitlements_token",
         "internal",
@@ -1246,6 +1266,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/entitlements",
             PathItem::new(HttpMethod::Get, get_entitlements),
+        )
+        .path(
+            "/api/v1/orgs/{org}/usage",
+            PathItem::new(HttpMethod::Get, get_usage),
         )
         .path(
             "/api/internal/v1/orgs/{org_id}/entitlements",

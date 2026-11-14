@@ -734,6 +734,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's usage by day
+         * @description Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.
+         */
+        get: operations["get_org_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}": {
         parameters: {
             query?: never;
@@ -3084,7 +3104,7 @@ export interface components {
              */
             updated_at: string;
         };
-        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
+        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
             features: components["schemas"]["Feature"][];
@@ -3094,6 +3114,8 @@ export interface components {
             plan: components["schemas"]["OrgPlan"];
             /** @description Where an Upgrade button goes. Omitted when the instance sets none. */
             upgrade_url?: string;
+            /** @description The org's units this month (D-P-16). */
+            usage: components["schemas"]["OrgMonthUsage"];
         };
         /**
          * Format: uuid
@@ -3188,6 +3210,22 @@ export interface components {
             /** @description URL slug. */
             slug: string;
         };
+        /** @description This UTC month's units (D-P-16, D-P-38). */
+        OrgMonthUsage: {
+            /** @description `YYYY-MM`. */
+            month: string;
+            notice: components["schemas"]["UsageNotice"];
+            /**
+             * Format: date-time
+             * @description 00:00 UTC on the 1st of the next month.
+             */
+            resets_at: string;
+            /**
+             * Format: int64
+             * @description Units so far this month, flushed or not.
+             */
+            units: number;
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         OrgPage: {
             /** @description Items in this page. */
@@ -3226,6 +3264,13 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
+        /** @description `GET /api/v1/orgs/{org}/usage`. */
+        OrgUsage: {
+            /** @description Days with usage, oldest first. Days without usage are absent. */
+            days: components["schemas"]["UsageDay"][];
+            from: string;
+            to: string;
+        };
         /** @description The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`. */
         OutputScoreBody: {
             /** @description Category labels of a categorical score. Omitted otherwise. */
@@ -4766,6 +4811,33 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** @description One UTC day of an org's usage, summed over its projects. */
+        UsageDay: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
+        };
+        /**
+         * @description Usage level against `units_included`.
+         * @enum {string}
+         */
+        UsageNotice: "none" | "warning" | "reached";
         /**
          * @description A user account.
          *
@@ -7947,6 +8019,79 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_usage: {
+        parameters: {
+            query?: {
+                /** @description First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month. */
+                from?: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days. */
+                to?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgUsage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

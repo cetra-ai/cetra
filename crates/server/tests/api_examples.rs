@@ -39,6 +39,7 @@ use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
 use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
 use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
 use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use llmobs_server::api::usage::OrgUsage;
 use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -369,6 +370,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<OrgMembership>>("static/orgs.json");
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
+    roundtrip::<OrgUsage>("static/org-usage.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
@@ -506,6 +508,7 @@ fn generated_files_roundtrip() {
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }

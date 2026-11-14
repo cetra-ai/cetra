@@ -4002,6 +4002,107 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/usage": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's usage by day",
+        "description": "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        "operationId": "get_org_usage",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's usage by day.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}": {
       "get": {
         "tags": [
@@ -13462,11 +13563,12 @@
       },
       "OrgEntitlements": {
         "type": "object",
-        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.",
+        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15).",
         "required": [
           "features",
           "plan",
-          "limits"
+          "limits",
+          "usage"
         ],
         "properties": {
           "features": {
@@ -13487,6 +13589,10 @@
           "upgrade_url": {
             "type": "string",
             "description": "Where an Upgrade button goes. Omitted when the instance sets none."
+          },
+          "usage": {
+            "$ref": "#/components/schemas/OrgMonthUsage",
+            "description": "The org's units this month (D-P-16)."
           }
         }
       },
@@ -13631,6 +13737,36 @@
           }
         }
       },
+      "OrgMonthUsage": {
+        "type": "object",
+        "description": "This UTC month's units (D-P-16, D-P-38).",
+        "required": [
+          "month",
+          "units",
+          "resets_at",
+          "notice"
+        ],
+        "properties": {
+          "month": {
+            "type": "string",
+            "description": "`YYYY-MM`."
+          },
+          "notice": {
+            "$ref": "#/components/schemas/UsageNotice"
+          },
+          "resets_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "00:00 UTC on the 1st of the next month."
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units so far this month, flushed or not.",
+            "minimum": 0
+          }
+        }
+      },
       "OrgPage": {
         "type": "object",
         "description": "One page of results. `next_cursor` is null when there is no next page.",
@@ -13708,6 +13844,30 @@
           "member",
           "viewer"
         ]
+      },
+      "OrgUsage": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/usage`.",
+        "required": [
+          "from",
+          "to",
+          "days"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            },
+            "description": "Days with usage, oldest first. Days without usage are absent."
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
       },
       "OutputScoreBody": {
         "type": "object",
@@ -16578,6 +16738,70 @@
           }
         },
         "additionalProperties": true
+      },
+      "UsageDay": {
+        "type": "object",
+        "description": "One UTC day of an org's usage, summed over its projects.",
+        "required": [
+          "day",
+          "spans",
+          "scores",
+          "units",
+          "bytes",
+          "judge_input_tokens",
+          "judge_output_tokens",
+          "judge_cost_usd"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "description": "`YYYY-MM-DD`."
+          },
+          "judge_cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "judge_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "judge_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scores": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spans": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`spans + scores`.",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageNotice": {
+        "type": "string",
+        "description": "Usage level against `units_included`.",
+        "enum": [
+          "none",
+          "warning",
+          "reached"
+        ]
       },
       "User": {
         "type": "object",

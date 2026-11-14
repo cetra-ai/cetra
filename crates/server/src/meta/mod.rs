@@ -23,6 +23,7 @@ pub(crate) mod personal_tokens;
 pub(crate) mod projects;
 pub(crate) mod saved_views;
 pub(crate) mod score_definitions;
+pub(crate) mod usage;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
 

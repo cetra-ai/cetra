@@ -32,4 +32,5 @@ pub(crate) mod streams;
 pub(crate) mod time_cursor;
 pub(crate) mod tokens;
 pub(crate) mod traces;
+pub(crate) mod usage;
 pub(crate) mod users;

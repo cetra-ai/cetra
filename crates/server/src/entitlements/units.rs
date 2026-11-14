@@ -3,6 +3,7 @@
 use chrono::NaiveTime;
 use llmobs_core::ids::OrgId;
 
+use crate::api::entitlements::UsageNotice;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::usage::month_bounds;
@@ -42,6 +43,32 @@ pub(crate) async fn check_cap(state: &AppState, org: OrgId) -> Result<(), CapExc
     }
 }
 
+/// 00:00 UTC on the 1st of the month after the UTC month of `now_ns`, in nanoseconds.
+pub(crate) fn month_reset_ns(now_ns: i64) -> i64 {
+    let (_, next) = month_bounds(now_ns);
+    next.and_time(NaiveTime::MIN)
+        .and_utc()
+        .timestamp()
+        .saturating_mul(NS_PER_SEC)
+}
+
+/// The usage level of `units` against `included` units (D-P-38): `Warning` from 80 %,
+/// `Reached` from 100 %. No included units, or zero, is always `None`.
+pub(crate) fn notice(units: u64, included: Option<u64>) -> UsageNotice {
+    let Some(included) = included.filter(|included| *included > 0) else {
+        return UsageNotice::None;
+    };
+    // Whole percent, rounded down. u64 times 100 fits in u128.
+    let percent = u128::from(units) * 100 / u128::from(included);
+    if percent >= 100 {
+        UsageNotice::Reached
+    } else if percent >= 80 {
+        UsageNotice::Warning
+    } else {
+        UsageNotice::None
+    }
+}
+
 /// The decision, pure: `Some` when `units >= cap`. The reset is 00:00 UTC on the 1st of the
 /// next month; `Retry-After` rounds up to whole seconds and is at least 1.
 fn decide(units: u64, cap: u64, now_ns: i64) -> Option<CapExceeded> {
@@ -49,11 +76,7 @@ fn decide(units: u64, cap: u64, now_ns: i64) -> Option<CapExceeded> {
         return None;
     }
     let (_, next) = month_bounds(now_ns);
-    let reset_s = next.and_time(NaiveTime::MIN).and_utc().timestamp();
-    let remaining_ns = reset_s
-        .saturating_mul(NS_PER_SEC)
-        .saturating_sub(now_ns)
-        .max(0);
+    let remaining_ns = month_reset_ns(now_ns).saturating_sub(now_ns).max(0);
     let retry_after_s = u64::try_from(remaining_ns.saturating_add(NS_PER_SEC - 1) / NS_PER_SEC)
         .unwrap_or(0)
         .max(1);
@@ -94,6 +117,32 @@ mod tests {
         let cap = decide(5, 5, now).expect("at the cap");
         assert_eq!(cap.retry_after_s, 1);
         assert!(cap.detail.contains("2027-01-01"), "{}", cap.detail);
+    }
+
+    #[test]
+    fn notice_levels() {
+        assert_eq!(notice(79, Some(100)), UsageNotice::None);
+        assert_eq!(notice(80, Some(100)), UsageNotice::Warning);
+        assert_eq!(notice(99, Some(100)), UsageNotice::Warning);
+        assert_eq!(notice(100, Some(100)), UsageNotice::Reached);
+        assert_eq!(notice(250, Some(100)), UsageNotice::Reached);
+        // 79.9 % rounds down to 79 %.
+        assert_eq!(notice(799, Some(1000)), UsageNotice::None);
+        assert_eq!(notice(800, Some(1000)), UsageNotice::Warning);
+    }
+
+    #[test]
+    fn notice_without_included_units_is_none() {
+        assert_eq!(notice(u64::MAX, None), UsageNotice::None);
+        assert_eq!(notice(0, None), UsageNotice::None);
+        assert_eq!(notice(u64::MAX, Some(0)), UsageNotice::None);
+    }
+
+    #[test]
+    fn notice_does_not_overflow() {
+        assert_eq!(notice(u64::MAX, Some(u64::MAX)), UsageNotice::Reached);
+        assert_eq!(notice(u64::MAX / 2, Some(u64::MAX)), UsageNotice::None);
+        assert_eq!(notice(u64::MAX, Some(1)), UsageNotice::Reached);
     }
 
     #[test]
