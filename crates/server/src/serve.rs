@@ -306,6 +306,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         secrets,
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
+        trace_loads: crate::eval::trace_load::TraceLoads::default(),
+        definitions: crate::eval::definitions::DefinitionCache::default(),
         entitlements: crate::entitlements::EntitlementsState::new(license),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);

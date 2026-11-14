@@ -4,6 +4,8 @@ import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
+import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
+import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
@@ -13,6 +15,7 @@ import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
+import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
 import setupResponseDocument from "../../../fixtures/api/static/setup-response.json";
 import signupResponseDocument from "../../../fixtures/api/static/signup-response.json";
 
@@ -91,6 +94,41 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_project_member",
     method: "delete",
     path: "/api/v1/projects/{project}/members/{user}",
+  },
+  {
+    operationId: "post_evaluator",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators",
+  },
+  {
+    operationId: "patch_evaluator",
+    method: "patch",
+    path: "/api/v1/projects/{project}/evaluators/{id}",
+  },
+  {
+    operationId: "delete_evaluator",
+    method: "delete",
+    path: "/api/v1/projects/{project}/evaluators/{id}",
+  },
+  {
+    operationId: "post_evaluator_test",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators/test",
+  },
+  {
+    operationId: "post_score_definition",
+    method: "post",
+    path: "/api/v1/projects/{project}/score-definitions",
+  },
+  {
+    operationId: "patch_score_definition",
+    method: "patch",
+    path: "/api/v1/projects/{project}/score-definitions/{id}",
+  },
+  {
+    operationId: "delete_score_definition",
+    method: "delete",
+    path: "/api/v1/projects/{project}/score-definitions/{id}",
   },
   { operationId: "post_admin_user", method: "post", path: "/api/v1/admin/users" },
   { operationId: "patch_admin_user", method: "patch", path: "/api/v1/admin/users/{id}" },
@@ -293,6 +331,16 @@ const RESPONSES: Record<string, Respond> = {
     });
   },
   delete_project_member: () => noContent(),
+  post_evaluator: ({ body }) =>
+    HttpResponse.json({ ...evaluatorDocument, ...named(body) }, { status: 201 }),
+  patch_evaluator: ({ body }) => HttpResponse.json({ ...evaluatorDocument, ...named(body) }),
+  delete_evaluator: () => noContent(),
+  post_evaluator_test: () => HttpResponse.json(evaluatorTestResultDocument),
+  post_score_definition: ({ body }) =>
+    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }, { status: 201 }),
+  patch_score_definition: ({ body }) =>
+    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
+  delete_score_definition: () => noContent(),
 
   post_admin_user: ({ body }) => {
     const { name: _name, ...unnamedUser } = adminUserCreatedDocument.user;

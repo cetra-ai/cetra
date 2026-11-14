@@ -15,6 +15,8 @@ Implementation plan for milestone M2 of track I. It has 10 sub-phases, I2.1 to I
 - `docs/spec/04-metadata-db.md` § Evaluation and § Scores definitions; `docs/spec/06-evaluation.md` § Scores and § Evaluators; `docs/spec/09-api.md` § Scores & annotations and § Evaluation & alerts.
 - The code each sub-phase points to, before you edit it.
 
+
+**Migration number.** M2's migration merged as `0006_evaluators.sql`, after track K's `0005_alerts.sql` landed first; the plan below still says `0005`.
 ## What M2 is, and what it is not
 
 When M2 is done:

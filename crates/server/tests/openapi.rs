@@ -282,6 +282,61 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/media/{sha256}",
         "get_media",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators",
+        "list_evaluators",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators",
+        "post_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "get_evaluator",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "patch_evaluator",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "delete_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluator-templates",
+        "list_evaluator_templates",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators/test",
+        "post_evaluator_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/score-definitions",
+        "list_score_definitions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/score-definitions",
+        "post_score_definition",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/score-definitions/{id}",
+        "patch_score_definition",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/score-definitions/{id}",
+        "delete_score_definition",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -304,6 +359,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_metrics",
+    "list_evaluators",
+    "list_score_definitions",
 ];
 
 /// Read operations with a handler (D-G-23): their errors include 422.
@@ -332,6 +389,8 @@ const TAGS: &[&str] = &[
     "sessions",
     "users",
     "scores",
+    "evaluation",
+    "score_definitions",
     "schema",
     "saved_views",
     "sql",
@@ -524,12 +583,12 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
-        } else if *id == "post_llm_connection" || *id == "patch_llm_connection" {
-            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_llm_connection"
+        } else if *id == "post_llm_connection"
+            || *id == "patch_llm_connection"
             || *id == "delete_llm_connection"
-            || *id == "post_llm_connection_test"
         {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_llm_connection" || *id == "post_llm_connection_test" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_channel"
             || *id == "update_channel"
@@ -539,6 +598,20 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
+        } else if *id == "post_evaluator"
+            || *id == "patch_evaluator"
+            || *id == "post_score_definition"
+            || *id == "patch_score_definition"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_evaluator"
+            || *id == "delete_evaluator"
+            || *id == "delete_score_definition"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_evaluator_test" {
+            // The test only collects 4xx codes; the operation also declares 503.
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if READ_OPERATIONS.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
@@ -621,6 +694,8 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("LlmConnectionPage", "LlmConnection"),
+        ("EvaluatorPage", "Evaluator"),
+        ("ScoreDefinitionPage", "ScoreDefinition"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
@@ -874,6 +949,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "LlmConnectionPage",
+        "EvaluatorPage",
+        "ScoreDefinitionPage",
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",
