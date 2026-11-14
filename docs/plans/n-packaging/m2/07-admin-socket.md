@@ -68,7 +68,7 @@ pub(crate) fn spawn(state: AppState, data_dir: &Path) -> Option<JoinHandle<()>>
 - If binding fails, for example because the path is longer than the 108-byte Unix socket limit, log
   a `warn` with the error (no path) and return `None`. The server still starts; the backup command
   then reports that no socket answers.
-- Bind `admin.sock.tmp` (removing a leftover one first), `set_permissions(0o600)` on it, then
+- Bind `admin.tmp` (no longer than `admin.sock`, so a path that fits one fits the other) (removing a leftover one first), `set_permissions(0o600)` on it, then
   `std::fs::rename` it to `admin.sock`. The socket never exists under its real name with a wider
   mode.
 - **Authentication:** for each accepted connection, read `stream.peer_cred()?.uid()` and compare
