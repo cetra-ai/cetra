@@ -37,11 +37,11 @@ Nothing creates **rule** jobs yet: the trigger is M4 and backfill is M6. M3 runs
 | D-I-5 | A successful connection test sets the connection `ok` and, from M3 on, resumes the rules paused for that connection. |
 | D-I-6 | One dispatcher, `eval.workers` workers. A claim needs a worker slot, a connection slot and a bucket token (`max(1, rpm/6)` tokens, refilled at `rpm/60` per second). A webhook evaluator runs at most 4 jobs at once. Strict priority (manual, rule, backfill), round-robin across projects. |
 | D-I-11 | `dedup_key` is unique: `rule:<rule_id>:<trace_hex>:<span_hex or ->` or `manual:<job_id>`. Rule enqueues are `ON CONFLICT DO NOTHING`. Live enqueues are capped at 10 000 per rule per UTC hour. |
-| D-I-12 | `queued → running` (claims += 1) `→ done / failed / queued`; `queued → skipped`. The worker increments `attempts` right before the call. No lease: startup re-queues `running` jobs and fails those with `claims > 3`; a janitor re-queues jobs running for more than 10 minutes. `finish` is fenced by `claims`. |
+| D-I-12 | `queued → running` (claims += 1) `→ done / failed / queued`; `queued → skipped`. The worker increments `attempts` right before the call. No lease: startup and the janitor (jobs running for more than 10 minutes) re-queue `running` jobs and add 1 to `interruptions`; a job already interrupted 3 times fails (`interrupted too often`). `finish` is fenced by `claims`. |
 | D-I-13 | Retryable errors back off `min(5 s · 2^(attempts−1), 10 min) ± 20 %`, at most 6 attempts. Load failures retry 3 times, 30 s apart (`load_retries`). Failed result writes retry 3 times, 5 s apart, then take the retryable path. |
-| D-I-14 | Pause classes: a connection error pauses every enabled rule whose evaluator uses the connection (`'connection'`) and re-queues the job; a webhook evaluator's rules pause with `'errors'`; a manual job fails. The breaker pauses a rule (`'errors'`) when at least 20 of its last 50 evaluated jobs exist and half or more failed. Resume clears a pause; a successful connection test or a key change resumes `'connection'` pauses. |
+| D-I-14 | Pause classes: a connection error pauses every enabled rule whose evaluator uses the connection (`'connection'`) and re-queues the job with its attempt given back (`attempts − 1`); a webhook evaluator's rules pause with `'errors'`; a manual job fails. A job whose connection changed since its claim re-queues without pausing anything. The breaker pauses a rule (`'errors'`) when at least 20 of its last 50 evaluated jobs exist and half or more failed. Resume clears a pause; a successful connection test or a key change resumes `'connection'` pauses. |
 | D-I-15 | Budgets on judge rules only, per UTC day or month, kept per day in `rule_spend`. Estimate `ceil(chars/4)` input tokens + `max_output_tokens` at the model price; reservations in memory; over budget pauses the rule (`'budget'`) and skips its queued jobs. A 30 s ticker clears `'budget'` pauses when the period turns. |
-| D-I-16 | Judge trace id per attempt: SHA-256(`llmobs.judge-trace.v1` ‖ job id ‖ attempts as `u32` BE)[..16]. |
+| D-I-16 | Judge trace id per run: SHA-256(`llmobs.judge-trace.v1` ‖ job id ‖ the run's `claims` as `u32` BE)[..16]. |
 | D-I-17 | The executor fails a job whose target trace has an `llmobs-eval` span. |
 | D-I-18 | `Writer::Evaluator { kind, evaluator_id, rule_id }`: source by kind, author = rule or evaluator, `session_id` and `user_id` from the root span, metadata = `judge.*` plus `<prefix>.eval.job_id` and `<prefix>.eval.evaluator_version`. |
 | D-I-19 | Deleting an evaluator that rules use is a 409; a PATCH that would break a rule is a 409 that lists the rules. |
@@ -50,7 +50,7 @@ Nothing creates **rule** jobs yet: the trigger is M4 and backfill is M6. M3 runs
 | D-I-24 | `ProjectPerm::ManageEvaluation` writes; `View` reads. |
 | D-I-27 | Pages: `/online-rules`, `/online-rules/new`, `/online-rules/$id`; "Run evaluator"; "View judge trace". |
 | D-I-28 | Hourly pruning: finished jobs older than 7 days deleted; queued jobs older than 24 h (7 days for backfill) skipped (`expired`); jobs of inactive projects or orgs deleted. |
-| D-I-30 | Rule validation: filter parsed by storage; 1–32 mapped variables; no `expected`/`item.*` expressions; no bare `span.*` in a trace rule; judge template variables all mapped; a check maps `output` (and `expected` when needed); `sample_rate ∈ (0, 1]`; `target` and `evaluator_id` immutable. |
+| D-I-30 | Rule validation: filter parsed by storage; 1–32 mapped variables; no `expected`/`item.*` expressions; no bare `span.*` in a trace rule; judge template variables all mapped; a check maps `output` (and `expected` when needed); `sample_rate ∈ (0, 1]`; `target` and `evaluator_id` immutable. Limits: name 1–128 characters, filter ≤ 4 096 bytes, each expression ≤ 1 024 bytes, `budget_usd` ≤ 1 000 000, 500 rules per project. The evaluator checks run again inside the rule's write, and an evaluator PATCH checks its rules inside its own write. |
 | D-I-32 | `count_enabled_rules` + `rule_limit::check`, inside the write transaction, on create with `enabled` and on a PATCH that enables. |
 | D-I-34 | Every read goes through `Storage::query` and A2's reads. |
 
@@ -65,7 +65,12 @@ M1's and M2's conventions apply unchanged (`01-m1-secrets-connections.md` § Con
 - **Logs of a check run go under your worktree's own `target/`** (for example `target/check-rust.log`), never in a shared directory: parallel worktrees would overwrite each other's logs.
 - **`just check-rust` runs as one background task**, and you wait for it to finish (read the log to the end, check the exit status). Never start a second run while one is going; never stop waiting early and commit.
 - **Clippy denies** (beyond M2's list) `large_enum_variant` (box the big variant's payload), `needless_pass_by_value` (take `&T` unless you consume it), `collapsible_if` (use `if a && let Some(x) = …`) and `type_complexity` (name the type with a `type` alias or a small struct).
-- **`crates/server/tests/openapi.rs` has two page lists:** `pages` near the component-name check (`(page, item)` pairs) and a second `pages` near the nullability test (`required_nullable`). A new page type goes in both.
+- **`crates/server/tests/openapi.rs` pins every operation.** A new or changed operation updates, in that file:
+  - `OPERATIONS`, the `(method, path, operation_id)` list, compared with the document as a whole;
+  - `QUERY_OR_BODY`, the operations whose query string can be a 400;
+  - the `expected_errors` if-chain in `document_lint`, which pins each operation's 4xx codes (an id that no branch names falls back to `{401, 403, 404, 429}`, or `{400, 401, 403, 404, 429}` when it is in `QUERY_OR_BODY`);
+  - two page lists: `pages` near the component-name check (`(page, item)` pairs) and a second `pages` near the nullability test (`required_nullable`). A new page type goes in both.
+- **Dead code across sub-phases.** rustc treats an item with `#[allow(dead_code)]` as used, and so is everything it reaches. When a sub-phase adds an entry point whose caller comes later, it marks that entry point (and any field nothing reads yet) with an item-level `#[allow(dead_code)] // <sub-phase> calls it.` and removes the allows of the items the entry point now reaches. Each sub-phase lists the allows it adds and removes.
 - **After a merge of another branch, Biome reports import-order errors** in the files the merge touched. Run `just fmt`, then check the diff is only import order.
 - **Vitest workers can die with `SIGILL`** when the machine is loaded. That is not a test failure: rerun only the files that crashed (`pnpm --dir web exec vitest run <files>`), then rerun `just check-web`.
 - **The storage test `crash_tests` can time out under load.** Rerun that one test alone (`cargo test -p llmobs-storage crash_tests -- --test-threads=1`); report it if it fails alone.
@@ -73,7 +78,7 @@ M1's and M2's conventions apply unchanged (`01-m1-secrets-connections.md` § Con
 - **Log-capture tests** (`crate::test_support::capture_logs`) use plain `#[tokio::test]`, never `flavor = "multi_thread"`.
 - **Background loops** follow track K's pattern (`crates/server/src/alerts/mod.rs`): a timing struct with `DEFAULT` and `TEST`, `interval` with `MissedTickBehavior::Skip`, and a `*_once(&AppState, now) -> Result<Report, _>` function that tests call directly with the manual clock. Loops log errors and go on.
 - **Never hold a `std::sync::Mutex` guard across an `.await`.** Take what you need, drop the guard, then await.
-- **`MetaDb::write` is the single writer.** Keep each write short: no storage read, provider call or sleep inside a write closure.
+- **`MetaDb::write` is the single writer.** Keep each write short: no storage read, provider call or sleep inside a write closure, and no scan that a reader connection can do (`state.meta.reader()`).
 - `web/src/routeTree.gen.ts` is gitignored. Never commit it.
 
 ## Parallel waves
@@ -85,7 +90,7 @@ Each wave starts when the waves before it are merged into the M3 integration bra
 | 1 | I3.1 storage reads · I3.2 tables and rows · I3.3 crate edits and policy types · I3.4 shared executor core and evaluator scores | M2 | `crates/server/src/eval/mod.rs` (module lines, I3.3 and I3.4); `crates/server/src/scores.rs` (I3.1 touches one test literal, I3.4 the writer); `docs/spec/06-evaluation.md` (I3.3 and I3.4 edit different sections) |
 | 2 | I3.5 API contract | wave 1 (I3.1's `ScoreListParams` and I3.3's `api/online_rules.rs`) | — |
 | 3 | I3.6 job execution · I3.10 web: rules list and editor | wave 2 | none (the web phase only reads the contract; I3.5 adds every M3 mock and query helper) |
-| 4 | I3.7 dispatcher and loops · I3.8 rules API · I3.11 web: rule page · I3.12 web: run evaluator and judge-trace links | I3.6 (server phases); I3.10 (web phases: the list, the editor, the shared mapping table) | `crates/server/src/eval/mod.rs` (I3.7 and I3.8 add to `EvalQueue` in different `impl` blocks); `docs/spec/06-evaluation.md` (I3.7 and I3.8 edit different bullets); `crates/server/src/test_support/mock_llm.rs` if I3.7 adds a reply delay |
+| 4 | I3.7 dispatcher and loops · I3.8 rules API · I3.11 web: rule page · I3.12 web: run evaluator and judge-trace links | I3.6 (server phases); I3.10 (web phases: the list, the editor, the shared mapping table) | `crates/server/src/eval/mod.rs` (I3.7 and I3.8 add to `EvalQueue` in different `impl` blocks); `docs/spec/06-evaluation.md` (I3.7 and I3.8 edit different bullets) |
 | 5 | I3.9 manual runs and the jobs API | I3.7, I3.8 | — |
 
 The Sonnet code reviews fit the waves: after wave 1 (I3.1–I3.4), after waves 2–3 (I3.5, I3.6, I3.10), and after waves 4–5 (I3.7–I3.9, I3.11, I3.12).
@@ -97,7 +102,7 @@ Contract files (`openapi.json`, `schema.gen.ts`, `fixtures/api/manifest.json`) a
 ```
 crates/otel/src/cost.rs                    PriceTable::price_for (I3.3)
 crates/eval/src/judge/…, runner.rs         Adapter::provider_name public; RunInput.judge_trace_id doc (I3.3)
-crates/storage/src/filter/scope.rs         strict_exclusions (I3.1)
+crates/storage/src/filter/scope.rs, mod.rs strict_exclusions (I3.1)
 crates/storage/src/reads/traces.rs         strict flag on the trace and span reads; span_refresh (I3.1)
 crates/storage/src/reads/alerts.rs         check_alert_filter removed (I3.1)
 crates/storage/src/reads/mod.rs            validate_filter (I3.1)
@@ -112,12 +117,14 @@ crates/server/src/
   eval/budget.rs, breaker.rs, retry.rs, hourly.rs, rule_limit.rs   pure policy types (I3.3)
   eval/execute.rs                          shared run core (I3.4); run_job, finish (I3.6)
   eval/test_run.rs                         uses execute.rs (I3.4)
+  eval/trace_load.rs                       LoadError::Saturated (I3.6)
   eval/dispatch.rs                         dispatch_once, ConnectionLimit, TokenBucket, loops (I3.7)
   eval/rule_check.rs                       rule ↔ evaluator checks (I3.8)
   scores.rs                                Writer::Evaluator (I3.4)
   http/mod.rs, test_support/mod.rs         AppInner.eval (I3.6)
   http/error.rs                            ApiError::ConflictWith (I3.8)
-  serve.rs                                 recover, spawn, shutdown order (I3.7)
+  serve.rs                                 recover, spawn, shutdown order, Drop aborts the loops (I3.7)
+  test_support/mock_llm.rs                 MockLlm::start_with_delay (I3.7)
   routes/online_rules.rs                   rules API (I3.8)
   routes/evaluators.rs                     delete and PATCH 409s (I3.8)
   routes/connections.rs                    resume on test success and key change (I3.8)
@@ -131,7 +138,7 @@ web/src/components/evaluators/mapping-table.tsx   shared variable-mapping editor
 web/src/components/online-rules/rule-form.tsx     (I3.10)
 web/src/routes/$org/$project/online-rules/{index,new}.tsx, $ruleId/edit.tsx (+ tests)   (I3.10)
 web/src/routes/$org/$project/online-rules/$ruleId/index.tsx (+ test)                   (I3.11)
-web/src/components/online-rules/{rule-banner,jobs-table,score-distribution}.tsx        (I3.11)
+web/src/components/online-rules/{rule-banner,jobs-table,score-distribution,rule-conflicts}.tsx   (I3.11)
 web/src/components/trace/run-evaluator-dialog.tsx (+ test), scores-tab.tsx             (I3.12)
 ```
 
@@ -141,10 +148,10 @@ web/src/components/trace/run-evaluator-dialog.tsx (+ test), scores-tab.tsx      
 
 The next free number when you start I3.2. When this plan was written, `0006_evaluators.sql` was the last one on M2's branch, and track M's PR #77 adds a migration too, so the number is `0007` or `0008`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `NN` below. Everything that depends on it:
 - the file name `crates/server/migrations/meta/00NN_eval_queue.sql`;
-- `meta/mod.rs` tests: the migration count in `open_twice_is_idempotent` (`NN`), and `open_existing_checks_the_file_and_the_version`, which inserts version `NN + 1` and expects `found == NN + 1`, `expected == NN`;
+- `meta/mod.rs` tests: the migration count in `open_twice_is_idempotent` (the number of files in `migrations/meta/` after yours; it equals `NN` because the numbers have no gap, but count the files), and `open_existing_checks_the_file_and_the_version`, which inserts version `NN + 1` and expects `found == NN + 1`, `expected == NN`;
 - `admin.rs` `schema_mismatch_names_the_versions`: inserts `NN + 1` and expects `"this binary expects schema NN, found NN+1"` with the numbers written out;
 - the `meta_schema` snapshot (`crates/server/tests/snapshots/meta_schema.snap`, or wherever `insta::assert_snapshot!("meta_schema", …)` writes it);
-- `docs/spec/04-metadata-db.md` and `00-design.md` § Modules, which name the file.
+- `docs/spec/04-metadata-db.md`, and `00-design.md` § Modules and § Tables, which name the file `0007_eval_queue.sql` (edit them only when `NN` is not `0007`).
 
 If another branch takes the number after you, the one that merges second renumbers on rebase (00-design § Scope). A migration that already merged is never renumbered.
 
@@ -163,7 +170,7 @@ If another branch takes the number after you, the one that merges second renumbe
 JSON field names are exact. Times are RFC 3339 (`llmobs_core::time_serde`; `crate::api::keys::optional_time` for optional times). Every `Option` field has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`. The enums are `snake_case`, `Copy`, with `as_str` and `from_name -> Option<Self>` like M2's `EvaluatorKind`.
 
 - **`RuleTarget`**: `"trace"` | `"span"`.
-- **`BudgetPeriod`**: `"day"` | `"month"` (added in I3.3; I3.5 adds `ToSchema`).
+- **`BudgetPeriod`**: `"day"` | `"month"` (added in I3.3, `ToSchema` included; I3.5 registers it).
 - **`PauseReason`**: `"budget"` | `"errors"` | `"connection"`.
 - **`RuleSpend`**: `{period_start: time, spent_usd: number, reserved_usd: number}`. `period_start` is the start of the current UTC day or month.
 - **`JobCounts`**: `{queued, running, done, failed, skipped}`, each a non-negative integer, always present.
@@ -206,6 +213,7 @@ JSON field names are exact. Times are RFC 3339 (`llmobs_core::time_serde`; `crat
 | duplicate name in the project | 409 | `conflict`, `an online rule with this name already exists` |
 | the project already has 500 rules | 409 | `conflict`, `a project has at most 500 online rules` |
 | the PATCH's stored row changed between read and write | 409 | `conflict`, `online rule changed, retry` |
+| the evaluator changed between the validation and the write (create or PATCH) | 409 | `conflict`, `evaluator changed, retry` |
 | create or enable over the plan's active-rule limit (D-I-32) | 403 | `plan_limit`, `Your plan allows <n> active online rule(s).` (singular for 1) |
 | unknown rule | 404 | `not_found` |
 
@@ -213,7 +221,7 @@ The 403 uses `ApiError::PlanLimit`, which track K added (D-K-14). D-I-32 says M3
 
 ### Rule validation
 
-Run on create, and on PATCH against the merged result (stored values overlaid by the body). All field errors are collected. The evaluator is the stored one (`evaluator::load`).
+Run on create, and on PATCH against the merged result (stored values overlaid by the body). All field errors are collected. The evaluator is the stored one, read as a `rule_check::Subject` (I3.8): its stored config is parsed, and a webhook's sealed values are never opened, because no check needs them.
 
 | # | Check | Field | Message |
 |---|---|---|---|
@@ -232,8 +240,9 @@ Run on create, and on PATCH against the merged result (stored values overlaid by
 | 13 | `budget_usd` finite, `> 0` and `<= 1_000_000` | `budget_usd` | `budget_usd must be above 0 and at most 1000000` |
 | 14 | a budget on a non-judge evaluator | `budget_usd` | `budgets apply to LLM judge evaluators only` |
 | 15 | a budget, and the judge's model has no price (`budget::model_price` returns `None`, § I3.3) | `budget_usd` | `the judge model has no price, so the rule cannot have a budget` |
+| 16 | every mapping expression is at most 1 024 bytes (`len()`) | `variable_mapping.<name>` | `expression must be at most 1024 bytes` |
 
-Checks 8–10 and 14–15 are the "rule ↔ evaluator" checks. `eval/rule_check.rs` (I3.8) implements them once; the evaluator PATCH re-runs them for every rule of the evaluator (D-I-19).
+The limits (checks 1, 4, 5, 13, 16 and the 500 rules of a project) are D-I-30's. Checks 8–10 and 14–15 are the "rule ↔ evaluator" checks. `eval/rule_check.rs` (I3.8) implements them once; the evaluator PATCH re-runs them for every rule of the evaluator (D-I-19).
 
 ### Eval job contract
 
@@ -252,6 +261,7 @@ Checks 8–10 and 14–15 are the "rule ↔ evaluator" checks. `eval/rule_check.
 | `trace_id` not 32 hex or all zeros | `trace_id` | `trace_id must be 32 hex digits` |
 | `span_id` not 16 hex or all zeros | `span_id` | `span_id must be 16 hex digits` |
 | `variable_mapping` has 0 or more than 32 entries | `variable_mapping` | `map 1 to 32 variables` |
+| an expression over 1 024 bytes | `variable_mapping.<name>` | `expression must be at most 1024 bytes` |
 | `VariableMapping::from_json` fails | `variable_mapping` | the `MappingError` display |
 | `needs_item()` | `variable_mapping` | `expected and item.* are for experiments only` |
 | `needs_target_span()` without `span_id` | `variable_mapping` | `span.* needs span_id` |
@@ -260,28 +270,28 @@ Checks 8–10 and 14–15 are the "rule ↔ evaluator" checks. `eval/rule_check.
 
 ### Job execution
 
-`eval::execute::run_job(state, job: ClaimedJob) -> Result<(), MetaError>` (I3.6) runs one claimed job. `ClaimedJob` is the `JobRow` read at claim time plus `claims` (its value after the claim) and the dispatch permits it holds. `now` is read from `state.clock` at each step that needs it. The steps, and what each failure does (the **finish** column names a `meta::eval_jobs::Finish` variant, § I3.2):
+`eval::execute::run_job(state, job: ClaimedJob) -> Result<(), MetaError>` (I3.6) runs one claimed job. `ClaimedJob` is the `JobRow` read with the candidates, `claims` (its value after the claim) and `connection_updated_at` (the candidate's `connection_updated_at`, `None` for a check or a webhook). The dispatch permits are not in it: `run_claimed` (I3.7) holds them and drops them after `run_job` returns. `now` is read from `state.clock` at each step that needs it. The steps, and what each failure does (the **finish** column names a `meta::eval_jobs::Finish` variant, § I3.2):
 
 | Step | Work | On failure |
 |---|---|---|
-| 1 | `projects::project_by_id`; the project and its org must be `active` | `Skipped { error: "project unavailable" }` |
+| 1 | `meta::projects::project_by_id(reader, project_id)` and `meta::orgs::org_by_id(reader, project.org_id)`; both must exist with `state == "active"` (read both rows' types first) | `Skipped { error: "project unavailable" }` |
 | 2 | `evaluators::get_evaluator(project, evaluator_id)`; missing → return `Ok(())` (the row cascades with it) | — |
 | 3 | rule jobs: `online_rules::get_rule(project, rule_id)`; missing → return. Disabled or paused → `Requeue { not_before: now }` and return (the dispatcher will not claim it while the rule is paused) | — |
-| 4 | `evaluator::load` (opens a webhook's sealed values); a judge's connection from `connections::get_connection` and `state.connections.get` | `Failed { class: Permanent, error: "evaluator could not be loaded" }` or `"connection not found"` |
+| 4 | `evaluator::load` (opens a webhook's sealed values); a judge's connection row from `connections::get_connection` and its key from `state.connections.get`. When the row's `updated_at` differs from `job.connection_updated_at`, the connection changed since the claim: `Requeue { not_before: now }` and return | `Failed { class: Permanent, error: "evaluator could not be loaded" }` or `"connection not found"` |
 | 5 | the mapping: the rule's `variable_mapping`, or the job's for a manual run; `VariableMapping::from_json` | `Failed { Permanent, <MappingError display> }` |
-| 6 | `trace_load::load_trace(state, project, trace_id, span_id, Some(trace_start_ns))` | `NotFound`/`NoTargetSpan` → load retry, final error `trace not found`; `Busy` → load retry, final error `storage unavailable`; `TooLarge` → `Failed { Permanent, "trace too large" }`; `EvaluationTrace` → `Failed { Permanent, "target is an evaluation trace" }`; `Failed`/`Convert` → `Failed { Permanent, "storage read failed" }`. A load retry is `LoadRetry { not_before: now + 30 s }` while `load_retries < 3`, else `Failed { Permanent, <final error> }` |
+| 6 | `trace_load::load_trace(state, project, trace_id, span_id, Some(trace_start_ns))` | `Saturated` (no load permit within 30 s) → `Requeue { not_before: now + retry::SATURATED_REQUEUE_NS }`, no load retry spent; `NotFound`/`NoTargetSpan` → load retry, final error `trace not found`; `Busy` → load retry, final error `storage unavailable`; `TooLarge` → `Failed { Permanent, "trace too large" }`; `EvaluationTrace` → `Failed { Permanent, "target is an evaluation trace" }`; `Failed`/`Convert` → `Failed { Permanent, "storage read failed" }`. A load retry is `LoadRetry { not_before: now + 30 s }` while `load_retries < 3`, else `Failed { Permanent, <final error> }` |
 | 7 | `llmobs_eval::resolve(&mapping, Some(&TraceData::new(&spans, span_id)), None)` | `Failed { Permanent, <MappingError display> }` |
 | 8 | the live score definition of `output.name` (`state.definitions.live`), checked with `fits_definition` | `Failed { Permanent, "score definition mismatch" }` |
 | 9 | a levenshtein check with `output` or `expected` over 64 KiB | `Failed { Permanent, "levenshtein inputs must be at most 64 KiB each" }` |
-| 10 | rule or backfill job, judge evaluator, rule with a budget: render the prompt, `budget::model_price`, estimate, reserve (§ I3.6) | no price → `Failed { Permanent, "model has no price" }` and pause the rule (`errors`, detail `model has no price`); over budget → `Skipped { error: "budget" }`, pause the rule (`budget`), skip the rule's other queued jobs |
-| 11 | `start_attempt`: one write, `attempts += 1`, fenced by `claims` | no row → release the reservation and return (re-claimed or deleted) |
-| 12 | `judge_trace_id(job id, attempts)`; `execute::run_evaluator` with origin `Rule(rule_id)` for rule and backfill jobs, `Test` for manual runs | — (the run returns an outcome either way) |
+| 10 | rule or backfill job, judge evaluator, rule with a budget: render the prompt, `budget::model_price`, estimate, reserve (§ I3.6). The reservation is a guard (`budget::Reservation`, § I3.3) | no price → `Failed { Permanent, "model has no price" }` and pause the rule (`errors`, detail `model has no price`); over budget → `Skipped { error: "budget" }`, pause the rule (`budget`), skip the rule's other queued jobs |
+| 11 | `start_attempt`: one write, `attempts += 1`, fenced by `claims` | no row → return (re-claimed or deleted; dropping the guard releases the reservation) |
+| 12 | `job_judge_trace_id(job id, claims)`; `execute::run_evaluator` with origin `Rule(rule_id)` for rule and backfill jobs, `Test` for manual runs | — (the run returns an outcome either way) |
 | 13 | `execute::judge_usage`; `state.usage.add_judge` | — |
 | 14 | commit the judge trace, up to 3 tries 5 s apart (`execute::commit_judge_trace`) | the retryable path (below), error `could not store the result` |
 | 15 | success only: `scores::write` with `Writer::Evaluator`, up to 3 tries 5 s apart; a `BadRequest` answer is not retried | `BadRequest` → `Failed { Permanent, "score definition mismatch" }`; other errors → the retryable path, error `could not store the result` |
-| 16 | `finish` (§ I3.6): the job row, `rule_spend`, pauses and the connection status in one write | — |
+| 16 | `finish` (§ I3.6): `rule_spend`, the job row, pauses and the connection status in one write | — |
 
-Every exit after step 10 reserved a budget releases it (cost 0), except step 16, which turns it into the actual cost.
+The reservation guard releases the reservation when it is dropped without being settled: on every early exit, on a panic (unwinding drops it) and when the worker task is aborted at shutdown. Step 16 settles it with the actual cost.
 
 **Dispositions after the call** (step 16):
 
@@ -289,16 +299,19 @@ Every exit after step 10 reserved a budget releases it (cost 0), except step 16,
 |---|---|---|
 | `Ok` and the score was written | `Done` | `Done` |
 | `Err`, class `Retryable` | `Retry { not_before: now + retry::backoff_ns(job id, attempts) }` while `attempts < 6`, else `Failed { Retryable, … }` | same |
-| `Err`, class `Pause`, judge | connection `failing` (error text); pause every enabled, unpaused rule whose evaluator uses the connection (`connection`); `Requeue { not_before: now }` | `Failed { Pause, … }`; connection `failing` |
-| `Err`, class `Pause`, webhook | pause every enabled, unpaused rule of the evaluator (`errors`, detail = the error text); `Requeue { not_before: now }` | `Failed { Pause, … }` |
+| `Err`, class `Pause`, judge | connection `failing` (error text); pause every enabled, unpaused rule whose evaluator uses the connection (`connection`); `PauseRequeue { not_before: now }` (the attempt is given back, D-I-14) | `Failed { Pause, … }`; connection `failing` |
+| `Err`, class `Pause`, judge, and the connection's stored `updated_at` is no longer `job.connection_updated_at` (the key changed during the call) | `PauseRequeue { not_before: now }` only: no pause, no status change (D-I-14) | `Failed { Pause, … }` only |
+| `Err`, class `Pause`, webhook | pause every enabled, unpaused rule of the evaluator (`errors`, detail = the error text); `PauseRequeue { not_before: now }` | `Failed { Pause, … }` |
 | `Err`, class `Permanent` | `Failed { Permanent, … }` | same |
 | the retryable path after a write failure (steps 14–15) | as `Retryable` above, error `could not store the result` | same |
 
-After a rule job ends `Done` or `Failed`, the breaker records it (§ I3.3) when it "reached the evaluator": `Done`, or `Failed` with `EvalError::Judge`, `Webhook` or `Egress`. A trip pauses the rule (`errors`, detail `half or more of the last 50 jobs failed`). `Requeue`, `Retry`, `LoadRetry` and `Skipped` are not recorded.
+**The breaker.** Every exit after step 12 carries `reached_evaluator: bool`. It is true for `Done`, and for a `Failed` whose run error is `EvalError::Judge`, `Webhook` or `Egress` (`matches!(error, EvalError::Judge(_) | EvalError::Webhook(_) | EvalError::Egress(_))`). It is false for every exit before step 12, for the write failures of steps 14–15 (`could not store the result`, `score definition mismatch`) and for every other variant. After a rule job's `finish` matched its row, the breaker records it (§ I3.3) when `reached_evaluator` is true. A trip pauses the rule (`errors`, detail `half or more of the last 50 jobs failed`).
 
 The judge's `cost` for the budget and `rule_spend` is the `llm` span's `cost_total`; when the `llm` span has tokens but no `cost_total`, it is the estimate; with no `llm` span it is 0.
 
 Every pause is an audit event: `tracing::info!(target: "audit", rule_id, project_id, reason, "online rule paused")`. Logs never carry the detail text.
+
+**Accepted by design** (not bugs to fix): the janitor can re-queue a job that is still running, so a slow judge may be called twice (the fence drops the first result); the hourly cap and the breaker windows reset on restart; manual runs take priority 0, so one org's manual runs can delay every rule job, bounded only by the per-user limit of 10 a minute (D-I-21).
 
 ---
 
@@ -306,7 +319,7 @@ Every pause is an audit event: `tracing::info!(target: "audit", rule_id, project
 
 **Goal:** the reads M3, M4 and M6 need. Trace and span reads can apply strict exclusions; `span_refresh` exists; `validate_filter` replaces K's `check_alert_filter`; `GET /scores` filters by `evaluator_id` and `rule_id`.
 
-**Edit only:** `crates/storage/src/filter/scope.rs`, `crates/storage/src/reads/{mod,traces,alerts,scores}.rs`, `crates/storage/src/lib.rs` (re-exports), `crates/storage/src/query/traces.rs` and `crates/storage/tests/trace_bench.rs` (struct literals only), `crates/server/src/routes/{alert_rules,read,traces,scores,streams}.rs`, `crates/server/src/mcp/traces.rs`, `crates/server/src/api/{convert,scores}.rs`, `crates/server/src/scores.rs` (one test literal), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/05-query.md`, `docs/spec/09-api.md`.
+**Edit only:** `crates/storage/src/filter/scope.rs`, `crates/storage/src/filter/mod.rs` (the `pub(crate) use scope::{…}` line only), `crates/storage/src/reads/{mod,traces,alerts,scores}.rs`, `crates/storage/src/lib.rs` (re-exports), `crates/storage/src/query/traces.rs` and `crates/storage/tests/trace_bench.rs` (struct literals only), `crates/server/src/routes/{alert_rules,read,traces,scores,streams}.rs`, `crates/server/src/mcp/traces.rs`, `crates/server/src/api/{convert,scores}.rs`, `crates/server/src/scores.rs` (one test literal), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/05-query.md`, `docs/spec/09-api.md`.
 
 **Commit:** `Add strict exclusions, span refresh and score filters to storage reads`
 
@@ -314,11 +327,17 @@ Every pause is an audit event: `tracing::info!(target: "audit", rule_id, project
 
 ```rust
 /// Exclusions that no request flag and no filter can turn off (D-I-9): evaluation traces and
-/// experiment traces. On `spans`, the test is on the span's trace, not on the span.
-pub(crate) async fn strict_exclusions(ctx: &QueryContext, view: FilterView) -> Result<Expr, RunError>
+/// experiment traces. On `spans`, the test is on the span's trace, not on the span. `trace_ids`,
+/// when given, are the only traces the caller reads: the `spans` subquery is limited to them.
+pub(crate) async fn strict_exclusions(
+    ctx: &QueryContext,
+    view: FilterView,
+    trace_ids: Option<&[String]>,
+) -> Result<Expr, RunError>
 ```
+Add `strict_exclusions` to the `pub(crate) use scope::{exclusions, search, time_window};` line of `filter/mod.rs`, so `reads/traces.rs` can import it from `crate::filter`.
 - `Traces`: the conjunction that `exclusions(ctx, FilterView::Traces, false, false, false)` returns (both clauses). It always returns `Some` for those arguments; map `None` to `RunError::Internal(DataFusionError::Internal("…".into()))` rather than unwrapping.
-- `Spans`: `trace_id NOT IN (SELECT trace_id FROM traces WHERE <bad>)`, where `<bad>` is `environment = 'llmobs-eval' OR metadata['<experiment key>'] IS NOT NULL` on the `traces` view. Build `<bad>` as `NOT (<traces conjunction above>)`, the subquery with `ctx.session().table("traces")` → `.filter(bad)` → `.select(vec![col(traces::TRACE_ID)])`, and the expression with `datafusion::logical_expr::not_in_subquery(col(spans::TRACE_ID), Arc::new(plan.into_unoptimized_plan()))` (the `search` function above builds an `in_subquery` the same way).
+- `Spans`: `trace_id NOT IN (SELECT trace_id FROM traces WHERE [trace_id IN (<ids>) AND] <bad>)`, where `<bad>` is `environment = 'llmobs-eval' OR metadata['<experiment key>'] IS NOT NULL` on the `traces` view. Build `<bad>` as `NOT (<traces conjunction above>)`, the subquery with `ctx.session().table("traces")` → `.filter(bad)` (and, when `trace_ids` is `Some`, a first `.filter(col(traces::TRACE_ID).in_list(<lowercased ids as lit>, false))`, so DataFusion pushes the id test below the view's aggregation instead of aggregating every trace) → `.select(vec![col(traces::TRACE_ID)])`, and the expression with `datafusion::logical_expr::not_in_subquery(col(spans::TRACE_ID), Arc::new(plan.into_unoptimized_plan()))` (the `search` function above builds an `in_subquery` the same way).
 - Any other view: `RunError::InvalidRequest("strict exclusions apply to traces and spans".to_owned())`.
 
 Remove the module's `#![allow(dead_code)]` only if nothing in it is unused afterwards.
@@ -327,7 +346,7 @@ Remove the module's `#![allow(dead_code)]` only if nothing in it is unused after
 
 - `TraceRefreshRequest`, `TraceListRequest` and `SpanListRequest` gain `pub strict_exclusions: bool` (doc: "Apply [`strict_exclusions`]: evaluation and experiment rows are left out even when the filter names `environment` or the include flags are set (D-I-9)").
 - `ListPlan` gains `strict: bool`, set from the request in `ListPlan::traces` and `ListPlan::spans`.
-- In `refresh` and `list_frame`: when strict, push `strict_exclusions(ctx, view).await?` **instead of** calling `exclusions`; otherwise keep the current code.
+- In `refresh` and `list_frame`: when strict, push `strict_exclusions(ctx, view, ids).await?` **instead of** calling `exclusions`; otherwise keep the current code. `refresh` passes its ids (`Some`); the lists pass `None` (their window is on the span or trace start, which does not bound the trace row, so the subquery cannot be cut by time).
 - Every existing struct literal (server and storage, tests included; `rg -n "TraceRefreshRequest \{|TraceListRequest \{|SpanListRequest \{" crates`) gets `strict_exclusions: false`.
 
 ### `span_refresh` (`reads/traces.rs`)
@@ -357,8 +376,8 @@ pub const SPAN_REFRESH_COLUMNS: &[&str] = &[spans::TRACE_ID, spans::SPAN_ID, spa
 pub async fn span_refresh(ctx: &QueryContext, request: SpanRefreshRequest<'_>) -> Result<Vec<RecordBatch>, RunError>
 ```
 - Validation as `trace_refresh`: parse the filter for `FilterView::Spans` first; more than `MAX_REFRESH_IDS` ids or a bad id → `InvalidRequest`; `per_trace` outside `1..=MAX_REFRESH_SPANS_PER_TRACE` → `InvalidRequest("per_trace must be between 1 and 200")`; no ids → `Ok(vec![])` without a query.
-- The frame: `spans` table; conjuncts = (strict or default exclusions, as above, with `references_environment` from the parsed filter) AND `trace_id IN (ids)`; then the filter (`filter.apply`); then sort by `trace_id ASC, start_time ASC, span_id ASC` (`order_by` is for one sort column plus ties; build the three `SortExpr`s with `col(…).sort(true, false)`); then `select(SPAN_REFRESH_COLUMNS)`.
-- Run it with `frame.execute_stream()` (under the request timeout, like `trace_refresh`), and keep at most `per_trace` rows per trace while reading: for each batch, build a `BooleanArray` mask (count rows per `trace_id`, carried across batches in a `HashMap<String, usize>`; the stream is sorted, so a plain counter per id is enough), and keep `arrow::compute::filter_record_batch(&batch, &mask)` when it has rows. Memory stays bounded by the kept rows plus one batch.
+- The frame: `spans` table; conjuncts = (strict exclusions with `Some(&ids)`, or the default exclusions with `references_environment` from the parsed filter) AND `trace_id IN (ids)`; then the filter (`filter.apply`); then a window column `rn = row_number() OVER (PARTITION BY trace_id ORDER BY start_time ASC, span_id ASC)` (`frame.window(vec![…alias("rn")])`; build the expression with DataFusion's `row_number()` window function and `ExprFunctionExt`'s `.partition_by(…)`, `.order_by(…)`, `.build()?`; find the exact path in the pinned version with `rg -n "pub fn row_number" ~/.cargo/registry/src/*/datafusion-functions-window-*/src`); then `.filter(col("rn").lt_eq(lit(per_trace as u64)))`; then sort by `trace_id ASC, start_time ASC, span_id ASC` (three `SortExpr`s, `col(…).sort(true, false)`); then `select(SPAN_REFRESH_COLUMNS)`.
+- Run it with `frame.collect()` under the request timeout, like `trace_refresh`. The answer is at most 500 × 200 rows of three columns. The window sorts the matching spans of at most 500 traces on the columns it needs (the scan reads only the filter's columns and these three); DataFusion's memory pool bounds that sort, and running out is a `RunError` like any other read.
 - Export `SpanRefreshRequest`, `span_refresh`, `MAX_REFRESH_SPANS_PER_TRACE` and `SPAN_REFRESH_COLUMNS` from `reads/mod.rs` and `lib.rs`.
 
 M3 has no production caller of `span_refresh` (M4's sweeper is the first). It is a public storage read with its own tests, so it is not dead code.
@@ -417,7 +436,7 @@ Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its
 
 **Goal:** migration `00NN_eval_queue.sql` with `online_rules`, `eval_jobs` and `rule_spend`, and the three `meta` modules that read and write them.
 
-**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list and its migration tests), `crates/server/src/admin.rs` (the schema-mismatch test only), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`.
+**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list and its migration tests), `crates/server/src/admin.rs` (the schema-mismatch test only), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `NN` is not `0007`).
 
 **Commit:** `Store online rules, eval jobs and rule spend`
 
@@ -464,6 +483,7 @@ CREATE TABLE eval_jobs (
   attempts INTEGER NOT NULL DEFAULT 0,
   claims INTEGER NOT NULL DEFAULT 0,
   load_retries INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
   not_before INTEGER NOT NULL,
   error_class TEXT,
   error TEXT,
@@ -555,7 +575,7 @@ Functions (each documented with `# Errors`, `MetaError` when the query fails or 
 | `insert_rule(conn, new: NewRule, fields: RuleFields, now) -> RuleRow` | counts the project's rules first (`Conflict("a project has at most 500 online rules")` at 500); `unique_or(error, "an online rule with this name already exists")` like `meta/evaluators.rs` |
 | `update_rule(conn, project, id, fields, now) -> Option<RuleRow>` | replaces the editable columns and `updated_at`; `None` when missing; name clash → the same `Conflict` |
 | `delete_rule(conn, project, id) -> bool` | |
-| `count_enabled_rules(conn, org) -> u64` | `SELECT COUNT(*) FROM online_rules r JOIN projects p ON p.id = r.project_id WHERE p.org_id = ? AND r.enabled = 1` (D-I-32); paused rules count |
+| `count_enabled_rules(conn, org) -> u64` | `SELECT COUNT(*) FROM online_rules r JOIN projects p ON p.id = r.project_id WHERE p.org_id = ? AND p.state = 'active' AND r.enabled = 1` (D-I-32), like K's `count_enabled_org_rules` in `meta/alerts.rs`; paused rules count, rules of a project being deleted do not |
 | `rules_of_evaluator(conn, evaluator_id) -> Vec<RuleRow>` | every rule of the evaluator, ordered by `name, id` |
 | `pause_rule(conn, id, reason, detail: Option<&str>, now) -> bool` | `UPDATE … SET paused_reason = ?, paused_at = ?, paused_detail = ?, updated_at = ? WHERE id = ? AND enabled = 1 AND paused_reason IS NULL`; true when a row changed |
 | `pause_rules_of_connection(conn, connection_id, detail, now) -> Vec<Uuid>` | the same update (`'connection'`) for `evaluator_id IN (SELECT id FROM evaluators WHERE connection_id = ?)`, with `RETURNING id` |
@@ -589,6 +609,7 @@ pub(crate) struct JobRow {
     pub(crate) attempts: u32,
     pub(crate) claims: u32,
     pub(crate) load_retries: u32,
+    pub(crate) interruptions: u32,
     pub(crate) not_before: i64,
     pub(crate) error_class: Option<String>,
     pub(crate) error: Option<String>,
@@ -647,8 +668,12 @@ pub(crate) enum Finish {
     Retry { not_before: i64, error: String, judge_trace_id: Option<TraceId>, usage: JobUsage },
     /// back to `queued` with `load_retries += 1`, `not_before`, `error_class = 'retryable'`, `error`.
     LoadRetry { not_before: i64, error: &'static str },
-    /// back to `queued` with `not_before`, nothing else (a pause, or a rule that is no longer runnable).
+    /// back to `queued` with `not_before`, nothing else (a rule that is no longer runnable, a changed
+    /// connection before the call, no trace-load permit).
     Requeue { not_before: i64 },
+    /// back to `queued` with `not_before` and `attempts = MAX(attempts - 1, 0)`: a pause gives back
+    /// the attempt the run counted (D-I-14).
+    PauseRequeue { not_before: i64 },
     /// `skipped`; sets `finished_at`, `error`, clears `error_class`.
     Skipped { error: &'static str },
 }
@@ -663,19 +688,21 @@ Box the big variants' fields if clippy reports `large_enum_variant` (§ Conventi
 | `insert_job(conn, job: NewJob, now) -> bool` | `INSERT … ON CONFLICT(dedup_key) DO NOTHING`, `status = 'queued'`, `not_before = now`; true when a row was inserted. Backfill's `DO UPDATE` rule (D-I-11) is M6's own function |
 | `get_job(pool, project, id) -> Option<JobRow>` | |
 | `list_jobs(pool, project, filter: &JobFilter, before: Option<(i64, Uuid)>, limit: i64) -> Vec<JobRow>` | `JobFilter { rule_id, evaluator_id, status: Option<&'static str>, kind: Option<&'static str> }` (all `Option`, `Copy`); each is `(?n IS NULL OR column = ?n)`; newest first `created_at DESC, id DESC`, strictly before `before` like `meta/alerts.rs` `list_events` |
-| `candidates(conn, now, saturated: &[Uuid], limit: i64) -> Vec<Candidate>` | § The candidate query |
+| `candidates(pool, now, saturated: &[Uuid], limit: i64) -> Vec<Candidate>` | § The candidate query. It takes the **reader** pool: the scan must never hold the single writer |
 | `claim(conn, id, now) -> Option<u32>` | `UPDATE eval_jobs SET status = 'running', claims = claims + 1, updated_at = ? WHERE id = ? AND status = 'queued' RETURNING claims` |
 | `start_attempt(conn, id, claims, now) -> Option<u32>` | `UPDATE … SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'running' AND claims = ? RETURNING attempts` |
 | `finish(conn, id, claims, finish: Finish, now) -> bool` | one `UPDATE … WHERE id = ? AND status = 'running' AND claims = ?` per variant (columns as in the enum docs); false when no row matched (D-I-12: drop the result) |
 | `skip_queued_of_rule(conn, rule_id, error: &'static str, now) -> u64` | queued jobs of the rule → `skipped` with `error`, `finished_at = now` |
-| `requeue_stale(conn, older_than, now) -> u64` | `running` jobs with `updated_at < older_than` → `queued`, `not_before = now` (the janitor) |
-| `recover(conn, now) -> (u64, u64)` | startup: `running` with `claims > 3` → `failed`, `error_class = 'permanent'`, `error = 'interrupted too often'`, `finished_at = now`; then other `running` → `queued`, `not_before = now`. Returns `(requeued, failed)` |
+| `requeue_stale(conn, older_than, now) -> (u64, u64)` | the janitor: the interruption rule below for `running` jobs with `updated_at < older_than`. Returns `(requeued, failed)` |
+| `recover(conn, now) -> (u64, u64)` | startup: the interruption rule for every `running` job. Returns `(requeued, failed)` |
+
+**The interruption rule.** Both functions do, in one transaction and in this order (D-I-12): `running` jobs (of the cut-off, for the janitor) with `interruptions >= 3` → `failed`, `error_class = 'permanent'`, `error = 'interrupted too often'`, `finished_at = now`, `updated_at = now`; then the other ones → `queued`, `not_before = now`, `interruptions = interruptions + 1`, `updated_at = now`. The SQL text is fixed: a shared private helper runs the two statements with `updated_at < ?` bound to the cut-off, and `recover` passes `i64::MAX`.
 | `prune(conn, now) -> PruneReport` | § Pruning |
 | `counts_since(pool, project, since) -> HashMap<Uuid, JobCounts>` | `SELECT rule_id, status, COUNT(*) … WHERE project_id = ? AND rule_id IS NOT NULL AND created_at >= ? GROUP BY rule_id, status`. `JobCounts { queued, running, done, failed, skipped: u64 }` (`Default`) lives in this module |
 
 `trace_id`, `span_id` and `judge_trace_id` are stored as their 16 and 8 raw bytes (`TraceId::as_bytes`/`from_bytes`, `SpanId` likewise; read `crates/core/src/ids.rs`). A blob of the wrong length is `MetaError::Corrupt`.
 
-**The candidate query.** One statement; `saturated` is bound as a JSON array of UUID strings (`serde_json::to_string`), so the SQL text stays fixed:
+**The candidate query.** One statement on the reader pool; `saturated` is bound as a JSON array of UUID strings (`serde_json::to_string`), so the SQL text stays fixed:
 
 ```sql
 SELECT * FROM (
@@ -714,7 +741,7 @@ LIMIT ?3
 | `spent_between(pool, rule_id, from_day, to_day) -> f64` | `SELECT COALESCE(SUM(spent_usd), 0) … WHERE rule_id = ? AND day >= ? AND day < ?` |
 | `prune_spend(conn, before_day) -> u64` | deletes rows with `day < before_day`; 62 days keep two whole months for the month view |
 
-There is no batch read: the rules list calls `spent_between` once per budgeted rule (at most 500 per project).
+There is no batch read: the rules list calls `spent_between` once per budgeted rule of the page it answers.
 
 ### Spec
 
@@ -739,8 +766,10 @@ With `crate::meta::test_db()`, an org, a project, a connection, an evaluator (`m
 - `claim` → `Some(1)`, a second `claim` → `None`; `start_attempt` with a stale `claims` → `None`;
 - `finish` with a stale `claims` is false and changes nothing; each `Finish` variant sets exactly its columns (one assertion block per variant);
 - `candidates`: priority order; at most 20 per (priority, project): 25 jobs of project A and 1 of project B at the same priority give 21 rows including B's; `saturated` excludes a connection's jobs and a webhook evaluator's jobs (by evaluator id); a paused or disabled rule's jobs are excluded, manual jobs are not; `not_before` in the future is excluded; a `deleting` project's jobs are excluded;
-- `recover`: claims 4 → failed `interrupted too often`, claims 2 → queued;
-- `requeue_stale` only touches `running` rows older than the cut-off;
+- `recover`: `interruptions` 3 → failed `interrupted too often`; `interruptions` 2 with `claims` 6 → queued with `interruptions` 3 (claims do not count);
+- `requeue_stale` only touches `running` rows older than the cut-off, and applies the same `interruptions` rule;
+- `finish` with `PauseRequeue` after `start_attempt` leaves `attempts` where it was before the attempt, and never below 0;
+- `list_jobs`: each `JobFilter` field alone, and `before` pages newest first (`limit` 1, three rows, the cursor of each page is the last row's `(created_at, id)`), with two rows sharing a `created_at` ordered by `id DESC`;
 - `prune`: one case per step;
 - `counts_since` groups by rule and status and ignores manual jobs;
 - deleting the rule cascades its jobs; deleting the evaluator cascades its jobs.
@@ -809,7 +838,7 @@ pub(crate) fn model_price<'a>(prices: &'a PriceTable, model: &str, adapter: Adap
 pub(crate) fn estimate_usd(prompt_chars: usize, max_output_tokens: u32, price: &PriceRow) -> f64;
 ```
 
-`Budgets` keeps, per rule, the spend of the current period and the reservations, in memory:
+`Budgets` keeps, per rule, the spend of the current period and the reservations, in memory. A reservation is a guard: dropping it without settling gives the amount back, so an early return, a panic (unwinding drops it) or an aborted worker task can never leak a reservation.
 
 ```rust
 #[derive(Debug, Default)]
@@ -818,24 +847,46 @@ pub(crate) struct Budgets { rules: Mutex<HashMap<Uuid, RuleBudget>> }
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct RuleBudget { period_start: i64, spent: f64, reserved: f64 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Reserve {
-    /// Reserved: hand this amount back to `settle` or `release`.
-    Reserved(f64),
+#[derive(Debug)]
+pub(crate) enum Reserve<'a> {
+    /// Reserved: settle the guard after the call, or drop it to give the amount back.
+    Reserved(Reservation<'a>),
     /// `spent + reserved + estimate > budget`: pause the rule.
     Over,
     /// The rule's spend for this period is not loaded: call `load`, then try again.
     NotLoaded,
 }
 
+/// One reservation. Dropping it releases the amount; `settle` turns it into the actual cost.
+#[derive(Debug)]
+#[must_use = "dropping a reservation releases it"]
+pub(crate) struct Reservation<'a> {
+    budgets: &'a Budgets,
+    rule: Uuid,
+    period_start: i64,
+    amount: f64,
+    done: bool,
+}
+
+impl Reservation<'_> {
+    /// After a call: the reservation becomes `actual` spend.
+    pub(crate) fn settle(mut self, actual: f64);
+    /// The reserved amount (the estimate).
+    pub(crate) fn amount(&self) -> f64;
+    /// The period the reservation counts in.
+    pub(crate) fn period_start(&self) -> i64;
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) { if !self.done { /* release: reserved -= amount, clamped at 0 */ } }
+}
+
 impl Budgets {
-    pub(crate) fn try_reserve(&self, rule: Uuid, period_start: i64, budget: f64, estimate: f64) -> Reserve;
-    /// Sets the spend read from `rule_spend` for `period_start`. Keeps the reservations when the period is the same one.
+    pub(crate) fn try_reserve(&self, rule: Uuid, period_start: i64, budget: f64, estimate: f64) -> Reserve<'_>;
+    /// Sets the spend read from `rule_spend` for `period_start`, only when the rule has no entry
+    /// for that period. An entry for the same period is kept as it is: another job loaded it first,
+    /// and settles may have added to it since that read.
     pub(crate) fn load(&self, rule: Uuid, period_start: i64, spent: f64);
-    /// After a call: the reservation becomes `actual`.
-    pub(crate) fn settle(&self, rule: Uuid, period_start: i64, reserved: f64, actual: f64);
-    /// No call was made: give the reservation back.
-    pub(crate) fn release(&self, rule: Uuid, period_start: i64, reserved: f64);
     /// The view of the rule: `(spent, reserved)` for `period_start`, or `None`.
     pub(crate) fn view(&self, rule: Uuid, period_start: i64) -> Option<(f64, f64)>;
     /// Drops the rule (deleted, or its budget changed).
@@ -843,7 +894,7 @@ impl Budgets {
 }
 ```
 
-`try_reserve` returns `NotLoaded` when the rule has no entry or its `period_start` differs. `settle` and `release` do nothing when the stored period differs (the period turned during the call: the new period's spend is read from `rule_spend`, which `finish` updates). Reservations never go below 0 (clamp). The executor (I3.6) reads `rule_spend` when it gets `NotLoaded` — so the view is loaded on a rule's first check and at each period change, not at startup.
+`try_reserve` returns `NotLoaded` when the rule has no entry or its `period_start` differs. Settling and releasing do nothing when the stored period differs (the period turned during the call: the new period's spend is read from `rule_spend`, which `finish` updates) or the entry was forgotten. Reservations never go below 0 (clamp). `settle` and `Drop` take the `Mutex` briefly and never panic (`unwrap_or_else(PoisonError::into_inner)`). The executor (I3.6) reads `rule_spend` when it gets `NotLoaded` — so the view is loaded on a rule's first check and at each period change, not at startup.
 
 ### `eval/breaker.rs` (D-I-14)
 
@@ -871,6 +922,9 @@ pub(crate) const LOAD_RETRIES: u32 = 3;
 pub(crate) const LOAD_RETRY_NS: i64 = 30_000_000_000;
 pub(crate) const WRITE_TRIES: u32 = 3;
 pub(crate) const WRITE_RETRY: Duration = Duration::from_secs(5);
+/// A job that got no trace-load permit in 30 s goes back to the queue this much later, without
+/// spending a load retry: the wait measured the other jobs, not this trace (D-I-23).
+pub(crate) const SATURATED_REQUEUE_NS: i64 = 5_000_000_000;
 
 /// `min(5 s · 2^(attempts−1), 10 min)` scaled by a factor in `[0.8, 1.2)` taken from
 /// SHA-256(`llmobs.retry.v1` ‖ job id ‖ attempts as u32 BE): deterministic, so a test can pin it.
@@ -922,13 +976,13 @@ impl From<RuleLimitError> for ApiError  // ApiError::PlanLimit { detail: "Your p
 ### Tests
 
 Unit tests in each module:
-- `budget`: `day_start` and `month_start` on 2026-03-15T13:00Z, on an exact midnight, and on 2024-02-29; `estimate_usd` for 400 chars, 100 output tokens at 1 and 4 USD per million is `100·1e-6 + 100·4e-6`; `model_price` is `None` for a row without `price_output`; `Budgets`: `NotLoaded` first, then `Reserved`, then `Over` at the edge (`spent + reserved + estimate > budget` is over, equal is not); `settle` moves the reservation to spend; `release` gives it back; a new period is `NotLoaded` again; `forget`.
+- `budget`: `day_start` and `month_start` on 2026-03-15T13:00Z, on an exact midnight, and on 2024-02-29; `estimate_usd` for 400 chars, 100 output tokens at 1 and 4 USD per million is `100·1e-6 + 100·4e-6`; `model_price` is `None` for a row without `price_output`; `Budgets`: `NotLoaded` first, then `Reserved`, then `Over` at the edge (`spent + reserved + estimate > budget` is over, equal is not); `settle` moves the reservation to spend; dropping a `Reservation` gives it back; a guard dropped after `forget` or after the period turned changes nothing; `load` for the period already loaded keeps the entry (load 1.0, reserve 0.5, settle 0.5 → spent 1.5; `load(…, 1.0)` again → still 1.5); a new period is `NotLoaded` again; `forget`.
 - `breaker`: 19 failures do not trip; the 20th with ≥ half failed trips and clears the window; 50 successes then 20 failures do not trip (window is the last 50: 30 ok, 20 failed → 40 % failed); 25 ok + 25 failed trips; `reset`.
 - `retry`: `backoff_ns` for attempts 1–8 lies in `[0.8, 1.2)` × `5 s · 2^(n−1)` capped at 10 min; the same job and attempt give the same value; two jobs differ.
 - `hourly`: 10 000 admitted then false, `dropped` counts; a new hour resets.
 - `rule_limit`: `check(5, None)` ok; `check(1, Some(1))` ok; `check(2, Some(1))` is `Err(RuleLimitError { limit: 1 })`; the `ApiError` is `PlanLimit` with `Your plan allows 1 active online rule.`, and with limit 3, `… 3 active online rules.`
 
-Items with no production caller before I3.6 get the item-level `#[allow(dead_code)]` with `// I3.6 uses it.` (or `I3.7`, `I3.8`, `M4`). The sub-phase that first uses an item removes its attribute.
+Items with no production caller before I3.6 get the item-level `#[allow(dead_code)]` with `// I3.6 uses it.` (or `I3.7`, `I3.8`, `M4`). The sub-phase that first uses an item removes its attribute (§ Conventions › Dead code). Expected: I3.6 removes those of `budget` (except `Budgets::view` and `Budgets::forget`), `Breakers::record` and `retry`; I3.8 those of `rule_limit`, `HourlyCaps::{dropped, forget}`, `Budgets::{view, forget}` and `Breakers::reset`; `HourlyCaps::admit` keeps its M4 attribute. The compiler decides: a sub-phase removes an attribute when the build passes without it, and reports what it removed.
 
 ### Done when
 
@@ -982,9 +1036,9 @@ pub(crate) fn count_judge_usage(state: &AppState, project: &ProjectRow, now: i64
 /// Commits the judge trace in its own task (D-G-38). Its spans are not billable (D-I-31).
 pub(crate) async fn commit_judge_trace(state: &AppState, project: &ProjectRow, now: i64, trace: Normalized) -> Result<CommitReceipt, IngestError>;
 
-/// The judge trace id of a job's attempt (D-I-16): the first 16 bytes of
-/// SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ attempts as u32 BE).
-pub(crate) fn job_judge_trace_id(job: Uuid, attempts: u32) -> TraceId;
+/// The judge trace id of a job's run (D-I-16): the first 16 bytes of
+/// SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
+pub(crate) fn job_judge_trace_id(job: Uuid, claims: u32) -> TraceId;
 
 /// A check's `output` or `expected` over 64 KiB (the distance is quadratic).
 pub(crate) fn levenshtein_too_large(evaluator: &Evaluator, variables: &Variables) -> bool;
@@ -999,7 +1053,7 @@ pub(crate) enum ExecuteError {
 - `run_evaluator` is `test_run.rs`'s two `runner.run(RunInput { … })` branches, unchanged, building `RunInput` from `args` (`ingest` from `state.ingest.context(project, now)`, `prices` from `state.ingest.prices()`). The check branch keeps `spawn_blocking` + `Handle::block_on`.
 - `judge_usage` finds the `llm` span (`span.span_kind == SpanKind::Llm`) as `test_run.rs` does. `count_judge_usage` is the `state.usage.add_judge(…)` call moved here.
 - `commit_judge_trace` is the `reserve_exact(0)` + `commit_in_task(…, CommitTarget { request_bytes: 0, … })` pair.
-- `job_judge_trace_id`: `TraceId::from_bytes` refuses all zeros; SHA-256 output is never all zeros in practice, but handle it: on `Err`, flip the last byte to 1 and build again (comment the invariant). Add the constant `JUDGE_TRACE_TAG: &[u8] = b"llmobs.judge-trace.v1"` built with `llmobs_core::llmobs_name!(".judge-trace.v1").as_bytes()`.
+- `job_judge_trace_id`: `TraceId::from_bytes` refuses all zeros; SHA-256 output is never all zeros in practice, but handle it: on `Err`, flip the last byte to 1 and build again (comment the invariant). Add the constant `const JUDGE_TRACE_TAG: &[u8] = b"llmobs.judge-trace.v1";` as a plain literal, like `DERIVE_TAG` in `scores.rs`, with the comment "A hash input, not an attribute name: the D46 rename must not change judge trace ids."
 - `levenshtein_too_large` is `test_run.rs`'s check, moved; `render` moves with it if `test_run.rs` no longer needs it, else make it `pub(crate)` in `execute.rs` and import it.
 
 `test_run.rs` keeps its body rules, its answer building and its 4xx/503 mapping, and calls these functions. `ExecuteError::Panicked` maps to `ApiError::Internal`. The test-run tests must pass unchanged: that is the proof the move kept the behaviour.
@@ -1033,7 +1087,7 @@ The variant has no production caller before I3.6: item-level `#[allow(dead_code)
 - `evaluator_scores_count_in_usage`: after the write, `state.usage` flushed (`state.usage.flush(&state.meta)`) gives `usage_daily.scores = 1` for the day (read how `usage.rs` tests read `usage_daily`). This is the design's "evaluator scores count in `usage_daily.scores`".
 
 `execute.rs` tests:
-- `job_judge_trace_id_is_pinned`: compute SHA-256 of the tag ‖ the 16 bytes of `01900000-0000-7000-8000-000000000800` ‖ `00 00 00 01` outside this code (for example `printf` with `xxd -r -p | sha256sum`), pin the first 32 hex digits, and assert. A different `attempts` gives a different id.
+- `job_judge_trace_id_is_pinned`: compute SHA-256 of the tag ‖ the 16 bytes of `01900000-0000-7000-8000-000000000800` ‖ `00 00 00 01` (claims 1) outside this code (for example `printf` with `xxd -r -p | sha256sum`), pin the first 32 hex digits, and assert. A different `claims` gives a different id.
 - `judge_usage_reads_the_llm_span` on a hand-built `EvalRun` (or the result of a check run: no `llm` span → `None`).
 
 The test-run tests in `routes/evaluators.rs` pass unchanged.
@@ -1062,7 +1116,7 @@ Unit tests next to the types: `OnlineRule` round-trips the fixture and omits abs
 
 ### OpenAPI (`api/openapi.rs`)
 
-Register the schemas (with `insert_page::<EvalJob>("EvalJobPage")`; `OnlineRulePage` with its own schema) and add `online_rule_paths` and `eval_job_paths`, built like `evaluator_paths`. Tag `evaluation`. Operations:
+Register the schemas in the schema list of `openapi.rs` (`set.insert::<T>()` for each type; `set.insert_page::<EvalJob>("EvalJobPage")`; `set.insert::<OnlineRulePage>()`, which works because its hand-written `ToSchema::name()` is `OnlineRulePage`) and add `online_rule_paths` and `eval_job_paths`, built like `evaluator_paths`. Tag `evaluation`. Operations:
 
 | operation_id | Method and path | Request | 2xx | Errors | Description |
 |---|---|---|---|---|---|
@@ -1076,7 +1130,11 @@ Register the schemas (with `insert_page::<EvalJob>("EvalJobPage")`; `OnlineRuleP
 | `get_eval_job` | `GET {PROJECT}/eval-jobs/{id}` | — | `200 EvalJob` | 400, 401, 403, 404, 429 | "Any project member can read." |
 | `post_evaluator_run` | `POST {PROJECT}/evaluators/{id}/run` | `RunEvaluatorRequest` | `202 EvalJob` | 400, 401, 403, 404, 429 | "Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs." |
 
-`tests/openapi.rs`: add `("OnlineRulePage", "OnlineRule")` and `("EvalJobPage", "EvalJob")` to the first `pages` list, and both names to the second (§ Conventions). If the `next_cursor` assertions in the first loop need `OnlineRulePage`'s schema to look exactly like `Page<T>`'s, make it so.
+`tests/openapi.rs` (§ Conventions):
+- `OPERATIONS`: the nine `(method, path, operation_id)` tuples of the table, with the paths written out (`/api/v1/projects/{project}/online-rules`, `/api/v1/projects/{project}/online-rules/{id}`, `/api/v1/projects/{project}/online-rules/{id}/resume`, `/api/v1/projects/{project}/eval-jobs`, `/api/v1/projects/{project}/eval-jobs/{id}`, `/api/v1/projects/{project}/evaluators/{id}/run`), after the evaluator operations;
+- `QUERY_OR_BODY`: `list_online_rules` and `list_eval_jobs`;
+- `expected_errors`: a branch `post_online_rule || patch_online_rule` → `{400, 401, 403, 404, 409, 429}`, and a branch `get_online_rule || delete_online_rule || post_online_rule_resume || get_eval_job || post_evaluator_run` → `{400, 401, 403, 404, 429}`, both before the `READ_OPERATIONS` branch;
+- the two `pages` lists: `("OnlineRulePage", "OnlineRule")` and `("EvalJobPage", "EvalJob")` in the first, both names in the second. If the `next_cursor` assertions in the first loop need `OnlineRulePage`'s schema to look exactly like `Page<T>`'s, make it so.
 
 The routes come in I3.8 and I3.9. No test requires a documented operation to have a route (`http/access.rs` checks the other direction: every documented route is in the document), so the operations can land first.
 
@@ -1091,7 +1149,7 @@ The values are § Fixed identifiers; times are `2026-01-01T…` with nine fracti
 - `requests/online-rule-create.json`: the create body of rule `…0700`.
 - `requests/evaluator-run.json`: `{trace_id: "a1000000000000000000000000000001", trace_start: "2026-01-01T10:00:00.000Z", variable_mapping: {input: "trace.input", output: "trace.output"}}`. Check `trace_start` against trace 1's `start_time` in `fixtures/api/dataset/spans.json` and use that value.
 
-`api_examples.rs`: `list_online_rules` → `online-rules.json`; `get_online_rule` (`id` …0700) → `online-rule.json`; `post_online_rule` (201) → `online-rule.json`; `post_online_rule_resume` (`id` …0701, 200) → `online-rule.json`; `list_eval_jobs` → `eval-jobs.json`; `get_eval_job` (`id` …0800) → `eval-job.json`; `post_evaluator_run` (`id` …0500, **202**, `example_status` or a variant with path params) → `eval-job-queued.json`. `tests/api_examples.rs`: round-trip every file with its type, and the two request files (`RunEvaluatorRequest` has no `Serialize`: deserialize it only, as M2 does for `evaluator-test.json`), and add them to the request ↔ operation list. Run `just api-examples` for `manifest.json`.
+`api_examples.rs`: `list_online_rules` → `online-rules.json`; `get_online_rule` (`id` …0700) → `online-rule.json`; `post_online_rule` (201) → `online-rule.json`; `post_online_rule_resume` (`id` …0701, 200) → `online-rule.json`; `list_eval_jobs` → `eval-jobs.json`; `get_eval_job` (`id` …0800) → `eval-job.json`; `post_evaluator_run` (`id` …0500, **202**) → `eval-job-queued.json`, written with struct update syntax because no helper takes both path params and a status: `Example { status: 202, ..example("post_evaluator_run", params(&[("id", "01900000-0000-7000-8000-000000000500")]), BTreeMap::new(), "static/eval-job-queued.json", "application/json") }`. `tests/api_examples.rs`: round-trip every file with its type, and the two request files (`RunEvaluatorRequest` has no `Serialize`: deserialize it only, as M2 does for `evaluator-test.json`), and add them to the request ↔ operation list. Run `just api-examples` for `manifest.json`.
 
 `fixtures/api/README.md` § Fixed identifiers: add the rule, the second rule and the three jobs.
 
@@ -1123,7 +1181,7 @@ Run `just openapi` after the Rust types, then the web checks.
 
 **Goal:** `execute::run_job` runs one claimed job end to end (§ Job execution) and `finish` writes its outcome, with retries, load retries, write retries, pauses, the breaker and budgets. `AppInner` gains `eval: EvalQueue`. The dispatcher (I3.7) is the only production caller; the tests call `run_job` on jobs they insert and claim.
 
-**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/execute.rs`, `crates/server/src/eval/{budget,breaker,retry}.rs` (remove `dead_code` attributes only), `crates/server/src/scores.rs` (remove the variant's `dead_code` attribute only), `crates/server/src/http/mod.rs` (`AppInner.eval`), `crates/server/src/serve.rs` (construct it only), `crates/server/src/test_support/mod.rs` (construct it only), `docs/spec/06-evaluation.md`.
+**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/execute.rs`, `crates/server/src/eval/trace_load.rs` (the `Saturated` error only), `crates/server/src/eval/test_run.rs` (its mapping of `Saturated` only), `crates/server/src/eval/{budget,breaker,retry}.rs` (remove `dead_code` attributes only), `crates/server/src/scores.rs` (remove the variant's `dead_code` attribute only), `crates/server/src/http/mod.rs` (`AppInner.eval`), `crates/server/src/serve.rs` (construct it only), `crates/server/src/test_support/mod.rs` (construct it only), `docs/spec/06-evaluation.md`.
 
 **Commit:** `Run queued evaluator jobs`
 
@@ -1145,6 +1203,8 @@ impl EvalQueue {
     pub(crate) fn wake(&self) { self.wake.notify_one(); }
 }
 ```
+Dead code (§ Conventions): `run_job`, `ClaimedJob`, `EvalQueue::wake` and the field `hourly` have no production caller or reader until I3.7 and I3.8. Give each an item-level `#[allow(dead_code)] // I3.7 calls it.` (`// I3.8 reads it.` for `hourly`). Everything `run_job` reaches then counts as used, so remove the I3.3 attributes of what it calls.
+
 `AppInner` gains `pub(crate) eval: crate::eval::EvalQueue` (doc: "The eval queue's in-memory state (D-I-6)."); `serve.rs` and `test_support/mod.rs` set `eval: crate::eval::EvalQueue::default()`. I3.7 adds fields and replaces `Default` with `EvalQueue::new(workers)`.
 
 ### `run_job` and `finish` (`eval/execute.rs`)
@@ -1155,6 +1215,8 @@ impl EvalQueue {
 pub(crate) struct ClaimedJob {
     pub(crate) row: JobRow,
     pub(crate) claims: u32,
+    /// The judge connection's `updated_at` when the job was claimed (D-I-14); `None` for checks and webhooks.
+    pub(crate) connection_updated_at: Option<i64>,
 }
 
 /// Runs one claimed job and records its outcome (§ Job execution). Every step's failure is a job
@@ -1164,15 +1226,16 @@ pub(crate) async fn run_job(state: &AppState, job: ClaimedJob) -> Result<(), Met
 
 Follow § Job execution step by step; write each step as a small private `async fn` returning `Result<T, Exit>`, where `Exit` is a private enum of the early outcomes (`Finish(Finish)`, `Gone`, `PauseAndFinish { … }`), so `run_job` reads as the table. Details the table does not give:
 
+- **`trace_load.rs`.** Add `LoadError::Saturated` (`#[error("storage is busy")]`) and return it when the permit wait times out (the first `map_err` of `load_trace_capped`); the storage `Busy` and `Timeout` cases stay `Busy`. `test_run.rs` matches `LoadError::Busy | LoadError::Saturated` in its existing `Busy` arm, so test runs answer as before. Add a `trace_load.rs` test: with every permit held (the existing permit test shows how) and the clock paused (`#[tokio::test(start_paused = true)]`), `load_trace` returns `Saturated`.
 - **Origin.** `EvalOrigin::Rule(rule_id)` when `row.rule_id` is set (rule and backfill), else `EvalOrigin::Test`.
 - **Target.** `EvalTarget { trace_id: Some(row.trace_id), span_id: row.span_id }`.
 - **Budget (step 10).** Only when the job has a rule, the rule has `budget_usd` and `budget_period`, and the evaluator is a judge:
   1. `prompt = PromptTemplate::compile(&judge.prompt).and_then(|t| t.render(&variables))`; a template error is `Failed { Permanent, <TemplateError display> }` (it cannot happen for a saved evaluator, but do not unwrap).
   2. `adapter = Adapter::from_name(&connection_row.adapter)`; `price = budget::model_price(&state.ingest.prices(), &judge.model, adapter, now)`. `None` → `Failed { Permanent, "model has no price" }` and `pause_rule(rule, PAUSE_ERRORS, Some("model has no price"))`.
   3. `estimate = budget::estimate_usd(prompt.chars().count(), judge.max_output_tokens, price)`; `period_start = budget::period_start(period, now)`.
-  4. `state.eval.budgets.try_reserve(rule, period_start, budget, estimate)`; on `NotLoaded`, read `rule_spend::spent_between(reader, rule, period_start, now_day_end)` (`now_day_end = budget::day_start(now) + DAY_NS`), `load`, and try once more. A second `NotLoaded` cannot happen (the period was just loaded); treat it as `Failed { Permanent, "budget unavailable" }` and log a `warn` with the rule id.
+  4. `state.eval.budgets.try_reserve(rule, period_start, budget, estimate)`; on `NotLoaded`, read `rule_spend::spent_between(reader, rule, period_start, now_day_end)` (`now_day_end = budget::day_start(now) + DAY_NS`), `load`, and try once more. A second `NotLoaded` can only follow a `forget` between the two calls (the rule was edited or deleted); treat it as `Requeue { not_before: now }` and log a `debug` with the rule id.
   5. `Over` → one write: `pause_rule(rule, PAUSE_BUDGET, Some("budget reached"))`, `skip_queued_of_rule(rule, "budget")`, and this job `Finish::Skipped { error: "budget" }`.
-  Keep `(rule, period_start, reserved)` to settle or release later.
+  Keep the `Reservation` guard in a local of `run_job` until step 16 settles it. Do not move it into a spawned task: it borrows `state.eval.budgets`.
 - **The call (step 12).** `run_evaluator(state, RunArgs { … })`. `ExecuteError::Panicked` → `Failed { Permanent, "internal error" }`.
 - **Latency.** `latency_ms` is the wall time of `run_evaluator` (`Instant`).
 - **Writes (steps 14–15).** Try up to `retry::WRITE_TRIES` times with `tokio::time::sleep(retry::WRITE_RETRY)` between tries (tests use `#[tokio::test(start_paused = true)]` or a failing storage that recovers; see Tests). The judge trace commit comes first; the score write only on success.
@@ -1183,15 +1246,16 @@ Follow § Job execution step by step; write each step as a small private `async 
   - `metadata`: the outcome's `metadata` (`judge.*`), plus `llmobs.eval.job_id` = the job id, `llmobs.eval.evaluator_version` = the evaluator row's `version`, and `llmobs.eval.truncated = "true"` when the load was truncated. Build the keys with `llmobs_core::llmobs_name!(".eval.job_id")` etc., as constants in `execute.rs`.
   - `scores::write(state, &project, Writer::Evaluator { kind, evaluator_id, rule_id }, vec![item])`; the answer's single id is the `score_id`.
 - **Cost (D-I-15, D-I-18).** `actual = usage.cost_usd`, else the estimate when `usage` has tokens, else 0. `count_judge_usage` runs right after the call (step 13), before any write, as test runs do.
+- **The exit after the call.** Steps 12–15 end in one private `struct Ended { finish: Finish, reached_evaluator: bool, pause: Pause, actual: f64 }`, where `Pause` is `None`, `Connection { connection_id, error_text }`, `Evaluator { error_text }` or `MarkConnection { connection_id, error_text }` (a manual judge job). `reached_evaluator` follows § Job execution › The breaker.
 - **`finish` (step 16)** is one `MetaDb::write` that, in order:
-  1. calls `eval_jobs::finish(conn, id, claims, variant, now)`; when it returns false, it stops there and commits nothing else (the job was re-claimed or deleted; D-I-12 drops the result silently);
-  2. adds `actual` to `rule_spend` for `day_start(now)` when the job has a budgeted rule and `actual > 0`;
-  3. applies the pause the disposition asks for: `pause_rules_of_connection` + `connections::set_connection_status(conn, connection_id, "failing", Some(&error_text), now)`, or `pause_rules_of_evaluator(…, PAUSE_ERRORS, Some(&error_text))`, or (manual pause-class judge) only the connection status;
-  4. returns the ids of the rules it paused, for the audit log and the breaker reset.
-  After the write: `budgets.settle(rule, period_start, reserved, actual)` (or `release` when no call was made), log one audit line per paused rule, and record the breaker (§ Job execution). A trip is one more short write: `pause_rule(rule, PAUSE_ERRORS, Some("half or more of the last 50 jobs failed"))`.
+  1. adds `actual` to `rule_spend` for `day_start(now)` when the job has a budgeted rule and `actual > 0`. This runs even when step 2 finds the job re-claimed: the provider was paid, and the in-memory settle below counts it too, so memory and `rule_spend` agree;
+  2. for `Pause::Connection` and `Pause::MarkConnection`: reads the connection row (`connections::get_connection_tx`); when it is missing or its `updated_at` is not `job.connection_updated_at`, the connection changed during the call, so the pause becomes `Pause::None` (and a rule job's `finish` stays `PauseRequeue`);
+  3. calls `eval_jobs::finish(conn, id, claims, variant, now)`; when it returns false, it stops there and commits step 1 only (the job was re-claimed or deleted; D-I-12 drops the result silently);
+  4. applies the pause that is left: `pause_rules_of_connection` + `connections::set_connection_status(conn, connection_id, "failing", Some(&error_text), now)`, or `pause_rules_of_evaluator(…, PAUSE_ERRORS, Some(&error_text))`, or (`MarkConnection`) only the connection status;
+  5. returns whether the row matched and the ids of the rules it paused, for the audit log.
+  After the write: `reservation.settle(actual)` when there is one (always, matched or not), log one audit line per paused rule, and, when the row matched and `reached_evaluator`, record the breaker. A trip is one more short write: `pause_rule(rule, PAUSE_ERRORS, Some("half or more of the last 50 jobs failed"))`, then its audit line.
 - **Logs.** One `debug` per job: job id, kind, status, attempts, error class, latency. Never the error text of a judge or webhook failure at `info` or above (it is safe, but it is the user's content area); never variables, prompts or answers.
 
-`EvalError` kind for the breaker: `matches!(error, EvalError::Judge(_) | EvalError::Webhook(_) | EvalError::Egress(_))`.
 
 ### Spec
 
@@ -1199,30 +1263,41 @@ Follow § Job execution step by step; write each step as a small private `async 
 
 ### Tests (`eval/execute.rs`)
 
-Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time first, § Conventions; an org, a project, a mock-LLM connection on `MockLlm`, a judge evaluator whose prompt uses `{{ input }}` and `{{ output }}`, a stored target trace via `app.commit_spans` with a root span carrying `session_id` and `user_id`), `rule_job(…)` (inserts a rule and a job with `insert_job`, then `claim`s it and builds `ClaimedJob`), and `job(app, id)` to read the row back. Use `MockLlm::start(vec![completion(…)])` as M2's test-run tests do, and `MockWebhook` for webhook cases.
+Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time first, § Conventions; an org, a project, a mock-LLM connection on `MockLlm`, a judge evaluator whose prompt uses `{{ input }}` and `{{ output }}`, a stored target trace via `app.commit_spans` with a root span carrying `session_id` and `user_id`), `rule_job(…)` (inserts a rule and a job with `insert_job`, then `claim`s it and builds `ClaimedJob` with the connection row's current `updated_at`), and `job(app, id)` to read the row back. Use `MockLlm::start(vec![completion(…)])` as M2's test-run tests do, and `MockWebhook` for webhook cases.
 
-- `a_rule_job_writes_the_score_and_the_judge_trace`: `done`, 1 attempt, `judge_trace_id == job_judge_trace_id(id, 1)`, `score_id` set; `GET /scores?rule_id=` returns one `llm_judge` score with `evaluator_id`, `rule_id`, the root's `session_id` and `user_id`, metadata `judge.trace_id` and `llmobs.eval.job_id`; `GET /traces/{judge trace}` finds the judge trace in `llmobs-eval`.
+- `a_rule_job_writes_the_score_and_the_judge_trace`: `done`, 1 attempt, `judge_trace_id == job_judge_trace_id(id, 1)` (claims 1), `score_id` set; `GET /scores?rule_id=` returns one `llm_judge` score with `evaluator_id`, `rule_id`, the root's `session_id` and `user_id`, metadata `judge.trace_id` and `llmobs.eval.job_id`; `GET /traces/{judge trace}` finds the judge trace in `llmobs-eval`.
 - `a_manual_job_has_no_rule_id_and_no_budget`.
 - `a_retryable_error_backs_off_then_fails_after_six_attempts`: mock 503 forever; run, re-claim (set `not_before` past with the manual clock: `app.state.clock.set(row.not_before)`), run again… after the 6th attempt the job is `failed`, `retryable`; each retry's `not_before` equals `now + backoff_ns(id, attempts)`.
-- `a_pause_error_pauses_the_connection_rules_and_requeues`: mock 401; two rules in two projects on the same connection; the job is `queued` with unchanged `attempts` after the run's increment (1), both rules `paused_reason = 'connection'`, the connection `failing` with `provider status 401`.
+- `a_pause_error_pauses_the_connection_rules_and_requeues`: mock 401; two rules in two projects on the same connection; the job is `queued` with `attempts` 0 (the run's attempt was given back), both rules `paused_reason = 'connection'`, the connection `failing` with `provider status 401`.
+- `a_key_change_during_the_call_requeues_without_pausing`: call the step-16 function (`finish_job(state, &job, ended, reservation)`; write step 16 as this standalone `async fn` so tests can drive it) on a claimed and started rule job, with `Ended { finish: PauseRequeue { … }, pause: Pause::Connection { … }, … }` and a `connection_updated_at` older than the row's (a key PATCH in between): the job is `queued`, `attempts` back to 0, no rule paused, the connection status unchanged.
+- `a_changed_connection_before_the_call_requeues`: `connection_updated_at` one less than the row's → `queued`, `attempts` 0, the mock got no request.
 - `a_webhook_pause_pauses_the_evaluator_rules`: webhook 401.
 - `a_manual_pause_fails_and_marks_the_connection`: no rule paused.
 - `a_permanent_error_fails_at_once`: mock answers `"not json"` → `failed`, `permanent`.
 - `a_missing_trace_retries_three_times_then_fails`: `load_retries` 1, 2, 3, then `failed` with `trace not found`.
+- `no_load_permit_requeues_without_a_load_retry`: hold every `trace_loads` permit, run under `start_paused = true` → `queued`, `not_before = now + SATURATED_REQUEUE_NS`, `load_retries` 0.
 - `an_evaluation_trace_is_refused`: a target in `llmobs-eval` → `failed`, `target is an evaluation trace`, no judge trace.
 - `a_mapping_error_writes_no_judge_trace`: `output` mapped to `span[name=nope].output` without `?` → `failed`, `judge_trace_id` NULL.
 - `a_definition_mismatch_fails`: a categorical live definition named like the numeric output.
 - `budget_over_pauses_and_skips`: budget 0.000001 USD; two queued jobs of the rule; running one → it is `skipped` (`budget`), the other is `skipped`, the rule is paused `budget`, the mock got no request.
 - `budget_spend_is_recorded`: a generous budget; the judge's model is one the built-in table prices for `openai` (pick it from `crates/otel/prices/builtin.json`), and the mock's reply names that model (build the body like `completion` does, with your `model`), so the `llm` span has a `cost_total`; after the run `rule_spend` for today equals that `cost_total`, and `budgets.view` shows `reserved == 0`.
+- `a_month_budget_sums_the_days`: `budget_period: month`, `rule_spend` rows on two earlier days of this month adding up to just under the budget → the job is `skipped` (`budget`); with the same rows in the previous month, it runs.
+- `a_lost_claim_still_records_the_spend`: a budgeted rule; run a `ClaimedJob` whose `claims` is stale → the row is untouched, `rule_spend` has the cost and `budgets.view` shows `reserved == 0`.
+- `a_lost_start_attempt_releases_the_reservation`: re-claim the job between the reservation and step 11 (call the step functions directly) → `budgets.view` shows `reserved == 0`.
 - `an_unpriced_answer_spends_the_estimate`: the same, but the mock's reply names `gpt-test` (unpriced): `rule_spend` equals the estimate.
 - `model_without_price_fails_and_pauses`: budgeted rule, model `gpt-test` (unpriced) → `failed`, `model has no price`, rule paused `errors`.
 - `a_stale_claim_drops_the_result`: claim, then `requeue_stale` + `claim` again (claims 2); run the first `ClaimedJob` (claims 1): the job row is untouched by its finish, but the score and the judge trace exist (D-I-12 accepts this).
 - `the_breaker_pauses_after_twenty_failures`: 20 jobs answering `"not json"` (permanent judge errors) → the rule is paused `errors` after the 20th.
 - `a_paused_rule_requeues_its_claimed_job`.
 - `a_deleted_evaluator_ends_quietly`: delete the evaluator (cascades the job), run → `Ok(())`.
+- `a_rule_deleted_during_the_run_ends_quietly`: delete the rule before step 16 (run the steps directly): the job row cascades, `finish` matches nothing, `run_job` is `Ok(())`.
+- `a_check_job_runs_to_done` (a `contains` check, the `spawn_blocking` path) and `a_webhook_job_runs_to_done` (`MockWebhook`): each `done` with its source.
+- `a_truncated_trace_marks_the_score`: test the metadata helper directly: `truncated: true` adds `llmobs.eval.truncated = "true"`, `false` adds nothing (a real trace over `MAX_SPANS` is too slow to commit).
+- `a_large_levenshtein_input_fails`: `output` over 64 KiB → `failed`, `levenshtein inputs must be at most 64 KiB each`, no judge trace.
+- `a_store_failure_does_not_count_for_the_breaker`: 20 `finish_job` calls with `Ended { reached_evaluator: false, … }` with `Failed { Permanent, "could not store the result" }` → the rule is not paused.
 - `judge_usage_and_score_units_are_counted`: after one done job and `state.usage.flush`, `usage_daily` has `judge_input_tokens = 10`, `judge_output_tokens = 3` (the mock's usage) and `scores = 1`, and `spans` counts none of the judge spans (D-I-31).
 
-The write-retry path (steps 14–15) is hard to trigger with real storage; test the helper that loops (`retry_write(tries, delay, f)`) with a closure that fails twice then succeeds, under `#[tokio::test(start_paused = true)]`.
+The write-retry path (steps 14–15) is hard to trigger with real storage; test the helper that loops (`retry_write(tries, delay, f)`) with a closure that fails twice then succeeds, and with one that always fails (three calls, then the error), under `#[tokio::test(start_paused = true)]`. Steps 14 and 15 must both go through it.
 
 ### Done when
 
@@ -1234,7 +1309,7 @@ The write-retry path (steps 14–15) is hard to trigger with real storage; test 
 
 **Goal:** the dispatcher claims jobs within the worker, connection, rate and webhook limits (D-I-6), runs each in its own task, and the janitor, pruner and budget ticker run as loops. Startup recovers interrupted jobs; shutdown stops the loops, gives workers 3 s, then aborts them.
 
-**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/dispatch.rs` (new), `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs` (the constructor only), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`.
+**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/dispatch.rs` (new), `crates/server/src/eval/execute.rs` (remove the I3.6 `dead_code` attributes only), `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs` (the constructor only), `crates/server/src/test_support/mock_llm.rs` (`start_with_delay` only), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`.
 
 **Commit:** `Dispatch eval jobs and run the queue loops`
 
@@ -1246,10 +1321,13 @@ pub(crate) struct EvalQueue {
     stop: tokio::sync::watch::Sender<bool>,
     /// `eval.workers` slots (D-I-6).
     workers: Arc<Semaphore>,
-    /// Per connection: its slots and its token bucket, rebuilt when the connection's `updated_at` changes.
+    /// Per connection: its slots and its token bucket, rebuilt when the connection's
+    /// `max_concurrency` or `requests_per_minute` changes (not on other edits, such as a key change).
     connections: Mutex<HashMap<Uuid, Arc<dispatch::ConnectionLimit>>>,
     /// Per webhook evaluator: 4 slots.
     webhooks: Mutex<HashMap<Uuid, Arc<Semaphore>>>,
+    /// Per priority: the project whose job was claimed last, where the next pass's rotation starts (D-I-6).
+    last_project: Mutex<HashMap<u8, ProjectId>>,
     pub(crate) budgets: Budgets,
     pub(crate) breakers: Breakers,
     pub(crate) hourly: HourlyCaps,
@@ -1260,7 +1338,8 @@ impl EvalQueue {
     pub(crate) fn wake(&self);
     /// Tells every eval loop to stop.
     pub(crate) fn stop(&self);
-    /// A receiver that sees `true` once `stop` was called.
+    /// A receiver of the stop flag. Loops wait with `receiver.wait_for(|stopped| *stopped)`, which
+    /// also returns at once when `stop` was called before the receiver was made (`changed()` would not).
     pub(crate) fn stopped(&self) -> tokio::sync::watch::Receiver<bool>;
 }
 ```
@@ -1281,15 +1360,19 @@ Write `Debug` by hand (counts only). `serve.rs` and `test_support` build it with
 ```rust
 /// Webhook evaluators run at most this many jobs at once (D-I-6).
 pub(crate) const WEBHOOK_SLOTS: usize = 4;
-/// Most candidates one pass reads.
+/// Most candidates one pass reads; a pass reads `min(CANDIDATES, CANDIDATES_PER_SLOT × free workers)`.
 const CANDIDATES: i64 = 400;
+/// Candidates read per free worker slot: some candidates are skipped by the pick (a connection
+/// that runs out of slots or tokens during the pass).
+const CANDIDATES_PER_SLOT: i64 = 4;
 /// A job running longer than this goes back to the queue (D-I-12).
 const STALE_NS: i64 = 600_000_000_000;
 
 /// A connection's slots and token bucket (D-I-6).
 #[derive(Debug)]
 pub(crate) struct ConnectionLimit {
-    updated_at: i64,
+    /// `(max_concurrency, requests_per_minute)` it was built for.
+    limits: (u32, u32),
     slots: Arc<Semaphore>,
     bucket: Mutex<TokenBucket>,
 }
@@ -1314,8 +1397,9 @@ pub(crate) struct Permits { _worker: OwnedSemaphorePermit, _slot: Option<OwnedSe
 /// `running`. Returns how many jobs it started.
 pub(crate) async fn dispatch_once(state: &AppState, now: i64, running: &mut JoinSet<()>) -> Result<usize, MetaError>;
 
-/// Re-queues jobs running for more than 10 minutes (D-I-12).
-pub(crate) async fn janitor_once(state: &AppState, now: i64) -> Result<u64, MetaError>;
+/// Re-queues jobs running for more than 10 minutes, and fails those interrupted too often (D-I-12).
+/// Returns `(requeued, failed)`.
+pub(crate) async fn janitor_once(state: &AppState, now: i64) -> Result<(u64, u64), MetaError>;
 
 /// Hourly pruning (D-I-28).
 pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<PruneReport, MetaError>;
@@ -1324,19 +1408,24 @@ pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<PruneReport
 pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, MetaError>;
 ```
 
-**`dispatch_once`:**
-1. If `workers.available_permits() == 0`, return `Ok(0)`.
+**`dispatch_once`** (design § Queue). The scan runs on a reader; the writer is held only for the claims:
+1. `free = workers.available_permits()`; if 0, return `Ok(0)`.
 2. `saturated`: every connection id whose `slots` has no permit or whose bucket `has_token(now)` is false, and every webhook evaluator id whose semaphore has no permit. Collect under each `Mutex`, then release it.
-3. One `MetaDb::write`: `eval_jobs::candidates(conn, now, &saturated, CANDIDATES)`, then the pick (below), then `eval_jobs::claim(conn, id, now)` for each picked job. The closure owns an `Arc` of what the pick needs — build a small `Arc<PickState>` holding clones of `workers`, and the connection and webhook maps' `Arc` values for the candidates' ids, **before** the write (create a missing `ConnectionLimit` from the candidate's `connection_limits`, or replace one whose `updated_at` differs; create a missing webhook semaphore with `WEBHOOK_SLOTS`). It returns `Vec<(JobRow, u32 claims, Permits)>`. A claim that returns `None` (raced) drops its permits.
-4. For each claimed job: `running.spawn(run_claimed(state.clone(), ClaimedJob { row, claims }, permits))`.
+3. `eval_jobs::candidates(state.meta.reader(), now, &saturated, min(CANDIDATES, CANDIDATES_PER_SLOT × free))`.
+4. The limits the pick needs, under the maps' `Mutex`es and released before the pick: for each candidate's connection, the `Arc<ConnectionLimit>` from the map, created from the candidate's `connection_limits` when missing, or replaced when its `limits` differ from the candidate's `(max_concurrency, requests_per_minute)` (running jobs keep the old one's permits until they finish, so the new limit can be exceeded for one call's duration, which is accepted); for each webhook evaluator, its semaphore, created with `WEBHOOK_SLOTS` when missing. Copy `last_project` too.
+5. `pick` (below), synchronous: no `.await` between the start of the pick and its end.
+6. Nothing picked → return `Ok(0)`. Otherwise one `MetaDb::write` whose closure owns the picked ids (`Vec<Uuid>`) and calls `eval_jobs::claim(conn, id, now)` for each, returning `Vec<Option<u32>>` in the same order. The permits stay outside the closure. A `None` (claimed or removed since the read) drops that job's permits. A write error drops every permit and returns the error.
+7. For each claimed job: `running.spawn(run_claimed(state.clone(), ClaimedJob { row, claims, connection_updated_at }, permits))`, where `connection_updated_at` is the third value of the candidate's `connection_limits`.
+8. Store, for each priority, the project of the last job claimed at it in `last_project`. Return the number spawned.
 
-**The pick** (pure function `pick(candidates, try_acquire) -> Vec<(Candidate, Permits)>`, unit-tested without a database):
-- Group by `priority` ascending. Within a priority, order projects by their first candidate; take rounds: in each round, for each project in order, its next candidate. Stop when the worker semaphore has no permit left.
-- For each candidate: `workers.clone().try_acquire_owned()`; then, for a judge, the connection's `slots.clone().try_acquire_owned()` and `bucket.try_take(now)`; for a webhook, its semaphore; checks need only the worker permit. When a connection or webhook permit or token fails, add its id to a local `blocked` set and skip every later candidate with that id in this pass. Partial permits are dropped.
+**The pick** (pure function `pick(candidates, limits: &PickLimits, last_project: &HashMap<u8, ProjectId>, now) -> Vec<(Candidate, Permits)>`, where `PickLimits` holds the worker semaphore and the step-4 maps; unit-tested without a database):
+- Group by `priority` ascending. Within a priority, order the projects by id, starting with the first id greater than `last_project[priority]` and wrapping around (from the smallest id when there is no entry). Take rounds: in each round, for each project in that order, its next candidate (candidates of a project keep the query's `not_before, id` order). Stop when the worker semaphore has no permit left.
+- For each candidate: `workers.clone().try_acquire_owned()`; then, for a judge, the connection's `slots.clone().try_acquire_owned()` first and only then `bucket.try_take(now)`, so a token is never spent for a job that has no slot; for a webhook, its semaphore; checks need only the worker permit. When a connection or webhook permit or token fails, add its id to a local `blocked` set and skip every later candidate with that id in this pass. Partial permits are dropped.
 
 **`run_claimed(state, job, permits)`:**
 ```rust
 let id = job.row.id; let claims = job.claims;
+// The permits live here, not in the job: they are dropped after the job's finish.
 let result = AssertUnwindSafe(execute::run_job(&state, job)).catch_unwind().await;
 match result {
     Ok(Ok(())) => {}
@@ -1348,13 +1437,13 @@ state.eval.wake();
 ```
 (`futures::FutureExt::catch_unwind`. This replaces D-I-12's "caught as a `JoinError`"; the design was updated with this plan.)
 
-**`janitor_once`** = `requeue_stale(conn, now − STALE_NS, now)`; wake when it moved a job. **`prune_once`** = `eval_jobs::prune`. **`budget_once`** = `clear_budget_pauses(conn, day_start(now), month_start(now), now)`; for each cleared rule, `budgets.forget(rule)` and one audit line `online rule resumed` with `reason = "budget period"`.
+**`janitor_once`** = `requeue_stale(conn, now − STALE_NS, now)`; wake when it re-queued a job. **`prune_once`** = `eval_jobs::prune`. **`budget_once`** = `clear_budget_pauses(conn, day_start(now), month_start(now), now)`; for each cleared rule, `budgets.forget(rule)` and one audit line `online rule resumed` with `reason = "budget period"`.
 
 ### Loops, startup and shutdown (`eval/mod.rs`)
 
 ```rust
-/// Startup recovery (D-I-12): `running` jobs go back to `queued`, except those claimed more
-/// than 3 times, which fail. Logs the counts.
+/// Startup recovery (D-I-12): `running` jobs go back to `queued` with one more interruption,
+/// except those already interrupted 3 times, which fail. Logs the counts.
 pub(crate) async fn recover(state: &AppState) -> Result<(), MetaError>;
 
 /// The eval loops. Shutdown stops and joins them; it never aborts a job mid-write except after `drain`.
@@ -1366,45 +1455,57 @@ impl EvalTasks {
     /// Stops every loop and waits for it. The dispatcher loop gives its workers `timing.drain`,
     /// then aborts them; their jobs stay `running` until the next start.
     pub(crate) async fn shutdown(self, state: &AppState);
+    /// Aborts every loop now. Aborting the dispatcher drops its `JoinSet`, which aborts the workers.
+    pub(crate) fn abort(&self);
 }
 ```
-- **Dispatcher loop:** owns `JoinSet<()>`. Each turn: `tokio::select!` on `stopped.changed()`, `interval.tick()` (`dispatch_every`) and `state.eval.wake.notified()`; then reap finished workers (`while running.try_join_next().is_some() {}`), then `dispatch_once(&state, state.clock.now_ns(), &mut running)` (log errors). On stop: `tokio::time::timeout(timing.drain, async { while running.join_next().await.is_some() {} })`, then `running.abort_all()` and drain the aborted ones (`while running.join_next().await.is_some() {}`), logging how many were aborted.
-- **Janitor, prune and budget loops:** `interval` + `MissedTickBehavior::Skip` + `select!` with `stopped.changed()`; call the `*_once` function; log errors.
+- **Every loop runs one pass as soon as it starts**, which `spawn` does right after `recover`: tokio's `interval` completes its first tick at once, and unlike `alerts/mod.rs` the eval loops do **not** discard it (a server that restarts often would otherwise never prune).
+- **Dispatcher loop:** owns `JoinSet<()>`. Each turn: `tokio::select!` on `stopped.wait_for(|stopped| *stopped)`, `interval.tick()` (`dispatch_every`) and `state.eval.wake.notified()`; then reap finished workers (`while running.try_join_next().is_some() {}`), then `dispatch_once(&state, state.clock.now_ns(), &mut running)` (log errors). On stop: `tokio::time::timeout(timing.drain, async { while running.join_next().await.is_some() {} })`, then `running.abort_all()` and drain the aborted ones (`while running.join_next().await.is_some() {}`), logging how many were aborted.
+- **Janitor, prune and budget loops:** `interval` + `MissedTickBehavior::Skip` + `select!` with `stopped.wait_for(|stopped| *stopped)`; call the `*_once` function; log errors.
 - `shutdown`: `state.eval.stop()`, then await each handle (the dispatcher's includes the drain). Wrap the whole in `tokio::time::timeout(timing.drain + Duration::from_secs(5), …)`; on timeout abort what is left and log it.
 
 `serve.rs`:
 - after `bootstrap::prepare` succeeds: `if let Err(error) = crate::eval::recover(&state).await { release_state(state).await; return Err(error.into()); }`;
 - next to `alerts::spawn_loops`: `let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);` stored in a new `Running` field `eval_tasks: Option<crate::eval::EvalTasks>`;
-- `Running::shutdown`: right after `let serve_error = …` (the HTTP drain) and before `for task in self.tasks.drain(..)`: `if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) { eval.shutdown(state).await; }`. Update the method's doc to list the step. Judge-trace commits that workers started are covered by the existing `wait_for_commits` step after it (D-G-38).
+- `Running::shutdown`: right after `let serve_error = …` (the HTTP drain) and before `for task in self.tasks.drain(..)`: `if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) { eval.shutdown(state).await; }`. Update the method's doc to list the step.
+- `impl Drop for Running` (`serve.rs`, after the `tasks` loop): `if let Some(eval) = &self.eval_tasks { eval.abort(); }`. Without it a `Running` dropped without `shutdown` leaves the loops holding `AppState`, and `<data_dir>/LOCK` is never released. Judge-trace commits that workers started are covered by the existing `wait_for_commits` step after it (D-G-38).
 
 ### Spec
 
-- `docs/spec/06-evaluation.md` § Online rules › Execution: replace the claim and lease sentences with the dispatcher: "One dispatcher claims jobs every second or when woken, by strict priority (manual, rule, backfill), one job per project per round, when a worker slot, the connection's concurrency slot and a token of its bucket (`max(1, rpm/6)` tokens, refilled at `rpm/60` per second) are free; a webhook evaluator runs at most 4 jobs at once (D-I-6). A janitor re-queues jobs running for more than 10 minutes; startup re-queues `running` jobs and fails those claimed more than 3 times (D-I-12)." And the **Rate limits per connection** bullet: "`max_concurrency` and `requests_per_minute` per connection, shared by every rule of every project (D-I-4, D-I-6)."
-- `docs/spec/12-operations.md` § Process lifecycle: in **Startup**, after the key sentence, add "Then `running` eval jobs go back to `queued` (those claimed more than 3 times fail), and the eval dispatcher, janitor, pruner and budget ticker start (D-I-12)." In **Shutdown**, replace "stop workers (leases expire and are re-queued)" with "stop the eval loops and give eval workers 3 s, then abort them; their jobs stay `running` and the next start re-queues them (D-I-12)".
+- `docs/spec/06-evaluation.md` § Online rules › Execution: replace the claim and lease sentences with the dispatcher: "One dispatcher claims jobs every second or when woken, by strict priority (manual, rule, backfill), one job per project per round, when a worker slot, the connection's concurrency slot and a token of its bucket (`max(1, rpm/6)` tokens, refilled at `rpm/60` per second) are free; a webhook evaluator runs at most 4 jobs at once (D-I-6). A janitor re-queues jobs running for more than 10 minutes, and startup re-queues every `running` job; both count an interruption, and a job interrupted a fourth time fails (D-I-12)." And the **Rate limits per connection** bullet: "`max_concurrency` and `requests_per_minute` per connection, shared by every rule of every project (D-I-4, D-I-6)."
+- `docs/spec/12-operations.md` § Process lifecycle: in **Startup**, after the key sentence, add "Then `running` eval jobs go back to `queued` (a job interrupted a fourth time fails), and the eval dispatcher, janitor, pruner and budget ticker start, each running one pass at once (D-I-12)." In **Shutdown**, replace "stop workers (leases expire and are re-queued)" with "stop the eval loops and give eval workers 3 s, then abort them; their jobs stay `running` and the next start re-queues them (D-I-12)".
 
 ### Tests
 
 `dispatch.rs` unit tests (no database):
 - `token_bucket_bursts_then_refills`: rpm 60 → capacity 10; 10 takes succeed, the 11th fails; after 1 s one more succeeds; rpm 3 → capacity 1.
-- `pick_is_strict_priority_then_round_robin`: candidates P0 (project A ×2), P1 (A ×3, B ×1) with 4 workers → A0, A0, then A1, B1 (round-robin within P1).
+- `pick_is_strict_priority_then_round_robin`: candidates P0 (project A ×2), P1 (A ×3, B ×1) with 4 workers and no `last_project` → A0, A0, then A1, B1 (round-robin within P1).
+- `pick_rotates_across_passes`: P1 candidates of projects A and B (5 each, A's id smaller), 1 worker per pass, `last_project` carried from pass to pass as `dispatch_once` does → A, B, A, B.
 - `pick_skips_a_full_connection`: connection with 1 slot, two candidates on it and one check → the first and the check.
+- `pick_takes_no_token_without_a_slot`: a connection with 0 free slots and a full bucket → nothing picked, the bucket still full.
 - `pick_skips_a_webhook_at_four`.
 
 `dispatch.rs` tests with `TestApp` (clock set to real time when an evaluator runs):
 - `dispatch_runs_a_manual_job_to_done`: insert a manual job with `insert_job`, `dispatch_once` → 1, `running.join_next().await` → the job is `done`.
 - `dispatch_respects_eval_workers`: `with_config(|c| c.eval.workers = 2)`, 5 check jobs, one pass starts 2.
-- `dispatch_respects_the_connection_slots`: connection `max_concurrency` 1; the mock provider delays its answer (if `MockLlm` cannot delay, add a `delay: Duration` field to `Reply` in `test_support/mock_llm.rs` and list that file in your report); two jobs → one starts; after it finishes, the next pass starts the other.
+- `dispatch_respects_the_connection_slots`: connection `max_concurrency` 1; the mock provider delays its answer (`MockLlm::start_with_delay`, below); two jobs → one starts; after it finishes, the next pass starts the other.
+- `dispatch_respects_the_bucket`: connection `requests_per_minute` 6 (capacity 1); three jobs; the first pass starts one, a pass at the same `now` starts none, a pass 10 s later starts one more.
+- `dispatch_holds_a_webhook_at_four`: six webhook jobs on one evaluator with a delayed `MockWebhook` (or a webhook URL that never answers before the test ends) → one pass starts 4.
+- `the_rotation_serves_every_project`: 25 manual jobs of project A then 1 of project B, `eval.workers = 1`, jobs on a delayed mock; two passes (each after the previous job finished) start one job of A and then B's job.
+- `the_dispatcher_wakes_on_notify`: spawn the loops with `dispatch_every` of 1 hour (a custom `EvalTiming`), wait until the first pass ran (every loop runs once at start), insert a manual check job on a committed trace and call `state.eval.wake()` → the job is `done` within 5 s.
 - `dispatch_skips_paused_rules_and_inactive_projects`.
-- `a_changed_connection_gets_new_limits`: bump `updated_at` (PATCH the connection), the next pass builds a new `ConnectionLimit` with the new `max_concurrency`.
+- `a_changed_connection_gets_new_limits`: PATCH the connection's `max_concurrency`, and the next pass builds a new `ConnectionLimit` with it; a PATCH of the key alone keeps the old `ConnectionLimit` (same `Arc`).
 - `a_panicked_job_fails_with_internal_error`: no real job can be made to panic, so write the panic arm as its own `async fn finish_panicked(state, id, claims)` and test it: a claimed job becomes `failed`, `permanent`, `internal error`; with a stale `claims` nothing changes.
 - `janitor_requeues_stale_jobs`, `prune_once_*` (one per D-I-28 case), `budget_once_clears_a_turned_day_and_keeps_today`.
 - `recover_requeues_and_fails_crash_loops`.
 - `shutdown_drains_then_aborts` (real time, `EvalTiming::TEST`): `spawn`, a job whose mock answer takes 10 s, `shutdown` returns within about 3 s and the job is still `running`.
-- `serve.rs`: the existing start/stop tests pass; add one that `bind`s, queues nothing, and shuts down cleanly (if a similar test exists, extend it to assert no panic and a clean return).
+- `serve.rs`: the existing tests pass unchanged with the loops running (`healthz_over_tcp_and_shutdown_releases_the_lock` covers a clean `shutdown`). Add `a_dropped_running_releases_the_lock`: `bind` in a temp dir, drop the `Running` without `shutdown`, then `bind` again on the same dir until it succeeds, for at most 5 s (copy `a_second_bind_stops_on_the_lock`'s setup); it must succeed.
+
+**`MockLlm::start_with_delay(replies, delay: Duration)`** (`test_support/mock_llm.rs`): `MockState` gains `delay: Duration`; `start(replies)` becomes `start_with_delay(replies, Duration::ZERO)`. In `handle`, take the reply, drop the `replies` lock, then `tokio::time::sleep(state.delay).await` before answering. `Reply` does not change, so no other test file changes.
 
 ### Done when
 
-`just check` passes.
+`just check` passes, and `shutdown_drains_then_aborts` and `the_dispatcher_wakes_on_notify` pass five runs in a row (`for i in 1 2 3 4 5; do cargo test -p llmobs-server <name> || break; done`): they use real time, so a flaky one must be fixed, not retried. I3.7 removes the I3.6 `dead_code` attributes of `run_job`, `ClaimedJob` and `EvalQueue::wake`; the `hourly` field keeps its attribute until I3.8.
 
 ---
 
@@ -1412,7 +1513,7 @@ impl EvalTasks {
 
 **Goal:** the online rule routes, with D-I-30's validation and D-I-32's check; the evaluator delete and PATCH 409s (D-I-19); connection tests and key changes resume `'connection'` pauses (D-I-5, D-I-14).
 
-**Edit only:** `crates/server/src/routes/online_rules.rs` (new), `crates/server/src/routes/mod.rs` (module line), `crates/server/src/http/access.rs` (one `routes.extend` line), `crates/server/src/eval/rule_check.rs` (new), `crates/server/src/eval/mod.rs` (module line, and an `impl EvalQueue` block with `forget_rule`), `crates/server/src/eval/{budget,rule_limit}.rs` (remove `dead_code` attributes only), `crates/server/src/meta/online_rules.rs` (one new function), `crates/server/src/routes/evaluators.rs`, `crates/server/src/routes/connections.rs`, `crates/server/src/http/error.rs`, `crates/server/src/api/openapi.rs` (409 on `delete_evaluator`), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
+**Edit only:** `crates/server/src/routes/online_rules.rs` (new), `crates/server/src/routes/mod.rs` (module line), `crates/server/src/http/access.rs` (one `routes.extend` line), `crates/server/src/eval/rule_check.rs` (new), `crates/server/src/eval/mod.rs` (module line, and an `impl EvalQueue` block with `forget_rule`), `crates/server/src/eval/{budget,rule_limit}.rs` (remove `dead_code` attributes only), `crates/server/src/meta/online_rules.rs` (one new function), `crates/server/src/routes/evaluators.rs`, `crates/server/src/routes/connections.rs`, `crates/server/src/http/error.rs`, `crates/server/src/api/openapi.rs` (409 on `delete_evaluator`), `crates/server/tests/openapi.rs` (move `delete_evaluator` from the `{400, 401, 403, 404, 429}` branch to the branch with 409: `post_evaluator || patch_evaluator || …`), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
 
 **Commit:** `Add the online rules API`
 
@@ -1429,6 +1530,27 @@ Its problem is `conflict` with the detail and `errors` (like `BadRequest`). Test
 ### `eval/rule_check.rs`
 
 ```rust
+/// What the rule checks need of an evaluator. Built from the stored row without opening a
+/// webhook's sealed values (no check needs the URL, headers or secret).
+pub(crate) enum Subject {
+    Judge(JudgeConfig),
+    Check(Check),
+    Webhook,
+}
+
+impl Subject {
+    /// From a stored row: `kind` through `EvaluatorKind::from_name`; a judge's or check's `config`
+    /// through `EvaluatorConfig::from_parts(kind, &document)` as `evaluator::load` does; a webhook
+    /// is `Webhook` without reading `secret_enc`.
+    ///
+    /// # Errors
+    ///
+    /// [`EvaluatorError::Corrupt`] when a column does not decode.
+    pub(crate) fn from_row(row: &EvaluatorRow) -> Result<Self, EvaluatorError>;
+    /// From a parsed configuration (the evaluator PATCH's new value).
+    pub(crate) fn from_config(config: &EvaluatorConfig) -> Self;
+}
+
 /// What a rule asks of its evaluator (§ Rule validation, checks 8–10, 14–15).
 pub(crate) struct RuleShape<'a> {
     pub(crate) target: RuleTarget,
@@ -1437,12 +1559,12 @@ pub(crate) struct RuleShape<'a> {
     pub(crate) budgeted: bool,
 }
 
-/// Every check of the rule against `evaluator`, as field errors (§ Rule validation).
+/// Every check of the rule against `subject`, as field errors (§ Rule validation).
 /// `adapter` is the judge's connection adapter (`None` for other kinds, or when the connection is gone,
 /// which fails check 15). `prices` and `now` price the judge's model.
-pub(crate) fn check_rule(shape: &RuleShape<'_>, evaluator: &Evaluator, adapter: Option<Adapter>, prices: &PriceTable, now: i64) -> Vec<FieldError>;
+pub(crate) fn check_rule(shape: &RuleShape<'_>, subject: &Subject, adapter: Option<Adapter>, prices: &PriceTable, now: i64) -> Vec<FieldError>;
 ```
-Unit tests: one per check (8, 9, 10 with each check kind, 14, 15) and a clean case.
+Read `crates/eval/src/config.rs` for the exact names of `JudgeConfig` and `Check` and their re-exports. Unit tests: one per check (8, 9, 10 with each check kind, 14, 15), a clean case, and `Subject::from_row` of a webhook row whose `secret_enc` is garbage (it is never opened, so the result is `Webhook`).
 
 ### `routes/online_rules.rs`
 
@@ -1459,19 +1581,19 @@ Routes (all `Access::Project`, `session_only: false`, `documented: true`):
 
 **`rule_json(state, row, counts, now) -> Result<OnlineRule, ApiError>`**: the row's columns; `variable_mapping` parsed from its JSON (`corrupt` on failure, as `routes/evaluators.rs` does); `spend` when the rule has a budget: `period_start = budget::period_start(period, now)`, `spent_usd = rule_spend::spent_between(reader, id, period_start, day_start(now) + DAY_NS)`, `reserved_usd = state.eval.budgets.view(id, period_start).map_or(0.0, |(_, reserved)| reserved)`; `jobs_last_24h` from `counts` (default zeros); `dropped_last_hour = state.eval.hourly.dropped(id, now)`.
 
-**List:** `list_rules`, `counts_since(reader, project, now − 24 h)`, `org_enabled_rules = count_enabled_rules` on a reader connection (`state.meta.reader().acquire().await?`, then `&mut *conn`), then `page_named` over `(name, id, rule)`, answered as `OnlineRulePage`.
+**List:** `list_rules`, then `page_named` over `(name, id, row)` first, so only the page's rows are turned into JSON; then `counts_since(reader, project, now − 24 h)` and `rule_json` for each row of the page (one `spent_between` per budgeted rule of the page); `org_enabled_rules = count_enabled_rules` on a reader connection (`state.meta.reader().acquire().await?`, then `&mut *conn`). Answer `OnlineRulePage`. Read `page_named` in `routes/orgs.rs` and map its page's items after it returns.
 
 **Create:**
 1. `principal::session_user` (as the evaluator routes); trim `name`.
-2. Load the evaluator (`get_evaluator`; missing → check 2), `evaluator::load` it, and for a judge read its connection row for the adapter.
-3. Run § Rule validation checks 1, 2, 4–7, 11–13 here and checks 8–10, 14–15 with `rule_check::check_rule`; collect every error; a non-empty list is `400`.
+2. Load the evaluator row (`get_evaluator`; missing → check 2) and its `rule_check::Subject::from_row`, and for a judge read its connection row for the adapter.
+3. Run § Rule validation checks 1, 2, 4–7, 11–13, 16 here and checks 8–10, 14–15 with `rule_check::check_rule`; collect every error; a non-empty list is `400`.
 4. Check 3: when the filter is not blank, `open_query(state, project, None)` then `llmobs_storage::validate_filter(&ctx, view, text)?` (`view` is `ViewName::Traces` or `ViewName::Spans`; the `?` turns `RunError::Invalid` into the `invalid_filter` problem on field `filter`, as K's route does).
-5. One `MetaDb::write`: the evaluator still exists (`get_evaluator_tx`; else the outcome `EvaluatorGone` → 400 check 2); when `enabled`, `rule_limit::check(count_enabled_rules(conn, org)? + 1, limit)`, where `limit = rule_limit::limit(&state, org)` is read before the write (an `Outcome::OverLimit(RuleLimitError)` result, not an `Err`, so nothing is written); then `insert_rule`.
+5. One `MetaDb::write`, whose closure owns the evaluator row read in step 2: `get_evaluator_tx` again; missing → the outcome `EvaluatorGone` → 400 on `evaluator_id` with check 2's message; its `version` or `updated_at` differs from the row of step 2 → `Conflict("evaluator changed, retry")` (409), because the checks of step 3 ran against the old one; when `enabled`, `rule_limit::check(count_enabled_rules(conn, org)? + 1, limit)`, where `limit = rule_limit::limit(&state, org)` is read before the write (an `Outcome::OverLimit(RuleLimitError)` result, not an `Err`, so nothing is written); then `insert_rule`.
 6. Audit `tracing::info!(target: "audit", rule_id, project_id, user_id, "online rule created")`; `201` with `rule_json`.
 
 Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_string(&BTreeMap)`.
 
-**Update:** read the row (404), merge the body over it (`""` filter clears; `clear_budget` clears both budget fields), validate the merged rule as on create (the evaluator is the stored one), then one write: the stored row must equal the one read (else `Conflict("online rule changed, retry")`); when `enabled` goes from false to true, the limit check as on create; `update_rule`; and when the budget amount or period changed and the rule is paused `'budget'`, clear the pause in the same write (`resume_rule`, D-I-15). After the write: when the budget changed, `state.eval.budgets.forget(id)`. Audit `online rule updated`. `200`.
+**Update:** read the row (404), merge the body over it (`""` filter clears; `clear_budget` clears both budget fields), validate the merged rule as on create (the evaluator is the stored one), then one write: the stored row must equal the one read (else `Conflict("online rule changed, retry")`); the evaluator row is re-read and compared as on create (`evaluator changed, retry`; a missing evaluator cannot happen while the rule exists, because the delete refuses it, so treat it as the same 409); when `enabled` goes from false to true, the limit check as on create; `update_rule`; and when the budget amount or period changed and the rule is paused `'budget'`, clear the pause in the same write (`resume_rule`, D-I-15). After the write: when the budget changed, `state.eval.budgets.forget(id)`. Audit `online rule updated`. `200`.
 
 **Delete:** `delete_rule` (its jobs and spend cascade); then `state.eval.forget_rule(id)`, a new method that calls `budgets.forget`, `breakers.reset` and `hourly.forget`. Audit `online rule deleted`. `204`.
 
@@ -1479,8 +1601,8 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 ### Evaluator routes (`routes/evaluators.rs`)
 
-- **Delete:** inside the write, `rules_of_evaluator(conn, id)`; when not empty, nothing is deleted and the answer is `409 ConflictWith { detail: "online rules use this evaluator", errors: one per rule, message "uses this evaluator" }`. Change the write's result from `bool` to a small enum.
-- **PATCH:** after `prepare` and `check_against_store`, read `rules_of_evaluator` (on a reader connection) and run `rule_check::check_rule` for each with the new evaluator (its mapping from the rule's JSON, its target, `budgeted = budget_usd.is_some()`; the adapter from the new `connection_id`'s row). Any error → `409 ConflictWith { detail: "the change would break online rules that use this evaluator", errors: one per broken rule, message = that rule's first error message }`.
+- **Delete:** inside the write, `rules_of_evaluator(conn, id)`; when not empty, nothing is deleted and the answer is `409 ConflictWith { detail: "online rules use this evaluator", errors: one per rule (field `rules.<rule id>`, message "<rule name>: uses this evaluator") }`. Change the write's result from `bool` to a small enum. Rule names are configuration, not payload, so they may appear in the message.
+- **PATCH:** the rule checks run inside `write_update` (the write that already re-reads the evaluator and the judge's connection), so a rule saved between a read and the write cannot slip past. Pass `write_update` the new `Subject::from_config(&prepared.evaluator.config)` and `state.ingest.prices()` (an `Arc`, owned by the closure). After the connection check: `rules_of_evaluator(conn, id)`; for each rule, `check_rule` with its mapping (from its JSON; a stored mapping that no longer parses is a `MetaError::Corrupt`), its target, `budgeted = budget_usd.is_some()`, and the adapter of the connection row read in that transaction (`Adapter::from_name(&row.adapter)`). Any error → a new `Outcome::BreaksRules(Vec<FieldError>)`, nothing written → `409 ConflictWith { detail: "the change would break online rules that use this evaluator", errors: one per broken rule (field `rules.<rule id>`), message = "<rule name>: <that rule's first error message>" }`.
 
 ### Connection routes (`routes/connections.rs`, D-I-5, D-I-14)
 
@@ -1489,15 +1611,20 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 ### Spec
 
-- `docs/spec/06-evaluation.md` § Online rules, after the first paragraph: "Rules are managed under `/online-rules` by project members (D-I-24). Saving a rule checks the filter with storage for the rule's view, the mapping against the evaluator (every variable of a judge prompt mapped; a check's `output`, and `expected` when it needs one; no `expected` or `item.*` expressions; no bare `span.*` in a trace rule) and the budget (judges only, with a priced model) (D-I-30). `target` and `evaluator_id` cannot change. On the Free plan an org has at most 1 active rule, an enabled one, paused or not; creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction; a smaller limit never disables existing rules (D-I-32)."
-- `docs/spec/09-api.md` § Evaluation & alerts: replace the `GET/POST /online-rules` row with `GET/POST /online-rules` · `GET/PATCH/DELETE /online-rules/{id}` (the list answers `org_enabled_rules`), add `POST /online-rules/{id}/resume`, and add to the evaluators row "`DELETE` and a `PATCH` that would break a rule are `409` with the rules in `errors` (D-I-19)".
+- `docs/spec/06-evaluation.md` § Online rules, after the first paragraph: "Rules are managed under `/online-rules` by project members (D-I-24). Saving a rule checks the filter with storage for the rule's view, the mapping against the evaluator (every variable of a judge prompt mapped; a check's `output`, and `expected` when it needs one; no `expected` or `item.*` expressions; no bare `span.*` in a trace rule) and the budget (judges only, with a priced model) (D-I-30). `target` and `evaluator_id` cannot change. Limits: a name of 1–128 characters, a filter of at most 4 096 bytes, 1–32 variables of at most 1 024 bytes each, `budget_usd` at most 1 000 000, and 500 rules per project (D-I-30). The checks against the evaluator run again in the rule's write transaction, and an evaluator PATCH runs them for every rule of the evaluator in its own write (D-I-19). On the Free plan an org has at most 1 active rule, an enabled one, paused or not; creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction; a smaller limit never disables existing rules (D-I-32)."
+- `docs/spec/09-api.md` § Evaluation & alerts: replace the `GET/POST /online-rules` row with `GET/POST /online-rules` · `GET/PATCH/DELETE /online-rules/{id}` (the list answers `org_enabled_rules`; a project has at most 500 rules, the 501st is a `409`), add `POST /online-rules/{id}/resume`, and add to the evaluators row "`DELETE` and a `PATCH` that would break a rule are `409` with the rules in `errors` (D-I-19)".
 
 ### Tests (`routes/online_rules.rs`, over HTTP)
 
 - `create_get_list_round_trip`: a judge rule; `GET` matches; the list has `org_enabled_rules: 1` and `jobs_last_24h` zeros; `spend` present with `period_start` at today's UTC midnight.
-- `create_validates_every_field`: one request per row of § Rule validation (1, 2, 4–15); each is a 400 on its field with its message.
+- `create_validates_every_field`: one request per row of § Rule validation (1, 2, 4–16); each is a 400 on its field with its message.
+- `a_duplicate_name_is_409` and `the_501st_rule_is_409` (insert 500 rows with `meta::online_rules::insert_rule` in one write, then `POST` the next).
+- `budget_and_clear_budget_together_is_400` (check 12).
+- `a_deleted_evaluator_at_write_time_is_400`: drive the write helper with an evaluator id that is gone (`EvaluatorGone` → 400 on `evaluator_id`).
+- `a_changed_evaluator_at_write_time_is_409`: call the write helper with an evaluator row whose `version` is one less than the stored one → `evaluator changed, retry`.
+- `a_webhook_rule_is_saved_without_opening_its_secret`: a webhook evaluator whose `secret_enc` was overwritten with garbage by SQL in the test; creating a rule on it succeeds.
 - `invalid_filter_is_400_with_position` and `a_span_filter_is_checked_on_the_spans_view` (`span_kind = 'llm'` is accepted for a span rule and refused for a trace rule).
-- `patch_refuses_target_and_evaluator_id`, `patch_merges_and_clears_the_filter`, `clear_budget_removes_the_budget`, `patch_of_a_changed_row_is_409` (pause the rule through `pause_rule` between… use two sequential PATCHes with a stale read simulated by calling the write helper directly if needed; otherwise test the store-level check).
+- `patch_refuses_target_and_evaluator_id`, `patch_merges_and_clears_the_filter`, `clear_budget_removes_the_budget`, `patch_of_a_changed_row_is_409` (call the update's write helper with the rule row as read, after pausing the rule with `pause_rule`: the rows differ → 409 `online rule changed, retry`).
 - `the_active_rule_limit_refuses_create_and_enable`: replace the limit for the test — `rule_limit::limit` returns `None`, so test the route's write helper with `Some(1)` directly (extract `fn insert_checked(conn, …, limit: Option<u64>)`), and assert a 403 `plan_limit` problem built from its `RuleLimitError`. A disabled create passes at the limit; enabling it fails.
 - `a_paused_rule_counts_as_active` (the count includes it).
 - `resume_clears_the_pause_and_resets_the_breaker`.
@@ -1505,7 +1632,7 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 - `viewer_reads_member_writes_api_key_cannot_write`.
 - `delete_cascades_jobs_and_spend`.
 
-`routes/evaluators.rs`: `delete_with_rules_is_409_listing_them`; `patch_that_drops_a_mapped_prompt_variable_is_409` (a rule maps `input` and `output`; a PATCH adds `{{ context }}` to the prompt → 409 naming the rule); `patch_that_moves_to_an_unpriced_model_breaks_a_budgeted_rule`.
+`routes/evaluators.rs`: `delete_with_rules_is_409_listing_them`; `patch_that_drops_a_mapped_prompt_variable_is_409` (a rule maps `input` and `output`; a PATCH adds `{{ context }}` to the prompt → 409 naming the rule, and the evaluator's `version` is unchanged); `patch_that_moves_to_an_unpriced_model_breaks_a_budgeted_rule`; `a_rule_saved_during_the_patch_is_checked` (call `write_update` directly with a rule inserted after the PATCH's reads: it still answers `BreaksRules`).
 
 `routes/connections.rs`: `a_successful_test_resumes_connection_pauses` (two paused rules, one `'connection'`, one `'errors'`: only the first resumes); `a_key_change_resumes_and_sets_ok`.
 
@@ -1550,8 +1677,8 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 - `run_queues_a_manual_job`: `202`, `kind: manual`, `status: queued`, `attempts: 0`; the row's `priority` is 0 and its `dedup_key` `manual:<id>`.
 - `run_validates_its_body` (one case per row of the table), `run_of_an_unknown_evaluator_is_404`, `run_is_rate_limited_with_tests` (10 test runs then a run → 429), `viewer_and_api_key_cannot_run`.
-- `jobs_list_filters_and_pages`: 3 jobs of two rules and one manual; each filter; `limit=1` pages through with the cursor, newest first; another project's job is not listed and its `GET` is 404.
-- `a_manual_run_completes_through_the_loops` (end to end, real time; clock set to real time first): `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `POST …/run` against a `MockLlm` judge, poll `GET /eval-jobs/{id}` every 50 ms for at most 10 s until `done`; then `GET /scores?evaluator_id=…` has one `llm_judge` score without `rule_id`, and `GET /traces/{judge_trace_id}?include_eval=true` (check the parameter name) finds the judge trace; finally `EvalTasks::shutdown`.
+- `jobs_list_filters_and_pages`: 3 jobs of two rules and one manual; each filter (`rule_id`, `evaluator_id`, `status`, `kind`); `limit=1` pages through with the cursor, newest first; a malformed cursor is 400; another project's job is not listed and its `GET` is 404.
+- `a_manual_run_completes_through_the_loops` (end to end, real time; clock set to real time first): `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `POST …/run` against a `MockLlm` judge, poll `GET /eval-jobs/{id}` every 50 ms for at most 10 s until `done`; then `GET /scores?evaluator_id=…` has one `llm_judge` score without `rule_id`, and `GET /traces/{judge_trace_id}` finds the judge trace (the trace detail takes only `around`, `TraceDetailParams` in `api/traces.rs`; without it storage reads around the current time, which is when the judge trace was written; if the read misses it, pass `?around=<the job's finished_at>`); finally `EvalTasks::shutdown`.
 
 ### Done when
 
@@ -1569,13 +1696,14 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 ### Shared modules
 
-- `mapping-table.tsx`: move from `test-panel.tsx` the `MappingRow` type, `newMappingRow`, the prompt-variable parser, `expressionFor` and `initialMapping`, and the mapping table's JSX. Export:
-  - `interface MappingRow { key: string; variable: string; expression: string }`, `newMappingRow(variable, expression)`;
-  - `promptVariables(prompt: string): string[]`;
-  - `defaultExpression(variable: string, target: "trace" | "span"): string`: `input` → `trace.input` / `span.input`, `output` → `trace.output` / `span.output`, others `""`;
-  - `initialMapping(defaults: Schema<"TemplateMapping">[], prompt: string, target: "trace" | "span" = "trace"): MappingRow[]`;
-  - `mappingObject(rows: MappingRow[]): Record<string, string>` (rows with an empty variable are left out);
-  - `MappingTable({ rows, onChange, disabled, errorFor }: { rows: MappingRow[]; onChange: (rows: MappingRow[]) => void; disabled?: boolean; errorFor?: (variable: string) => string | undefined })`, with "Add variable" and remove buttons, as in the test panel.
+- `mapping-table.tsx`: move out of `test-panel.tsx` (read it first) the mapping row type, its constructor, the prompt-variable parser, the default expression, the initial mapping and the mapping table's JSX. What changes, exactly:
+  - `MappingRow` keeps its fields `{ id: number; variable: string; expression: string }`, so the JSX keeps `key={row.id}`; it is exported.
+  - The module-level `rowId` counter moves too, behind `export function nextRowId(): number`. `newMappingRow(variable, expression)` (exported) and `test-panel.tsx`'s own `newVariableRow` both call `nextRowId()`, so the two kinds of rows still never share an id.
+  - `variableNames(prompt)` is renamed `promptVariables(prompt: string): string[]` (same body).
+  - `expressionFor(variable)` is replaced by `defaultExpression(variable: string, target: "trace" | "span"): string`: `input` → `trace.input` / `span.input`, `output` → `trace.output` / `span.output`, others `""`. With `"trace"` it returns what `expressionFor` returned.
+  - `initialMapping(defaults: Schema<"TemplateMapping">[], prompt: string, target: "trace" | "span" = "trace"): MappingRow[]`: the same body, with `defaultExpression(variable, target)`.
+  - New: `mappingObject(rows: MappingRow[]): Record<string, string>` (rows with an empty variable are left out).
+  - New: `MappingTable({ rows, onChange, disabled, errorFor }: { rows: MappingRow[]; onChange: (rows: MappingRow[]) => void; disabled?: boolean; errorFor?: (variable: string) => string | undefined })`, the test panel's mapping JSX with its "Add variable" and remove buttons; the test panel passes its `editMapping` as `onChange`.
 - `error-hints.ts`: move `HINTS` from `test-panel.tsx` as `export const ERROR_HINTS: Record<Schema<"TestErrorClass">, string>`.
 - `test-panel.tsx` imports both. `test-panel.test.tsx` passes unchanged: that is the proof.
 - `mapping-table.test.tsx`: `defaultExpression` for both targets; `mappingObject` drops empty rows; adding and removing rows calls `onChange`.
@@ -1641,7 +1769,7 @@ Edit page: loads the rule (`onlineRuleQuery`; 404 → not found), renders `RuleF
 
 **Goal:** `/online-rules/$ruleId` shows the rule, its pause banner and resume, its spend, its jobs and its score distribution. List rows and the editor lead to it.
 
-**Edit only:** `web/src/routes/$org/$project/online-rules/$ruleId/index.tsx` and `.test.tsx` (new), `web/src/components/online-rules/{rule-banner,jobs-table,score-distribution}.tsx` (new, with `score-distribution.test.ts` for its pure function), `web/src/routes/$org/$project/online-rules/index.tsx` (the name link), `web/src/components/online-rules/rule-form.tsx` (navigation after save), and their existing tests where the link or navigation is asserted.
+**Edit only:** `web/src/routes/$org/$project/online-rules/$ruleId/index.tsx` and `.test.tsx` (new), `web/src/components/online-rules/{rule-banner,jobs-table,score-distribution,rule-conflicts}.tsx` (new, with `score-distribution.test.ts` for its pure function), `web/src/routes/$org/$project/online-rules/index.tsx` (the name link), `web/src/components/online-rules/rule-form.tsx` (navigation after save), `web/src/api/queries.ts` (`scoresQuery`'s parameter type only), `web/src/routes/$org/$project/evaluators/$evaluatorId.tsx` and `.test.tsx` and `web/src/components/evaluators/evaluator-form.tsx` (the 409 conflict list only), and their existing tests where the link or navigation is asserted.
 
 **Commit:** `Add the online rule page`
 
@@ -1656,7 +1784,7 @@ Loader: `ensureQueryData(onlineRuleQuery(…))`, a 404 → `notFound()` (as the 
 - **Details:** evaluator (a link to `/evaluators/$evaluatorId`), target, filter (monospace, "—" when none), sample rate, the mapping (read-only rows), enabled.
 - **Spend** (when `spend`): "$0.42 spent of $5.00 today" (or "this month"), "+$0.01 reserved" when `reserved_usd > 0`, and a bar of width `min(100, spent / budget · 100) %` with `aria-label="Spend"` and `aria-valuenow`.
 - **Last 24 hours:** the five counts, and "{n} matches dropped this hour by the 10 000 per hour cap" when `dropped_last_hour > 0`.
-- **Score distribution** (`score-distribution.tsx`): `scoresQuery(org, project, { rule_id: ruleId, limit: 1000 })` (check that `scoresQuery` passes `rule_id` through; the generated params type has it after I3.1). The pure function `distribution(scores: Schema<"Score">[]): { kind: "numeric" | "boolean" | "categorical" | "text" | "empty"; bins: { label: string; count: number }[] }`:
+- **Score distribution** (`score-distribution.tsx`): `scoresQuery(org, project, { rule_id: ruleId, limit: 1000 })`. `scoresQuery` in `queries.ts` types its query as `{ trace_id: string; span_id?; target?; limit? }`; change it to `{ trace_id?: string; span_id?: string; rule_id?: string; target?: Schema<"ScoreTargetKind">; limit?: number }` (the generated params have `rule_id` after I3.1). Existing callers pass `trace_id` and still type-check. The pure function `distribution(scores: Schema<"Score">[]): { kind: "numeric" | "boolean" | "categorical" | "text" | "empty"; bins: { label: string; count: number }[] }`:
   - numeric: 10 equal bins from the minimum to the maximum value, labels `"0.00–0.10"` (two decimals); all values equal → one bin labelled with the value;
   - boolean: `true` and `false`;
   - categorical: one bin per label, most frequent first, then by label;
@@ -1664,6 +1792,8 @@ Loader: `ensureQueryData(onlineRuleQuery(…))`, a 404 → `notFound()` (as the 
   - no scores: `empty` ("No scores yet.").
   Deleted scores are left out. The title is "Score distribution (latest {n} scores)". Each bar is a `div` with `aria-label="{label}: {count}"` and a width proportional to the largest bin.
 - **Jobs** (`jobs-table.tsx`): `$api.useInfiniteQuery` on `GET …/eval-jobs` with `evalJobsInit(org, project, { rule_id })`, "Load more". Columns: Status (badge), Kind, Target (a link to `/$org/$project/traces/$traceId`, with `search={{ span: span_id }}` when there is one), Attempts, Error (`error_class`: message, truncated with a tooltip), Cost, Latency, Created, and "View judge trace" (a link to the judge trace) when `judge_trace_id` is set. `JobsTable({ org, project, filters })` is reusable.
+
+**Evaluator conflicts** (`rule-conflicts.tsx`, D-I-19): `RuleConflicts({ org, project, problem })` renders nothing unless the problem is a `409` whose `errors` have fields starting with `rules.`; then a list with one item per error: a link to `/$org/$project/online-rules/$ruleId` (the id after `rules.`) whose text is the error's message (it starts with the rule's name). The evaluator page's delete error and the evaluator form's save error render it under their existing message (read how each keeps the caught error; keep the problem object, not only its message).
 
 Then change the list's name link to the rule page, and make `RuleForm` navigate to the rule page after a create (`201`'s id) and after an edit; the edit page's "Cancel" goes to the rule page too. Update the I3.10 tests that assert those targets.
 
@@ -1681,6 +1811,8 @@ Then change the list's name link to the rule page, and make `RuleForm` navigate 
 - `a viewer has no edit or resume`.
 - `unknown rule shows not found`.
 
+`evaluators/$evaluatorId.test.tsx`: `a delete refused by rules lists them` (override `DELETE` with a 409 `ConflictWith` naming rule `…0700`: the message and a link to `/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700`); `a save refused by rules lists them` (the same on `PATCH`).
+
 ### Done when
 
 `just check-web` passes; then `just check`.
@@ -1697,9 +1829,9 @@ Then change the list's name link to the rule page, and make `RuleForm` navigate 
 
 ### The dialog (`run-evaluator-dialog.tsx`)
 
-`RunEvaluatorButton({ trace, spanId }: { trace: Schema<"TraceSummary">; spanId?: string })` renders "Run evaluator" (a small button in the trace header's action group: add an optional `actions?: ReactNode` prop to `TraceHeader`, rendered before the copy button, and pass the button from `TraceView`). For viewers it is disabled with the tooltip "Only members can run evaluators" (`DisabledReason`). It opens a dialog:
+`RunEvaluatorButton({ trace, spanId, selectedIsRoot }: { trace: Schema<"TraceSummary">; spanId?: string; selectedIsRoot: boolean })` renders "Run evaluator" (a small button in the trace header's action group: add an optional `actions?: ReactNode` prop to `TraceHeader`, rendered before the copy button, and pass the button from `TraceView`). For viewers it is disabled with the tooltip "Only members can run evaluators" (`DisabledReason`). It opens a dialog:
 - **Evaluator**: a select of the project's evaluators.
-- **Target**: "Whole trace" or "Selected span" (only when `spanId` is set and is not the root span); default "Whole trace".
+- **Target**: "Whole trace" or "Selected span" (only when `spanId` is set and is not a root span); default "Whole trace". The button gets `selectedIsRoot: boolean` from `TraceView`, which has the trace's spans: true when the selected span has no `parent_span_id` (read how `trace-view.tsx` finds the selected span and reuse that).
 - **Variables**: `MappingTable`, refilled with `defaultMappingFor(evaluator, target)` (I3.10) when the evaluator or the target changes.
 - **Run** → `POST …/evaluators/{id}/run` with `{trace_id, span_id?, trace_start: trace.start_time, variable_mapping}`.
 
@@ -1726,6 +1858,7 @@ In `scores-tab.tsx`, for a score whose `source` is `llm_judge`, `check` or `webh
 `run-evaluator-dialog.test.tsx` (render the trace page through `renderApp`):
 - `runs on the whole trace and shows the result`: pick "Relevance"; the mapping is `input → trace.input`, `output → trace.output`; Run → the body is the fixture `requests/evaluator-run.json`; the `GET /eval-jobs/…0802` override answers `queued` once, then the done job → "Score written" and the judge-trace link.
 - `runs on the selected span with span expressions`.
+- `the root span offers only the whole trace`.
 - `shows a failed run with its hint`.
 - `429 shows the wait message`.
 - `a viewer cannot run`.
