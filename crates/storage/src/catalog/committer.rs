@@ -25,7 +25,9 @@ use super::db::{
 use super::{Catalog, FileId, FileMeta, FileState, FileTable, table_index};
 use crate::RetentionReport;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus, PendingDeletion, Tombstones};
-use crate::error::{CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError};
+use crate::error::{
+    CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError, OrphanError,
+};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::projects::ProjectStates;
@@ -1043,6 +1045,52 @@ impl Committer {
             .map_err(CatalogError::db)
     }
 
+    // ---- Orphan collection (N M2, D-N-21) ----
+
+    /// Store keys the catalog needs: active data files, and media of projects
+    /// that are not dropping or dropped. Read before the store is listed.
+    pub(crate) async fn needed_keys(&self) -> Result<HashSet<String>, OrphanError> {
+        let mut inner = self.inner.lock().await;
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT path FROM data_files WHERE state = 'active'")
+                .fetch_all(&mut inner.connection)
+                .await?;
+        let mut keys: HashSet<String> = paths.into_iter().collect();
+        let media: Vec<(String, String)> = sqlx::query_as(
+            "SELECT m.project_id, m.sha256 FROM media m
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM projects p
+                 WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))",
+        )
+        .fetch_all(&mut inner.connection)
+        .await?;
+        for (project, sha) in media {
+            keys.insert(media_key(&project, &sha)?);
+        }
+        Ok(keys)
+    }
+
+    /// Store keys the catalog knows in any state: every data file, every media
+    /// blob of every project, and every staged path. Read after the store is
+    /// listed, so an object published during the listing is found here.
+    pub(crate) async fn known_keys(&self) -> Result<HashSet<String>, OrphanError> {
+        let mut inner = self.inner.lock().await;
+        let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM data_files")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let staged: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_objects")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let media: Vec<(String, String)> = sqlx::query_as("SELECT project_id, sha256 FROM media")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let mut keys: HashSet<String> = paths.into_iter().chain(staged).collect();
+        for (project, sha) in media {
+            keys.insert(media_key(&project, &sha)?);
+        }
+        Ok(keys)
+    }
+
     /// Delete one staged object that is not a catalog file or a stored media
     /// blob, then its row.
     ///
@@ -1276,6 +1324,13 @@ pub(crate) fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// The store key of a `media` row, through [`Objects::media_path`] so the layout
+/// has one formatter. A project id that does not parse is [`OrphanError::BadProjectId`].
+fn media_key(project: &str, sha256: &str) -> Result<String, OrphanError> {
+    let project: ProjectId = project.parse().map_err(|_| OrphanError::BadProjectId)?;
+    Ok(Objects::media_path(project, sha256))
 }
 
 /// `(project_id, sha256)` when `path` is a media path, `media/<project>/<64

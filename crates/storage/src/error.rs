@@ -700,6 +700,23 @@ pub enum SnapshotError {
     BadProjectId,
 }
 
+/// Why [`crate::Storage::collect_orphans`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum OrphanError {
+    /// Listing the object store failed.
+    #[error("listing the object store: {0}")]
+    List(object_store::Error),
+    /// Deleting an orphan failed.
+    #[error("deleting an orphan: {0}")]
+    Delete(#[from] ObjectError),
+    /// Reading the catalog failed.
+    #[error("reading the catalog: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A `media` row names a project id that does not parse.
+    #[error("reading the catalog: invalid project id")]
+    BadProjectId,
+}
+
 /// A batch could not be deduplicated. `reason` is a static description, never row content.
 #[derive(Debug, thiserror::Error)]
 #[error("dedup failed: {reason}")]
