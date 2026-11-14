@@ -96,3 +96,7 @@ large cached executables, grey-cloud the `s3` DNS record or set
 References:
 [kache action](https://github.com/kunobi-ninja/kache-action/tree/ad7317540dcdd71c904f7a60a87b620a0c0e67ed),
 [kache CI write policy](https://ninja.kunobi.com/docs/kache/remote-cache/ci#who-may-write).
+
+## Release workflow
+
+`workflows/release.yml` runs on tags `v*` (D-N-14). Its `run:` steps call `just` recipes, except steps that only pass values between steps (reading the version, the image and chart names, `helm push`, `gh release create`), which stay inline. (docs/plans/n-packaging/README.md § Releasing, D-N-5–D-N-7). It uses no compiler cache. Its `publish` job runs in the GitHub environment `release` (create it under Settings → Environments, limited to tags `v*`; add a required reviewer to approve each publish) and is the only job with write permissions: `contents` (the GitHub release), `packages` (GHCR), `id-token` and `attestations` (build provenance). It needs no secret besides the workflow's own `GITHUB_TOKEN`.
