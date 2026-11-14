@@ -989,7 +989,9 @@ mod tests {
     async fn seed(db: &MetaDb) -> Seed {
         db.write(|conn| {
             Box::pin(async move {
-                let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW).await?.id;
+                let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW)
+                    .await?
+                    .id;
                 let project = insert_project(conn, org, "Support", "support", None, NOW)
                     .await?
                     .id;

@@ -96,7 +96,9 @@ mod tests {
     async fn seed_rule(db: &MetaDb) -> Uuid {
         db.write(|conn| {
             Box::pin(async move {
-                let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW).await?.id;
+                let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW)
+                    .await?
+                    .id;
                 let project: ProjectId = insert_project(conn, org, "Support", "support", None, NOW)
                     .await?
                     .id;
