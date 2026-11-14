@@ -286,10 +286,12 @@ mod tests {
         Run,
         /// Plan and build the physical plan only.
         Plan,
-        /// `plan_sql` only.
-        Logical,
         /// `plan_sql` must return an error (and not abort).
         Reject,
+        /// `plan_sql` succeeds and `create_physical_plan` must return an error
+        /// (and not abort). It runs the analyzer first, so that walk is part of
+        /// the test too.
+        RejectPhysical,
     }
 
     fn on_two_megabytes(sql: String, mode: OnStack) {
@@ -308,15 +310,17 @@ mod tests {
                         return;
                     }
                     let plan = planned.expect("plan");
-                    if matches!(mode, OnStack::Logical) {
-                        return;
-                    }
                     let frame = ctx
                         .session()
                         .execute_logical_plan(plan)
                         .await
                         .expect("execute");
-                    frame.create_physical_plan().await.expect("physical");
+                    let physical = frame.create_physical_plan().await;
+                    if matches!(mode, OnStack::RejectPhysical) {
+                        physical.expect_err("rejected by create_physical_plan");
+                        return;
+                    }
+                    physical.expect("physical");
                     if matches!(mode, OnStack::Run) {
                         frame.collect().await.expect("run");
                     }
@@ -374,14 +378,29 @@ mod tests {
     }
 
     #[test]
-    fn full_size_like_chains_plan_on_a_two_megabyte_stack() {
-        let mut sql = String::from("SELECT 'a' AS a WHERE 'a'");
-        for _ in 0..512 {
-            sql.push_str(" ~~ 'a'");
+    fn full_size_like_chains_are_rejected_on_a_two_megabyte_stack() {
+        // From the second operator on, the left operand is Boolean, so the
+        // type coercion analyzer rejects the chain after recursing through
+        // all 512 levels. The optimizer and the physical planner never see it.
+        for operator in ["~~", "~~*", "!~~", "!~~*"] {
+            let mut sql = String::from("SELECT 'a' AS a WHERE 'a'");
+            for _ in 0..512 {
+                sql.push_str(&format!(" {operator} 'a'"));
+            }
+            on_two_megabytes(sql, OnStack::RejectPhysical);
         }
-        // From the second `~~` on the chain is `Boolean ~~ Utf8`, which only
-        // the physical planner rejects; the stack risk is in `plan_sql`.
-        on_two_megabytes(sql, OnStack::Logical);
+    }
+
+    #[test]
+    fn full_size_like_predicates_run_on_a_two_megabyte_stack() {
+        // One LIKE, then 511 Boolean comparisons: a type-correct chain of 512
+        // operators that the analyzer, the optimizer and the physical planner
+        // all walk, and that runs.
+        let mut sql = String::from("SELECT 'a' AS a WHERE 'a' ~~ 'a'");
+        for _ in 0..511 {
+            sql.push_str(" = true");
+        }
+        on_two_megabytes(sql, OnStack::Run);
     }
 
     #[test]
