@@ -900,7 +900,11 @@ mod tests {
         let other = app
             .state
             .meta
-            .write(move |conn| Box::pin(async move { insert_org(conn, OrgId::new_v7(), "Other", "other", 1).await }))
+            .write(move |conn| {
+                Box::pin(
+                    async move { insert_org(conn, OrgId::new_v7(), "Other", "other", 1).await },
+                )
+            })
             .await
             .unwrap();
         let foreign = add_connection(&app, other.id, Uuid::now_v7()).await;

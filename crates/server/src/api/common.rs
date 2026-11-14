@@ -174,7 +174,10 @@ impl ProblemCode {
             Self::PayloadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
             Self::RangeNotSatisfiable => 416,
-            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed | Self::TooManyTraces => 422,
+            Self::QueryTimeout
+            | Self::QueryTooLarge
+            | Self::OwnerNotAllowed
+            | Self::TooManyTraces => 422,
             Self::Conflict => 409,
             Self::RateLimited => 429,
             Self::Internal => 500,
@@ -197,9 +200,10 @@ impl ProblemCode {
             Self::PayloadTooLarge => "Payload Too Large",
             Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::RangeNotSatisfiable => "Range Not Satisfiable",
-            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed | Self::TooManyTraces => {
-                "Unprocessable Content"
-            }
+            Self::QueryTimeout
+            | Self::QueryTooLarge
+            | Self::OwnerNotAllowed
+            | Self::TooManyTraces => "Unprocessable Content",
             Self::Conflict => "Conflict",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",

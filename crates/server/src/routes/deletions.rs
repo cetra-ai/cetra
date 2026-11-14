@@ -1475,7 +1475,9 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let beta = insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Beta", "beta", now).await?;
+                    let beta =
+                        insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Beta", "beta", now)
+                            .await?;
                     add_org_member(conn, beta.id, user_id, OrgRole::Owner, now).await?;
                     let b1 = insert_project(conn, beta.id, "b1", "b1", None, now).await?;
                     let b2 = insert_project(conn, beta.id, "b2", "b2", None, now).await?;
@@ -1547,7 +1549,14 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let gamma = insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Gamma", "gamma", now).await?;
+                    let gamma = insert_org(
+                        conn,
+                        llmobs_core::ids::OrgId::new_v7(),
+                        "Gamma",
+                        "gamma",
+                        now,
+                    )
+                    .await?;
                     add_org_member(conn, gamma.id, user_id, OrgRole::Owner, now).await?;
                     insert_project(conn, gamma.id, "g1", "g1", None, now).await
                 })

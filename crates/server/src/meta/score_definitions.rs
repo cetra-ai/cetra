@@ -337,10 +337,12 @@ mod tests {
     const NOW: i64 = 1_000;
 
     async fn org(db: &MetaDb) -> OrgId {
-        db.write(|conn| Box::pin(async move { insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW).await }))
-            .await
-            .unwrap()
-            .id
+        db.write(|conn| {
+            Box::pin(async move { insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW).await })
+        })
+        .await
+        .unwrap()
+        .id
     }
 
     async fn project(db: &MetaDb, org: OrgId) -> ProjectId {

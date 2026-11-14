@@ -657,13 +657,13 @@ mod tests {
     use crate::auth::secret::hash_token;
     use crate::config::Secret;
     use crate::entitlements::tokens::grant_from_token;
-    use crate::meta::entitlements::{StoredToken, put_token};
     use crate::meta::deletions::{
         ActorKind, DeletionKind, DeletionRow, FailReason, NewDeletion, RequestDetails,
         deletion_by_id, insert_deletion, insert_projects, insert_sessions, insert_traces,
         mark_applied, mark_dropped, mark_failed, mark_handed_over, scope_projects, scope_sessions,
         scope_traces, store_counts,
     };
+    use crate::meta::entitlements::{StoredToken, put_token};
     use crate::meta::orgs::insert_org;
     use crate::meta::password_resets::valid_reset;
     use crate::meta::projects::insert_project;
