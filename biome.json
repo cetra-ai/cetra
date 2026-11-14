@@ -10,6 +10,7 @@
       "web/**",
       "sdks/typescript/**",
       "tools/capture/ts/**",
+      "tools/packaging/**",
       "!**/dist",
       "!**/node_modules",
       "!web/src/api/schema.gen.ts",

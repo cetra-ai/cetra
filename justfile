@@ -205,3 +205,9 @@ check-capture: capture-py-sync capture-ts-sync
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
     cargo run -q -p llmobs-capture -- run --all --check
+
+# Packaging and release (track N, docs/plans/n-packaging/)
+
+# Write target/dist/THIRD-PARTY-NOTICES.md: licences of the crates and web packages in the binary (D-N-8)
+notices: js-install
+    tools/packaging/notices.sh
