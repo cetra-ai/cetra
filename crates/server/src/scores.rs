@@ -529,6 +529,8 @@ mod tests {
                 session_id: None,
                 name: None,
                 source: None,
+                evaluator_id: None,
+                rule_id: None,
                 window: None,
                 limit: 100,
                 cursor: None,

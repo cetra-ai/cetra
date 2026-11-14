@@ -463,6 +463,7 @@ fn refresh_request<'a>(
         trace_ids,
         include_eval: params.include_eval,
         include_experiments: params.include_experiments,
+        strict_exclusions: false,
         timeout: REFRESH_TIMEOUT,
     }
 }

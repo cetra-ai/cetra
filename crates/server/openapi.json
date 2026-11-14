@@ -8108,6 +8108,26 @@
             }
           },
           {
+            "name": "evaluator_id",
+            "in": "query",
+            "description": "Scores written by this evaluator.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "query",
+            "description": "Scores written by this online rule.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Inclusive `created_at` start. RFC 3339 or epoch milliseconds.",
