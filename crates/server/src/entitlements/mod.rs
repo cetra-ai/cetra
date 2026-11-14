@@ -6,14 +6,25 @@
 // Track P M2: P9 uses these outside tests.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::HashMap;
+use std::sync::{Arc, PoisonError, RwLock};
+
 use llmobs_core::ids::OrgId;
 
 use crate::config::EntitlementDefaults;
 use crate::ee::license::{LicenseState, LicenseStatus};
 use crate::http::AppState;
 use crate::http::error::ApiError;
+use crate::meta::entitlements::window_ends_since;
+use crate::meta::{MetaDb, MetaError};
+
+pub(crate) mod tokens;
 
 pub(crate) use crate::api::entitlements::Feature;
+use tokens::{OrgGrant, OrgTokenError, grant_from_token};
+
+/// The window history looks back this far (D-P-30).
+const WINDOW_LOOKBACK_NS: i64 = 30 * 86_400 * 1_000_000_000;
 
 /// A set of [`Feature`]s.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -137,17 +148,90 @@ impl Entitlements {
     }
 }
 
-/// Entitlement sources held by the process (D-P-10).
+/// Where an org's plan and limits come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// `[entitlements.defaults]`: no valid org token.
+    Defaults,
+    /// The org's token, until its grace period ends.
+    OrgToken,
+}
+
+/// An org token's state at one instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenStatus {
+    /// Before the token's `expires_at`.
+    Active,
+    /// From `expires_at` to before `grace_ends_at`.
+    Grace,
+}
+
+/// The org's plan as shown to users (D-P-32).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanView {
+    /// The token's plan id; `None` with the defaults.
+    pub(crate) id: Option<String>,
+    /// The token's plan name, or `defaults.plan_name`.
+    pub(crate) name: String,
+    /// The token's add-ons; empty with the defaults.
+    pub(crate) add_ons: Vec<String>,
+    /// Where the plan comes from.
+    pub(crate) source: Source,
+    /// Token status at the instant; `None` with the defaults.
+    pub(crate) status: Option<TokenStatus>,
+    /// The token's `expires_at`, ns.
+    pub(crate) expires_at: Option<i64>,
+    /// The token's `grace_ends_at`, ns.
+    pub(crate) grace_ends_at: Option<i64>,
+}
+
+/// Entitlement sources held by the process (D-P-10, D-P-11).
 #[derive(Debug)]
 pub(crate) struct EntitlementsState {
     license: LicenseState,
     defaults: Defaults,
+    /// The newest accepted token per org, valid or in grace at the time it was read.
+    orgs: RwLock<HashMap<OrgId, Arc<OrgGrant>>>,
 }
 
 impl EntitlementsState {
-    /// From the licence and the instance defaults read at startup.
-    pub(crate) fn new(license: LicenseState, defaults: Defaults) -> Self {
-        Self { license, defaults }
+    /// Reads the licence, the instance defaults and the stored org tokens.
+    ///
+    /// A stored token that no longer verifies for this cell (a retired key, a changed
+    /// `public_url`) is skipped with a `warn` naming the org id and the reason.
+    pub(crate) async fn load(
+        meta: &MetaDb,
+        license: LicenseState,
+        defaults: Defaults,
+        public_url: &str,
+    ) -> Result<Self, MetaError> {
+        let mut orgs = HashMap::new();
+        for stored in crate::meta::entitlements::all_tokens(meta.reader()).await? {
+            let granted = grant_from_token(&stored.token, public_url, &defaults.limits).and_then(
+                |(org, grant)| {
+                    if org == stored.org_id {
+                        Ok(grant)
+                    } else {
+                        Err(OrgTokenError::OrgMismatch)
+                    }
+                },
+            );
+            match granted {
+                Ok(grant) => {
+                    orgs.insert(stored.org_id, Arc::new(grant));
+                }
+                Err(error) => tracing::warn!(
+                    org_id = %stored.org_id,
+                    reason = %error,
+                    "stored org token skipped"
+                ),
+            }
+        }
+        Ok(Self {
+            license,
+            defaults,
+            orgs: RwLock::new(orgs),
+        })
     }
 
     /// The instance licence.
@@ -159,20 +243,100 @@ impl EntitlementsState {
     pub(crate) fn defaults(&self) -> &Defaults {
         &self.defaults
     }
+
+    /// The org's held grant, valid or not at the current instant.
+    pub(crate) fn grant(&self, org: OrgId) -> Option<Arc<OrgGrant>> {
+        self.orgs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&org)
+            .cloned()
+    }
+
+    /// Replaces the org's grant if `grant.issued_at` is newer than the held one.
+    pub(crate) fn put_grant(&self, org: OrgId, grant: OrgGrant) {
+        let mut orgs = self.orgs.write().unwrap_or_else(PoisonError::into_inner);
+        if orgs
+            .get(&org)
+            .is_some_and(|held| held.issued_at >= grant.issued_at)
+        {
+            return;
+        }
+        orgs.insert(org, Arc::new(grant));
+    }
+
+    /// What `org` may do at `now`: the org's token while it is in grace, else the defaults,
+    /// plus the licence's features while it is active or in grace.
+    pub(crate) fn resolve(&self, org: OrgId, now: i64) -> Entitlements {
+        let licensed = self.license.active_features(now);
+        match self.grant(org) {
+            Some(grant) if now < grant.grace_ends_at => {
+                Entitlements::new(grant.features.union(licensed), grant.limits)
+            }
+            _ => Entitlements::new(self.defaults.features.union(licensed), self.defaults.limits),
+        }
+    }
+
+    /// The org's plan at `now` (D-P-32).
+    pub(crate) fn plan_at(&self, org: OrgId, now: i64) -> PlanView {
+        match self.grant(org) {
+            Some(grant) if now < grant.grace_ends_at => PlanView {
+                id: Some(grant.plan.id.clone()),
+                name: grant.plan.name.clone(),
+                add_ons: grant.plan.add_ons.clone(),
+                source: Source::OrgToken,
+                status: Some(if now < grant.expires_at {
+                    TokenStatus::Active
+                } else {
+                    TokenStatus::Grace
+                }),
+                expires_at: Some(grant.expires_at),
+                grace_ends_at: Some(grant.grace_ends_at),
+            },
+            _ => PlanView {
+                id: None,
+                name: self.defaults.plan_name.clone(),
+                add_ons: Vec::new(),
+                source: Source::Defaults,
+                status: None,
+                expires_at: None,
+                grace_ends_at: None,
+            },
+        }
+    }
+
+    /// The largest data window (days; `None` = unlimited) that applied to `org` during the
+    /// last 30 days (D-P-30): the current one, every recorded end since `now − 30 days`, and
+    /// the held token's window if it expired since then. `None` anywhere wins.
+    pub(crate) async fn retention_window_at(
+        &self,
+        meta: &MetaDb,
+        org: OrgId,
+        now: i64,
+    ) -> Result<Option<u64>, MetaError> {
+        let since = now.saturating_sub(WINDOW_LOOKBACK_NS);
+        let mut windows = vec![self.resolve(org, now).limits.data_access_days];
+        windows.extend(
+            window_ends_since(meta.reader(), org, since)
+                .await?
+                .into_iter()
+                .map(|(_, days)| days),
+        );
+        if let Some(grant) = self
+            .grant(org)
+            .filter(|grant| (since..=now).contains(&grant.grace_ends_at))
+        {
+            windows.push(grant.limits.data_access_days);
+        }
+        Ok(windows
+            .into_iter()
+            .try_fold(0_u64, |largest, days| days.map(|days| largest.max(days))))
+    }
 }
 
 /// What `org` may do now. Synchronous and in memory; call it at every check (D-P-10).
-///
-/// The instance defaults plus the licence's features while it is active or in grace,
-/// for every org. `_org` is used from P4 on, when the org's own token joins the
-/// resolution.
-pub(crate) fn of(state: &AppState, _org: OrgId) -> Entitlements {
-    let defaults = state.entitlements.defaults();
-    let licensed = state
-        .entitlements
-        .license()
-        .active_features(state.clock.now_ns());
-    Entitlements::new(defaults.features.union(licensed), defaults.limits)
+pub(crate) fn of(state: &AppState, org: OrgId) -> Entitlements {
+    state.entitlements.resolve(org, state.clock.now_ns())
 }
 
 /// Ok when `org` may use `feature`; otherwise the `plan_required` error that names it (D-P-14).
@@ -227,10 +391,77 @@ pub(crate) fn log_license(license: &LicenseState, now_ns: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EntitlementDefaults, Secret};
+    use crate::config::{EntitlementDefaults, PublicUrl, Secret};
     use crate::ee::license::InvalidLicense;
-    use crate::test_support::{TestApp, capture_logs, license_key, license_key_until};
+    use crate::meta::entitlements::{StoredToken, put_token, record_window_end};
+    use crate::meta::orgs::insert_org;
+    use crate::test_support::{
+        TestApp, capture_logs, license_key, license_key_until, org_token, sign_token,
+    };
     use llmobs_token::TokenError;
+    use serde_json::json;
+    use tokens::grant_from_token;
+    use uuid::Uuid;
+
+    const DAY_NS: i64 = 86_400 * 1_000_000_000;
+
+    /// Nanoseconds of an RFC 3339 instant.
+    fn at(rfc3339: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
+    }
+
+    /// A grant issued at `issued_at`, with no features and no limits.
+    fn grant_issued_at(issued_at: i64) -> OrgGrant {
+        OrgGrant {
+            token_id: Uuid::now_v7(),
+            issued_at,
+            expires_at: i64::MAX,
+            grace_ends_at: i64::MAX,
+            plan: tokens::PlanInfo {
+                id: "pro".to_owned(),
+                name: "Pro".to_owned(),
+                add_ons: Vec::new(),
+            },
+            features: FeatureSet::EMPTY,
+            limits: Limits::default(),
+        }
+    }
+
+    /// The grant a dev-signed org token for `org` yields on this cell.
+    fn grant_for(
+        org: OrgId,
+        expires_at: &str,
+        grace_ends_at: &str,
+        features: &[&str],
+        limits: &serde_json::Value,
+    ) -> OrgGrant {
+        let token = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            expires_at,
+            grace_ends_at,
+            features,
+            limits,
+        );
+        grant_from_token(&token, PublicUrl::default().origin(), &Limits::default())
+            .unwrap()
+            .1
+    }
+
+    /// Inserts an org in the meta database and returns its id.
+    async fn new_org(app: &TestApp, slug: &str) -> OrgId {
+        let slug = slug.to_owned();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_org(conn, "Acme", &slug, now).await }))
+            .await
+            .unwrap()
+            .id
+    }
 
     #[test]
     fn feature_names_round_trip() {
@@ -397,5 +628,182 @@ mod tests {
         let (_, logs) = capture_logs(async { log_license(&refused, now) }).await;
         assert!(logs.contains("refused"), "{logs}");
         assert!(!logs.contains("garbage"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn token_applies_until_grace_ends() {
+        let app = TestApp::new().await;
+        let org = OrgId::new_v7();
+        let grant = grant_for(
+            org,
+            "2026-02-01T00:00:00Z",
+            "2026-03-01T00:00:00Z",
+            &["project_roles"],
+            &json!({}),
+        );
+        app.state.entitlements.put_grant(org, grant);
+
+        app.state.clock.set(at("2026-01-01T00:00:00Z"));
+        let plan = app
+            .state
+            .entitlements
+            .plan_at(org, app.state.clock.now_ns());
+        assert_eq!(plan.source, Source::OrgToken);
+        assert_eq!(plan.status, Some(TokenStatus::Active));
+        let entitlements = of(&app.state, org);
+        assert!(entitlements.allows(Feature::ProjectRoles));
+        assert!(!entitlements.allows(Feature::RetentionManagement));
+
+        app.state.clock.set(at("2026-02-15T00:00:00Z"));
+        let plan = app
+            .state
+            .entitlements
+            .plan_at(org, app.state.clock.now_ns());
+        assert_eq!(plan.source, Source::OrgToken);
+        assert_eq!(plan.status, Some(TokenStatus::Grace));
+        assert!(of(&app.state, org).allows(Feature::ProjectRoles));
+
+        app.state.clock.set(at("2026-03-01T00:00:00Z"));
+        let plan = app
+            .state
+            .entitlements
+            .plan_at(org, app.state.clock.now_ns());
+        assert_eq!(plan.source, Source::Defaults);
+        assert_eq!(plan.status, None);
+        let entitlements = of(&app.state, org);
+        assert!(entitlements.allows(Feature::RetentionManagement));
+        assert!(!entitlements.allows(Feature::ProjectRoles));
+    }
+
+    #[tokio::test]
+    async fn older_grant_does_not_replace_newer() {
+        let app = TestApp::new().await;
+        let org = OrgId::new_v7();
+        app.state.entitlements.put_grant(org, grant_issued_at(10));
+        app.state.entitlements.put_grant(org, grant_issued_at(5));
+        assert_eq!(app.state.entitlements.grant(org).unwrap().issued_at, 10);
+    }
+
+    #[tokio::test]
+    async fn ee_features_from_a_token_need_no_licence() {
+        let app = TestApp::new().await;
+        let org = OrgId::new_v7();
+        let grant = grant_for(
+            org,
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &["project_roles"],
+            &json!({}),
+        );
+        app.state.entitlements.put_grant(org, grant);
+        let entitlements = of(&app.state, org);
+        assert!(entitlements.allows(Feature::ProjectRoles));
+        assert!(!entitlements.allows(Feature::SsoEnforcement));
+    }
+
+    #[tokio::test]
+    async fn load_skips_tokens_that_no_longer_verify() {
+        let app = TestApp::new().await;
+        let valid_org = new_org(&app, "valid").await;
+        let other_org = new_org(&app, "other").await;
+        let received = app.state.clock.now_ns();
+
+        let valid = org_token(
+            valid_org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+        );
+        let foreign = sign_token(&json!({
+            "kind": "org",
+            "id": Uuid::now_v7().to_string(),
+            "issued_at": "2025-12-01T00:00:00Z",
+            "expires_at": "2099-01-01T00:00:00Z",
+            "grace_ends_at": "2099-02-01T00:00:00Z",
+            "audience": "https://elsewhere.example",
+            "org_id": other_org.to_string(),
+            "plan": {"id": "pro", "name": "Pro"},
+        }));
+        let stored = [(valid_org, valid), (other_org, foreign)];
+        for (org_id, token) in stored {
+            let record = StoredToken {
+                org_id,
+                token,
+                token_id: Uuid::now_v7(),
+                issued_at: received - 1,
+                received_at: received,
+            };
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { put_token(conn, &record).await }))
+                .await
+                .unwrap();
+        }
+
+        let defaults = app.state.entitlements.defaults().clone();
+        let (loaded, logs) = capture_logs(EntitlementsState::load(
+            &app.state.meta,
+            LicenseState::Absent,
+            defaults,
+            PublicUrl::default().origin(),
+        ))
+        .await;
+        let loaded = loaded.unwrap();
+        assert!(loaded.grant(valid_org).is_some());
+        assert!(loaded.grant(other_org).is_none());
+        assert!(logs.contains("WARN"), "{logs}");
+        assert!(logs.contains(&other_org.to_string()), "{logs}");
+        assert!(logs.contains("the token is for another cell"), "{logs}");
+        assert!(!logs.contains("llmobs1."), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn retention_window_takes_the_largest_of_30_days() {
+        let app = TestApp::new().await;
+        let org = new_org(&app, "retention").await;
+        let now = app.state.clock.now_ns();
+        let grant = grant_for(
+            org,
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({"data_access_days": 30}),
+        );
+        app.state.entitlements.put_grant(org, grant);
+
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    record_window_end(conn, org, now - 10 * DAY_NS, Some(1825)).await?;
+                    record_window_end(conn, org, now - 40 * DAY_NS, None).await
+                })
+            })
+            .await
+            .unwrap();
+        let window = app
+            .state
+            .entitlements
+            .retention_window_at(&app.state.meta, org, now)
+            .await
+            .unwrap();
+        assert_eq!(window, Some(1825));
+
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { record_window_end(conn, org, now - 5 * DAY_NS, None).await })
+            })
+            .await
+            .unwrap();
+        let window = app
+            .state
+            .entitlements
+            .retention_window_at(&app.state.meta, org, now)
+            .await
+            .unwrap();
+        assert_eq!(window, None);
     }
 }

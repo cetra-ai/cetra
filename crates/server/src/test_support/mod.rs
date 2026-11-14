@@ -110,6 +110,44 @@ pub(crate) fn license_key_until(
     }))
 }
 
+/// A `dev-1` org token for `org_id`, audience the default test `public_url`'s origin, plan
+/// `pro` with add-on `teams`. Times are RFC 3339; `limits` is the JSON object of the
+/// `limits` claim.
+pub(crate) fn org_token(
+    org_id: OrgId,
+    issued_at: &str,
+    expires_at: &str,
+    grace_ends_at: &str,
+    features: &[&str],
+    limits: &serde_json::Value,
+) -> String {
+    sign_token(&serde_json::json!({
+        "kind": "org",
+        "id": Uuid::now_v7().to_string(),
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "grace_ends_at": grace_ends_at,
+        "audience": PublicUrl::default().origin(),
+        "org_id": org_id.to_string(),
+        "plan": {"id": "pro", "name": "Pro", "add_ons": ["teams"]},
+        "features": features,
+        "limits": limits,
+    }))
+}
+
+/// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
+/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
+pub(crate) fn control_plane_token(scope: &str) -> String {
+    sign_token(&serde_json::json!({
+        "kind": "control_plane",
+        "id": Uuid::now_v7().to_string(),
+        "issued_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-01-01T00:05:00Z",
+        "audience": PublicUrl::default().origin(),
+        "scope": scope,
+    }))
+}
+
 /// One process's data directory and router.
 pub(crate) struct TestApp {
     /// Kept so the directory outlives the open files.
@@ -262,6 +300,14 @@ impl TestApp {
             config.license_key.as_ref().map(|key| key.expose().as_str()),
         );
         let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
+        let entitlements = crate::entitlements::EntitlementsState::load(
+            &meta,
+            license,
+            defaults,
+            config.public_url.origin(),
+        )
+        .await
+        .expect("stored org tokens load");
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -284,7 +330,7 @@ impl TestApp {
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
-            entitlements: crate::entitlements::EntitlementsState::new(license, defaults),
+            entitlements,
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
