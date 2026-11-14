@@ -72,12 +72,10 @@ an incremental alternative to dated copies.
    `aws s3 sync s3://llmobs-backups/2026-11-14/prod s3://llmobs/prod --delete` (with
    `--endpoint-url` for non-AWS providers).
 5. Start llmobs. A backup from an older version is migrated on start.
-6. Deletions requested after the
-   backup was taken are not in it. Once your version has `llmobs admin reapply-deletions`,
-   re-apply them with `llmobs admin reapply-deletions --from <kept data directory>`; until then,
-   repeat those deletions by hand.
+6. Deletions requested after the backup was taken are not in it. Re-apply them from the data
+   directory you kept: `llmobs admin reapply-deletions --from <kept data directory>`.
 
 ## Retention and privacy
 
 Data deleted in llmobs (GDPR erasure, retention) stays in older backups until they expire. Keep
-backups for 30 days or less, and repeat deletions after every restore (step 6).
+backups for 30 days or less, and re-apply deletions after every restore (step 6).
