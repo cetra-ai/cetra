@@ -3,6 +3,16 @@
 Read [00-design.md](00-design.md) first, especially § Design › Trigger and § Design › Restore
 (D-N-17, D-N-21).
 
+**Also (cross-track review X15):** `llmobs admin migrate [--config <file>]` opens `meta.db` with
+`MetaDb::open` and the storage with `Storage::open` (the server must be stopped: a held `LOCK` maps
+to `AdminError::Locked`), which runs both databases' migrations (and B9's pre-migration copies),
+then shuts the storage down and exits, printing `meta.db and catalog.db are at this version's
+schema`. A restore of an older backup runs it before `reapply-deletions`, so the server never starts
+on restored data before the deletions are re-applied. Test `migrate_on_a_stopped_server_succeeds` and
+`migrate_while_the_server_runs_is_refused`; spec 09 § CLI gets the row `| \`llmobs admin migrate\` |
+with the server stopped: run the migrations of \`meta.db\` and \`catalog.db\`, then exit (restores of
+older backups, D-N-22) |`.
+
 **Goal:**
 - `llmobs admin backup --to <dir> [--meta-only] [--config <file>]` asks the running server, through
   `<data_dir>/admin.sock`, for a backup, and prints the report.
