@@ -412,9 +412,7 @@ fn placeholder_types(statement: &str) -> BTreeMap<String, ParamType> {
             '"' | '`' => skip_quoted(&chars, index + 1, character),
             '$' => skip_dollar(&chars, index).unwrap_or(index + 1),
             '-' if next == Some('-') => skip_line_comment(&chars, index + 2),
-            '/' if next == Some('*') => {
-                find_sequence(&chars, index + 2, &['*', '/']).unwrap_or(chars.len())
-            }
+            '/' if next == Some('*') => skip_block_comment(&chars, index + 2),
             '{' => {
                 if let Some((name, kind)) = placeholder_at(&chars, index) {
                     found.entry(name).or_insert(kind);
@@ -469,6 +467,31 @@ fn skip_escape(chars: &[char], mut index: usize) -> usize {
 
 fn skip_line_comment(chars: &[char], from: usize) -> usize {
     find_sequence(chars, from, &['\n']).unwrap_or(chars.len())
+}
+
+/// Skips a `/* … */` comment body that starts at `from` (just after the `/*`). Block comments
+/// nest, as they do in the server's GenericDialect tokenizer. Returns the index after the
+/// matching `*/`, or the end of the text.
+fn skip_block_comment(chars: &[char], from: usize) -> usize {
+    let mut depth = 1;
+    let mut index = from;
+    while index < chars.len() {
+        match (chars[index], chars.get(index + 1)) {
+            ('/', Some('*')) => {
+                depth += 1;
+                index += 2;
+            }
+            ('*', Some('/')) => {
+                depth -= 1;
+                index += 2;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    chars.len()
 }
 
 /// Skips a dollar-quoted string that starts with the `$` at `start`. `None` when that `$` is an
@@ -686,6 +709,18 @@ mod tests {
                 ("q", ParamType::Timestamp),
             ])
         );
+    }
+
+    #[test]
+    fn placeholder_types_nests_block_comments() {
+        // The server's GenericDialect nests `/* */`, so the `'` after the inner `*/` is still
+        // inside the comment and `{x:Int}` is a placeholder.
+        assert_eq!(
+            placeholder_types("/* a /* b */ c's */ {x:Int}"),
+            typed_map(&[("x", ParamType::Int)])
+        );
+        // An unclosed comment swallows the rest of the text.
+        assert_eq!(placeholder_types("/* a /* b */ {x:Int}"), typed_map(&[]));
     }
 
     #[test]

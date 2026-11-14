@@ -29,3 +29,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Deleted spans and the spans of a dropped project leave the WAL by the end of the next flush cycle,
   not when the newest WAL segment fills (64 MiB): each committed flush starts a new segment when
   the open one holds records, and deletes the segments it has flushed (D-A1-14).
+- `llmobs query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
+  server does, instead of reading the rest of the statement as a string.
