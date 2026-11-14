@@ -11,6 +11,7 @@ pub mod connections;
 pub(crate) mod convert;
 pub mod deletions;
 pub mod entitlements;
+pub mod eval_jobs;
 pub mod evaluators;
 pub mod internal;
 pub mod invites;

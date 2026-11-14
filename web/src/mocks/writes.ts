@@ -8,12 +8,14 @@ import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json"
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
 import deletionResolvingDocument from "../../../fixtures/api/static/deletion-resolving.json";
+import evalJobQueuedDocument from "../../../fixtures/api/static/eval-job-queued.json";
 import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
@@ -188,6 +190,31 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_alert_rule",
     method: "delete",
     path: "/api/v1/projects/{project}/alert-rules/{id}",
+  },
+  {
+    operationId: "post_online_rule",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules",
+  },
+  {
+    operationId: "patch_online_rule",
+    method: "patch",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "delete_online_rule",
+    method: "delete",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "post_online_rule_resume",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/resume",
+  },
+  {
+    operationId: "post_evaluator_run",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators/{id}/run",
   },
 ];
 
@@ -456,6 +483,13 @@ const RESPONSES: Record<string, Respond> = {
     return HttpResponse.json({ ...rule, ...body });
   },
   delete_alert_rule: () => noContent(),
+
+  post_online_rule: ({ body }) =>
+    HttpResponse.json({ ...onlineRuleDocument, ...named(body) }, { status: 201 }),
+  patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
+  delete_online_rule: () => noContent(),
+  post_online_rule_resume: () => HttpResponse.json(onlineRuleDocument),
+  post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {

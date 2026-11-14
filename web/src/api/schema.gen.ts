@@ -965,6 +965,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/eval-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List eval jobs
+         * @description Any project member can read. Newest first. Jobs are kept 7 days after they finish.
+         */
+        get: operations["list_eval_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/eval-jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an eval job
+         * @description Any project member can read.
+         */
+        get: operations["get_eval_job"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/evaluator-templates": {
         parameters: {
             query?: never;
@@ -1057,6 +1097,26 @@ export interface paths {
         patch: operations["patch_evaluator"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/evaluators/{id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run an evaluator on one trace
+         * @description Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.
+         */
+        post: operations["post_evaluator_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -1126,6 +1186,78 @@ export interface paths {
         get: operations["get_metrics"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List online rules
+         * @description Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).
+         */
+        get: operations["list_online_rules"];
+        put?: never;
+        /**
+         * Create an online rule
+         * @description Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.
+         */
+        post: operations["post_online_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an online rule
+         * @description Any project member can read.
+         */
+        get: operations["get_online_rule"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an online rule
+         * @description Project members and above. Queued jobs of the rule are deleted with it.
+         */
+        delete: operations["delete_online_rule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an online rule
+         * @description Project members and above. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.
+         */
+        patch: operations["patch_online_rule"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume an online rule
+         * @description Project members and above. Clears the rule's pause.
+         */
+        post: operations["post_online_rule_resume"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1935,6 +2067,11 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /**
+         * @description The period of a rule budget, in UTC.
+         * @enum {string}
+         */
+        BudgetPeriod: "day" | "month";
         /** @description `POST /api/v1/me/password`. */
         ChangePasswordRequest: {
             /** @description The current password. Required when the account has one, and absent when it does not. */
@@ -2161,6 +2298,43 @@ export interface components {
             requests_per_minute?: number;
             /** @description How the provider is asked to fill the answer schema. Default `native`. */
             structured_output?: components["schemas"]["StructuredOutputMode"];
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules` body. Absent optional fields take their defaults.
+         *
+         *     Optional fields refuse `null` (spec 09 § Conventions). Its `Debug` is derived: a rule holds
+         *     configuration only, no payload or secret.
+         */
+        CreateOnlineRuleRequest: {
+            /** @description Period of the budget. Required with `budget_usd`. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Judge evaluators only.
+             */
+            budget_usd?: number;
+            /** @description Whether the rule runs. Default true. */
+            enabled?: boolean;
+            /**
+             * Format: uuid
+             * @description The evaluator the rule runs.
+             */
+            evaluator_id: string;
+            /** @description Filter over the target's view. Absent means no filter. */
+            filter?: string;
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name: string;
+            /**
+             * Format: double
+             * @description Share of the matching targets to evaluate, in `(0, 1]`. Default 1.
+             */
+            sample_rate?: number;
+            /** @description What the rule matches. Immutable once created. */
+            target: components["schemas"]["RuleTarget"];
+            /** @description Prompt variable to mapping expression, 1 to 32 variables. */
+            variable_mapping: {
+                [key: string]: string;
+            };
         };
         /** @description `POST /api/v1/orgs`. */
         CreateOrgRequest: {
@@ -2464,6 +2638,100 @@ export interface components {
             /** @description End-user id. */
             user_id: string;
         };
+        /** @description An eval job. Spec 09 § Evaluation & alerts. */
+        EvalJob: {
+            /**
+             * Format: int32
+             * @description Attempts made so far.
+             */
+            attempts: number;
+            /**
+             * Format: double
+             * @description Cost of the judge call, in USD.
+             */
+            cost_usd?: number;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The failure text, without payload content or secrets. */
+            error?: string;
+            /** @description What the caller should do with the failure. Omitted unless the job failed or was requeued. */
+            error_class?: components["schemas"]["TestErrorClass"];
+            /**
+             * Format: uuid
+             * @description The evaluator the job runs.
+             */
+            evaluator_id: string;
+            /**
+             * Format: date-time
+             * @description Time the job finished. Omitted while it is queued or running.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Job id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Input tokens of the judge call.
+             */
+            input_tokens?: number;
+            /** @description The judge trace of the run, 32 lowercase hex digits. */
+            judge_trace_id?: components["schemas"]["TraceId"];
+            /** @description Where the job came from. */
+            kind: components["schemas"]["EvalJobKind"];
+            /**
+             * Format: int64
+             * @description Latency of the judge call, in milliseconds.
+             */
+            latency_ms?: number;
+            /**
+             * Format: date-time
+             * @description Earliest time the job may run. JSON is RFC 3339.
+             */
+            not_before: string;
+            /**
+             * Format: int64
+             * @description Output tokens of the judge call.
+             */
+            output_tokens?: number;
+            /**
+             * Format: uuid
+             * @description The rule that queued the job. Omitted for a manual run.
+             */
+            rule_id?: string;
+            /**
+             * Format: uuid
+             * @description The score the run wrote.
+             */
+            score_id?: string;
+            /** @description Target span, 16 lowercase hex digits. Omitted for a trace target. */
+            span_id?: components["schemas"]["SpanId"];
+            /** @description Where the job is in its life. */
+            status: components["schemas"]["EvalJobStatus"];
+            /** @description Target trace, 32 lowercase hex digits. */
+            trace_id: components["schemas"]["TraceId"];
+        };
+        /**
+         * @description Where a job came from. Stored as `eval_jobs.kind`.
+         * @enum {string}
+         */
+        EvalJobKind: "rule" | "manual" | "backfill";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        EvalJobPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["EvalJob"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Where a job is in its life. Stored as `eval_jobs.status`.
+         * @enum {string}
+         */
+        EvalJobStatus: "queued" | "running" | "done" | "failed" | "skipped";
         /** @description An evaluator. Sealed values (a webhook's signing secret and header values) are not included. */
         Evaluator: {
             /** @description The kind-specific configuration as stored. A webhook keeps only its URL host, timeout and header names. */
@@ -2758,6 +3026,34 @@ export interface components {
             org: components["schemas"]["InviteOrg"];
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
+        };
+        /** @description Job counts of a rule, by status. */
+        JobCounts: {
+            /**
+             * Format: int64
+             * @description Finished jobs with a score.
+             */
+            done: number;
+            /**
+             * Format: int64
+             * @description Jobs that failed for good.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Jobs waiting to run.
+             */
+            queued: number;
+            /**
+             * Format: int64
+             * @description Jobs running now.
+             */
+            running: number;
+            /**
+             * Format: int64
+             * @description Jobs left out before they ran.
+             */
+            skipped: number;
         };
         /**
          * @description One headline number.
@@ -3084,6 +3380,85 @@ export interface components {
              */
             updated_at: string;
         };
+        /** @description An online rule. Spec 09 § Evaluation & alerts. */
+        OnlineRule: {
+            /** @description Period of the budget. Present exactly when `budget_usd` is. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Omitted when the rule has none.
+             */
+            budget_usd?: number;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who created the rule. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /**
+             * Format: int64
+             * @description Live matches dropped by the hourly cap in the current UTC hour. Counted in memory, so 0 after a restart.
+             */
+            dropped_last_hour: number;
+            /** @description Whether the rule runs. */
+            enabled: boolean;
+            /**
+             * Format: uuid
+             * @description The evaluator the rule runs. Immutable.
+             */
+            evaluator_id: string;
+            /** @description Filter over the target's view. Omitted when the rule has none. */
+            filter?: string;
+            /**
+             * Format: uuid
+             * @description Rule id.
+             */
+            id: string;
+            /** @description Jobs of the rule created in the last 24 hours, by status. */
+            jobs_last_24h: components["schemas"]["JobCounts"];
+            /** @description Display name, 1 to 128 characters. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description When the rule was paused. Omitted when it is not paused.
+             */
+            paused_at?: string;
+            /** @description Detail of the pause: an error text or a fixed text. Never payload content. */
+            paused_detail?: string;
+            /** @description Why the rule is paused. Omitted when it is not paused. */
+            paused_reason?: components["schemas"]["PauseReason"];
+            /**
+             * Format: double
+             * @description Share of the matching targets that are evaluated, in `(0, 1]`.
+             */
+            sample_rate: number;
+            /** @description Budget spend of the current period. Omitted when the rule has no budget. */
+            spend?: components["schemas"]["RuleSpend"];
+            /** @description What the rule matches. Immutable. */
+            target: components["schemas"]["RuleTarget"];
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /** @description Prompt variable to mapping expression. */
+            variable_mapping: {
+                [key: string]: string;
+            };
+        };
+        /** @description One page of online rules. `next_cursor` is null when there is no next page. */
+        OnlineRulePage: {
+            /** @description Rules in this page. */
+            data: components["schemas"]["OnlineRule"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+            /** @description Enabled rules of the whole org, counted for the plan's active-rule limit. */
+            org_enabled_rules: number;
+        };
         /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
@@ -3237,6 +3612,11 @@ export interface components {
         };
         /** @description One part of a canonical message. Spec 01 § Canonical message format. */
         Part: components["schemas"]["TextPart"] | components["schemas"]["ReasoningPart"] | components["schemas"]["ToolCallPart"] | components["schemas"]["ToolCallResponsePart"] | components["schemas"]["UriPart"] | components["schemas"]["BlobPart"] | components["schemas"]["UnknownPart"];
+        /**
+         * @description Why a rule is paused (D-I-14, D-I-15).
+         * @enum {string}
+         */
+        PauseReason: "budget" | "errors" | "connection";
         /** @description Parsed span payload: messages, any JSON, or plain text. Spec 09 § Response shapes. */
         Payload: {
             /**
@@ -3440,6 +3820,47 @@ export interface components {
             password: string;
             /** @description The token from the reset link. */
             token: string;
+        };
+        /** @description Spend of a rule budget in the current period. */
+        RuleSpend: {
+            /**
+             * Format: date-time
+             * @description Start of the current UTC day or month.
+             */
+            period_start: string;
+            /**
+             * Format: double
+             * @description Estimated cost of the running jobs, in USD.
+             */
+            reserved_usd: number;
+            /**
+             * Format: double
+             * @description Cost of the finished jobs in the period, in USD.
+             */
+            spent_usd: number;
+        };
+        /**
+         * @description What an online rule matches: a trace, or a span of a trace (D-I-9).
+         * @enum {string}
+         */
+        RuleTarget: "trace" | "span";
+        /**
+         * @description `POST /api/v1/projects/{project}/evaluators/{id}/run` body.
+         *
+         *     Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the
+         *     mapping holds expressions, not payload.
+         */
+        RunEvaluatorRequest: {
+            /** @description Span of the trace to target, 16 hex digits. */
+            span_id?: string;
+            /** @description Trace to run on, 32 hex digits. */
+            trace_id: string;
+            /** @description The trace's `start_time`, from the trace detail the UI loaded. */
+            trace_start: components["schemas"]["TimeParam"];
+            /** @description Prompt variable to mapping expression, 1 to 32 variables. */
+            variable_mapping: {
+                [key: string]: string;
+            };
         };
         /**
          * @description A saved list view or SQL query.
@@ -4685,6 +5106,38 @@ export interface components {
         UpdateMeRequest: {
             /** @description Display name. Null or omitted clears it. A present value is trimmed to 1–100 characters. */
             name?: string;
+        };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/online-rules/{id}` body. Absent means unchanged.
+         *
+         *     There is no `evaluator_id` or `target`: sending either is a 400 (unknown field). Optional
+         *     fields refuse `null`; removing the budget is `clear_budget: true`.
+         */
+        UpdateOnlineRuleRequest: {
+            /** @description Period of the budget. Needed with `budget_usd` when the rule has none yet. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Budget per period, in USD. Judge evaluators only.
+             */
+            budget_usd?: number;
+            /** @description Removes the budget. Cannot come with `budget_usd` or `budget_period`. */
+            clear_budget?: boolean;
+            /** @description Turns the rule on or off. */
+            enabled?: boolean;
+            /** @description Filter over the target's view. `""` clears it. */
+            filter?: string;
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name?: string;
+            /**
+             * Format: double
+             * @description Share of the matching targets to evaluate, in `(0, 1]`.
+             */
+            sample_rate?: number;
+            /** @description Replaces the whole mapping, 1 to 32 variables. */
+            variable_mapping?: {
+                [key: string]: string;
+            };
         };
         /** @description `PATCH /api/v1/orgs/{org}/members/{user}`. */
         UpdateOrgMemberRequest: {
@@ -9527,6 +9980,157 @@ export interface operations {
             };
         };
     };
+    list_eval_jobs: {
+        parameters: {
+            query?: {
+                /** @description Jobs queued by this online rule. */
+                rule_id?: string;
+                /** @description Jobs of this evaluator. */
+                evaluator_id?: string;
+                /** @description Jobs with this status. */
+                status?: components["schemas"]["EvalJobStatus"];
+                /** @description Jobs of this kind. */
+                kind?: components["schemas"]["EvalJobKind"];
+                /** @description Maximum number of jobs to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of eval jobs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJobPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_eval_job: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Eval job id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJob"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_evaluator_templates: {
         parameters: {
             query?: never;
@@ -10042,6 +10646,80 @@ export interface operations {
             };
         };
     };
+    post_evaluator_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RunEvaluatorRequest"];
+            };
+        };
+        responses: {
+            /** @description The queued job. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalJob"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_media: {
         parameters: {
             query?: never;
@@ -10442,6 +11120,451 @@ export interface operations {
             };
             /** @description The server is busy or a dependency is unavailable. Retry later. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_online_rules: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of online rules. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRulePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateOnlineRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The created rule. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_online_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOnlineRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule_resume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule, not paused. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
