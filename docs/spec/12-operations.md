@@ -118,15 +118,7 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 
 **GDPR and backups:** deleted data persists in backups until they expire; the docs recommend a backup retention ≤ 30 days. Before a restore, keep the current data directory (or a copy of its `meta.db`); after it, start `llmobs serve` once if the backup is from an older version, then run `llmobs admin reapply-deletions --from <kept data_dir>`: it copies every deletion the restored `meta.db` lacks, with its scope, and the server redoes them (D-M-9).
 
-**Online backups (track N's M2, not built):** `llmobs admin backup --to <dir>`, triggered on the running server (it holds the data directory's lock), consistent without stopping:
-
-1. Forces a memtable flush (so WAL content is in Parquet).
-2. Pauses compaction / deletion rewrites / retention (they create and obsolete files).
-3. `VACUUM INTO` consistent copies of `meta.db` and `catalog.db`.
-4. Copies (or hard-links, when on the same filesystem) all active data files listed in the copied `catalog.db` + media objects.
-5. Resumes background tasks. Writes a manifest with checksums.
-
-In S3 mode, `--meta-only` does steps 1–3 and 5 and relies on bucket versioning or replication for objects; deleted-file cleanup by GC respects a configurable `gc.object_retention` so a metadata backup stays restorable for that period. After restoring such a backup, objects the restored catalog doesn't list stay in the store; `llmobs admin gc-orphans` lists the object store and deletes them (the regular GC never lists the bucket, 03 §5).
+**Online backups (track N's M2, planned in `docs/plans/n-packaging/m2/`, D-N-17–D-N-24):** `llmobs admin backup --to <dir> [--meta-only]` asks the running server (it holds the data directory's lock) through the control socket `<data_dir>/admin.sock`. The server flushes both tables, copies `meta.db` and then `catalog.db` with `VACUUM INTO` (the catalog copy under the committer lock, pinning every object it lists), hard-links or copies those objects in local mode, copies `secret.key`, and writes `manifest.json` last. Compaction, deletion and retention keep running. In S3 mode the backup is metadata-only and stays restorable against the live bucket for `storage.gc.grace`, which may be up to 30 days (no separate `gc.object_retention` key). A restore puts the files back with the server stopped, then runs `llmobs admin gc-orphans` (deletes objects the restored catalog does not know, reports needed objects the store lacks) before starting and `reapply-deletions`.
 
 ## Upgrades
 
