@@ -146,12 +146,12 @@ web/src/components/trace/run-evaluator-dialog.tsx (+ test), scores-tab.tsx      
 
 ### The migration number
 
-The next free number when you start I3.2. When this plan was written, `0006_evaluators.sql` was the last one on M2's branch, and track M's PR #77 adds a migration too, so the number is `0007` or `0008`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `NN` below. Everything that depends on it:
+The next free number when you start I3.2. `main` has `0008_entitlements.sql` (track P's M2), so the number is `0009`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `NN` below. Everything that depends on it:
 - the file name `crates/server/migrations/meta/00NN_eval_queue.sql`;
-- `meta/mod.rs` tests: the migration count in `open_twice_is_idempotent` (the number of files in `migrations/meta/` after yours; it equals `NN` because the numbers have no gap, but count the files), and `open_existing_checks_the_file_and_the_version`, which inserts version `NN + 1` and expects `found == NN + 1`, `expected == NN`;
-- `admin.rs` `schema_mismatch_names_the_versions`: inserts `NN + 1` and expects `"this binary expects schema NN, found NN+1"` with the numbers written out;
-- the `meta_schema` snapshot (`crates/server/tests/snapshots/meta_schema.snap`, or wherever `insta::assert_snapshot!("meta_schema", …)` writes it);
-- `docs/spec/04-metadata-db.md`, and `00-design.md` § Modules and § Tables, which name the file `0007_eval_queue.sql` (edit them only when `NN` is not `0007`).
+- the `meta_schema` snapshot (`crates/server/tests/snapshots/meta_schema.snap`, written by `insta::assert_snapshot!("meta_schema", …)`);
+- `docs/spec/04-metadata-db.md` (the new tables), and `00-design.md` § Modules and § Tables, which name the file `0009_eval_queue.sql` (edit them only when `NN` is not `0009`).
+
+The migration tests need no edit: `open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` (`meta/mod.rs`) and `schema_mismatch_names_the_versions` (`admin.rs`) all compute the version with `expected_version()`, which reads the highest embedded migration.
 
 If another branch takes the number after you, the one that merges second renumbers on rebase (00-design § Scope). A migration that already merged is never renumbered.
 
@@ -443,7 +443,7 @@ Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its
 
 **Goal:** migration `00NN_eval_queue.sql` with `online_rules`, `eval_jobs` and `rule_spend`, and the three `meta` modules that read and write them.
 
-**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list and its migration tests), `crates/server/src/admin.rs` (the schema-mismatch test only), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `NN` is not `0007`).
+**Edit only:** `crates/server/migrations/meta/00NN_eval_queue.sql` (new), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (new), `crates/server/src/meta/mod.rs` (module list), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `NN` is not `0009`).
 
 **Commit:** `Store online rules, eval jobs and rule spend`
 
@@ -520,7 +520,7 @@ CREATE TABLE rule_spend (
 
 `online_rules.evaluator_id` has the default `NO ACTION`: deleting a project cascades to evaluators and rules in one statement; deleting an evaluator that rules use is refused by the route (I3.8). `eval_jobs_project` serves the jobs list (newest first per project); it is not in the design's table list, which this plan's commit updates.
 
-**Existing tests:** the migration count, `open_existing_checks_the_file_and_the_version` and `admin.rs` `schema_mismatch_names_the_versions`, as § The migration number says. Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the three tables, the five named indexes, and SQLite's automatic indexes (the primary keys of `online_rules` and `eval_jobs`, `rule_spend`'s composite key, `UNIQUE(project_id, name)` and `UNIQUE(dedup_key)`). List them in the report.
+**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the three tables, the five named indexes, and SQLite's automatic indexes (the primary keys of `online_rules` and `eval_jobs`, `rule_spend`'s composite key, `UNIQUE(project_id, name)` and `UNIQUE(dedup_key)`). List them in the report.
 
 ### `meta/online_rules.rs`
 
