@@ -89,6 +89,26 @@ describe("QuotaState", () => {
     }
   });
 
+  it("pauses one hour and warns once when Retry-After is beyond the Date range", () => {
+    const clock = fakeClock(START);
+    const warn = spyWarn();
+    try {
+      const quota = new QuotaState(clock.now);
+      expect(() => quota.on402("9999999999999999999999")).not.toThrow();
+      expect(() => quota.on402("9999999999999999999999")).not.toThrow();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        "llmobs: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T22:00:00Z (retrying at most every hour)",
+      );
+      clock.advance(3_599_999);
+      expect(quota.paused()).toBe(true);
+      clock.advance(1);
+      expect(quota.paused()).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("warns again when a new pause starts after the previous one ended", () => {
     const clock = fakeClock(START);
     const warn = spyWarn();

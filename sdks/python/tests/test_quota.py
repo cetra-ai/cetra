@@ -1,12 +1,14 @@
 """Tests for the pause after a 402 (plan p-entitlements M3 § P11, D-P-34)."""
 
 import logging
+import threading
+from collections.abc import Sequence
 from typing import Protocol
 
 import pytest
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.trace import Tracer
 
 import llmobs
@@ -130,6 +132,86 @@ def test_one_warning_per_pause_with_the_utc_reset_instant(
             PAUSE_WARNING % "2027-01-15T08:01:00Z",
             PAUSE_WARNING % "2027-01-15T08:02:00Z",
         ]
+
+
+def test_warning_shows_the_raw_retry_after_while_the_pause_is_capped(
+    caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="llmobs"):
+        state.on_402("86400")
+        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-16T08:00:00Z"]
+
+    clock.now = 3599.0
+    assert state.paused()
+    clock.now = 3600.0
+    assert not state.paused()
+
+
+def test_huge_retry_after_does_not_raise_and_pauses_one_hour(
+    caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="llmobs"):
+        state.on_402("9" * 5000)
+        state.on_402("9" * 30)
+        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
+
+    clock.now = 3599.0
+    assert state.paused()
+    clock.now = 3600.0
+    assert not state.paused()
+
+
+def test_signed_or_spaced_retry_after_pauses_one_hour(
+    caplog: pytest.LogCaptureFixture, state: QuotaState, clock: FakeClock
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="llmobs"):
+        state.on_402("+5")
+        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T09:00:00Z"]
+
+    clock.now = 3599.0
+    assert state.paused()
+    clock.now = 3600.0
+    assert not state.paused()
+
+
+def test_concurrent_402s_warn_once_per_pause(
+    caplog: pytest.LogCaptureFixture, state: QuotaState
+) -> None:
+    threads = 8
+    barrier = threading.Barrier(threads)
+
+    def hit() -> None:
+        barrier.wait()
+        state.on_402("60")
+
+    with caplog.at_level(logging.WARNING, logger="llmobs"):
+        workers = [threading.Thread(target=hit) for _ in range(threads)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        assert llmobs_warnings(caplog) == [PAUSE_WARNING % "2027-01-15T08:01:00Z"]
+
+
+class _FailingExporter(SpanExporter):
+    """An inner exporter whose export is refused with a 402 that starts a pause."""
+
+    def __init__(self, state: QuotaState) -> None:
+        self._state = state
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self._state.on_402("60")
+        return SpanExportResult.FAILURE
+
+    def shutdown(self) -> None:
+        pass
+
+
+def test_failed_export_that_starts_a_pause_reports_success(state: QuotaState) -> None:
+    exporter = QuotaPauseExporter(state, _FailingExporter(state))
+
+    assert exporter.export([]) is SpanExportResult.SUCCESS
+    assert state.paused()
 
 
 def test_score_402_pauses_the_trace_exporter(

@@ -101,7 +101,11 @@ fn encode_cursor(day: &str, org_id: Uuid) -> Result<String, ApiError> {
 fn decode_cursor(text: &str) -> Result<Cursor, ApiError> {
     let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| invalid_cursor())?;
     let cursor: Cursor = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
-    NaiveDate::parse_from_str(&cursor.day, "%Y-%m-%d").map_err(|_| invalid_cursor())?;
+    let day = NaiveDate::parse_from_str(&cursor.day, "%Y-%m-%d").map_err(|_| invalid_cursor())?;
+    // `%Y-%m-%d` also parses `2026-1-5`; only the padded form is the day the cursor wrote.
+    if day.format("%Y-%m-%d").to_string() != cursor.day {
+        return Err(invalid_cursor());
+    }
     Ok(cursor)
 }
 
@@ -288,7 +292,13 @@ mod tests {
         let token = control_plane_token("usage");
         let not_json = URL_SAFE_NO_PAD.encode(b"not json");
         let bad_day = encode_cursor("2026-13-01", Uuid::now_v7()).unwrap();
-        for cursor in ["!!!", not_json.as_str(), bad_day.as_str()] {
+        let unpadded = encode_cursor("2026-1-5", Uuid::now_v7()).unwrap();
+        for cursor in [
+            "!!!",
+            not_json.as_str(),
+            bad_day.as_str(),
+            unpadded.as_str(),
+        ] {
             let response = get(
                 &app,
                 &token,

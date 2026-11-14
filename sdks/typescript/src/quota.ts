@@ -36,9 +36,14 @@ export class QuotaState {
     const start = this.now();
     this.until = start + Math.min(seconds * 1000, MAX_PAUSE_MILLIS);
     if (!wasPaused) {
-      const reset = `${new Date(start + seconds * 1000).toISOString().slice(0, 19)}Z`;
+      const resetAt = new Date(start + seconds * 1000);
+      // A huge Retry-After is outside the Date range; fall back to the pause length.
+      const reset = Number.isNaN(resetAt.getTime())
+        ? new Date(start + MAX_PAUSE_MILLIS).toISOString()
+        : resetAt.toISOString();
+      const resetText = `${reset.slice(0, 19)}Z`;
       warn(
-        `llmobs: the organization reached its monthly units cap; telemetry is dropped until ${reset} (retrying at most every hour)`,
+        `llmobs: the organization reached its monthly units cap; telemetry is dropped until ${resetText} (retrying at most every hour)`,
       );
     }
   }

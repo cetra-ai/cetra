@@ -11,7 +11,13 @@ export function UsageBanner({ org }: { org: string }) {
   if (usage === undefined || usage.notice === "none") {
     return null;
   }
-  const message = usageMessage(usage.notice, usage.resets_at, query.data?.limits.units_cap);
+  const limits = query.data?.limits;
+  const message = usageMessage(
+    usage.notice,
+    usage.resets_at,
+    limits?.units_included,
+    limits?.units_cap,
+  );
   return (
     <div
       role="status"
@@ -26,12 +32,15 @@ export function UsageBanner({ org }: { org: string }) {
 function usageMessage(
   notice: "warning" | "reached",
   resetsAt: string,
+  included: number | undefined,
   cap: number | undefined,
 ): string {
   if (notice === "warning") {
     return "This organization has used 80% of its monthly units.";
   }
-  if (cap === undefined) {
+  // Ingest stops only when the cap holds the org below its included units; a cap above them
+  // (or no cap) means the extra units are billed as overage.
+  if (cap === undefined || included === undefined || cap > included) {
     return "This organization used all units included in its plan; additional units are billed as overage.";
   }
   // The RFC 3339 date part; the server writes UTC.

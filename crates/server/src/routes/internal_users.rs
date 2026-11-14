@@ -79,7 +79,16 @@ async fn revoke_access(
                 delete_user_sessions(conn, user, None).await?;
                 let hashes = revoke_user_tokens(conn, user, now).await?;
                 if disable {
-                    users::set_disabled(conn, user, Some(now), now).await?;
+                    // An already disabled user keeps the instant it was first disabled.
+                    let disabled_at: Option<i64> =
+                        sqlx::query_scalar("SELECT disabled_at FROM users WHERE id = ?")
+                            .bind(user.to_string())
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::from)?;
+                    if disabled_at.is_none() {
+                        users::set_disabled(conn, user, Some(now), now).await?;
+                    }
                 }
                 Ok(hashes)
             })
@@ -397,6 +406,28 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(owner_still_there, 1);
+    }
+
+    #[tokio::test]
+    async fn disabling_twice_keeps_the_first_disabled_at() {
+        let app = TestApp::new().await;
+        let user = linked_user(&app, "twice@example.com", "sub-twice", false).await;
+        let token = control_plane_token("users");
+
+        assert_eq!(
+            post_user(&app, "disable", &token, "sub-twice").await.status,
+            204
+        );
+        let first = user_row(&app, user.id).await.unwrap().disabled_at;
+        assert!(first.is_some());
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        assert_eq!(
+            post_user(&app, "disable", &token, "sub-twice").await.status,
+            204
+        );
+        assert_eq!(user_row(&app, user.id).await.unwrap().disabled_at, first);
+        assert_eq!(session_me(&app, &user.cookie).await.status, 401);
     }
 
     #[tokio::test]

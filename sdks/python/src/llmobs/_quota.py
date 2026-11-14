@@ -6,6 +6,7 @@ until then, at most one hour at a time, and logs one warning per pause. The
 trace exporter and the score queue share one ``QuotaState``.
 """
 
+import threading
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ class QuotaState:
     ) -> None:
         self._clock = clock
         self._wall = wall
+        self._lock = threading.Lock()
         self.until = float("-inf")
 
     def paused(self) -> bool:
@@ -46,27 +48,42 @@ class QuotaState:
     def on_402(self, retry_after: str | None) -> None:
         """Pause for ``Retry-After`` seconds, at most one hour; warn once per pause start.
 
-        A missing, non-integer or non-positive value pauses for one hour.
+        A missing, non-digit or zero value pauses for one hour. The warning
+        shows ``now + Retry-After`` (not capped), as the plan and the
+        TypeScript SDK do.
         """
         seconds = _retry_seconds(retry_after)
         pause = min(seconds, _MAX_PAUSE_S)
-        was_paused = self.paused()
-        self.until = self._clock() + pause
-        if not was_paused:
-            reset = datetime.fromtimestamp(self._wall() + pause, tz=UTC)
-            logger.warning(_PAUSE_WARNING, reset.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        with self._lock:
+            was_paused = self.paused()
+            self.until = self._clock() + pause
+            if not was_paused:
+                reset = _reset_text(self._wall() + seconds, fallback=self._wall() + pause)
+                logger.warning(_PAUSE_WARNING, reset)
 
 
 def _retry_seconds(retry_after: str | None) -> int:
-    """``Retry-After`` as a positive number of seconds, else one hour."""
-    if retry_after is not None:
+    """``Retry-After`` as a positive number of seconds, else one hour.
+
+    Only ASCII digits count, so ``"+5"`` and ``" 5"`` are not accepted.
+    """
+    if retry_after is not None and retry_after.isascii() and retry_after.isdigit():
         try:
             seconds = int(retry_after)
-        except ValueError:
+        except ValueError:  # more digits than Python converts to an int
             return _MAX_PAUSE_S
         if seconds > 0:
             return seconds
     return _MAX_PAUSE_S
+
+
+def _reset_text(epoch: float, fallback: float) -> str:
+    """The UTC instant as ``YYYY-MM-DDTHH:MM:SSZ``; ``fallback`` if ``epoch`` is out of range."""
+    try:
+        instant = datetime.fromtimestamp(epoch, tz=UTC)
+    except (OverflowError, ValueError, OSError):
+        instant = datetime.fromtimestamp(fallback, tz=UTC)
+    return instant.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def quota_session(state: QuotaState) -> requests.Session:
@@ -91,7 +108,11 @@ class QuotaPauseExporter(SpanExporter):
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         if self._state.paused():
             return SpanExportResult.SUCCESS
-        return self._inner.export(spans)
+        result = self._inner.export(spans)
+        if result is not SpanExportResult.SUCCESS and self._state.paused():
+            # The failure is the 402 that just started the pause; drop the batch on purpose.
+            return SpanExportResult.SUCCESS
+        return result
 
     def shutdown(self) -> None:
         self._inner.shutdown()

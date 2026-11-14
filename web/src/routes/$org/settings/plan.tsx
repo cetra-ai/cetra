@@ -267,7 +267,7 @@ function UsageMeter({
           aria-label="Units this month"
           aria-valuemin={0}
           aria-valuemax={base}
-          aria-valuenow={units}
+          aria-valuenow={Math.min(units, base)}
           className="relative h-3 w-full overflow-hidden rounded-full bg-muted"
         >
           <div className="h-full bg-primary" style={{ width: `${percent}%` }} />

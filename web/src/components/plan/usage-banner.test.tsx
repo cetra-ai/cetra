@@ -72,6 +72,25 @@ it("says ingest is paused until the reset when a cap is reached", async () => {
   );
 });
 
+it("says extra units are billed when the cap is above the included units", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () =>
+      HttpResponse.json(
+        entitlementsWith("reached", {
+          ...entitlementsFixture.limits,
+          units_cap: 300000,
+        }),
+      ),
+    ),
+  );
+
+  await renderApp("/acme/support-bot/dashboard");
+
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "This organization used all units included in its plan; additional units are billed as overage.",
+  );
+});
+
 it("says extra units are billed when no cap is set", async () => {
   server.use(
     http.get("/api/v1/orgs/:org/entitlements", () =>

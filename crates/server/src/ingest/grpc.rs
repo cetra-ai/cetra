@@ -28,7 +28,7 @@ use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
 
 /// The status message of a rate refusal. The wrapper logs it at `debug`.
-const RATE_LIMITED: &str = "rate limited";
+const RATE_LIMITED_MESSAGE: &str = "rate limited";
 
 /// The tonic service. Cloning shares the state.
 #[derive(Clone)]
@@ -53,7 +53,9 @@ impl TraceService for GrpcTraces {
             Ok(response) => Ok(tonic::Response::new(response)),
             Err(status) => {
                 // Rate and cap refusals are expected for a client over its limit: `debug`.
-                if status.code() == Code::ResourceExhausted || status.message() == RATE_LIMITED {
+                if status.code() == Code::ResourceExhausted
+                    || status.message() == RATE_LIMITED_MESSAGE
+                {
                     tracing::debug!(
                         target: "ingest",
                         transport = "grpc",
@@ -183,7 +185,7 @@ impl From<IngestError> for tonic::Status {
             IngestError::Media(MediaError::Invalid { .. }) => {
                 tonic::Status::invalid_argument("invalid media in the request")
             }
-            IngestError::RateLimited { .. } => tonic::Status::unavailable(RATE_LIMITED),
+            IngestError::RateLimited { .. } => tonic::Status::unavailable(RATE_LIMITED_MESSAGE),
             IngestError::Busy
             | IngestError::Append(
                 AppendError::Backpressure

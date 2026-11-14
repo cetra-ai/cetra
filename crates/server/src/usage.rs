@@ -117,6 +117,12 @@ impl Usage {
     }
 
     /// The org's loaded units of `month`, if loaded for that month.
+    /// Forgets every loaded month, so the next `month_units` loads again. Tests only.
+    #[cfg(test)]
+    fn forget_loaded_months(&self) {
+        self.lock_months().clear();
+    }
+
     fn loaded_units(&self, org_id: OrgId, month: i32) -> Option<u64> {
         self.lock_months()
             .get(&org_id)
@@ -594,6 +600,9 @@ mod tests {
             let (usage, meta) = (Arc::clone(&usage), Arc::clone(&meta));
             tokio::task::spawn(async move {
                 for _ in 0..50 {
+                    // Forget the loaded counter each round so every call really loads
+                    // against the flushes and adds in flight.
+                    usage.forget_loaded_months();
                     usage.month_units(&meta, org, DAY_ONE).await.unwrap();
                 }
             })
