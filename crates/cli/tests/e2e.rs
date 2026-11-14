@@ -136,24 +136,11 @@ struct Server {
 async fn start(dir: &Path, extra_config: &str) -> Server {
     let config_path = dir.join("llmobs.toml");
     let data_dir = dir.join("data");
-    // The config rejects equal listen addresses, so `:0` on all three would fail.
-    // Three ports are reserved together (held until all are read) and then released.
-    let reserved: Vec<std::net::TcpListener> = (0..3)
-        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    let ports: Vec<u16> = reserved
-        .iter()
-        .map(|listener| listener.local_addr().unwrap().port())
-        .collect();
-    drop(reserved);
     fs::write(
         &config_path,
         format!(
-            "data_dir = {:?}\nhttp_addr = \"127.0.0.1:{}\"\notlp_http_addr = \"127.0.0.1:{}\"\ngrpc_addr = \"127.0.0.1:{}\"\npublic_url = \"{ORIGIN}\"\n\n[init]\nadmin_email = \"{ADMIN_EMAIL}\"\nadmin_password = \"{ADMIN_PASSWORD}\"\norg = \"Acme\"\nproject = \"Proto\"\nsecret_key = \"{INIT_KEY}\"\n{extra_config}",
+            "data_dir = {:?}\nhttp_addr = \"127.0.0.1:0\"\notlp_http_addr = \"127.0.0.1:0\"\ngrpc_addr = \"127.0.0.1:0\"\npublic_url = \"{ORIGIN}\"\n\n[init]\nadmin_email = \"{ADMIN_EMAIL}\"\nadmin_password = \"{ADMIN_PASSWORD}\"\norg = \"Acme\"\nproject = \"Proto\"\nsecret_key = \"{INIT_KEY}\"\n{extra_config}",
             data_dir.display().to_string(),
-            ports[0],
-            ports[1],
-            ports[2],
         ),
     )
     .unwrap();
