@@ -94,6 +94,9 @@ struct CommitterInner {
 /// The single writer of `catalog.db`.
 pub(crate) struct Committer {
     inner: Mutex<CommitterInner>,
+    /// Held for read by every media deletion and for write by a catalog snapshot
+    /// (N M2, D-N-18). Take it before `inner`, never while holding `inner`.
+    pub(crate) object_gc_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl std::fmt::Debug for Committer {
@@ -118,6 +121,7 @@ impl Committer {
                 hooks,
                 retired: HashMap::new(),
             }),
+            object_gc_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
     }
 
@@ -129,6 +133,18 @@ impl Committer {
     /// Highest flushed WAL sequence for `table`. Missing row is `0`.
     pub(crate) async fn flushed_seq(&self, table: Table) -> u64 {
         self.inner.lock().await.flushed[table_index(table)]
+    }
+
+    /// `VACUUM INTO path` on the catalog connection and a clone of the in-memory
+    /// catalog, in one critical section: the copy and the clone describe the same
+    /// commit. `path` must not exist and must be UTF-8 (the caller checks both).
+    pub(crate) async fn snapshot_into(&self, path: &str) -> Result<Arc<Catalog>, sqlx::Error> {
+        let mut inner = self.inner.lock().await;
+        sqlx::query("VACUUM INTO ?")
+            .bind(path)
+            .execute(&mut inner.connection)
+            .await?;
+        Ok(Arc::clone(&inner.catalog))
     }
 
     /// The pending deletions as last committed.

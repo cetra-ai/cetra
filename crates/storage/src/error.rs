@@ -654,6 +654,23 @@ impl CompactionError {
     }
 }
 
+/// Why [`crate::Storage::snapshot_catalog`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// The snapshot target already exists.
+    #[error("the snapshot target already exists")]
+    Exists,
+    /// The snapshot target is not valid UTF-8.
+    #[error("the snapshot target is not valid UTF-8")]
+    NonUtf8Path,
+    /// SQLite failed, or a value of the copy is invalid.
+    #[error("catalog snapshot: {0}")]
+    Db(#[from] sqlx::Error),
+    /// A `media` row of the copy names a project id that does not parse.
+    #[error("catalog snapshot: invalid project id in the copy")]
+    BadProjectId,
+}
+
 /// A batch could not be deduplicated. `reason` is a static description, never row content.
 #[derive(Debug, thiserror::Error)]
 #[error("dedup failed: {reason}")]

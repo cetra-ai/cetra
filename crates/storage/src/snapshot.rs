@@ -1,0 +1,404 @@
+//! Consistent copies of `catalog.db` for online backups (N M2, D-N-18).
+//!
+//! [`crate::Storage::snapshot_catalog`] writes the copy and returns a
+//! [`CatalogSnapshot`]. The snapshot pins every object it lists until it is
+//! dropped: data files through the `retired` reference count, media through
+//! the `object_gc_gate`.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use llmobs_core::ids::ProjectId;
+use sqlx::{ConnectOptions, Connection};
+use tokio::sync::OwnedRwLockWriteGuard;
+
+use crate::catalog::{Catalog, table_index};
+use crate::error::SnapshotError;
+use crate::objects::Objects;
+use crate::wal::Table;
+
+/// A consistent copy of `catalog.db` and the pin that keeps its objects (N M2,
+/// D-N-18). Dropping it releases the pin.
+pub struct CatalogSnapshot {
+    /// The copied file.
+    pub path: PathBuf,
+    /// Every object the copy needs: active data files and live media.
+    pub objects: Vec<LiveObject>,
+    /// `table_state.flushed_seq` of the copy: `[spans, scores]`.
+    pub flushed_seq: [u64; 2],
+    /// Keeps the in-memory catalog of the copy alive, so its data files stay
+    /// referenced and GC keeps them.
+    _catalog: Arc<Catalog>,
+    /// Blocks media deletion and dropped-project media deletion while held.
+    _gate: OwnedRwLockWriteGuard<()>,
+}
+
+impl CatalogSnapshot {
+    /// Built by [`crate::Storage::snapshot_catalog`] once the copy is written
+    /// and read, with the pins it must hold.
+    pub(crate) fn new(
+        path: PathBuf,
+        objects: Vec<LiveObject>,
+        flushed_seq: [u64; 2],
+        catalog: Arc<Catalog>,
+        gate: OwnedRwLockWriteGuard<()>,
+    ) -> Self {
+        Self {
+            path,
+            objects,
+            flushed_seq,
+            _catalog: catalog,
+            _gate: gate,
+        }
+    }
+}
+
+impl fmt::Debug for CatalogSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogSnapshot")
+            .field("path", &self.path)
+            .field("objects", &self.objects.len())
+            .field("flushed_seq", &self.flushed_seq)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One object a snapshot needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveObject {
+    /// Store-relative key: `tables/…/….parquet` or `media/{project}/{sha256}`.
+    pub key: String,
+    /// Size of the object in bytes, as the catalog records it.
+    pub size_bytes: u64,
+}
+
+/// Reads the objects and the sequences of a copy written by `VACUUM INTO`.
+///
+/// Active data files come first in key order, then live media. Media of a
+/// dropping or dropped project is not listed: its drop deletes it.
+pub(crate) async fn read_copy(path: &Path) -> Result<(Vec<LiveObject>, [u64; 2]), SnapshotError> {
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .connect()
+        .await?;
+    let files: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT path, size_bytes FROM data_files WHERE state = 'active' ORDER BY path",
+    )
+    .fetch_all(&mut connection)
+    .await?;
+    let media: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT m.project_id, m.sha256, m.size_bytes FROM media AS m
+         WHERE NOT EXISTS (
+           SELECT 1 FROM projects AS p
+           WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))
+         ORDER BY m.project_id, m.sha256",
+    )
+    .fetch_all(&mut connection)
+    .await?;
+    let sequences: Vec<(String, i64)> =
+        sqlx::query_as("SELECT table_name, flushed_seq FROM table_state")
+            .fetch_all(&mut connection)
+            .await?;
+    connection.close().await?;
+
+    let mut objects = Vec::with_capacity(files.len() + media.len());
+    for (key, size) in files {
+        objects.push(LiveObject {
+            key,
+            size_bytes: stored_u64(size)?,
+        });
+    }
+    for (project, sha, size) in media {
+        let project: ProjectId = project.parse().map_err(|_| SnapshotError::BadProjectId)?;
+        objects.push(LiveObject {
+            key: Objects::media_path(project, &sha),
+            size_bytes: stored_u64(size)?,
+        });
+    }
+    let mut flushed_seq = [0, 0];
+    for (table, sequence) in sequences {
+        let index = match table.as_str() {
+            "spans" => table_index(Table::Spans),
+            "scores" => table_index(Table::Scores),
+            _ => {
+                return Err(SnapshotError::Db(sqlx::Error::Decode(
+                    "unknown table_name in the copy".into(),
+                )));
+            }
+        };
+        flushed_seq[index] = stored_u64(sequence)?;
+    }
+    Ok((objects, flushed_seq))
+}
+
+/// A stored integer that must not be negative.
+fn stored_u64(value: i64) -> Result<u64, SnapshotError> {
+    u64::try_from(value)
+        .map_err(|_| SnapshotError::Db(sqlx::Error::Decode("negative value in the copy".into())))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use bytes::Bytes;
+    use sha2::{Digest, Sha256};
+    use sqlx::ConnectOptions;
+
+    use crate::Storage;
+    use crate::catalog::FileTable;
+    use crate::compaction::job::tests::{at, config_in, flush_cycle, project, quiet_compaction};
+    use crate::error::SnapshotError;
+    use crate::media::MediaBlob;
+    use crate::objects::Objects;
+    use crate::test_support::{span_row, span_rows};
+    use crate::wal::{Table, spans_at};
+
+    fn blob_of(bytes: &'static [u8]) -> MediaBlob {
+        let bytes = Bytes::from_static(bytes);
+        MediaBlob {
+            sha256: Sha256::digest(bytes.as_ref()).into(),
+            mime_type: "image/png".to_owned(),
+            bytes,
+        }
+    }
+
+    /// Waits until the spans table has `count` active files and no memtable rows.
+    async fn wait_for_spans_files(storage: &Storage, count: usize) {
+        let started = Instant::now();
+        while storage.catalog_files(Table::Spans).len() < count
+            || storage.published_rows(Table::Spans) != 0
+        {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "flush did not publish the spans"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn object_on_disk(dir: &std::path::Path, key: &str) -> bool {
+        dir.join("objects").join(key).is_file()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_lists_active_files_and_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_millis(100));
+        let storage = Storage::open(config).await.unwrap();
+        let bytes = b"snapshot-media";
+        let blob = blob_of(bytes);
+        let media_key = Objects::media_path(project(), &hex::encode(blob.sha256));
+        storage.put_media(project(), blob).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1, 2]))
+            .await
+            .unwrap();
+        wait_for_spans_files(&storage, 1).await;
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+
+        let mut expected = storage.catalog_paths(FileTable::Spans);
+        expected.extend(storage.catalog_paths(FileTable::Traces));
+        expected.extend(storage.catalog_paths(FileTable::Scores));
+        expected.sort();
+        let mut listed: Vec<String> = snapshot
+            .objects
+            .iter()
+            .map(|object| object.key.clone())
+            .filter(|key| key.starts_with("tables/"))
+            .collect();
+        listed.sort();
+        assert_eq!(listed, expected);
+        assert!(
+            snapshot.objects.iter().any(|object| object.key == media_key
+                && object.size_bytes == u64::try_from(bytes.len()).unwrap()),
+            "the live media is not listed"
+        );
+        assert_eq!(
+            snapshot.flushed_seq[0],
+            storage.committer.flushed_seq(Table::Spans).await
+        );
+        assert!(snapshot.flushed_seq[0] > 0);
+        assert_eq!(snapshot.flushed_seq[1], 0);
+
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&target)
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let active: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM data_files WHERE state = 'active'")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(usize::try_from(active).unwrap(), expected.len());
+        drop(connection);
+
+        drop(snapshot);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A snapshot holds back the deletion of obsolete files: the GC waits for
+    /// the gate while the snapshot is alive, then deletes the files.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_holds_obsolete_gc() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(3), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..3_u8 {
+            let base = at(10, 0, 0) + i64::from(index) * 60 * 1_000_000_000;
+            let batch = span_rows(&[
+                span_row(0, 10 + index, base, base + 1_000_000_000),
+                span_row(1, 20 + index, base + 2_000_000_000, base + 3_000_000_000),
+            ]);
+            storage = flush_cycle(&config, storage, batch).await;
+        }
+        // The six inputs of the compaction below: three spans and three traces files.
+        let mut obsoleted = storage.catalog_paths(FileTable::Spans);
+        obsoleted.extend(storage.catalog_paths(FileTable::Traces));
+        assert_eq!(obsoleted.len(), 6, "{obsoleted:?}");
+        let storage = Arc::new(storage);
+
+        let report = storage.compact(at(11, 0, 0)).await.unwrap();
+        assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        for object in &snapshot.objects {
+            assert!(
+                !obsoleted.contains(&object.key),
+                "{} is obsolete yet listed",
+                object.key
+            );
+        }
+
+        let collector = Arc::clone(&storage);
+        let task = tokio::spawn(async move { collector.collect_obsolete(Duration::ZERO).await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !task.is_finished(),
+            "obsolete collection ran while a snapshot was held"
+        );
+        for path in &obsoleted {
+            assert!(object_on_disk(dir.path(), path), "{path} was deleted");
+        }
+        for object in &snapshot.objects {
+            assert!(
+                object_on_disk(dir.path(), &object.key),
+                "{} was deleted under a snapshot",
+                object.key
+            );
+        }
+
+        drop(snapshot);
+        let report = task.await.unwrap().unwrap();
+        assert_eq!(report.deleted, 6, "{report:?}");
+        for path in &obsoleted {
+            assert!(!object_on_disk(dir.path(), path), "{path} survived");
+        }
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// While a snapshot holds the gate, a project drop commits and returns at
+    /// once, and leaves its media for the GC task. Once the snapshot is gone,
+    /// the GC step deletes the media.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_holds_media_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Storage::open(config).await.unwrap();
+        let blob = blob_of(b"held-media");
+        let key = Objects::media_path(project(), &hex::encode(blob.sha256));
+        storage.put_media(project(), blob).await.unwrap();
+
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        assert!(snapshot.objects.iter().any(|object| object.key == key));
+
+        tokio::time::timeout(Duration::from_secs(5), storage.drop_project(project()))
+            .await
+            .expect("the drop waited for the snapshot")
+            .unwrap();
+        assert!(
+            storage
+                .committer
+                .dropping_projects()
+                .await
+                .unwrap()
+                .contains(&project()),
+            "the drop did not commit"
+        );
+        assert!(
+            object_on_disk(dir.path(), &key),
+            "the media was deleted under a snapshot"
+        );
+
+        drop(snapshot);
+        storage.media.finish_drops().await;
+        assert!(!object_on_disk(dir.path(), &key), "the media survived");
+        assert!(
+            storage
+                .committer
+                .dropping_projects()
+                .await
+                .unwrap()
+                .is_empty(),
+            "the drop did not finish"
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    /// Appends succeed and a flush driven by `flush.max_age` still commits
+    /// while a snapshot is held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_does_not_block_appends_or_flushes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_millis(100));
+        let storage = Storage::open(config).await.unwrap();
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.append_spans(project(), spans_at(&[1, 2])),
+        )
+        .await
+        .expect("an append waited for the snapshot")
+        .unwrap();
+        wait_for_spans_files(&storage, 1).await;
+
+        drop(snapshot);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_refuses_an_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Storage::open(config).await.unwrap();
+        let target = dir.path().join("catalog-copy.db");
+        let held = storage.snapshot_catalog(&target).await.unwrap();
+
+        let again = tokio::time::timeout(Duration::from_secs(5), storage.snapshot_catalog(&target))
+            .await
+            .expect("a refused snapshot waited for the gate");
+        assert!(
+            matches!(again, Err(SnapshotError::Exists)),
+            "the second snapshot was not refused"
+        );
+
+        drop(held);
+        storage.shutdown().await.unwrap();
+    }
+}
