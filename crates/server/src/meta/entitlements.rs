@@ -1,6 +1,4 @@
 //! `org_entitlements` and `org_window_ends` (D-P-11, D-P-30).
-// Track P M2: P4 and P5 use these outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 

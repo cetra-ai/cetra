@@ -69,6 +69,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/entitlements",
         "get_org_entitlements",
     ),
+    (
+        "put",
+        "/api/internal/v1/orgs/{org_id}/entitlements",
+        "put_org_entitlements_token",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -281,6 +286,7 @@ const TAGS: &[&str] = &[
     "sql",
     "metrics",
     "media",
+    "internal",
 ];
 
 const METHODS: &[&str] = &[
@@ -359,6 +365,7 @@ fn document_lint() {
                 | "post_email_verify"
                 | "post_email_verify_resend"
                 | "get_invite_preview"
+                | "put_org_entitlements_token"
         ) {
             assert_eq!(operation_security.map(Vec::len), Some(0), "{id}");
         } else if matches!(
@@ -412,6 +419,8 @@ fn document_lint() {
             expected_errors.extend(["400", "403", "409", "429"]);
         } else if *id == "post_login" {
             expected_errors.extend(["401", "403", "429"]);
+        } else if *id == "put_org_entitlements_token" {
+            expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);
         } else if *id == "post_email_verify" {

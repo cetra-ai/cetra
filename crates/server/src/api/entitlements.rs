@@ -65,3 +65,11 @@ pub struct OrgEntitlements {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade_url: Option<String>,
 }
+
+/// `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutOrgTokenRequest {
+    /// A signed `kind: org` token. Never logged.
+    pub token: String,
+}

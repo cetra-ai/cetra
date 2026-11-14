@@ -39,7 +39,7 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
-use super::entitlements::{Feature, OrgEntitlements};
+use super::entitlements::{Feature, OrgEntitlements, PutOrgTokenRequest};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -129,6 +129,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<PutOrgTokenRequest>();
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -278,6 +279,10 @@ pub fn openapi() -> OpenApi {
             tag("sql", "SQL console over the project's views."),
             tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
+            tag(
+                "internal",
+                "Endpoints the cloud control plane calls on a cell.",
+            ),
         ]))
         .components(Some(components(&schemas)))
         .security(Some([
@@ -1066,6 +1071,25 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let put_entitlements = operation(
+        "put_org_entitlements_token",
+        "internal",
+        "Store the org's entitlement token",
+    )
+    .description(Some(
+        "The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+    .request_body(Some(json_body("PutOrgTokenRequest")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The token is stored, or it was already stored.")
+            .build(),
+        &[400, 404, 409, 429],
+    ))
+    .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     let mut projects = PathItem::new(HttpMethod::Get, list);
@@ -1078,6 +1102,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/entitlements",
             PathItem::new(HttpMethod::Get, get_entitlements),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}/entitlements",
+            PathItem::new(HttpMethod::Put, put_entitlements),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)

@@ -719,6 +719,84 @@
         "security": []
       }
     },
+    "/api/internal/v1/orgs/{org_id}/entitlements": {
+      "put": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Store the org's entitlement token",
+        "description": "The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.",
+        "operationId": "put_org_entitlements_token",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOrgTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The token is stored, or it was already stored."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/public/feedback": {
       "post": {
         "tags": [
@@ -9496,6 +9574,20 @@
           "none"
         ]
       },
+      "PutOrgTokenRequest": {
+        "type": "object",
+        "description": "`PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "A signed `kind: org` token. Never logged."
+          }
+        },
+        "additionalProperties": false
+      },
       "ReasoningPart": {
         "type": "object",
         "description": "Model reasoning, separate from the user-visible text.",
@@ -11801,6 +11893,10 @@
     {
       "name": "media",
       "description": "Extracted media blobs."
+    },
+    {
+      "name": "internal",
+      "description": "Endpoints the cloud control plane calls on a cell."
     }
   ]
 }

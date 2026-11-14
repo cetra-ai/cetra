@@ -188,6 +188,9 @@ pub(crate) async fn insert_org_with_derived_slug(
     Err(MetaError::Conflict("slug taken"))
 }
 
+const ORG_BY_ID_SQL: &str =
+    "SELECT id, name, slug, state, created_at, updated_at FROM orgs WHERE id = ?";
+
 /// The org with this id.
 ///
 /// # Errors
@@ -195,12 +198,27 @@ pub(crate) async fn insert_org_with_derived_slug(
 /// Returns [`MetaError`] when the query fails or the id does not parse.
 pub(crate) async fn org_by_id(pool: &SqlitePool, id: OrgId) -> Result<Option<OrgRow>, MetaError> {
     fetch_org(
-        sqlx::query_as(
-            "SELECT id, name, slug, state, created_at, updated_at FROM orgs WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(pool)
-        .await?,
+        sqlx::query_as(ORG_BY_ID_SQL)
+            .bind(id.to_string())
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// The org with this id, in the write transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the id does not parse.
+pub(crate) async fn org_by_id_tx(
+    conn: &mut SqliteConnection,
+    id: OrgId,
+) -> Result<Option<OrgRow>, MetaError> {
+    fetch_org(
+        sqlx::query_as(ORG_BY_ID_SQL)
+            .bind(id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?,
     )
 }
 

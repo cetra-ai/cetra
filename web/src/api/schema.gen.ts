@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/orgs/{org_id}/entitlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Store the org's entitlement token
+         * @description The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.
+         */
+        put: operations["put_org_entitlements_token"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/public/feedback": {
         parameters: {
             query?: never;
@@ -2244,6 +2264,11 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential. */
+        PutOrgTokenRequest: {
+            /** @description A signed `kind: org` token. Never logged. */
+            token: string;
+        };
         /** @description Model reasoning, separate from the user-visible text. */
         ReasoningPart: {
             /** @description The reasoning text. */
@@ -4022,6 +4047,67 @@ export interface operations {
             };
             /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_entitlements_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The token is stored, or it was already stored. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

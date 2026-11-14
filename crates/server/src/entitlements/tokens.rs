@@ -49,6 +49,9 @@ pub(crate) enum OrgTokenError {
     /// The token is for another org than the one it was sent for.
     #[error("the token is for another org")]
     OrgMismatch,
+    /// The token is past its grace period (`now >= grace_ends_at`).
+    #[error("the token has expired")]
+    Expired,
     /// The dates are out of order, or the plan id or name is not 1 to 64 characters.
     #[error("the token fields are inconsistent")]
     Fields,
