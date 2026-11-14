@@ -9,6 +9,8 @@ import { CopyButton } from "@/components/copy-button";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
 import {
@@ -108,6 +110,8 @@ function InviteForm({
   const [role, setRole] = useState<OrgRole>("member");
   const [emailError, setEmailError] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
+  const planLimited = problemOf(create.error)?.code === "plan_limit";
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -124,6 +128,10 @@ function InviteForm({
       {
         onError: (caught) => {
           const status = problemOf(caught)?.status;
+          if (problemOf(caught)?.code === "plan_limit") {
+            setError(problemMessage(caught, "Your plan does not allow another seat."));
+            return;
+          }
           if (status === 409) {
             setEmailError("This person is already a member.");
             return;
@@ -190,6 +198,7 @@ function InviteForm({
           </Select>
         </div>
         <FormError message={error} />
+        {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
         <DialogFooter>
           <Button type="button" variant="outline" disabled={create.isPending} onClick={onCancel}>
             Cancel

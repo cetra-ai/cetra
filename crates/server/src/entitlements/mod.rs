@@ -349,6 +349,21 @@ pub(crate) fn require(state: &AppState, org: OrgId, feature: Feature) -> Result<
     }
 }
 
+/// Whether `count + adding` would exceed `limit` (D-P-20). `None` never does.
+pub(crate) fn over_limit(limit: Option<u64>, count: u64, adding: u64) -> bool {
+    limit.is_some_and(|limit| count.saturating_add(adding) > limit)
+}
+
+/// The `plan_limit` error for `limit` (D-P-14). `noun` is (singular, plural).
+pub(crate) fn plan_limit(limit: u64, noun: (&str, &str)) -> ApiError {
+    ApiError::PlanLimit {
+        detail: format!(
+            "Your plan allows {limit} {}.",
+            if limit == 1 { noun.0 } else { noun.1 }
+        ),
+    }
+}
+
 /// `entitlements.upgrade_url` for `org`, or `None` when unset (D-P-15).
 pub(crate) fn upgrade_url(state: &AppState, org: OrgId) -> Option<String> {
     state
