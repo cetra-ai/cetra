@@ -59,58 +59,11 @@ export interface RunTarget {
 }
 
 export function RunEvaluatorButton({ trace, spanId, selectedIsRoot }: RunTarget) {
-  const { data } = useProject();
-  const [open, setOpen] = useState(false);
-  const canRun = canManageEvaluation(data.role);
-
-  return (
-    <>
-      <DisabledReason reason={canRun ? undefined : "Only members can run evaluators"}>
-        <Button
-          type="button"
-          variant="outline"
-          size="xs"
-          disabled={!canRun}
-          onClick={() => {
-            setOpen(true);
-          }}
-        >
-          Run evaluator
-        </Button>
-      </DisabledReason>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Run evaluator</DialogTitle>
-            <DialogDescription>
-              Queues one run at the highest priority. Its score is written when the run finishes.
-            </DialogDescription>
-          </DialogHeader>
-          <RunEvaluatorForm trace={trace} spanId={spanId} selectedIsRoot={selectedIsRoot} />
-        </DialogContent>
-      </Dialog>
-    </>
-  );
-}
-
-function RunEvaluatorForm({ trace, spanId, selectedIsRoot }: RunTarget) {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
   const queryClient = useQueryClient();
-  const ref = projectRef(org, project);
-  const evaluators = $api.useQuery(
-    "get",
-    "/api/v1/projects/{project}/evaluators",
-    evaluatorsInit(org, project),
-  );
-  const [evaluatorId, setEvaluatorId] = useState("");
-  const [target, setTarget] = useState<Target>("trace");
-  const [mapping, setMapping] = useState<MappingRow[]>([]);
-  const [fieldMessages, setFieldMessages] = useState<Record<string, string>>({});
-  const [formMessage, setFormMessage] = useState<string | undefined>();
+  const [open, setOpen] = useState(false);
+  // The job is read here, not in the form, so the scores refresh even after the dialog closes.
   const [jobId, setJobId] = useState<string | undefined>();
-  const run = $api.useMutation("post", "/api/v1/projects/{project}/evaluators/{id}/run", {
-    gcTime: 0,
-  });
   const job = useQuery({
     ...evalJobQuery(org, project, jobId ?? ""),
     enabled: jobId !== undefined,
@@ -130,9 +83,86 @@ function RunEvaluatorForm({ trace, spanId, selectedIsRoot }: RunTarget) {
     }
   }, [status, queryClient]);
 
-  if (evaluators.error) {
-    throw evaluators.error;
+  const canRun = canManageEvaluation(data.role);
+
+  function onOpenChange(next: boolean) {
+    if (next) {
+      // Each opening starts from no job, as the form did when it was mounted fresh.
+      setJobId(undefined);
+    }
+    setOpen(next);
   }
+
+  return (
+    <>
+      <DisabledReason reason={canRun ? undefined : "Only members can run evaluators"}>
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          disabled={!canRun}
+          onClick={() => {
+            onOpenChange(true);
+          }}
+        >
+          Run evaluator
+        </Button>
+      </DisabledReason>
+      <Dialog open={open} onOpenChange={onOpenChange}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Run evaluator</DialogTitle>
+            <DialogDescription>
+              Queues one run at the highest priority. Its score is written when the run finishes.
+            </DialogDescription>
+          </DialogHeader>
+          <RunEvaluatorForm
+            trace={trace}
+            spanId={spanId}
+            selectedIsRoot={selectedIsRoot}
+            jobId={jobId}
+            job={job.data}
+            jobError={job.isError}
+            onQueued={setJobId}
+          />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+interface RunFormProps extends RunTarget {
+  jobId: string | undefined;
+  job: Job | undefined;
+  jobError: boolean;
+  onQueued: (jobId: string) => void;
+}
+
+function RunEvaluatorForm({
+  trace,
+  spanId,
+  selectedIsRoot,
+  jobId,
+  job,
+  jobError,
+  onQueued,
+}: RunFormProps) {
+  const { org, project } = useProject();
+  const ref = projectRef(org, project);
+  const evaluators = $api.useQuery(
+    "get",
+    "/api/v1/projects/{project}/evaluators",
+    evaluatorsInit(org, project),
+  );
+  const [evaluatorId, setEvaluatorId] = useState("");
+  const [target, setTarget] = useState<Target>("trace");
+  const [mapping, setMapping] = useState<MappingRow[]>([]);
+  const [fieldMessages, setFieldMessages] = useState<Record<string, string>>({});
+  const [formMessage, setFormMessage] = useState<string | undefined>();
+  const run = $api.useMutation("post", "/api/v1/projects/{project}/evaluators/{id}/run", {
+    gcTime: 0,
+  });
+  const busy = job?.status === "queued" || job?.status === "running";
   const list = evaluators.data?.data ?? [];
   const picked = list.find((item) => item.id === evaluatorId);
   // A span run needs a selected span that is not a root; otherwise the whole trace is the target.
@@ -195,7 +225,7 @@ function RunEvaluatorForm({ trace, spanId, selectedIsRoot }: RunTarget) {
       },
       {
         onSuccess: (queued) => {
-          setJobId(queued.id);
+          onQueued(queued.id);
         },
         onError: onRunError,
       },
@@ -205,7 +235,9 @@ function RunEvaluatorForm({ trace, spanId, selectedIsRoot }: RunTarget) {
   const otherMessages = Object.entries(fieldMessages)
     .filter(([field]) => field !== "variable_mapping" && !field.startsWith("variable_mapping."))
     .map(([, message]) => message);
-  const message = formMessage ?? (otherMessages.length > 0 ? otherMessages.join(" ") : undefined);
+  const loadMessage = evaluators.isError ? "Could not load the evaluators." : undefined;
+  const message =
+    loadMessage ?? formMessage ?? (otherMessages.length > 0 ? otherMessages.join(" ") : undefined);
 
   return (
     <form noValidate className="flex flex-col gap-4" onSubmit={onSubmit}>
@@ -263,10 +295,10 @@ function RunEvaluatorForm({ trace, spanId, selectedIsRoot }: RunTarget) {
       </div>
 
       <FormError message={message} />
-      <RunOutcome org={org} project={project} job={job.data} jobId={jobId} />
+      <RunOutcome org={org} project={project} job={job} jobError={jobError} jobId={jobId} />
 
       <div className="flex justify-end">
-        <SubmitButton pending={run.isPending} disabled={evaluatorId.length === 0}>
+        <SubmitButton pending={run.isPending} disabled={evaluatorId.length === 0 || busy}>
           {run.isPending ? "Starting…" : "Run"}
         </SubmitButton>
       </div>
@@ -279,15 +311,27 @@ function RunOutcome({
   org,
   project,
   job,
+  jobError,
   jobId,
 }: {
   org: string;
   project: string;
   job: Job | undefined;
+  jobError: boolean;
   jobId: string | undefined;
 }) {
   if (jobId === undefined) {
     return null;
+  }
+  if (jobError) {
+    return (
+      <p role="alert" className="text-sm text-destructive">
+        Could not read the run's status.{" "}
+        <Link to="/$org/$project/online-rules" params={{ org, project }} className="underline">
+          View jobs
+        </Link>
+      </p>
+    );
   }
   if (job === undefined || job.status === "queued") {
     return <p className="text-sm">Queued</p>;

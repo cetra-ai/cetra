@@ -86,7 +86,11 @@ export function ScoreDistribution({
     return <Skeleton className="h-24 w-full" />;
   }
   if (query.isError) {
-    throw query.error;
+    return (
+      <p role="alert" className="text-xs text-destructive">
+        Could not load the scores.
+      </p>
+    );
   }
   const scores = query.data.data;
   const result = distribution(scores);

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
@@ -18,6 +18,7 @@ import {
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import { useProject } from "@/components/shell/project-context";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -622,7 +623,17 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             {formError.hint ? <p>{formError.hint}</p> : null}
           </div>
         ) : null}
-        <div className="flex justify-end">
+        <div className="flex items-center justify-end gap-2">
+          {saved ? (
+            <Button asChild variant="outline">
+              <Link
+                to="/$org/$project/online-rules/$ruleId"
+                params={{ org, project, ruleId: rule.id }}
+              >
+                Cancel
+              </Link>
+            </Button>
+          ) : null}
           <DisabledReason reason={canEdit ? undefined : NO_PERMISSION}>
             <SubmitButton pending={pending}>{saved ? "Save" : "Create rule"}</SubmitButton>
           </DisabledReason>

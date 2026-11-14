@@ -92,6 +92,18 @@ it("shows a viewer a read-only form", async () => {
   expect(save.parentElement).toHaveAccessibleDescription("Only members can edit online rules");
 });
 
+it("cancels back to the rule page without saving", async () => {
+  const patched = capturePatch();
+  const { user, router } = await renderApp(EDIT_URL);
+
+  const name = await screen.findByLabelText("Name");
+  await user.type(name, " draft");
+  await user.click(screen.getByRole("link", { name: "Cancel" }));
+
+  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
+  expect(patched.calls()).toBe(0);
+});
+
 it("saves an unchanged rule without a PATCH and opens its rule page", async () => {
   const patched = capturePatch();
   const { user, router } = await renderApp(EDIT_URL);

@@ -178,3 +178,66 @@ it("shows not found for an unknown rule", async () => {
 
   expect(await screen.findByText("Page not found")).toBeInTheDocument();
 });
+
+it("keeps the page when the evaluator query fails", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
+    http.get("/api/v1/projects/:project/evaluators/:id", () => problemResponse(500, "internal")),
+  );
+  await renderApp(SPAN_RULE_URL);
+
+  expect(await screen.findByRole("heading", { name: "Relevance on spans" })).toBeInTheDocument();
+  expect(screen.getByText("Evaluator").nextElementSibling).toHaveTextContent("—");
+  expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+});
+
+it("keeps the page and shows an alert when the scores query fails", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
+    http.get("/api/v1/projects/:project/scores", () => problemResponse(500, "internal")),
+  );
+  await renderApp(SPAN_RULE_URL);
+
+  expect(await screen.findByRole("heading", { name: "Relevance on spans" })).toBeInTheDocument();
+  const section = screen.getByRole("region", { name: "Score distribution" });
+  expect(await within(section).findByRole("alert")).toHaveTextContent("Could not load the scores.");
+  expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+});
+
+it("keeps the page and shows an alert when the eval jobs query fails", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () => HttpResponse.json(pausedRule({}))),
+    http.get("/api/v1/projects/:project/eval-jobs", () => problemResponse(500, "internal")),
+  );
+  await renderApp(SPAN_RULE_URL);
+
+  expect(await screen.findByRole("heading", { name: "Relevance on spans" })).toBeInTheDocument();
+  const section = screen.getByRole("region", { name: "Jobs" });
+  expect(await within(section).findByRole("alert")).toHaveTextContent("Could not load the jobs.");
+  expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+});
+
+it("reloads the eval jobs after a resume", async () => {
+  let jobReads = 0;
+  let resumed = false;
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () =>
+      HttpResponse.json(resumed ? pausedRule({ paused_reason: undefined }) : pausedRule({})),
+    ),
+    http.get("/api/v1/projects/:project/eval-jobs", () => {
+      jobReads += 1;
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+    http.post("/api/v1/projects/:project/online-rules/:id/resume", () => {
+      resumed = true;
+      return HttpResponse.json(pausedRule({ paused_reason: undefined }));
+    }),
+  );
+  const { user } = await renderApp(SPAN_RULE_URL);
+
+  await screen.findByText("No jobs yet.");
+  const reads = jobReads;
+  await user.click(screen.getByRole("button", { name: "Resume" }));
+
+  await waitFor(() => expect(jobReads).toBeGreaterThan(reads));
+});

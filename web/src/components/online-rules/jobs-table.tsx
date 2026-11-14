@@ -46,8 +46,12 @@ export function JobsTable({
       getNextPageParam: (page) => page.next_cursor ?? undefined,
     },
   );
-  if (query.error) {
-    throw query.error;
+  if (query.isError) {
+    return (
+      <p role="alert" className="text-xs text-destructive">
+        Could not load the jobs.
+      </p>
+    );
   }
   if (query.isPending) {
     return <p className="text-xs text-muted-foreground">Loading jobs…</p>;
@@ -126,7 +130,10 @@ function JobRow({ org, project, job }: { org: string; project: string; job: Job 
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="truncate">{job.error}</span>
+                  {/* biome-ignore lint/a11y/noNoninteractiveTabindex: the tooltip shows the full error, so keyboard users must be able to focus it */}
+                  <span tabIndex={0} className="truncate">
+                    {job.error}
+                  </span>
                 </TooltipTrigger>
                 <TooltipContent>{job.error}</TooltipContent>
               </Tooltip>

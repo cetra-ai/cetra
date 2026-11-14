@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ERROR_HINTS } from "@/components/evaluators/error-hints";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
@@ -182,5 +182,76 @@ describe("run evaluator dialog", () => {
     const header = await screen.findByRole("region", { name: "Trace" });
 
     expect(within(header).getByRole("button", { name: "Run evaluator" })).toBeDisabled();
+  });
+
+  it("says when the run's status cannot be read", async () => {
+    captureRuns(() => HttpResponse.json(queuedFixture, { status: 202 }));
+    server.use(
+      http.get("/api/v1/projects/:project/eval-jobs/:id", () => problemResponse(500, "internal")),
+    );
+    const { user, dialog } = await openDialog(
+      `/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`,
+    );
+
+    await choose(user, dialog, "Evaluator", RELEVANCE_OPTION);
+    await user.click(within(dialog).getByRole("button", { name: "Run" }));
+
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("Could not read the run's status.");
+    expect(within(alert).getByRole("link", { name: "View jobs" })).toHaveAttribute(
+      "href",
+      "/acme/support-bot/online-rules",
+    );
+    expect(within(dialog).queryByText("Queued")).toBeNull();
+  });
+
+  it("disables Run while the job is queued", async () => {
+    captureRuns(() => HttpResponse.json(queuedFixture, { status: 202 }));
+    pollJob(queuedFixture);
+    const { user, dialog } = await openDialog(
+      `/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`,
+    );
+
+    await choose(user, dialog, "Evaluator", RELEVANCE_OPTION);
+    await user.click(within(dialog).getByRole("button", { name: "Run" }));
+
+    expect(await within(dialog).findByText("Queued")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Run" })).toBeDisabled();
+  });
+
+  it("refreshes the scores when a run finishes after the dialog closed", async () => {
+    captureRuns(() => HttpResponse.json(queuedFixture, { status: 202 }));
+    pollJob(queuedFixture, DONE);
+    const { user, dialog, queryClient } = await openDialog(
+      `/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`,
+    );
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    await choose(user, dialog, "Evaluator", RELEVANCE_OPTION);
+    await user.click(within(dialog).getByRole("button", { name: "Run" }));
+    expect(await within(dialog).findByText("Queued")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(invalidate).not.toHaveBeenCalled();
+
+    await waitFor(
+      () =>
+        expect(invalidate).toHaveBeenCalledWith({
+          queryKey: ["get", "/api/v1/projects/{project}/scores"],
+        }),
+      { timeout: 3000 },
+    );
+  });
+
+  it("says when the evaluators cannot be loaded", async () => {
+    server.use(
+      http.get("/api/v1/projects/:project/evaluators", () => problemResponse(500, "internal")),
+    );
+    const { dialog } = await openDialog(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "Could not load the evaluators.",
+    );
+    expect(within(dialog).getByRole("button", { name: "Run" })).toBeDisabled();
   });
 });

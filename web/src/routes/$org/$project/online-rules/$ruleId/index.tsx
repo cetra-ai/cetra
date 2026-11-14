@@ -4,7 +4,12 @@ import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery } from "@/api/queries-evaluation";
-import { onlineRuleKey, onlineRuleQuery, onlineRulesKey } from "@/api/queries-online-rules";
+import {
+  evalJobsKey,
+  onlineRuleKey,
+  onlineRuleQuery,
+  onlineRulesKey,
+} from "@/api/queries-online-rules";
 import { connectionsInit } from "@/api/queries-settings";
 import { JobsTable } from "@/components/online-rules/jobs-table";
 import { RuleBanner } from "@/components/online-rules/rule-banner";
@@ -71,9 +76,6 @@ function OnlineRulePage() {
   if (detail.isError) {
     throw detail.error;
   }
-  if (evaluator.error) {
-    throw evaluator.error;
-  }
   const rule = detail.data;
   const config: Record<string, unknown> = evaluator.data?.config ?? {};
   const connectionId = typeof config.connection_id === "string" ? config.connection_id : undefined;
@@ -88,6 +90,7 @@ function OnlineRulePage() {
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, rule.id) });
           void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
+          void queryClient.invalidateQueries({ queryKey: evalJobsKey(org, project) });
         },
       },
     );
