@@ -886,19 +886,27 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_auth(&mut config.auth)?;
     validate_init(&config.init)?;
-    if config.otlp_http_addr == Some(config.http_addr) {
+    if config
+        .otlp_http_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "otlp_http_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr == Some(config.http_addr) {
+    if config
+        .grpc_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr.is_some() && config.grpc_addr == config.otlp_http_addr {
+    if let (Some(grpc), Some(otlp)) = (config.grpc_addr, config.otlp_http_addr)
+        && same_listener(grpc, otlp)
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from otlp_http_addr",
@@ -1013,6 +1021,12 @@ fn normalize_domains(key: &'static str, domains: &mut [String]) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// Two listen addresses collide when they are equal; port 0 asks the OS for a distinct free
+/// port per listener, so it never collides.
+fn same_listener(a: SocketAddr, b: SocketAddr) -> bool {
+    a == b && a.port() != 0
 }
 
 fn validate_auth(auth: &mut AuthSettings) -> Result<(), ConfigError> {
@@ -2945,6 +2959,16 @@ link_existing_by_email = true
             assert_eq!(text, expected, "{toml}");
             assert!(!text.contains(rejected), "{text}");
         }
+    }
+
+    #[test]
+    fn port_zero_on_every_listener_is_accepted() {
+        let config = load_from(
+            Some("http_addr = \"127.0.0.1:0\"\notlp_http_addr = \"127.0.0.1:0\"\ngrpc_addr = \"127.0.0.1:0\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.http_addr.port(), 0);
     }
 
     #[test]
