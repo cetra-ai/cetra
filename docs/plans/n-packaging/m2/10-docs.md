@@ -24,6 +24,13 @@ Restructure it into:
      prefer it).
 2. **What a backup contains.** Keep the current list.
 3. **`## Online backup`** (new), with:
+   - the advice to set an absolute `LLMOBS_DATA_DIR`: a relative one resolves against the server's
+     and the CLI's different working directories;
+   - for containers: the target must be outside the data volume, so it is another mount, and the
+     objects are then copied, not hard-linked, on every run. Hard links on one filesystem protect
+     against operator error, not against losing the disk. Show the mounts: a second volume
+     `backups:/backups` in a compose override, and an extra volume on the StatefulSet. These are
+     examples in the docs; B10 does not change `deploy/`;
    - the command and an example for each install: the binary, `docker compose exec llmobs llmobs
      admin backup --to /backups/$(date +%F)` with a `/backups` volume owned by uid 65532, and
      Kubernetes with `kubectl exec`;
@@ -107,6 +114,7 @@ is.
 ## Verify
 
 ```bash
+! grep -n "planned in \`docs/plans/n-packaging/m2/\`" docs/spec/12-operations.md
 for f in docs/self-hosting/*.md; do
   grep -o '](\(\.\./\)*[A-Za-z0-9_./-]*[)#]' "$f" | sed 's/^](//; s/[)#]$//' | grep -v '^$' | while read -r link; do
     test -e "docs/self-hosting/$link" || echo "$f: broken link $link"

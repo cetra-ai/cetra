@@ -9,7 +9,10 @@ socket.
 
 **Edit only:** `crates/server/src/backup.rs` (new), `crates/server/src/lib.rs` (`pub mod backup;`),
 `crates/server/src/http/mod.rs` (one field in `AppInner`), `crates/server/src/serve.rs` (initialise
-the field; add `pub(crate) fn state(&self) -> &AppState` on `Running` for the tests),
+the field; add a `#[cfg(test)] pub(crate) fn state(&self) -> &AppState` on `Running`, which unwraps
+the `Option` with `.expect("state is present until shutdown")`, allowed in tests; also move
+`serve::tests`' private `config()` and `with_init()` helpers to `test_support` as `pub(crate)`, so
+other test modules can build a server config),
 `crates/server/src/test_support/mod.rs` (initialise the field in its `AppInner` literal), and `crates/server/Cargo.toml` only if a dependency already in the workspace is missing
 (`sha2`, `hex` and `chrono` are already workspace dependencies).
 
@@ -42,14 +45,6 @@ Until B7 calls it, `run` is dead code in non-test builds, so the module starts w
 ```rust
 //! Online backups of a running server (N M2, D-N-17–D-N-19, D-N-24).
 
-/// What the client asked for.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct BackupRequest {
-    pub to: PathBuf,
-    #[serde(default)]
-    pub meta_only: bool,
-}
-
 /// What a finished backup reports (also the socket answer, B7).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct BackupReport {
@@ -72,6 +67,8 @@ pub enum BackupMode { Full, MetaOnly }
 pub enum BackupError {
     #[error("another backup is running")]
     Busy,
+    #[error("the target must be an absolute path")]
+    RelativeTarget,
     #[error("the target directory is not empty")]
     TargetNotEmpty,
     #[error("the target directory is inside the data directory")]
@@ -91,13 +88,13 @@ pub enum BackupError {
 }
 ```
 
-`BackupError::code()` returns, in variant order: `busy`, `target_not_empty`,
+`BackupError::code()` returns, in variant order: `busy`, `bad_request`, `target_not_empty`,
 `target_inside_data_dir`, `meta_only_needs_s3`, `flush_failed`, `meta_copy_failed`,
 `snapshot_failed`, `objects_failed`, `io`.
 
 ```rust
 /// Takes an online backup into `request.to` (§ Consistency of N M2's design).
-pub(crate) async fn run(state: &AppState, request: BackupRequest) -> Result<BackupReport, BackupError>
+pub(crate) async fn run(state: &AppState, to: &Path, meta_only: bool) -> Result<BackupReport, BackupError>
 ```
 
 Steps (each maps to § Design › Consistency):
@@ -106,20 +103,33 @@ Steps (each maps to § Design › Consistency):
 2. Decide the mode. S3 mode is `matches!(storage config object_store_url(), ObjectStoreUrl::S3 { .. })`.
    - Local mode: `meta_only` → `MetaOnlyNeedsS3`; otherwise `Full`.
    - S3 mode: `MetaOnly`, whatever `meta_only` says (D-N-24).
-3. Target checks, through `tokio::fs`:
-   - Canonicalise `data_dir`, and the target's parent (create the parent with `create_dir_all`
-     first). If the canonical target starts with the canonical `data_dir`, return
-     `TargetInsideDataDir`.
-   - If the target exists and is a non-empty directory (or not a directory), return
-     `TargetNotEmpty`. Otherwise create it with mode `0o700` (`std::os::unix::fs::DirBuilderExt`).
+3. Target checks, through `tokio::fs`, in this order:
+   1. `to` must be absolute, else `RelativeTarget`. The server's working directory is not the
+      client's.
+   2. Resolve `to`: canonicalise it if it exists (this resolves a symlink); otherwise canonicalise
+      its nearest existing ancestor and append the rest.
+   3. Canonicalise `data_dir` and, in local mode, the object-store root. If the resolved target is
+      equal to or under either, return `TargetInsideDataDir`. This check comes before anything is
+      created.
+   4. If the target exists and is a non-empty directory (or not a directory), return
+      `TargetNotEmpty`. If it exists and is empty, set its mode to `0o700`. Otherwise create its
+      parents with `create_dir_all` and the target itself with mode `0o700`
+      (`std::os::unix::fs::DirBuilderExt`), and remember `created = true`.
+   5. From here on, any error removes what the backup wrote: `remove_dir_all(target)` when
+      `created`, otherwise remove its entries. Then return the error. Unlinking hard links never
+      touches the data directory's files.
 4. `state.storage.flush_now(Duration::from_secs(60)).await?`.
 5. `VACUUM INTO` the target's `meta.db` on one connection from `state.meta.reader()`:
    `sqlx::query("VACUUM INTO ?").bind(path_str)`. Map errors to `Meta`.
 6. `let snapshot = state.storage.snapshot_catalog(&dir.join("catalog.db")).await?;`
 7. `Full` mode: `let copy = state.storage.copy_objects(&snapshot, &dir.join("objects")).await?;`
-   `MetaOnly` mode: `CopyReport { count: snapshot.objects.len(), bytes: sum of size_bytes, linked: 0, copied: 0 }`.
+   `MetaOnly` mode: `CopyReport { count: u64::try_from(snapshot.objects.len()).unwrap_or(u64::MAX), bytes: sum of size_bytes, linked: 0, copied: 0 }`.
+7b. Drop `snapshot` now: the objects are linked or listed, and holding the gate longer only delays
+   deletions.
 8. If `state.config.encryption_key.is_none()` (the key is the file; this is the test `open_secrets`
-   uses) and `crypto::key_path(data_dir)` exists, copy it to `dir/secret.key` and set mode `0o600`. Record
+   uses) and `crypto::key_path(data_dir)` exists, copy it: open the target with
+   `OpenOptions::new().write(true).create_new(true).mode(0o600)`, then copy the bytes into it; never
+   copy, then chmod. Copy it to `dir/secret.key` and set mode `0o600`. Record
    `encryption_key = "file"`, otherwise `"environment"`.
 9. Write `manifest.json` exactly as § Backup layout and manifest shows:
    - `format: 1`;
@@ -133,12 +143,12 @@ Steps (each maps to § Design › Consistency):
    - `gc_grace_secs`;
    - `restorable_until`: `created_at + gc.grace` for `MetaOnly`, `null` for `Full`;
    - `files`: `meta.db`, `catalog.db` and `secret.key` when present, each with `bytes` and the hex
-     SHA-256 computed by reading the file;
+     SHA-256 computed by reading the file, after it has been `sync_all`ed;
    - `objects: {count, bytes}`.
 
    Write it to `manifest.json.tmp`, `sync_all`, rename it to `manifest.json`, then `sync_all` the
    directory.
-10. Drop `snapshot`. Return the report. `duration_ms` is measured from step 1.
+10. Return the report. `duration_ms` is measured from step 1.
 
 Log one `info` line at the end: `mode`, `objects`, `object_bytes`, `duration_ms`. Never log the
 target path: it is operator data, and the CLI prints it.
@@ -147,7 +157,8 @@ target path: it is operator data, and the CLI prints it.
 
 Start a real server with the `serve::bind` test pattern: a temp data dir, and `config.init` fields
 set as `serve.rs`'s tests do. Append a few spans with `running.state().storage.append_spans(...)`,
-then call `backup::run(running.state(), …)`.
+then call `backup::run(running.state(), &target, false)`. The target is `<tmp>/backup`, so it does not
+exist yet.
 
 Put the manifest building in a pure function `manifest(…) -> serde_json::Value`, and unit-test both
 branches: `meta-only` with `restorable_until` set, and `environment` key. That covers what a server
@@ -169,6 +180,9 @@ test cannot reach without S3.
 - `the_target_must_be_empty_and_outside_the_data_dir`:
   - a non-empty target → `TargetNotEmpty`;
   - `data_dir/x` → `TargetInsideDataDir`.
+- `a_relative_target_is_refused`: `run(state, Path::new("rel"), false)` gives `RelativeTarget`.
+- `a_failed_backup_removes_the_directory_it_created`: make step 4 fail (for example, shut the
+  storage down first so `flush_now` returns `ShuttingDown`); the target does not exist afterwards.
 - `meta_only_is_refused_in_local_mode`: `meta_only: true` on a local-mode server →
   `MetaOnlyNeedsS3`.
 - `the_key_is_not_copied_when_it_comes_from_the_environment`: with `encryption_key` set in the config,
@@ -186,7 +200,7 @@ just check
 
 ## Done when
 
-- [ ] `backup::run`, `BackupRequest`, `BackupReport`, `BackupMode` and `BackupError` exist with the
-      six tests.
+- [ ] `backup::run`, `BackupReport`, `BackupMode` and `BackupError` exist, with the six tests and
+      the manifest unit tests.
 - [ ] The manifest matches the design exactly.
 - [ ] `just check` passes. One commit: `Add online backups to the server`.

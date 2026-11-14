@@ -27,10 +27,15 @@ The crates do not depend on each other, so each gets its own private function, a
 fn pre_migration_copy(connection, dir, name, applied, expected):
     if applied == 0 (no migrations table: a new database) or applied >= expected: return
     target = dir / "{name}.pre-{CARGO_PKG_VERSION}"
-    if target exists: remove it (a crash between copy and migrate left it)
-    VACUUM INTO ?  with target bound as a parameter (never interpolated: paths may contain quotes),
-                   on the same connection, before any migration runs
-    for every entry in dir whose file name starts with "{name}.pre-" and is not target's: remove it
+    if target exists: keep it and skip the copy (a previous start of this version made it; an
+        upgrade that failed half-way must not replace the good copy with a half-migrated one)
+    else:
+        tmp = target + ".tmp"; remove a leftover tmp
+        VACUUM INTO ?  with tmp bound as a parameter (never interpolated: paths may contain quotes),
+                       on the same connection, before any migration runs
+        rename tmp to target
+    for every entry in dir whose file name starts with "{name}.pre-" and is not target: remove it
+        (other versions and stale .tmp files)
     log info: "copied {name} before migrating" with applied and expected (no paths)
 ```
 
@@ -44,7 +49,8 @@ pre_migration_copy(&mut writer, data_dir, "meta.db", applied, expected_version()
 ```
 
 Errors map to two new variants: `MetaError::PreMigrationIo(std::io::Error)` and
-`MetaError::PreMigrationDb(sqlx::Error)`. A failed copy stops the
+`MetaError::PreMigrationDb(sqlx::Error)`. Neither uses `#[from]`: `MetaError` already has
+`From<sqlx::Error>`. Map explicitly. A failed copy stops the
 start: an upgrade without its safety copy is not run.
 
 ### `catalog/db.rs`
@@ -81,11 +87,16 @@ last upgrade (D-N-22)."
   4. `meta.db.pre-<CARGO_PKG_VERSION>` exists and has the first migration's version; the old copy is
      gone.
 - `a_new_or_current_meta_db_gets_no_copy`: open a fresh directory twice; no `meta.db.pre-*` file.
+- `an_existing_pre_migration_copy_is_kept`:
+  1. Before opening an older `meta.db`, create `meta.db.pre-<CARGO_PKG_VERSION>` with known
+     content.
+  2. After `MetaDb::open`, its content is unchanged.
 
 **`catalog/db.rs`:**
 - `opening_an_older_catalog_keeps_a_pre_migration_copy`: the same recipe with the catalog migrator's
   first migration (`0001_catalog.sql`).
 - `a_new_or_current_catalog_gets_no_copy`.
+- `an_existing_pre_migration_copy_is_kept` (catalog).
 
 ## Verify
 
@@ -99,5 +110,5 @@ just check
 
 - [ ] Both databases are copied before an actual migration, and never otherwise.
 - [ ] Only the last copy remains.
-- [ ] The four tests pass, and spec 12 is updated.
+- [ ] The six tests pass, and spec 12 is updated.
 - [ ] `just check` passes. One commit: `Copy the databases before migrating them`.

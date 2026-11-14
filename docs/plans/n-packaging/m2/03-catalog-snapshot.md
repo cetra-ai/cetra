@@ -49,9 +49,9 @@ deadlock.
 1. Add a public-in-crate field to `Committer`, initialised in `Committer::open`:
 
    ```rust
-   /// Held for read by every media deletion and for write by a catalog snapshot
+   /// Held for read by every object deletion and for write by a catalog snapshot
    /// (N M2, D-N-18). Take it before `inner`, never while holding `inner`.
-   pub(crate) object_gc_gate: tokio::sync::RwLock<()>,
+   pub(crate) object_gc_gate: Arc<tokio::sync::RwLock<()>>,
    ```
 
 2. Add a method:
@@ -109,8 +109,11 @@ pub struct LiveObject {
 ```
 
 - `CatalogSnapshot` implements `Debug` by hand, showing `path`, the object count and `flushed_seq`.
-- To hold the guard in the struct, change the gate to `Arc<tokio::sync::RwLock<()>>` in `Committer`
-  and take it with `write_owned()`.
+- The snapshot takes the gate with `Arc::clone(&gate).write_owned()`, to hold the guard in the struct.
+- Re-export `SnapshotError`, `CatalogSnapshot` and `LiveObject` from `lib.rs`.
+- `Storage::drop_project` must not wait for a whole backup. It calls `finish_drop` only if
+  `object_gc_gate.try_read()` succeeds; while a backup holds the gate, it returns after its commit and
+  leaves the media to `finish_drops`, which the GC task retries every 10 minutes.
 
 ### `lib.rs`
 
@@ -171,25 +174,19 @@ pub enum SnapshotError {
      `published.load()`) and the media key.
   5. `flushed_seq` equals `committer.flushed_seq`.
   6. The copied file opens and has the same `data_files` count.
-- `snapshot_pins_obsoleted_files`:
-  1. Snapshot.
-  2. Run a compaction that obsoletes the snapshot's files. Set the compaction policy the way the
-     compaction tests do, with `set_policy(policy(n, bytes))` and enough level-0 files on one day,
-     so that `Storage::compact` merges them.
-  3. Run `collect_obsolete(Duration::ZERO)`: every key in `snapshot.objects` still exists in the
-     store.
-  4. Drop the snapshot and run `collect_obsolete(Duration::ZERO)` again: the obsoleted ones are gone.
-- `snapshot_holds_media_deletion`:
-  1. Snapshot with one media object, then delete the project (`drop_project`) in a spawned task.
-  2. Poll until `committer.dropping_projects()` lists the project, so the drop's commit is done and
-     only the media step remains. Then assert that the media object still exists and the task has not
-     finished.
-  3. Drop the snapshot: the task finishes and the object is gone.
-- `snapshot_holds_obsolete_gc`: while a snapshot is held, `Storage::collect_obsolete(Duration::ZERO)`
-  started in a task does not return until the snapshot is dropped. Check this the same way as the
-  media test: poll until the task is waiting, then assert it has not finished.
-- `snapshot_does_not_block_appends_or_flushes`: while a snapshot is held, `append_spans` and
-  `flush_now` complete within 5 s.
+- `snapshot_holds_obsolete_gc`:
+  1. A compaction obsoletes some files.
+  2. Take a snapshot, then spawn `collect_obsolete(Duration::ZERO)`.
+  3. After 200 ms the task is pending and every snapshot key exists.
+  4. Drop the snapshot: the task finishes and the obsoleted files are gone.
+
+  Never call `collect_obsolete` on the test's own task while it holds a snapshot: that deadlocks.
+- `snapshot_defers_dropped_project_media`:
+  1. With a snapshot held, `drop_project` returns promptly, and the project's media object still
+     exists.
+  2. Drop the snapshot and run the GC entry point that calls `finish_drops`: the object is gone.
+- `snapshot_does_not_block_appends_or_flushes`: while a snapshot is held, appends succeed, and a flush
+  driven by a small `flush.max_age` still commits: the catalog lists new files within 5 s.
 - `snapshot_refuses_an_existing_target`: a second snapshot to the same path returns `Exists`.
 
 ## Verify

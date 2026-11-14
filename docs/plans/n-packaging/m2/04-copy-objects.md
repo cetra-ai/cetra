@@ -68,6 +68,9 @@ The algorithm runs in `tokio::task::spawn_blocking`, because it is filesystem wo
    5. Count `linked` or `copied`, and add `size_bytes` to `bytes`.
 3. Finally, `fsync` every directory created, walking `dest` once at the end.
 
+Re-export `CopyReport` and `CopyObjectsError` from `lib.rs` (`pub use`), so the server can name
+them at the crate root.
+
 ### `error.rs`
 
 ```rust

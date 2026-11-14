@@ -93,8 +93,10 @@ pub async fn collect_orphans(
 
 Algorithm:
 
-1. Take `self.committer.object_gc_gate` for write, so no media deletion runs concurrently.
-2. `let (known, needed) = self.committer.known_and_needed_keys().await?;`
+1. Take `self.committer.object_gc_gate` for write, so no object deletion runs concurrently.
+2. Read `needed` **before** listing, and `known` **after** listing. An object published while the
+   list runs is then in `known` (or staged), and never counted as an orphan. Split
+   `known_and_needed_keys` into `needed_keys()` and `known_keys()`.
 3. For each prefix, `"tables"` then `"media"`, stream `self.objects.raw_store().list(Some(&prefix))`.
    For each `ObjectMeta`:
    1. `key = meta.location.as_ref()`. Skip it if its last segment is a temporary name
@@ -122,6 +124,8 @@ pub enum OrphanError {
     Delete(#[from] crate::error::ObjectError),
     #[error("reading the catalog: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("reading the catalog: invalid project id")]
+    BadProjectId,
 }
 ```
 
@@ -136,7 +140,9 @@ Three traps:
 - `raw_store()` takes `object_store::path::Path` (`ObjectPath::from(key)`), not `&str`.
 - End every test with `storage.shutdown().await`, as the `gc.rs` tests do.
 
-`collect_orphans` runs on a fully started engine. That is safe only because the CLI (B8) opens the
+`collect_orphans` runs on a fully started engine. `Storage::open` runs GC and `finish_drops` itself,
+so `--dry-run` reports, but opening is not read-only. A `--min-age` below an hour is safe only
+because nothing appends. That is safe only because the CLI (B8) opens the
 storage while the server is stopped (`LOCK`), and nothing appends; it then calls `shutdown()`.
 
 
@@ -154,6 +160,10 @@ storage while the server is stopped (`LOCK`), and nothing appends; it then calls
 - `collect_orphans_keeps_staged_and_obsolete_objects`:
   1. A compaction obsoletes files (not yet collected), and a staged row exists.
   2. With `min_age = 0`, neither is deleted.
+- `collect_orphans_reports_missing_media`: delete a live media blob directly; the report has
+  `missing_media = 1` and `missing = 0`.
+- `collect_orphans_keeps_dropping_project_media`: a project in `dropping` state with a media row
+  (known, not needed). The object is neither deleted nor counted as missing.
 - `collect_orphans_skips_temp_names`: a file named like a temporary upload (see `is_temp_name`) is
   neither counted nor deleted.
 
@@ -166,5 +176,5 @@ just check
 
 ## Done when
 
-- [ ] `Storage::collect_orphans`, `OrphanReport` and `OrphanError` exist with the six tests.
+- [ ] `Storage::collect_orphans`, `OrphanReport` and `OrphanError` exist with the eight tests.
 - [ ] `just check` passes. One commit: `Add Storage::collect_orphans`.

@@ -10,8 +10,9 @@ Read [00-design.md](00-design.md) first, especially § Design › Trigger and §
   must be stopped), runs `collect_orphans`, prints the counts, and exits with status 1 when objects
   are missing.
 
-**Edit only:** `crates/cli/src/main.rs`, `crates/server/src/admin.rs` (a `gc_orphans` function, an
-error variant and the module doc), `docs/spec/09-api.md` (§ CLI rows).
+**Edit only:** `crates/cli/src/main.rs`, `crates/cli/src/test_server.rs` (two accessors),
+`crates/server/src/admin.rs` (a `gc_orphans` function, a report struct, the `Locked` text and the
+module doc), `docs/spec/09-api.md` (§ CLI rows).
 
 **Commit:** `Add the backup and gc-orphans admin commands`
 
@@ -50,6 +51,9 @@ GcOrphans {
     /// Report only; delete nothing.
     #[arg(long)]
     dry_run: bool,
+    /// Required in S3 mode without `--dry-run`: deleting orphans there rolls the live bucket back.
+    #[arg(long)]
+    rollback_bucket: bool,
     /// Config file. Overrides `LLMOBS_CONFIG`.
     #[arg(long)]
     config: Option<PathBuf>,
@@ -83,9 +87,19 @@ intended.
 
 **`GcOrphans`:** call `llmobs_server::admin::gc_orphans(&config, min_age, dry_run)`. That function
 opens `Storage::open(config.storage_config())`.
-- `OpenError::Locked { .. }` maps to a new `AdminError::ServerRunning`, with the message
-  `the server is running: stop it before gc-orphans`.
-- Any other `OpenError` maps to a new `AdminError::Storage(#[from] llmobs_storage::error::OpenError)`.
+- In S3 mode, without `--dry-run`, `--rollback-bucket` must be given, else a new
+  `AdminError::RollbackNeedsConfirmation` (`in S3 mode this deletes every object written after the
+  backup from the live bucket; run with --dry-run first, then add --rollback-bucket`).
+- First, `<data_dir>/catalog.db` must exist, else a new
+  `AdminError::NoCatalog` (`no catalog.db in the data directory: restore it before running
+  gc-orphans`). `Storage::open` would otherwise create an empty catalog, and every object would
+  then look like an orphan.
+- `OpenError::Locked { .. }` maps to the existing `AdminError::Locked`. Its message becomes `the
+  server is running: stop it first`; update the rotate-key tests that assert the old text.
+- Any other `OpenError` maps to a new `AdminError::Storage(llmobs_storage::error::OpenError)`.
+- It returns a server-side `pub struct GcOrphansReport { orphans, orphan_bytes, recent_unknown,
+  missing, missing_media, dry_run }`, copied from `OrphanReport`. The CLI does not depend on
+  `llmobs-storage`.
 
 It then runs `collect_orphans`, calls `storage.shutdown().await`, and returns the `OrphanReport`.
 Update `admin.rs`'s module doc: it says these commands work while the server runs, which is no
@@ -123,12 +137,17 @@ Replace the row that lists `llmobs admin compact … · wal-inspect · gc-orphan
 - `backup_through_a_running_server`: `TestServer` keeps its config private, so start a server the
   way `TestServer::start` does internally: write an `llmobs.toml` in a short `tempfile::tempdir()`
   (the socket path must stay under 108 bytes), then `serve::bind(config, None)`. Run
-  `run_cli(["llmobs","admin","backup","--to",<tmp>,"--config",<toml>])`, and get `Ok`;
-  `<tmp>/manifest.json` exists.
+  `run_cli(["llmobs","admin","backup","--to",<tmp>/backup,"--config",<toml>])`, and get `Ok`;
+  `<tmp>/backup/manifest.json` exists. Set `otlp_http_addr` and `grpc_addr` to `""` in the toml, as
+  `TestServer` does.
+- `gc_orphans_refuses_a_data_dir_without_a_catalog`: on an empty temp data dir, it returns `Err`
+  containing `no catalog.db`.
 - `gc_orphans_on_a_stopped_server_reports_zero_missing`: create a data dir by starting and stopping a
   server, then `run_cli([... "gc-orphans", "--config", ...])` is `Ok`.
 - `gc_orphans_fails_when_objects_are_missing`:
-  1. Start a server, ingest one span, and wait for a flush (or set `flush.max_age` small).
+  1. Start a server with `TestServer::start` (it ingests a trace). Add `pub(crate) fn data_dir()` and
+     `pub(crate) fn config_path()` accessors to `TestServer`. Wait for a flush: with B2 merged,
+     call `running.state().storage.flush_now`, or poll until `objects/tables` holds a file.
   2. Stop the server.
   3. Delete one Parquet file under `<data_dir>/objects/tables/`.
   4. `run_cli(gc-orphans)` returns `Err`, and the text mentions the incomplete restore.
@@ -148,6 +167,6 @@ Then by hand with a release build, as § How to verify in `00-design.md` describ
 
 ## Done when
 
-- [ ] Both commands exist with the five tests, and spec 09 lists them.
+- [ ] Both commands exist with the seven tests, and spec 09 lists them.
 - [ ] The manual run passes.
 - [ ] `just check` passes. One commit: `Add the backup and gc-orphans admin commands`.

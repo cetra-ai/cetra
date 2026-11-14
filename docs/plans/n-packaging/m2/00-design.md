@@ -100,7 +100,9 @@ the request and prints the report. It is the only command on the socket in M2.
 
 Why a socket:
 - it works with `docker compose exec llmobs llmobs admin backup …` (Q's cells) and over SSH;
-- file permissions are the authentication: only the server's user can connect;
+- authentication: the server checks the connecting process's uid (`SO_PEERCRED`, through
+  `UnixStream::peer_cred`) and accepts only the data directory's owner or root. File permissions
+  alone are not enough: macOS ignores them on `connect`;
 - it adds no network surface and no token.
 
 The backup is written by the server, so `<dir>` is a path on the **server's** filesystem, writable by
@@ -115,8 +117,12 @@ warning and runs without it. `llmobs admin backup` then reports that no server a
 
 1. **Claim the single backup slot.** A `tokio::sync::Mutex<()>` in `AppState`, taken with `try_lock`;
    a second request answers `busy`.
-2. **Prepare `<dir>`.** It must not exist, or must be an empty directory, else `target_not_empty`. It is
-   created with mode `0700`, and must not be inside `data_dir` (`target_inside_data_dir`).
+2. **Prepare `<dir>`.**
+   - It must be an absolute path (`bad_request`).
+   - It must not be inside `data_dir` or a local object-store root, after canonicalising, symlinks
+     included (`target_inside_data_dir`).
+   - It must not exist, or must be an empty directory (`target_not_empty`).
+   - It is created with mode `0700`; an existing empty directory is set to `0700`.
 3. **`Storage::flush_now(timeout)`** (60 s). Both tables flush everything acknowledged before the call
    and wait for the commit. Ingestion continues: rows appended after the call stay in the WAL and are
    not in the backup. The backup's point in time is the flush.
@@ -144,8 +150,11 @@ warning and runs without it. `llmobs admin backup` then reports that no server a
      pass quarantines mid-backup: they leave the catalog without entering `retired`;
    - media because `collect_media` and `finish_drop` take the gate for read before deleting.
 
-   Commits wait only for the catalog `VACUUM INTO`, which is short: `catalog.db` is small.
-   Deletions wait for the whole backup.
+   Commits wait for the catalog `VACUUM INTO`, which runs under the committer lock. That is a known
+   cost: it grows with the `data_files` and `media` rows, and on a large catalog flushes stall for its
+   duration. Deletions wait for the whole backup, except `drop_project`, which leaves its media to the
+   GC retry. The `Arc<Catalog>` pin is defence in depth: the gate alone already blocks every
+   deletion.
 
    Compaction, the deletion rewriter, retention and flushes keep running. They add files and mark old
    ones obsolete, which the snapshot does not care about.
@@ -165,8 +174,9 @@ warning and runs without it. `llmobs admin backup` then reports that no server a
 9. **Drop the snapshot,** which releases the pin and the gate, then the slot. Answer with the
    `BackupReport`.
 
-An error at any step removes nothing from `data_dir`. It leaves `<dir>` as it is, without a manifest,
-and answers `ok: false` with the step's code.
+An error at any step removes nothing from `data_dir`. If the server created `<dir>`, it removes it
+again (unlinking hard links is safe); a pre-existing empty `<dir>` is emptied. It answers
+`ok: false` with the step's code.
 
 ### Backup layout and manifest (D-N-19)
 
@@ -208,7 +218,8 @@ and answers `ok: false` with the step's code.
   server's own config, and the manifest stays free of anything sensitive.
 - `encryption_key`: `"file"` or `"environment"`.
 - `restorable_until`: for `meta-only`, `created_at + gc.grace` in RFC 3339; `null` for `full`.
-  It holds for data files. Media blobs follow their own rule: a blob is deleted an hour after no
+  It uses the `gc.grace` in force when the backup was taken; lowering `gc.grace` later shortens the
+  window. It holds for data files. Media blobs follow their own rule: a blob is deleted an hour after no
   span references it. A deletion applied after the backup can therefore remove a blob that the
   backup still references. `gc-orphans` reports such blobs separately, as missing media: the
   attachments are lost, the traces are not.
@@ -267,6 +278,8 @@ not dropping or dropped. Temporary names (the private `is_temp_name` in `objects
   binary's, it runs `VACUUM INTO '<data_dir>/meta.db.pre-<binary version>'` before migrating, then
   deletes every other `meta.db.pre-*`.
 - **`catalog.db`:** `open_catalog_db` does the same with `catalog.db.pre-<binary version>`.
+- **Failed upgrades:** an existing `<name>.pre-<version>` is kept, never replaced. A copy goes
+  through `<name>.pre-<version>.tmp` and a rename.
 - **Version:** the binary version is `env!("CARGO_PKG_VERSION")`. Both crates inherit the workspace
   version, so the two copies carry the same name suffix.
 - **When there is no copy:** a fresh data directory (no file yet) or a file already at the binary's
