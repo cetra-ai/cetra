@@ -3,11 +3,11 @@ import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-cr
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
+import channelsDocument from "../../../fixtures/api/static/channels.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
 import deletionResolvingDocument from "../../../fixtures/api/static/deletion-resolving.json";
-import channelsDocument from "../../../fixtures/api/static/channels.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
