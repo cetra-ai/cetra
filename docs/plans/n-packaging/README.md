@@ -158,7 +158,9 @@ Each archive contains one directory, `llmobs-<version>-<target>/`, with four fil
   - security contexts for uid/gid 65532, a read-only root filesystem, no capabilities, seccomp
     `RuntimeDefault` and no service account token;
   - probes: startup and liveness on `/healthz` (the startup probe allows 10 minutes for WAL
-    replay), readiness on `/readyz`.
+    replay), readiness on `/readyz`;
+  - `enableServiceLinks: false`, because Kubernetes' service-link variables for a Service named
+    `llmobs` (`LLMOBS_PORT=tcp://…`) are unknown `LLMOBS_*` keys the config loader rejects.
 - A Service (8080, 4317, 4318) and the headless Service the StatefulSet requires.
 - An optional Ingress for port 8080.
 - Configuration:
@@ -470,7 +472,9 @@ Hetzner server with Hetzner Object Storage (D170). What N gives Q, and what Q ne
      `AWS_REGION=<location>`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `LLMOBS_PUBLIC_URL`.
    - The encryption key comes from `LLMOBS_ENCRYPTION_KEY` (recommended for cells, kept in Q's
      secret store) or `/data/secret.key`.
-   - Never set an `LLMOBS_*` variable to an empty string.
+   - Never set an `LLMOBS_*` variable to an empty string, and never let an unknown one in. On
+     Kubernetes, a Service named `llmobs` makes `LLMOBS_PORT` and similar service-link
+     variables appear: set `enableServiceLinks: false`, as the chart does.
 4. **Backups:** M1 gives only cold snapshots (docs/self-hosting/backup.md), i.e. a minute of
    downtime per cell. Q's design asks for two things: R9, `llmobs admin backup [--meta-only] --to
    <dir>` run with `docker compose exec` while `llmobs serve` runs, writing `meta.db` and

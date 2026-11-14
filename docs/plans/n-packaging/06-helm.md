@@ -37,6 +37,9 @@ it needs network), kind v0.33.0, kubectl, Docker, python3.
 - **Environment order.** The fixed variables come first (`LLMOBS_DATA_DIR`,
   `LLMOBS_PUBLIC_URL`, `LLMOBS_CONFIG`, the S3 ones), then `env`. `envFrom` holds the chart's
   Secret, then `existingSecret`. In Kubernetes, `env` wins over `envFrom` for the same name.
+- **No service links.** `enableServiceLinks: false`: otherwise Kubernetes injects
+  `LLMOBS_PORT=tcp://…` and similar variables for the Service named `llmobs`, and the config
+  loader rejects them as unknown `LLMOBS_*` keys, so the pod crash-loops.
 - **Secrets.** The chart generates none: no `randAlphaNum`, no `lookup`.
 - **Guards.** `fail` stops the render when `s3.enabled` has no `s3.bucket`, or when
   `ingress.enabled` has no `ingress.host`.
@@ -244,6 +247,9 @@ spec:
         {{- end }}
     spec:
       automountServiceAccountToken: false
+      # Service links would inject LLMOBS_PORT=tcp://... and friends, which the config loader
+      # rejects as unknown LLMOBS_* keys.
+      enableServiceLinks: false
       # Shutdown drains requests (20 s) and flushes memtables (30 s) (spec 12).
       terminationGracePeriodSeconds: 60
       {{- with .Values.imagePullSecrets }}
@@ -685,7 +691,7 @@ echo "helm-check: passed"
 #
 # Usage: helm-smoke.sh <image>, e.g. helm-smoke.sh llmobs:dev. Needs docker, kind, kubectl, helm,
 # python3. The release is named llmobs, so the chart's fullname, the Service and the Secret are
-# all  and the pod is .
+# all `llmobs` and the pod is `llmobs-0`.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

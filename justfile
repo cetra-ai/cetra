@@ -243,3 +243,11 @@ install-smoke:
 # Run deploy/compose with an image and smoke-test it; `just compose-smoke llmobs:dev s3` adds Garage (D-N-9)
 compose-smoke tag="llmobs:dev" *mode:
     tools/packaging/compose-smoke.sh {{tag}} {{mode}}
+
+# Lint the Helm chart and validate its manifests with kubeconform (D-N-10)
+helm-check:
+    tools/packaging/helm-check.sh
+
+# Install the chart with an image on a throwaway kind cluster and smoke-test it (D-N-10)
+helm-smoke tag="llmobs:dev":
+    tools/packaging/helm-smoke.sh {{tag}}
