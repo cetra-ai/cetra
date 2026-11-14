@@ -224,13 +224,14 @@ ts-smoke tarball:
     trap 'rm -rf "$dir"' EXIT
     cd "$dir"
     npm init -y >/dev/null
-    npm install --no-audit --no-fund --ignore-scripts "$tarball" >/dev/null
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
     EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
     EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
     echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"
 ```
 
-The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The package has no dependencies, so `npm install` fetches nothing from the registry. `--ignore-scripts` keeps it that way.
+The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The smoke test does fetch the SDK's dependencies (five `@opentelemetry` packages and their ranged transitive dependencies, plus the `@opentelemetry/api` peer), since the tarball has them. The `npm install` is therefore age-gated with `--before` (seven days, D74) and has no lockfile. `--ignore-scripts` stops install scripts from running.
 
 Job `ts-sdk-min-node` steps:
 1. Checkout (`persist-credentials: false`) and `./.github/actions/js`.

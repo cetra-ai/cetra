@@ -97,7 +97,10 @@ ts-smoke tarball:
     trap 'rm -rf "$dir"' EXIT
     cd "$dir"
     npm init -y >/dev/null
-    npm install --no-audit --no-fund --ignore-scripts "$tarball" >/dev/null
+    # The SDK's dependencies come from npm, with no lockfile. Hold them to the 7-day age gate that
+    # pnpm's minimumReleaseAge applies to the repo (D74); npm 10, shipped with Node 22.12, supports --before.
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
     EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
     EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
     echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"
