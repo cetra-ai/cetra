@@ -316,7 +316,10 @@ pub(crate) async fn collect_orphans(
         report.orphans += 1;
         report.orphan_bytes = report.orphan_bytes.saturating_add(meta.size);
         if !dry_run {
-            objects.delete(key).await?;
+            objects
+                .delete(key)
+                .await
+                .map_err(|error| OrphanError::delete(&error))?;
         }
     }
     for key in &missing {
