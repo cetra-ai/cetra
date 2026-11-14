@@ -9,6 +9,7 @@ All HTTP on one port (`LLMOBS_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on 
 | `/api/v1/*` | REST API (UI + SDK + CLI) | cookie, PAT, or `sk` |
 | `/api/public/*` | browser-safe endpoints | `pk` |
 | `/mcp` | MCP server (streamable HTTP, `POST` only; not in the OpenAPI document) | PAT (D-H-3) |
+| `/api/internal/*` | endpoints the cloud control plane calls on a cell (§ Orgs, projects, members, keys) | a signed org token in the body (the entitlements PUT), else a `control_plane` bearer token with the route's scope (D-P-28) |
 | `/healthz`, `/readyz` | probes | none |
 | `/` (everything else) | web UI (SPA fallback to `index.html`) | — |
 
@@ -176,6 +177,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | Command | Purpose |
 |---|---|
 | `llmobs serve [--config llmobs.toml]` | run the server |
+| `llmobs admin entitlements show <org> [--format table\|json]` | an org's resolved plan, features, limits and retention window, read offline from the data dir (D-P-32) |
 | `llmobs admin create-user / reset-password / list-users / rotate-encryption-key / check` | local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3) |
 | `llmobs admin reapply-deletions --from <data_dir>` | after a backup restore: copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`; the server redoes them (D-M-9, 12 § Backups) |
 | `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` · `llmobs admin gc-orphans` | maintenance; `gc-orphans` lists the object store and deletes objects the catalog doesn't know (after a restore, 12 § Backups) |
