@@ -211,3 +211,19 @@ check-capture: capture-py-sync capture-ts-sync
 # Write target/dist/THIRD-PARTY-NOTICES.md: licences of the crates and web packages in the binary (D-N-8)
 notices: js-install
     tools/packaging/notices.sh
+
+# Build the release archive of one target into target/dist; Linux targets also stage the image context (D-N-1, D-N-16)
+dist target: js-install
+    tools/packaging/dist.sh {{target}}
+
+# Stage target/dist/image/linux-<arch> from a Linux release archive (D-N-3)
+image-context archive arch:
+    tools/packaging/image-context.sh {{archive}} {{arch}}
+
+# Start a binary on free ports and smoke-test it: /readyz, the UI, one OTLP span read back (D-N-13)
+binary-smoke binary:
+    tools/packaging/binary-smoke.sh {{binary}}
+
+# Write SHA256SUMS for the archives in a directory (D-N-7)
+checksums dir:
+    tools/packaging/checksums.sh {{dir}}
