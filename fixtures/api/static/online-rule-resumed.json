@@ -1,0 +1,23 @@
+{
+  "id": "01900000-0000-7000-8000-000000000701",
+  "name": "Relevance on spans",
+  "evaluator_id": "01900000-0000-7000-8000-000000000500",
+  "target": "span",
+  "variable_mapping": {
+    "input": "span.input",
+    "output": "span.output"
+  },
+  "sample_rate": 1.0,
+  "enabled": true,
+  "jobs_last_24h": {
+    "queued": 0,
+    "running": 0,
+    "done": 12,
+    "failed": 9,
+    "skipped": 0
+  },
+  "dropped_last_hour": 0,
+  "created_by": "01900000-0000-7000-8000-000000000100",
+  "created_at": "2026-01-01T09:00:00.000000000Z",
+  "updated_at": "2026-01-01T09:30:00.000000000Z"
+}

@@ -258,12 +258,16 @@ pub(crate) async fn run_job(state: &AppState, job: ClaimedJob) -> Result<(), Met
     let ready = match prepare(state, &job).await {
         Ok(ready) => ready,
         Err(Exit::Gone) => return Ok(()),
-        Err(Exit::Ended(ended)) => return finish_job(state, &job, *ended, None).await,
+        Err(Exit::Ended(ended)) => {
+            // No attempt was started: the count is the row's own.
+            return finish_job(state, &job, *ended, None, job.row.attempts).await;
+        }
         Err(Exit::Meta(error)) => return Err(error),
     };
     let Ready { reservation, call } = ready;
+    let attempts = call.attempts;
     let ended = call_evaluator(state, &job, call).await;
-    finish_job(state, &job, ended, reservation).await
+    finish_job(state, &job, ended, reservation, attempts).await
 }
 
 /// Where a step leaves the job early: nothing to write, an outcome to write, or a `meta.db` error.
@@ -609,25 +613,12 @@ async fn reserve<'a>(
         .map_err(|error| permanent(&error.to_string()))?;
     let prices = state.ingest.prices();
     let Some(price) = budget::model_price(&prices, &judge.model, adapter, now) else {
-        return Err(Exit::Ended(Box::new(Ended {
-            finish: Finish::Failed {
-                class: "permanent",
-                error: "model has no price".to_owned(),
-                judge_trace_id: None,
-                evaluator_version: None,
-                usage: JobUsage::default(),
-            },
-            reached_evaluator: false,
-            pause: Pause::Rule {
-                rule_id: rule.id,
-                reason: PAUSE_ERRORS,
-                detail: "model has no price",
-                skip_queued: false,
-            },
-            actual: 0.0,
-        })));
+        return Err(unpriced(rule.id));
     };
     let estimate = budget::estimate_usd(prompt.chars().count(), judge.max_output_tokens, price);
+    if !estimate.is_finite() {
+        return Err(unpriced(rule.id));
+    }
     let period_start = budget::period_start(period, now);
     let budgets = &state.eval.budgets;
     let mut attempt = budgets.try_reserve(rule.id, period_start, limit, estimate);
@@ -674,7 +665,8 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
         attempts,
     } = call;
     let row = &job.row;
-    let now = state.clock.now_ns();
+    // The call's own time (its prices and windows). Every decision after the call reads a fresh one.
+    let call_now = state.clock.now_ns();
     let output_name = evaluator.output.name.clone();
     let evaluator_id = evaluator.id;
     let started = Instant::now();
@@ -689,11 +681,13 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
             target,
             origin,
             judge_trace_id,
-            now,
+            now: call_now,
         },
     )
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // The call can take seconds: the retry, the writes and the finish use the time after it.
+    let now = state.clock.now_ns();
     let run = match run {
         Ok(run) => run,
         Err(ExecuteError::Panicked(_)) => {
@@ -890,6 +884,7 @@ async fn finish_job(
     job: &ClaimedJob,
     ended: Ended,
     reservation: Option<Reservation<'_>>,
+    attempts: u32,
 ) -> Result<(), MetaError> {
     let Ended {
         finish,
@@ -900,6 +895,9 @@ async fn finish_job(
     let now = state.clock.now_ns();
     let row = &job.row;
     let failed = !matches!(finish, Finish::Done { .. });
+    // The breaker counts only the job's final outcome: a retry, a requeue or a pause that
+    // downgraded to none is not a result of the evaluator (§ Job execution › The breaker).
+    let counts = reached_evaluator && matches!(finish, Finish::Done { .. } | Finish::Failed { .. });
     let label = finish_label(&finish);
     // Only a budgeted job holds a reservation, and its spend goes to its rule (D-I-15).
     let spend = match (&reservation, row.rule_id) {
@@ -927,7 +925,7 @@ async fn finish_job(
         job_id = %row.id,
         kind = %row.kind,
         status = label,
-        attempts = row.attempts,
+        attempts,
         matched = settled.matched,
         "eval job finished"
     );
@@ -937,7 +935,7 @@ async fn finish_job(
     let Some(rule) = row.rule_id else {
         return Ok(());
     };
-    if settled.matched && reached_evaluator && state.eval.breakers.record(rule, failed) {
+    if settled.matched && counts && state.eval.breakers.record(rule, failed) {
         let tripped = state
             .meta
             .write(move |conn| {
@@ -1265,6 +1263,28 @@ fn skipped() -> Exit {
     })
 }
 
+/// A judge model with no usable price (§ Job execution, step 10): the job fails and the rule
+/// pauses with `errors`. Also used when the estimate is not finite, since it cannot be budgeted.
+fn unpriced(rule_id: Uuid) -> Exit {
+    Exit::Ended(Box::new(Ended {
+        finish: Finish::Failed {
+            class: "permanent",
+            error: "model has no price".to_owned(),
+            judge_trace_id: None,
+            evaluator_version: None,
+            usage: JobUsage::default(),
+        },
+        reached_evaluator: false,
+        pause: Pause::Rule {
+            rule_id,
+            reason: PAUSE_ERRORS,
+            detail: "model has no price",
+            skip_queued: false,
+        },
+        actual: 0.0,
+    }))
+}
+
 /// Over budget: the job is skipped and the rule pauses (D-I-15).
 fn over_budget(rule_id: Uuid) -> Exit {
     Exit::Ended(Box::new(Ended {
@@ -1284,6 +1304,7 @@ fn over_budget(rule_id: Uuid) -> Exit {
 mod tests {
     use llmobs_eval::{CheckError, EvalError};
     use llmobs_otel::Rejections;
+    use serde_json::json;
 
     use super::*;
 
@@ -1297,6 +1318,35 @@ mod tests {
         let id = job_judge_trace_id(job, 1);
         assert_eq!(id.to_string(), PINNED_JUDGE_TRACE_ID);
         assert_ne!(job_judge_trace_id(job, 2), id);
+    }
+
+    #[test]
+    fn levenshtein_inputs_are_capped_at_64_kib_each() {
+        use llmobs_eval::{Evaluator, EvaluatorConfig, OutputScore, Variables};
+        let evaluator = Evaluator {
+            id: Uuid::nil(),
+            name: "Similar".to_owned(),
+            config: EvaluatorConfig::from_parts("check", &json!({"check": "levenshtein"}))
+                .expect("config"),
+            output: serde_json::from_value::<OutputScore>(
+                json!({"name": "similar", "data_type": "numeric"}),
+            )
+            .expect("output"),
+        };
+        let with_output = |len: usize| {
+            Variables::from_map(BTreeMap::from([
+                ("output".to_owned(), json!("x".repeat(len))),
+                ("expected".to_owned(), json!("x")),
+            ]))
+        };
+        assert!(!levenshtein_too_large(
+            &evaluator,
+            &with_output(MAX_LEVENSHTEIN_BYTES)
+        ));
+        assert!(levenshtein_too_large(
+            &evaluator,
+            &with_output(MAX_LEVENSHTEIN_BYTES + 1)
+        ));
     }
 
     #[test]
@@ -1326,11 +1376,13 @@ mod job_tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::eval::trace_load::MAX_LOADS;
     use crate::meta::connections::{ConnectionRow, get_connection};
     use crate::meta::eval_jobs::{KIND_MANUAL, KIND_RULE, NewJob, insert_job};
     use crate::meta::evaluators;
     use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
+    use crate::test_support::mock_webhook::MockWebhook;
     use crate::test_support::{Seeded, TestApp, dataset_span};
 
     const MAPPING: &str = r#"{"input": "trace.input", "output": "trace.output"}"#;
@@ -1355,6 +1407,11 @@ mod job_tests {
             config.security.allow_private_network_egress = true;
         })
         .await;
+        seeded_in(app).await
+    }
+
+    /// [`test_app`]'s clock and seed, for an app built some other way.
+    async fn seeded_in(app: TestApp) -> (TestApp, Seeded) {
         let real_now = i64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1369,6 +1426,17 @@ mod job_tests {
 
     /// Stores a root span of `trace` (the question and its answer) in `environment`.
     async fn store_trace(app: &TestApp, project: &ProjectRow, trace: TraceId, environment: &str) {
+        store_span_with(app, project, trace, environment, ANSWER).await;
+    }
+
+    /// [`store_trace`] with `output` as the answer.
+    async fn store_span_with(
+        app: &TestApp,
+        project: &ProjectRow,
+        trace: TraceId,
+        environment: &str,
+        output: &str,
+    ) {
         let now = app.state.clock.now_ns();
         let mut row: Span = dataset_span(0);
         row.trace_id = trace;
@@ -1376,7 +1444,7 @@ mod job_tests {
         row.parent_span_id = None;
         row.input = Some(QUESTION.to_owned());
         row.input_format = Some(PayloadFormat::Text);
-        row.output = Some(ANSWER.to_owned());
+        row.output = Some(output.to_owned());
         row.output_format = Some(PayloadFormat::Text);
         row.environment = Some(environment.to_owned());
         row.session_id = Some("session-7".to_owned());
@@ -1648,6 +1716,127 @@ mod job_tests {
         }
     }
 
+    /// A 200 completion whose response names `model`, so the call's cost is that model's.
+    fn completion_for(model: &str, content: &str) -> Reply {
+        let mut reply = completion(content);
+        reply.body["model"] = json!(model);
+        reply
+    }
+
+    /// A webhook evaluator named `Hook` at `url`, with a signing secret, outputting `hook`.
+    async fn webhook(app: &TestApp, seeded: &Seeded, url: &str) -> Uuid {
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/evaluators", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": "Hook",
+                "kind": "webhook",
+                "config": {"url": url},
+                "output_score": {"name": "hook", "data_type": "numeric"},
+                "webhook_secret": "0123456789abcdef"
+            }))
+            .send()
+            .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let value: Value = response.json();
+        Uuid::parse_str(value["id"].as_str().expect("id")).expect("uuid")
+    }
+
+    /// A live categorical definition of `name` in the project (the judge's score is numeric).
+    async fn categorical_definition(app: &TestApp, seeded: &Seeded, name: &str) {
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/score-definitions", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": name,
+                "data_type": "categorical",
+                "categories": [{"label": "good"}]
+            }))
+            .send()
+            .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    /// Runs a job until it leaves `queued`, making each retry due in turn. Returns the last row.
+    async fn run_until_done(app: &TestApp, project: &ProjectRow, job: Uuid, conn: Uuid) -> JobRow {
+        let mut row = run_once(app, project, job, Some(conn)).await;
+        while row.status == "queued" {
+            due(app, project, job).await;
+            row = run_once(app, project, job, Some(conn)).await;
+        }
+        row
+    }
+
+    /// The scores of `evaluator`, read through `GET /scores`.
+    async fn scores_of(app: &TestApp, seeded: &Seeded, evaluator: Uuid) -> Vec<Value> {
+        let response = app
+            .request(
+                Method::GET,
+                &format!(
+                    "/api/v1/projects/{}/scores?evaluator_id={evaluator}",
+                    seeded.project.id
+                ),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let page: Value = response.json();
+        page["data"].as_array().expect("data").clone()
+    }
+
+    /// Whether the judge trace `id` is stored (its trace page answers).
+    async fn judge_trace_exists(app: &TestApp, seeded: &Seeded, id: TraceId) -> bool {
+        let response = app
+            .request(
+                Method::GET,
+                &format!(
+                    "/api/v1/projects/{}/traces/{}",
+                    seeded.project.id,
+                    id.to_hex()
+                ),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        response.status == 200
+    }
+
+    /// The `usage_daily` sums of the project, after a flush: judge input and output tokens, the
+    /// judge cost, and the scores.
+    async fn usage_sums(app: &TestApp, seeded: &Seeded) -> (i64, i64, f64, i64) {
+        app.state
+            .usage
+            .flush(&app.state.meta)
+            .await
+            .expect("usage flushes");
+        sqlx::query_as(
+            "SELECT COALESCE(SUM(judge_input_tokens), 0), COALESCE(SUM(judge_output_tokens), 0), \
+             COALESCE(SUM(judge_cost_usd), 0), COALESCE(SUM(scores), 0) \
+             FROM usage_daily WHERE project_id = ?",
+        )
+        .bind(seeded.project.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("usage reads")
+    }
+
     #[tokio::test]
     async fn a_rule_job_writes_the_score_and_the_judge_trace() {
         let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
@@ -1860,7 +2049,7 @@ mod job_tests {
             },
             actual: 0.0,
         };
-        finish_job(&app.state, &claimed, ended, None)
+        finish_job(&app.state, &claimed, ended, None, claimed.row.attempts)
             .await
             .expect("finish");
 
@@ -2127,7 +2316,7 @@ mod job_tests {
 
     #[tokio::test]
     async fn a_budgeted_run_settles_its_reservation_into_the_rule_spend() {
-        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let mock = MockLlm::start(vec![completion_for(PRICED, JUDGE_ANSWER)]).await;
         let (app, seeded) = test_app().await;
         let conn = connection(&app, &seeded.cookie, &mock).await;
         let evaluator = judge(&app, &seeded, conn, PRICED).await;
@@ -2155,13 +2344,17 @@ mod job_tests {
         )
         .await
         .expect("read");
-        assert!(spent > 0.0, "the call's cost or its estimate is spent");
-        let (_, reserved) = app
+        assert!(spent > 0.0, "the priced model's cost is spent");
+        // The judge's `llm` span cost is what `usage_daily` counts for the same call.
+        let (_, _, judge_cost, _) = usage_sums(&app, &seeded).await;
+        assert_eq!(spent, judge_cost, "the spend is the call's cost");
+        let (in_memory, reserved) = app
             .state
             .eval
             .budgets
             .view(rule_id, budget::day_start(now))
             .expect("loaded");
+        assert_eq!(in_memory, spent, "the in-memory budget equals the table");
         assert_eq!(reserved, 0.0, "the reservation is settled");
     }
 
@@ -2202,7 +2395,7 @@ mod job_tests {
         assert_eq!(second.claims, 2);
 
         let ended = call_evaluator(&app.state, &first, call).await;
-        finish_job(&app.state, &first, ended, reservation)
+        finish_job(&app.state, &first, ended, reservation, 1)
             .await
             .expect("finish");
 
@@ -2210,6 +2403,17 @@ mod job_tests {
         assert_eq!(row.status, "running", "the stale finish changed nothing");
         assert_eq!(row.claims, 2);
         assert_eq!(mock.requests().len(), 1);
+        // D-I-12 keeps the result's writes: the score and the judge trace of the first claim.
+        let scores = scores_of(&app, &seeded, evaluator).await;
+        assert_eq!(scores.len(), 1, "the score is written");
+        assert_eq!(
+            scores[0]["metadata"]["llmobs.eval.job_id"],
+            json!(job.to_string())
+        );
+        assert!(
+            judge_trace_exists(&app, &seeded, job_judge_trace_id(job, 1)).await,
+            "the judge trace of claim 1 exists"
+        );
     }
 
     #[tokio::test]
@@ -2353,7 +2557,7 @@ mod job_tests {
             .expect("delete rule");
 
         let ended = call_evaluator(&app.state, &first, call).await;
-        finish_job(&app.state, &first, ended, reservation)
+        finish_job(&app.state, &first, ended, reservation, 1)
             .await
             .expect("ends quietly");
         assert!(job_row_opt(&app, &seeded.project, job).await.is_none());
@@ -2442,7 +2646,7 @@ mod job_tests {
                 pause: Pause::None,
                 actual: 0.0,
             };
-            finish_job(&app.state, &claimed, ended, None)
+            finish_job(&app.state, &claimed, ended, None, claimed.row.attempts)
                 .await
                 .expect("finish");
         }
@@ -2485,5 +2689,512 @@ mod job_tests {
         .await;
         assert_eq!(result, Err("busy"));
         assert_eq!(calls.get(), 3);
+    }
+
+    /// Re-queues the running job and claims it again, as the janitor and the dispatcher do: the
+    /// claim count of the new claim is one more than the old one's.
+    async fn reclaim(
+        app: &TestApp,
+        project: &ProjectRow,
+        job: Uuid,
+        judge_connection: Option<Uuid>,
+    ) -> ClaimedJob {
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    eval_jobs::requeue_stale(conn, i64::MAX, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .expect("requeue");
+        claimed(app, project, job, judge_connection).await
+    }
+
+    #[tokio::test]
+    async fn the_retry_is_due_from_the_time_after_the_call() {
+        let (app, seeded) = test_app().await;
+        let before = app.state.clock.now_ns();
+        // The judge answers 503 while the clock moves on: the call takes a second.
+        let later = before + 1_000_000_000;
+        let clock = app.state.clock.clone();
+        let mock = MockLlm::start_with_hook(vec![reply_status(503, "overloaded")], move || {
+            clock.set(later);
+        })
+        .await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(30), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(30),
+            before,
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.attempts, 1);
+        assert_eq!(
+            row.not_before,
+            later + retry::backoff_ns(job, 1),
+            "the backoff counts from the time after the call, not from before it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retried_attempt_does_not_count_for_the_breaker() {
+        // Every attempt is a 503. A job is retried five times before it fails; only that final
+        // failure is a breaker record, so nineteen failed jobs do not trip (they would at 20).
+        let mock = MockLlm::start(vec![reply_status(503, "overloaded")]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        let rule_id = rule(&app, &seeded, evaluator, None, MAPPING).await;
+        let mut jobs = Vec::new();
+        for n in 0..20_u128 {
+            store_trace(&app, &seeded.project, trace(300 + n), "production").await;
+            let (job, new) = new_job(
+                seeded.project.id,
+                KIND_RULE,
+                Some(rule_id),
+                evaluator,
+                None,
+                trace(300 + n),
+                app.state.clock.now_ns(),
+            );
+            enqueue(&app, new).await;
+            jobs.push(job);
+        }
+        for job in &jobs[..19] {
+            let row = run_until_done(&app, &seeded.project, *job, conn).await;
+            assert_eq!(row.status, "failed");
+            assert_eq!(row.attempts, 6);
+        }
+        assert_eq!(
+            rule_row(&app, &seeded.project, rule_id).await.paused_reason,
+            None,
+            "nineteen final failures do not trip; the retries do not count"
+        );
+        let row = run_until_done(&app, &seeded.project, jobs[19], conn).await;
+        assert_eq!(row.status, "failed");
+        assert_eq!(
+            rule_row(&app, &seeded.project, rule_id)
+                .await
+                .paused_reason
+                .as_deref(),
+            Some("errors"),
+            "the twentieth final failure trips the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saturated_trace_load_requeues_without_spending_a_load_retry() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) =
+            seeded_in(TestApp::with_permit_wait(Duration::from_millis(10)).await).await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(31), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(31),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+        let _held = app
+            .state
+            .trace_loads
+            .semaphore()
+            .try_acquire_many(MAX_LOADS)
+            .expect("permits");
+
+        let now = app.state.clock.now_ns();
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.not_before, now + retry::SATURATED_REQUEUE_NS);
+        assert_eq!(row.load_retries, 0, "no load retry is spent");
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn an_unpriced_estimate_ends_the_job_as_unpriced() {
+        let rule = Uuid::from_u128(77);
+        let Exit::Ended(ended) = unpriced(rule) else {
+            panic!("an unpriced job ends before the call");
+        };
+        let Ended {
+            finish,
+            pause,
+            actual,
+            ..
+        } = *ended;
+        assert!(matches!(
+            finish,
+            Finish::Failed { class: "permanent", ref error, .. } if error == "model has no price"
+        ));
+        assert!(matches!(
+            pause,
+            Pause::Rule { rule_id, reason: PAUSE_ERRORS, .. } if rule_id == rule
+        ));
+        assert_eq!(actual, 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_job_writes_its_score() {
+        let hook = MockWebhook::start(200, json!({"value": 0.5})).await;
+        let (app, seeded) = test_app().await;
+        let evaluator = webhook(&app, &seeded, &hook.url()).await;
+        let rule_id = rule(&app, &seeded, evaluator, None, MAPPING).await;
+        store_trace(&app, &seeded.project, trace(43), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(43),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, None).await;
+        assert_eq!(row.status, "done", "{:?}", row.error);
+        assert!(row.score_id.is_some());
+        assert_eq!(hook.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_webhook_401_pauses_the_evaluator_rules_and_requeues() {
+        let hook = MockWebhook::start(401, json!({"error": "no"})).await;
+        let (app, seeded) = test_app().await;
+        let mock = MockLlm::start(vec![]).await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = webhook(&app, &seeded, &hook.url()).await;
+        let rule_id = rule(&app, &seeded, evaluator, None, MAPPING).await;
+        store_trace(&app, &seeded.project, trace(44), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(44),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+        let before = connection_row(&app, &seeded.project, conn).await;
+
+        let row = run_once(&app, &seeded.project, job, None).await;
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.attempts, 0, "the attempt is given back");
+        assert_eq!(
+            rule_row(&app, &seeded.project, rule_id)
+                .await
+                .paused_reason
+                .as_deref(),
+            Some("errors")
+        );
+        let after = connection_row(&app, &seeded.project, conn).await;
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.last_error, before.last_error);
+    }
+
+    #[tokio::test]
+    async fn a_definition_mismatch_fails_before_the_call() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        // The judge's score is numeric; a live categorical definition of its name is a mismatch.
+        categorical_definition(&app, &seeded, "relevance").await;
+        store_trace(&app, &seeded.project, trace(45), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(45),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.error.as_deref(), Some("score definition mismatch"));
+        assert_eq!(
+            row.attempts, 0,
+            "the check runs before the attempt is counted"
+        );
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_levenshtein_input_over_64_kib_fails_before_the_call() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) = test_app().await;
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/evaluators", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": "Similar",
+                "kind": "check",
+                "config": {"check": "levenshtein"},
+                "output_score": {"name": "similar", "data_type": "numeric"}
+            }))
+            .send()
+            .await;
+        assert_eq!(response.status, 201);
+        let value: Value = response.json();
+        let evaluator = Uuid::parse_str(value["id"].as_str().expect("id")).expect("uuid");
+        let long = "x".repeat(64 * 1024 + 1);
+        store_span_with(&app, &seeded.project, trace(46), "production", &long).await;
+        let mapping = r#"{"output": "trace.output", "expected": "trace.output"}"#;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(mapping),
+            trace(46),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, None).await;
+        assert_eq!(row.status, "failed");
+        assert_eq!(
+            row.error.as_deref(),
+            Some("levenshtein inputs must be at most 64 KiB each")
+        );
+        assert_eq!(row.judge_trace_id, None, "no judge trace is written");
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_month_budget_sums_the_days_of_this_month() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let this_month = budget::month_start(app.state.clock.now_ns());
+        let mid_month = this_month + 14 * budget::DAY_NS + 12 * 3_600_000_000_000;
+        app.state.clock.set(mid_month);
+        let limit = 5.0;
+        let current = rule(&app, &seeded, evaluator, Some((limit, "month")), MAPPING).await;
+        let previous = rule(&app, &seeded, evaluator, Some((limit, "month")), MAPPING).await;
+        let day = budget::DAY_NS;
+        // This month's spend is just under the limit, so the estimate pushes it over. The other
+        // rule's spend is the same amount, but dated in the month before: it does not count.
+        let just_under = limit - 0.000_001;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    rule_spend::add_spend(conn, current, this_month + 2 * day, 2.0).await?;
+                    rule_spend::add_spend(conn, current, this_month + 4 * day, just_under - 2.0)
+                        .await?;
+                    rule_spend::add_spend(conn, previous, this_month - 2 * day, 2.0).await?;
+                    rule_spend::add_spend(conn, previous, this_month - 3 * day, just_under - 2.0)
+                        .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .expect("spend");
+        store_trace(&app, &seeded.project, trace(40), "production").await;
+        store_trace(&app, &seeded.project, trace(41), "production").await;
+        let (current_job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(current),
+            evaluator,
+            None,
+            trace(40),
+            mid_month,
+        );
+        let (previous_job, previous_new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(previous),
+            evaluator,
+            None,
+            trace(41),
+            mid_month,
+        );
+        enqueue(&app, new).await;
+        enqueue(&app, previous_new).await;
+
+        let row = run_once(&app, &seeded.project, current_job, Some(conn)).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("budget"));
+        let row = run_once(&app, &seeded.project, previous_job, Some(conn)).await;
+        assert_eq!(row.status, "done", "{:?}", row.error);
+    }
+
+    #[tokio::test]
+    async fn a_judge_run_counts_its_tokens_and_its_score() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        let rule_id = rule(&app, &seeded, evaluator, None, MAPPING).await;
+        store_trace(&app, &seeded.project, trace(42), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(42),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "done", "{:?}", row.error);
+        let (input, output, _, scores) = usage_sums(&app, &seeded).await;
+        // The mock's completion reports 10 input and 3 output tokens.
+        assert_eq!((input, output), (10, 3));
+        assert_eq!(scores, 1);
+    }
+
+    #[tokio::test]
+    async fn a_lost_claim_still_records_the_spend() {
+        let mock = MockLlm::start(vec![completion_for(PRICED, JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let rule_id = rule(&app, &seeded, evaluator, Some((5.0, "day")), MAPPING).await;
+        store_trace(&app, &seeded.project, trace(47), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(47),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+        let first = claimed(&app, &seeded.project, job, Some(conn)).await;
+        let Ready { reservation, call } = prepare(&app.state, &first).await.ok().expect("prepared");
+        let _second = reclaim(&app, &seeded.project, job, Some(conn)).await;
+
+        let ended = call_evaluator(&app.state, &first, call).await;
+        finish_job(&app.state, &first, ended, reservation, 1)
+            .await
+            .expect("finish");
+
+        let row = job_row(&app, &seeded.project, job).await;
+        assert_eq!(row.status, "running", "the stale finish changed nothing");
+        let now = app.state.clock.now_ns();
+        let spent = rule_spend::spent_between(
+            app.state.meta.reader(),
+            rule_id,
+            budget::day_start(now),
+            budget::day_start(now) + budget::DAY_NS,
+        )
+        .await
+        .expect("read");
+        assert!(
+            spent > 0.0,
+            "the provider was paid, so the spend is recorded"
+        );
+        let (_, reserved) = app
+            .state
+            .eval
+            .budgets
+            .view(rule_id, budget::day_start(now))
+            .expect("loaded");
+        assert_eq!(reserved, 0.0, "the reservation is settled");
+    }
+
+    #[tokio::test]
+    async fn a_lost_start_attempt_releases_the_reservation() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let rule_id = rule(&app, &seeded, evaluator, Some((5.0, "day")), MAPPING).await;
+        store_trace(&app, &seeded.project, trace(48), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(48),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+        let first = claimed(&app, &seeded.project, job, Some(conn)).await;
+        // The job is claimed again before this claim starts its attempt: the reservation made in
+        // step 10 must go back when the start is refused.
+        let _second = reclaim(&app, &seeded.project, job, Some(conn)).await;
+
+        let outcome = prepare(&app.state, &first).await;
+        assert!(matches!(outcome, Err(Exit::Gone)));
+        let now = app.state.clock.now_ns();
+        assert_eq!(
+            app.state.eval.budgets.view(rule_id, budget::day_start(now)),
+            Some((0.0, 0.0))
+        );
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unpriced_answer_spends_the_estimate() {
+        // The judge's model is priced, but the answer names `gpt-test`, which is not: the call's
+        // cost is unknown, so the spend is the estimate.
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let rule_id = rule(&app, &seeded, evaluator, Some((5.0, "day")), MAPPING).await;
+        store_trace(&app, &seeded.project, trace(49), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(49),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "done", "{:?}", row.error);
+        let now = app.state.clock.now_ns();
+        let prices = app.state.ingest.prices();
+        let adapter = Adapter::from_name("openai").expect("adapter");
+        let price = budget::model_price(&prices, PRICED, adapter, now).expect("priced");
+        let prompt = format!("Question: {QUESTION}\nAnswer: {ANSWER}");
+        let estimate = budget::estimate_usd(prompt.chars().count(), 1024, price);
+        let spent = rule_spend::spent_between(
+            app.state.meta.reader(),
+            rule_id,
+            budget::day_start(now),
+            budget::day_start(now) + budget::DAY_NS,
+        )
+        .await
+        .expect("read");
+        assert_eq!(spent, estimate);
     }
 }

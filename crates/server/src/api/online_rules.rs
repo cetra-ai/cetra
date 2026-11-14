@@ -326,7 +326,7 @@ pub struct UpdateOnlineRuleRequest {
 }
 
 /// Deserializes a field that is present, and refuses `null` through `T`'s own deserializer.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(super) fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

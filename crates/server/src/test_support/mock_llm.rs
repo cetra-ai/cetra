@@ -31,20 +31,30 @@ pub(crate) struct MockLlm {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Clone)]
 struct MockState {
     /// Replies still to serve. The last one repeats.
     replies: Arc<Mutex<Vec<Reply>>>,
     /// Each request's headers and parsed JSON body, in arrival order.
     requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
+    /// Runs on each request before its reply (a test moves the clock while a call is in flight).
+    hook: Box<dyn Fn() + Send + Sync>,
 }
 
 impl MockLlm {
     /// Binds the listener and serves it in the background.
     pub(crate) async fn start(replies: Vec<Reply>) -> Self {
+        Self::start_with_hook(replies, || {}).await
+    }
+
+    /// [`Self::start`], and `hook` runs on each request before its reply.
+    pub(crate) async fn start_with_hook(
+        replies: Vec<Reply>,
+        hook: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         let state = Arc::new(MockState {
             replies: Arc::new(Mutex::new(replies)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            hook: Box::new(hook),
         });
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
@@ -88,6 +98,7 @@ async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: B
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((headers, parsed));
+    (state.hook)();
     let mut replies = state.replies.lock().unwrap_or_else(PoisonError::into_inner);
     // Replies are served in order; the last one repeats.
     let reply = match replies.len() {

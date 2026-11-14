@@ -3851,7 +3851,7 @@ export interface components {
          *     mapping holds expressions, not payload.
          */
         RunEvaluatorRequest: {
-            /** @description Span of the trace to target, 16 hex digits. */
+            /** @description Span of the trace to target, 16 hex digits. Omitted for a trace target; `null` is refused. */
             span_id?: string;
             /** @description Trace to run on, 32 hex digits. */
             trace_id: string;

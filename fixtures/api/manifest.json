@@ -789,7 +789,7 @@
     "query": {},
     "status": 200,
     "content_type": "application/json",
-    "file": "static/online-rule.json"
+    "file": "static/online-rule-resumed.json"
   },
   {
     "operation_id": "post_org_invite",

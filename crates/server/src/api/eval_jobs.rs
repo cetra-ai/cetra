@@ -182,8 +182,8 @@ pub struct EvalJobListParams {
 pub struct RunEvaluatorRequest {
     /// Trace to run on, 32 hex digits.
     pub trace_id: String,
-    /// Span of the trace to target, 16 hex digits.
-    #[serde(default)]
+    /// Span of the trace to target, 16 hex digits. Omitted for a trace target; `null` is refused.
+    #[serde(default, deserialize_with = "super::online_rules::present")]
     pub span_id: Option<String>,
     /// The trace's `start_time`, from the trace detail the UI loaded.
     pub trace_start: TimeParam,
@@ -242,6 +242,14 @@ mod tests {
         let request: RunEvaluatorRequest = serde_json::from_str(text).unwrap();
         assert_eq!(request.trace_id, "a1000000000000000000000000000001");
         assert!(request.span_id.is_none());
+    }
+
+    #[test]
+    fn run_request_refuses_a_null_span_id() {
+        let text = include_str!("../../../../fixtures/api/requests/evaluator-run.json");
+        let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
+        value["span_id"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<RunEvaluatorRequest>(value).is_err());
     }
 
     #[test]

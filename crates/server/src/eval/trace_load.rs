@@ -28,25 +28,31 @@ pub(crate) const MAX_LOADS: u32 = 4;
 
 /// Permits for trace loads, shared by test runs (M2) and jobs (M3).
 #[derive(Debug)]
-pub(crate) struct TraceLoads(tokio::sync::Semaphore);
+pub(crate) struct TraceLoads {
+    permits: tokio::sync::Semaphore,
+    /// How long a load waits for a permit before it answers `Saturated`. [`READ_TIMEOUT`] in
+    /// production; tests shorten it.
+    pub(crate) permit_wait: Duration,
+}
 
 impl TraceLoads {
-    /// `MAX_LOADS` permits.
-    pub(crate) fn new() -> Self {
-        Self(tokio::sync::Semaphore::new(
-            usize::try_from(MAX_LOADS).unwrap_or(4),
-        ))
+    /// `MAX_LOADS` permits, and a load waits `permit_wait` for one.
+    pub(crate) fn new(permit_wait: Duration) -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(usize::try_from(MAX_LOADS).unwrap_or(4)),
+            permit_wait,
+        }
     }
 
     /// The permits, for `load_trace` and for tests that hold them.
     pub(crate) fn semaphore(&self) -> &tokio::sync::Semaphore {
-        &self.0
+        &self.permits
     }
 }
 
 impl Default for TraceLoads {
     fn default() -> Self {
-        Self::new()
+        Self::new(READ_TIMEOUT)
     }
 }
 
@@ -103,14 +109,14 @@ pub(crate) async fn load_trace(
         target_span,
         around,
         MAX_SPANS,
-        READ_TIMEOUT,
+        state.trace_loads.permit_wait,
     )
     .await
 }
 
 /// [`load_trace`] with the span cap and the permit wait as parameters, so a test can reach
 /// `truncated` with a few spans and `Saturated` without waiting 30 s. `load_trace` passes
-/// [`MAX_SPANS`] and [`READ_TIMEOUT`].
+/// [`MAX_SPANS`] and `state.trace_loads.permit_wait`.
 async fn load_trace_capped(
     state: &AppState,
     project: ProjectId,

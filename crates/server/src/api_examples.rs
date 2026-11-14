@@ -671,7 +671,7 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "post_online_rule_resume",
             params(&[("id", "01900000-0000-7000-8000-000000000701")]),
             BTreeMap::new(),
-            "static/online-rule.json",
+            "static/online-rule-resumed.json",
             "application/json",
         ),
         example(
