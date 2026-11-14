@@ -23,6 +23,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until};
 
+use crate::api::common::ProblemCode;
 use crate::api::convert;
 use crate::api::traces::{TraceStreamParams, TraceSummary};
 use crate::auth::principal::Principal;
@@ -495,14 +496,19 @@ async fn send(tx: &mpsc::Sender<Event>, event: Event, timeout: Duration) -> bool
 fn take_slot(state: &AppState, principal: &Principal) -> Result<StreamSlot, ApiError> {
     state
         .live
-        .acquire(owner(principal))
+        .acquire(owner(principal)?)
         .ok_or(ApiError::RateLimited { retry_after_s: 1 })
 }
 
-fn owner(principal: &Principal) -> StreamOwner {
+fn owner(principal: &Principal) -> Result<StreamOwner, ApiError> {
     match principal {
-        Principal::Session { user, .. } | Principal::Pat { user, .. } => StreamOwner::User(user.id),
-        Principal::ApiKey { key_id, .. } => StreamOwner::Key(*key_id),
+        Principal::Session { user, .. } | Principal::Pat { user, .. } => {
+            Ok(StreamOwner::User(user.id))
+        }
+        Principal::ApiKey { key_id, .. } => Ok(StreamOwner::Key(*key_id)),
+        Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
+        }),
     }
 }
 

@@ -543,6 +543,7 @@ fn user_row(record: UserRecord) -> Result<UserRow, MetaError> {
 mod tests {
     use super::*;
     use crate::meta::test_db;
+    use llmobs_core::ids::OrgId;
     use uuid::Uuid;
 
     #[test]
@@ -730,7 +731,9 @@ mod tests {
             move |conn| {
                 Box::pin(async move {
                     assert!(!is_last_active_owner(conn, owner_id).await?);
-                    let org = crate::meta::orgs::insert_org(conn, "Acme", "acme", 1).await?;
+                    let org =
+                        crate::meta::orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1)
+                            .await?;
                     crate::meta::members::add_org_member(
                         conn,
                         org.id,

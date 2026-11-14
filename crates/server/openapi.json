@@ -719,6 +719,181 @@
         "security": []
       }
     },
+    "/api/internal/v1/orgs": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Create an org",
+        "description": "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+        "operationId": "post_internal_org",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInternalOrgRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The org with this id already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOrg"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The org was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalOrg"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/orgs/{org_id}/entitlements": {
+      "put": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Store the org's entitlement token",
+        "description": "The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.",
+        "operationId": "put_org_entitlements_token",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOrgTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The token is stored, or it was already stored."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/public/feedback": {
       "post": {
         "tags": [
@@ -1923,6 +2098,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5601,7 +5786,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5713,7 +5898,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7074,7 +7259,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8217,7 +8402,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8609,7 +8794,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8739,7 +8924,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8933,7 +9118,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9082,7 +9267,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9276,7 +9461,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9415,7 +9600,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9536,7 +9721,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9656,7 +9841,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9933,7 +10118,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10063,7 +10248,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces.",
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10887,12 +11072,21 @@
           "signup",
           "providers",
           "smtp_enabled",
-          "email_verification_required"
+          "email_verification_required",
+          "org_create_allowed"
         ],
         "properties": {
           "email_verification_required": {
             "type": "boolean",
             "description": "New accounts must verify their email before signing in."
+          },
+          "org_create_allowed": {
+            "type": "boolean",
+            "description": "Users may create orgs (D-P-31)."
+          },
+          "org_create_url": {
+            "type": "string",
+            "description": "Where \"New organization\" goes when users may not create orgs. Omitted when unset."
           },
           "password_enabled": {
             "type": "boolean",
@@ -11397,6 +11591,31 @@
           "webhook_secret": {
             "type": "string",
             "description": "Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateInternalOrgRequest": {
+        "type": "object",
+        "description": "`POST /api/internal/v1/orgs` (D-P-29).",
+        "required": [
+          "id",
+          "name",
+          "owner"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org id the control plane chose. A UUIDv7."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1–100 characters after trimming (as `POST /api/v1/orgs`)."
+          },
+          "owner": {
+            "$ref": "#/components/schemas/InternalOwner",
+            "description": "The first owner."
           }
         },
         "additionalProperties": false
@@ -12357,6 +12576,7 @@
         "type": "string",
         "description": "A feature an org may be entitled to. Names are append-only (D-P-12).",
         "enum": [
+          "retention_management",
           "project_roles",
           "sso_enforcement"
         ]
@@ -12492,6 +12712,43 @@
             "description": "Argument and return types, for example `score(name: string) -> float`."
           }
         }
+      },
+      "InternalOrg": {
+        "type": "object",
+        "description": "The created or existing org.",
+        "required": [
+          "id",
+          "slug"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org id."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The org slug."
+          }
+        }
+      },
+      "InternalOwner": {
+        "type": "object",
+        "description": "The owner of a new org.",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email; normalized like every email (D136)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name for a new user. Ignored when the user exists."
+          }
+        },
+        "additionalProperties": false
       },
       "Invite": {
         "type": "object",
@@ -13195,9 +13452,11 @@
       },
       "OrgEntitlements": {
         "type": "object",
-        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage.",
+        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.",
         "required": [
-          "features"
+          "features",
+          "plan",
+          "limits"
         ],
         "properties": {
           "features": {
@@ -13206,6 +13465,14 @@
               "$ref": "#/components/schemas/Feature"
             },
             "description": "Features the org may use now, in a fixed order."
+          },
+          "limits": {
+            "$ref": "#/components/schemas/OrgLimits",
+            "description": "The org's limits (D-P-13)."
+          },
+          "plan": {
+            "$ref": "#/components/schemas/OrgPlan",
+            "description": "The org's plan (D-P-32)."
           },
           "upgrade_url": {
             "type": "string",
@@ -13217,6 +13484,66 @@
         "type": "string",
         "format": "uuid",
         "description": "Organization id. A UUID, created as UUIDv7 and parsed from any version.\n\nSpec README § Cross-cutting conventions and decision D61."
+      },
+      "OrgLimits": {
+        "type": "object",
+        "description": "The org's limits (D-P-13). An omitted limit is unlimited.",
+        "properties": {
+          "data_access_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many days of data the org may read.",
+            "minimum": 0
+          },
+          "ingest_burst": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ingest burst, spans.",
+            "minimum": 0
+          },
+          "ingest_spans_per_sec": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sustained ingest rate, spans per second.",
+            "minimum": 0
+          },
+          "max_active_online_rules": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active online evaluation rules.",
+            "minimum": 0
+          },
+          "max_alert_rules": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Alert rules.",
+            "minimum": 0
+          },
+          "max_projects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Projects.",
+            "minimum": 0
+          },
+          "max_seats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seats.",
+            "minimum": 0
+          },
+          "units_cap": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hard cap on units.",
+            "minimum": 0
+          },
+          "units_included": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units included in the plan.",
+            "minimum": 0
+          }
+        }
       },
       "OrgMember": {
         "type": "object",
@@ -13315,6 +13642,50 @@
               "null"
             ],
             "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "OrgPlan": {
+        "type": "object",
+        "description": "The org's plan.",
+        "required": [
+          "name",
+          "add_ons",
+          "source"
+        ],
+        "properties": {
+          "add_ons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Add-ons, e.g. `teams`."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Omitted with the defaults."
+          },
+          "grace_ends_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Omitted with the defaults."
+          },
+          "id": {
+            "type": "string",
+            "description": "Plan id from the token. Omitted with the defaults."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlanSource",
+            "description": "Where the plan comes from."
+          },
+          "status": {
+            "$ref": "#/components/schemas/PlanStatus",
+            "description": "Omitted with the defaults."
           }
         }
       },
@@ -13529,6 +13900,22 @@
           "write"
         ]
       },
+      "PlanSource": {
+        "type": "string",
+        "description": "Where the org's plan comes from.",
+        "enum": [
+          "defaults",
+          "token"
+        ]
+      },
+      "PlanStatus": {
+        "type": "string",
+        "description": "An org token's state.",
+        "enum": [
+          "active",
+          "grace"
+        ]
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 7807 problem document.\n\nSpec 09 § Conventions.",
@@ -13587,6 +13974,7 @@
           "email_not_verified",
           "plan_limit",
           "plan_required",
+          "owner_not_allowed",
           "not_found",
           "method_not_allowed",
           "payload_too_large",
@@ -13729,6 +14117,20 @@
           "viewer",
           "none"
         ]
+      },
+      "PutOrgTokenRequest": {
+        "type": "object",
+        "description": "`PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "A signed `kind: org` token. Never logged."
+          }
+        },
+        "additionalProperties": false
       },
       "ReasoningPart": {
         "type": "object",
@@ -16354,6 +16756,10 @@
     {
       "name": "alerts",
       "description": "Alert rules, alert events and notification channels."
+    },
+    {
+      "name": "internal",
+      "description": "Endpoints the cloud control plane calls on a cell."
     }
   ]
 }

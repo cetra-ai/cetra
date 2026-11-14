@@ -118,7 +118,7 @@ check-ee:
     expected=6448026f2e06ab3da9ed8ddda686694bba37179e88db92dea6d4aab516c957ea
     header='// SPDX-License-Identifier: Elastic-2.0'
     status=0
-    for dir in crates/server/src/ee web/src/ee tools/license; do
+    for dir in crates/server/src/ee web/src/ee tools/license crates/token; do
         if [ ! -f "$dir/LICENSE" ]; then
             echo "$dir/LICENSE is missing"
             status=1
@@ -135,7 +135,7 @@ check-ee:
     done
     while IFS= read -r file; do
         case "$file" in
-            crates/server/src/ee/*|web/src/ee/*|tools/license/*) ;;
+            crates/server/src/ee/*|web/src/ee/*|tools/license/*|crates/token/*) ;;
             *) echo "$file: Elastic-2.0 header outside an ee directory"; status=1 ;;
         esac
     done < <(git grep -l -F 'SPDX-License-Identifier: Elastic-2.0' -- '*.rs' '*.ts' '*.tsx' || true)
@@ -268,9 +268,14 @@ release-verify tag:
 release-notes version:
     tools/packaging/release-notes.sh {{version}}
 
-# Packaging checks on x86_64 Linux: what CI's packaging job runs (D-N-13)
-check-packaging: versions-check helm-check js-install
+# Cheap packaging checks: versions, chart, compose files, Biome on tools/packaging (CI's packaging job, D-N-13)
+check-packaging-lint: versions-check helm-check js-install
     pnpm exec biome check tools/packaging
+    cd deploy/compose && docker compose config --quiet
+    cd deploy/compose && GARAGE_RPC_SECRET=x GARAGE_ADMIN_TOKEN=x GARAGE_ACCESS_KEY_ID=x GARAGE_SECRET_ACCESS_KEY=x docker compose -f compose.yaml -f compose.s3.yaml config --quiet
+
+# Full packaging checks on x86_64 Linux: the lint checks, the archive, binary, install, image and compose smokes (packaging.yml, D-N-13)
+check-packaging: check-packaging-lint
     just dist x86_64-unknown-linux-musl
     just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
     just install-smoke

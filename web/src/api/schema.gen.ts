@@ -248,6 +248,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an org
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).
+         */
+        post: operations["post_internal_org"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}/entitlements": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Store the org's entitlement token
+         * @description The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.
+         */
+        put: operations["put_org_entitlements_token"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/public/feedback": {
         parameters: {
             query?: never;
@@ -1853,6 +1893,10 @@ export interface components {
         AuthConfig: {
             /** @description New accounts must verify their email before signing in. */
             email_verification_required: boolean;
+            /** @description Users may create orgs (D-P-31). */
+            org_create_allowed: boolean;
+            /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
+            org_create_url?: string;
             /** @description Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set. */
             password_enabled: boolean;
             /** @description Configured OAuth and OIDC providers. */
@@ -2066,6 +2110,18 @@ export interface components {
             output_score: components["schemas"]["OutputScoreBody"];
             /** @description Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook. */
             webhook_secret?: string;
+        };
+        /** @description `POST /api/internal/v1/orgs` (D-P-29). */
+        CreateInternalOrgRequest: {
+            /**
+             * Format: uuid
+             * @description The org id the control plane chose. A UUIDv7.
+             */
+            id: string;
+            /** @description Display name, 1–100 characters after trimming (as `POST /api/v1/orgs`). */
+            name: string;
+            /** @description The first owner. */
+            owner: components["schemas"]["InternalOwner"];
         };
         /** @description `POST /api/v1/orgs/{org}/invites`. */
         CreateInviteRequest: {
@@ -2564,7 +2620,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "project_roles" | "sso_enforcement";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -2622,6 +2678,23 @@ export interface components {
             name: string;
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
+        };
+        /** @description The created or existing org. */
+        InternalOrg: {
+            /**
+             * Format: uuid
+             * @description The org id.
+             */
+            id: string;
+            /** @description The org slug. */
+            slug: string;
+        };
+        /** @description The owner of a new org. */
+        InternalOwner: {
+            /** @description Email; normalized like every email (D136). */
+            email: string;
+            /** @description Display name for a new user. Ignored when the user exists. */
+            name?: string;
         };
         /**
          * @description One pending invitation.
@@ -3011,10 +3084,14 @@ export interface components {
              */
             updated_at: string;
         };
-        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage. */
+        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
             features: components["schemas"]["Feature"][];
+            /** @description The org's limits (D-P-13). */
+            limits: components["schemas"]["OrgLimits"];
+            /** @description The org's plan (D-P-32). */
+            plan: components["schemas"]["OrgPlan"];
             /** @description Where an Upgrade button goes. Omitted when the instance sets none. */
             upgrade_url?: string;
         };
@@ -3025,6 +3102,54 @@ export interface components {
          *     Spec README § Cross-cutting conventions and decision D61.
          */
         OrgId: string;
+        /** @description The org's limits (D-P-13). An omitted limit is unlimited. */
+        OrgLimits: {
+            /**
+             * Format: int64
+             * @description How many days of data the org may read.
+             */
+            data_access_days?: number;
+            /**
+             * Format: int64
+             * @description Ingest burst, spans.
+             */
+            ingest_burst?: number;
+            /**
+             * Format: int64
+             * @description Sustained ingest rate, spans per second.
+             */
+            ingest_spans_per_sec?: number;
+            /**
+             * Format: int64
+             * @description Active online evaluation rules.
+             */
+            max_active_online_rules?: number;
+            /**
+             * Format: int64
+             * @description Alert rules.
+             */
+            max_alert_rules?: number;
+            /**
+             * Format: int64
+             * @description Projects.
+             */
+            max_projects?: number;
+            /**
+             * Format: int64
+             * @description Seats.
+             */
+            max_seats?: number;
+            /**
+             * Format: int64
+             * @description Hard cap on units.
+             */
+            units_cap?: number;
+            /**
+             * Format: int64
+             * @description Units included in the plan.
+             */
+            units_included?: number;
+        };
         /**
          * @description One org membership.
          *
@@ -3069,6 +3194,29 @@ export interface components {
             data: components["schemas"]["OrgMembership"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The org's plan. */
+        OrgPlan: {
+            /** @description Add-ons, e.g. `teams`. */
+            add_ons: string[];
+            /**
+             * Format: date-time
+             * @description Omitted with the defaults.
+             */
+            expires_at?: string;
+            /**
+             * Format: date-time
+             * @description Omitted with the defaults.
+             */
+            grace_ends_at?: string;
+            /** @description Plan id from the token. Omitted with the defaults. */
+            id?: string;
+            /** @description Display name. */
+            name: string;
+            /** @description Where the plan comes from. */
+            source: components["schemas"]["PlanSource"];
+            /** @description Omitted with the defaults. */
+            status?: components["schemas"]["PlanStatus"];
         };
         /**
          * @description Role on an org, and the caller's effective role on a project.
@@ -3156,6 +3304,16 @@ export interface components {
          */
         PersonalTokenScope: "read" | "write";
         /**
+         * @description Where the org's plan comes from.
+         * @enum {string}
+         */
+        PlanSource: "defaults" | "token";
+        /**
+         * @description An org token's state.
+         * @enum {string}
+         */
+        PlanStatus: "active" | "grace";
+        /**
          * @description RFC 7807 problem document.
          *
          *     Spec 09 § Conventions.
@@ -3183,7 +3341,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -3254,6 +3412,11 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential. */
+        PutOrgTokenRequest: {
+            /** @description A signed `kind: org` token. Never logged. */
+            token: string;
+        };
         /** @description Model reasoning, separate from the user-visible text. */
         ReasoningPart: {
             /** @description The reasoning text. */
@@ -5241,6 +5404,145 @@ export interface operations {
             };
         };
     };
+    post_internal_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInternalOrgRequest"];
+            };
+        };
+        responses: {
+            /** @description The org with this id already exists. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalOrg"];
+                };
+            };
+            /** @description The org was created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalOrg"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_entitlements_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The token is stored, or it was already stored. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_feedback: {
         parameters: {
             query?: never;
@@ -6208,6 +6510,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9027,7 +9338,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -9117,7 +9428,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10111,7 +10422,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -10931,7 +11242,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11203,7 +11514,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11296,7 +11607,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11403,7 +11714,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11514,7 +11825,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11621,7 +11932,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11720,7 +12031,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11811,7 +12122,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11901,7 +12212,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12076,7 +12387,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12169,7 +12480,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces. */
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;

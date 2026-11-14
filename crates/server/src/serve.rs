@@ -283,6 +283,22 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         config.license_key.as_ref().map(|key| key.expose().as_str()),
     );
     crate::entitlements::log_license(&license, Clock::System.now_ns());
+    let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
+    let entitlements = match crate::entitlements::EntitlementsState::load(
+        &meta,
+        license,
+        defaults,
+        config.public_url.origin(),
+    )
+    .await
+    {
+        Ok(entitlements) => entitlements,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
     let storage = Arc::new(storage);
     let state = AppState::new(AppInner {
         config,
@@ -307,9 +323,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         secrets,
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
+        entitlements,
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
-        entitlements: crate::entitlements::EntitlementsState::new(license),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -701,10 +717,11 @@ mod tests {
     use super::*;
     use crate::config::{
         AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-        MediaConfig, PublicUrl, Secret, SecurityConfig,
+        MediaConfig, OrgsConfig, PublicUrl, Secret, SecurityConfig,
     };
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use llmobs_core::ids::OrgId;
 
     #[tokio::test]
     async fn an_empty_database_logs_the_setup_url_once() {
@@ -978,7 +995,7 @@ mod tests {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support", "support-bot", None, now).await?;
@@ -1303,6 +1320,7 @@ mod tests {
             eval: EvalConfig::default(),
             security: SecurityConfig::default(),
             entitlements: EntitlementsConfig::default(),
+            orgs: OrgsConfig::default(),
             encryption_key: None,
             license_key: None,
             auth: AuthSettings::default(),

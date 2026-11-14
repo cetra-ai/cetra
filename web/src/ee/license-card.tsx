@@ -6,6 +6,7 @@ import type { Schema } from "@/api/types";
 import { Skeleton } from "@/components/ui/skeleton";
 
 const FEATURE_NAMES: Record<Schema<"Feature">, string> = {
+  retention_management: "Data retention management",
   project_roles: "Per-project roles",
   sso_enforcement: "SSO enforcement",
 };

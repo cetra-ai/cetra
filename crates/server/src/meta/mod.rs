@@ -11,6 +11,7 @@ pub(crate) mod api_keys;
 pub(crate) mod connections;
 pub(crate) mod deletions;
 pub(crate) mod email_verifications;
+pub(crate) mod entitlements;
 pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
 pub(crate) mod identities;

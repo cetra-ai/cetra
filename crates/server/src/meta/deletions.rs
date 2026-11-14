@@ -1484,7 +1484,7 @@ mod tests {
         let (org_id, project_id) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let org = orgs::insert_org(conn, "Acme", "acme", 1).await?;
+                    let org = orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
                     let project =
                         projects::insert_project(conn, org.id, "Bot", "bot", None, 1).await?;
                     Ok((org.id, project.id))

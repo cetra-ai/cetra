@@ -19,7 +19,7 @@ pub(crate) enum SlugError {
     Reserved,
 }
 
-/// An `orgs` row. `limits` is not read in D.
+/// An `orgs` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrgRow {
     /// UUIDv7.
@@ -148,11 +148,11 @@ fn fit(base: &str, suffix: Option<u32>) -> String {
 /// Returns [`MetaError`] when the insert fails.
 pub(crate) async fn insert_org(
     conn: &mut SqliteConnection,
+    id: OrgId,
     name: &str,
     slug: &str,
     now: i64,
 ) -> Result<OrgRow, MetaError> {
-    let id = OrgId::from_uuid(Uuid::now_v7());
     let record: OrgRecord = sqlx::query_as(
         "INSERT INTO orgs (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?) \
          RETURNING id, name, slug, state, created_at, updated_at",
@@ -204,16 +204,21 @@ pub(crate) async fn mark_org_deleting(
 
 /// Tries [`slug_from_name`], then `-2` … `-99`, in this transaction.
 ///
+/// A primary-key collision also maps to [`MetaError::Conflict`], so it is retried as if it
+/// were a slug collision. Callers with a chosen id check [`org_by_id_tx`] first, in the same
+/// transaction.
+///
 /// # Errors
 ///
 /// Returns [`MetaError::Conflict`] `"slug taken"` when every candidate is used.
 pub(crate) async fn insert_org_with_derived_slug(
     conn: &mut SqliteConnection,
+    id: OrgId,
     name: &str,
     now: i64,
 ) -> Result<OrgRow, MetaError> {
     for slug in slug_candidates(&slug_from_name(name)) {
-        match insert_org(conn, name, &slug, now).await {
+        match insert_org(conn, id, name, &slug, now).await {
             Ok(row) => return Ok(row),
             Err(MetaError::Conflict(_)) => {}
             Err(error) => return Err(error),
@@ -222,6 +227,9 @@ pub(crate) async fn insert_org_with_derived_slug(
     Err(MetaError::Conflict("slug taken"))
 }
 
+const ORG_BY_ID_SQL: &str =
+    "SELECT id, name, slug, state, created_at, updated_at FROM orgs WHERE id = ?";
+
 /// The org with this id.
 ///
 /// # Errors
@@ -229,12 +237,27 @@ pub(crate) async fn insert_org_with_derived_slug(
 /// Returns [`MetaError`] when the query fails or the id does not parse.
 pub(crate) async fn org_by_id(pool: &SqlitePool, id: OrgId) -> Result<Option<OrgRow>, MetaError> {
     fetch_org(
-        sqlx::query_as(
-            "SELECT id, name, slug, state, created_at, updated_at FROM orgs WHERE id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(pool)
-        .await?,
+        sqlx::query_as(ORG_BY_ID_SQL)
+            .bind(id.to_string())
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+/// The org with this id, in the write transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the id does not parse.
+pub(crate) async fn org_by_id_tx(
+    conn: &mut SqliteConnection,
+    id: OrgId,
+) -> Result<Option<OrgRow>, MetaError> {
+    fetch_org(
+        sqlx::query_as(ORG_BY_ID_SQL)
+            .bind(id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?,
     )
 }
 
@@ -390,7 +413,7 @@ mod tests {
                         1,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, 1).await?;
                     Ok(user)
                 })
@@ -419,19 +442,22 @@ mod tests {
         let (_dir, db) = test_db().await;
         db.write(|conn| {
             Box::pin(async move {
-                let first = insert_org_with_derived_slug(conn, "Acme, Inc.", 1).await?;
+                let first =
+                    insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme, Inc.", 1).await?;
                 assert_eq!(first.slug, "acme-inc");
-                let second = insert_org_with_derived_slug(conn, "Acme, Inc.", 1).await?;
+                let second =
+                    insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme, Inc.", 1).await?;
                 assert_eq!(second.slug, "acme-inc-2");
-                let third = insert_org_with_derived_slug(conn, "Acme, Inc.", 1).await?;
+                let third =
+                    insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme, Inc.", 1).await?;
                 assert_eq!(third.slug, "acme-inc-3");
 
-                let bang = insert_org_with_derived_slug(conn, "!!!", 1).await?;
+                let bang = insert_org_with_derived_slug(conn, OrgId::new_v7(), "!!!", 1).await?;
                 assert_eq!(bang.slug, "org");
                 for _ in 0..98 {
-                    insert_org_with_derived_slug(conn, "!!!", 1).await?;
+                    insert_org_with_derived_slug(conn, OrgId::new_v7(), "!!!", 1).await?;
                 }
-                let error = insert_org_with_derived_slug(conn, "!!!", 1)
+                let error = insert_org_with_derived_slug(conn, OrgId::new_v7(), "!!!", 1)
                     .await
                     .unwrap_err();
                 assert!(

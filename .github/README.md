@@ -1,6 +1,7 @@
 # CI compiler cache
 
-The Rust lint, test, e2e and packaging jobs use kache 2.0.0 with the Garage bucket `kache`
+The Rust lint, test and e2e jobs, and the `check-packaging` job of `workflows/packaging.yml`
+(main pushes and the weekly run), use kache 2.0.0 with the Garage bucket `kache`
 served at `https://s3.chapu.is`. The S3 endpoint and bucket are configured in
 `actions/rust/action.yml`; the region is `us-east-1`.
 

@@ -2,9 +2,12 @@ import { screen, waitFor } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import { authConfigQuery } from "@/api/auth";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import authConfig from "../../../fixtures/api/static/auth-config.json";
 import meFixture from "../../../fixtures/api/static/me.json";
 
 async function openDialog(user: UserEvent) {
@@ -45,6 +48,47 @@ it("creates an organization and opens it", async () => {
   expect(body).toEqual({ name: "Beta" });
   await waitFor(() => expect(router.state.location.pathname).toBe("/beta"));
   expect(await screen.findByRole("heading", { name: "Beta" })).toBeInTheDocument();
+});
+
+it("links to the create URL when users may not create orgs", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({
+        ...authConfig,
+        org_create_allowed: false,
+        org_create_url: "https://cloud.example.com/new",
+      }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme");
+  await user.click(screen.getByRole("button", { name: "Acme" }));
+  // The item is offered while the config loads, then becomes the link.
+  await waitFor(() =>
+    expect(screen.getByRole("menuitem", { name: "New organization" })).toHaveAttribute(
+      "href",
+      "https://cloud.example.com/new",
+    ),
+  );
+  expect(screen.queryByRole("dialog", { name: "New organization" })).toBeNull();
+});
+
+it("hides the new-organization item when users may not create orgs and no URL is set", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({ ...authConfig, org_create_allowed: false }),
+    ),
+  );
+
+  const { queryClient, user } = await renderApp("/acme");
+  await waitFor(() =>
+    expect(
+      queryClient.getQueryData<Schema<"AuthConfig">>(authConfigQuery.queryKey)?.org_create_allowed,
+    ).toBe(false),
+  );
+  await user.click(screen.getByRole("button", { name: "Acme" }));
+  await screen.findByRole("menuitemradio", { name: "Acme" });
+  expect(screen.queryByRole("menuitem", { name: "New organization" })).toBeNull();
 });
 
 it("sends the slug and shows a taken slug", async () => {

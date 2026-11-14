@@ -1,5 +1,6 @@
 export const orgSettingsNav = [
   { to: "/$org/settings/general", label: "General" },
+  { to: "/$org/settings/plan", label: "Plan" },
   { to: "/$org/settings/members", label: "Members" },
   { to: "/$org/settings/llm-connections", label: "LLM connections" },
 ] as const;

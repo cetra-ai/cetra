@@ -1392,7 +1392,7 @@ mod tests {
     async fn two_projects(db: &MetaDb) -> (ProjectId, ProjectId) {
         db.write(|conn| {
             Box::pin(async move {
-                let org = insert_org(conn, "O", "o", 1).await?;
+                let org = insert_org(conn, OrgId::new_v7(), "O", "o", 1).await?;
                 let a = insert_project(conn, org.id, "A", "a", None, 1).await?;
                 let b = insert_project(conn, org.id, "B", "b", None, 1).await?;
                 Ok((a.id, b.id))
@@ -2043,10 +2043,10 @@ mod tests {
         let (org, a, b, c) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let org = insert_org(conn, "O", "o", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "O", "o", 1).await?;
                     let a = insert_project(conn, org.id, "A", "a", None, 1).await?;
                     let b = insert_project(conn, org.id, "B", "b", None, 1).await?;
-                    let other = insert_org(conn, "P", "p", 1).await?;
+                    let other = insert_org(conn, OrgId::new_v7(), "P", "p", 1).await?;
                     let c = insert_project(conn, other.id, "C", "c", None, 1).await?;
                     Ok((org.id, a.id, b.id, c.id))
                 })

@@ -6,8 +6,11 @@
 
 use std::path::Path;
 
+use llmobs_core::ids::OrgId;
+use serde::Serialize;
 use uuid::Uuid;
 
+use crate::api::entitlements::{Feature, OrgLimits, OrgPlan};
 use crate::auth::AuthError;
 use crate::auth::password::{Hasher, check_policy};
 use crate::auth::reset::{ResetError, mint_reset, reset_link};
@@ -15,10 +18,13 @@ use crate::auth::secret::constant_time_eq;
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::crypto::{self, Aad, KeySource, SecretBox};
+use crate::ee::license::LicenseState;
+use crate::entitlements::{Defaults, EntitlementsState};
 use crate::meta::deletions::{
     DeletionState, all_deletions, insert_copy, scope_projects, scope_sessions, scope_traces,
 };
 use crate::meta::instance_settings::{self, ENCRYPTION_CHECK};
+use crate::meta::orgs::{org_by_id, org_by_slug};
 use crate::meta::password_resets::insert_reset;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaDb, MetaError};
@@ -49,6 +55,24 @@ pub struct UserSummary {
     pub created_at: i64,
 }
 
+/// One org's resolved entitlements, for `llmobs admin entitlements show` (D-P-32).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EntitlementsReport {
+    /// `orgs.id`.
+    pub org_id: Uuid,
+    /// `orgs.slug`.
+    pub org_slug: String,
+    /// The plan, from the org's token or the instance defaults.
+    pub plan: OrgPlan,
+    /// Features the org may use now.
+    pub features: Vec<Feature>,
+    /// Limits the org has now; an omitted limit is unlimited.
+    pub limits: OrgLimits,
+    /// The largest data window of the last 30 days (D-P-30). Omitted when unlimited.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_window_days: Option<u64>,
+}
+
 /// Why an admin command failed. The text never includes an email, a password, or a token.
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
@@ -75,6 +99,9 @@ pub enum AdminError {
     /// No user has that email.
     #[error("no such user")]
     NotFound,
+    /// No org has that id or slug.
+    #[error("no such org")]
+    OrgNotFound,
     /// The email is already registered.
     #[error("{0}")]
     Conflict(&'static str),
@@ -203,6 +230,56 @@ pub async fn list_users(config: &ServerConfig) -> Result<Vec<UserSummary>, Admin
     let outcome = list_all(&meta).await;
     meta.close().await;
     outcome
+}
+
+/// Resolves `org` (an id or a slug) from `meta.db` with the config and the licence, as
+/// the server would at this instant.
+///
+/// # Errors
+///
+/// Returns [`AdminError::OrgNotFound`] when no org has that id or slug, or another
+/// [`AdminError`] when the database is missing or unreadable.
+pub async fn entitlements(
+    config: &ServerConfig,
+    org: &str,
+) -> Result<EntitlementsReport, AdminError> {
+    let meta = open_meta(config).await?;
+    let outcome = entitlements_in(&meta, config, org).await;
+    meta.close().await;
+    outcome
+}
+
+async fn entitlements_in(
+    meta: &MetaDb,
+    config: &ServerConfig,
+    org: &str,
+) -> Result<EntitlementsReport, AdminError> {
+    let row = match org.parse::<OrgId>() {
+        Ok(id) => org_by_id(meta.reader(), id).await,
+        Err(_) => org_by_slug(meta.reader(), org).await,
+    }
+    .map_err(map_meta)?
+    .ok_or(AdminError::OrgNotFound)?;
+    let license =
+        LicenseState::from_key(config.license_key.as_ref().map(|key| key.expose().as_str()));
+    let defaults = Defaults::from_config(&config.entitlements.defaults);
+    let state = EntitlementsState::load(meta, license, defaults, config.public_url.origin())
+        .await
+        .map_err(map_meta)?;
+    let now = Clock::System.now_ns();
+    let resolved = state.resolve(row.id, now);
+    let retention_window_days = state
+        .retention_window_at(meta, row.id, now)
+        .await
+        .map_err(map_meta)?;
+    Ok(EntitlementsReport {
+        org_id: row.id.as_uuid(),
+        org_slug: row.slug,
+        plan: state.plan_at(row.id, now).into(),
+        features: resolved.features(),
+        limits: resolved.limits.into(),
+        retention_window_days,
+    })
 }
 
 /// What [`reapply_deletions`] did.
@@ -576,21 +653,25 @@ fn map_meta(error: MetaError) -> AdminError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::entitlements::{PlanSource, PlanStatus};
     use crate::auth::secret::hash_token;
     use crate::config::Secret;
+    use crate::entitlements::tokens::grant_from_token;
     use crate::meta::deletions::{
         ActorKind, DeletionKind, DeletionRow, FailReason, NewDeletion, RequestDetails,
         deletion_by_id, insert_deletion, insert_projects, insert_sessions, insert_traces,
         mark_applied, mark_dropped, mark_failed, mark_handed_over, scope_projects, scope_sessions,
         scope_traces, store_counts,
     };
+    use crate::meta::entitlements::{StoredToken, put_token};
     use crate::meta::orgs::insert_org;
     use crate::meta::password_resets::valid_reset;
     use crate::meta::projects::insert_project;
     use crate::meta::users::{set_disabled, user_by_email};
-    use crate::test_support::{TestApp, dataset_span};
+    use crate::test_support::{TestApp, dataset_span, org_token};
     use axum::http::{Method, StatusCode};
     use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use serde_json::json;
     use std::time::Duration;
 
     const PASSWORD: &str = "llmobs-ok1";
@@ -1398,6 +1479,61 @@ mod tests {
         assert!(!empty.path().join("LOCK").exists());
     }
 
+    #[tokio::test]
+    async fn entitlements_show_reads_the_token() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+
+        let defaults = Defaults::from_config(&config.entitlements.defaults);
+        let before = entitlements(&config, "acme").await.unwrap();
+        assert_eq!(before.org_id, org.as_uuid());
+        assert_eq!(before.org_slug, "acme");
+        assert_eq!(before.plan.source, PlanSource::Defaults);
+        assert_eq!(before.plan.name, defaults.plan_name);
+        assert_eq!(before.plan.status, None);
+        assert_eq!(before.features, vec![Feature::RetentionManagement]);
+        assert_eq!(before.limits, OrgLimits::default());
+        assert_eq!(before.retention_window_days, None);
+
+        let token = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &["project_roles"],
+            &json!({"units_included": 200_000, "data_access_days": 1825}),
+        );
+        let grant = grant_from_token(&token, config.public_url.origin(), &defaults.limits)
+            .unwrap()
+            .1;
+        let row = StoredToken {
+            org_id: org,
+            token,
+            token_id: grant.token_id,
+            issued_at: grant.issued_at,
+            received_at: Clock::System.now_ns(),
+        };
+        db.write(move |conn| Box::pin(async move { put_token(conn, &row).await }))
+            .await
+            .unwrap();
+        db.close().await;
+
+        let report = entitlements(&config, "acme").await.unwrap();
+        assert_eq!(report.plan.source, PlanSource::Token);
+        assert_eq!(report.plan.id.as_deref(), Some("pro"));
+        assert_eq!(report.plan.status, Some(PlanStatus::Active));
+        assert_eq!(report.limits.units_included, Some(200_000));
+        assert_eq!(report.limits.max_seats, None);
+        assert!(report.features.contains(&Feature::ProjectRoles));
+        assert_eq!(report.retention_window_days, Some(1825));
+        assert_eq!(entitlements(&config, ORG).await.unwrap(), report);
+
+        let missing = entitlements(&config, "missing").await.unwrap_err();
+        assert_eq!(missing.to_string(), "no such org");
+    }
+
     #[test]
     fn rotated_debug_prints_only_the_values() {
         let rotated = Rotated { values: 3 };
@@ -1517,10 +1653,10 @@ mod tests {
         let ids = db
             .write(|conn| {
                 Box::pin(async move {
-                    let org = insert_org(conn, "O", "o", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "O", "o", 1).await?;
                     let p1 = insert_project(conn, org.id, "p1", "p1", None, 1).await?;
                     let p2 = insert_project(conn, org.id, "p2", "p2", None, 1).await?;
-                    let org2 = insert_org(conn, "O2", "o2", 1).await?;
+                    let org2 = insert_org(conn, OrgId::new_v7(), "O2", "o2", 1).await?;
                     let p0 = insert_project(conn, org2.id, "p0", "p0", None, 1).await?;
                     Ok(Ids {
                         org: org.id,

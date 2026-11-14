@@ -57,6 +57,11 @@ pub(crate) enum Access {
     /// A personal access token, read or read-write; sessions and API keys get 403.
     /// No `{org}` or `{project}` in the path: the handler resolves projects itself (D-H-3).
     Pat,
+    /// The cloud control plane, with a `control_plane` token of this scope (D-P-28).
+    ControlPlane {
+        /// The scope the token must carry.
+        scope: &'static str,
+    },
 }
 
 impl Access {
@@ -135,6 +140,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::members::routes());
     routes.extend(crate::ee::project_roles::routes());
     routes.extend(crate::routes::entitlements::routes());
+    routes.extend(crate::routes::internal_orgs::routes());
     routes.extend(crate::routes::connections::routes());
     routes.extend(crate::routes::api_keys::routes());
     routes.extend(crate::routes::channels::routes());
@@ -251,7 +257,10 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
             if session_only && !matches!(principal, Principal::Session { .. }) {
                 return Err(forbidden());
             }
-            if matches!(principal, Principal::ApiKey { .. }) {
+            if matches!(
+                principal,
+                Principal::ApiKey { .. } | Principal::ControlPlane { .. }
+            ) {
                 return Err(forbidden());
             }
         }
@@ -262,7 +271,10 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
         Access::Org { perm, session_only } => {
             // A key is not a member of any org. 404 does not depend on whether
             // the route is session-only, so a foreign key cannot probe orgs.
-            if matches!(principal, Principal::ApiKey { .. }) {
+            if matches!(
+                principal,
+                Principal::ApiKey { .. } | Principal::ControlPlane { .. }
+            ) {
                 return Err(ApiError::NotFound);
             }
             if session_only && !matches!(principal, Principal::Session { .. }) {
@@ -292,6 +304,10 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
                 return Err(forbidden());
             }
         }
+        Access::ControlPlane { scope } => match &principal {
+            Principal::ControlPlane { scope: held, .. } if held.as_str() == scope => {}
+            _ => return Err(forbidden()),
+        },
     }
     parts.extensions.insert(principal);
     Ok(Request::from_parts(parts, body))
@@ -326,7 +342,9 @@ async fn grant_org(
 ) -> Result<(), ApiError> {
     let user = match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => user,
-        Principal::ApiKey { .. } => return Err(ApiError::NotFound),
+        Principal::ApiKey { .. } | Principal::ControlPlane { .. } => {
+            return Err(ApiError::NotFound);
+        }
     };
     let org = load_org(state, key).await?;
     let Some(org) = org else {
@@ -381,6 +399,7 @@ async fn grant_project(
             }
             grant_key_project(state, parts, *project_id, *scopes, key, perm).await
         }
+        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
     }
 }
 
@@ -594,7 +613,7 @@ mod tests {
     use crate::meta::personal_tokens::{self, NewToken};
     use crate::meta::projects::insert_project;
     use crate::meta::users::{self, NewUser, insert_user};
-    use crate::test_support::{TestApp, TestResponse};
+    use crate::test_support::{TestApp, TestResponse, control_plane_token};
 
     struct People {
         ada: HeaderValueCookie,
@@ -706,7 +725,7 @@ mod tests {
     async fn echo_user(Extension(principal): Extension<Principal>) -> Json<Value> {
         let user = match principal {
             Principal::Session { user, .. } | Principal::Pat { user, .. } => user,
-            Principal::ApiKey { .. } => {
+            Principal::ApiKey { .. } | Principal::ControlPlane { .. } => {
                 return Json(json!({
                     "org": null,
                     "project": null,
@@ -759,8 +778,8 @@ mod tests {
                     let member = insert_user(conn, user("member@example.com", false), now).await?;
                     let viewer = insert_user(conn, user("viewer@example.com", false), now).await?;
                     let bob = insert_user(conn, user("bob@example.com", false), now).await?;
-                    let acme = insert_org(conn, "Acme", "acme", now).await?;
-                    let other = insert_org(conn, "Other", "other", now).await?;
+                    let acme = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
+                    let other = insert_org(conn, OrgId::new_v7(), "Other", "other", now).await?;
                     add_org_member(conn, acme.id, ada.id, OrgRole::Owner, now).await?;
                     add_org_member(conn, acme.id, admin.id, OrgRole::Admin, now).await?;
                     add_org_member(conn, acme.id, member.id, OrgRole::Member, now).await?;
@@ -1029,6 +1048,82 @@ mod tests {
             .send()
             .await;
         assert_eq!(org.status, 404);
+    }
+
+    #[tokio::test]
+    async fn a_control_plane_route_admits_only_its_scope() {
+        let app = TestApp::with_route_table(vec![
+            route(
+                Method::GET,
+                "/t/control",
+                Access::ControlPlane { scope: "orgs" },
+                get(echo_empty),
+            ),
+            route(
+                Method::GET,
+                "/t/user",
+                Access::User {
+                    session_only: false,
+                },
+                get(echo_user),
+            ),
+            route(
+                Method::GET,
+                "/t/orgs/{org}",
+                Access::Org {
+                    perm: OrgPerm::View,
+                    session_only: false,
+                },
+                get(echo_org),
+            ),
+        ])
+        .await;
+        let people = people(&app).await;
+        let orgs = format!("Bearer {}", control_plane_token("orgs"));
+        let usage = format!("Bearer {}", control_plane_token("usage"));
+
+        let anonymous = app.request(Method::GET, "/t/control").send().await;
+        assert_outcome(
+            &anonymous,
+            StatusCode::UNAUTHORIZED,
+            "denied-401",
+            "anonymous",
+        );
+        let allowed = app
+            .request(Method::GET, "/t/control")
+            .header("authorization", &orgs)
+            .send()
+            .await;
+        assert_outcome(&allowed, StatusCode::OK, "allowed", "orgs token");
+        let other_scope = app
+            .request(Method::GET, "/t/control")
+            .header("authorization", &usage)
+            .send()
+            .await;
+        assert_outcome(
+            &other_scope,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "usage token",
+        );
+        let session = app
+            .request(Method::GET, "/t/control")
+            .header("cookie", &people.ada.0)
+            .send()
+            .await;
+        assert_outcome(&session, StatusCode::FORBIDDEN, "denied-403", "session");
+        let on_org = app
+            .request(Method::GET, "/t/orgs/acme")
+            .header("authorization", &orgs)
+            .send()
+            .await;
+        assert_outcome(&on_org, StatusCode::NOT_FOUND, "denied-404", "org route");
+        let on_user = app
+            .request(Method::GET, "/t/user")
+            .header("authorization", &orgs)
+            .send()
+            .await;
+        assert_outcome(&on_user, StatusCode::FORBIDDEN, "denied-403", "user route");
     }
 
     async fn key_route(Extension(_access): Extension<ProjectAccess>) -> StatusCode {
@@ -1594,6 +1689,9 @@ mod tests {
                     Some(vec![SecurityRequirement::new("bearer", [] as [&str; 0])])
                 }
                 Access::Public => Some(Vec::new()),
+                Access::ControlPlane { .. } => {
+                    Some(vec![SecurityRequirement::new("bearer", [] as [&str; 0])])
+                }
                 Access::InstanceAdmin
                 | Access::User { session_only: true }
                 | Access::Org {
