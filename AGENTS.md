@@ -148,6 +148,11 @@ Run everything through `just`:
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
 | `just e2e` | build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `llmobs serve` |
+| `just dist <target>` | release archive of one target into `target/dist` (and the image context on Linux) |
+| `just image [tag]` · `just image-smoke [tag]` | build and smoke-test the Docker image from `target/dist` |
+| `just compose-smoke [tag] [s3]` · `just helm-check` · `just helm-smoke [tag]` · `just install-smoke` | packaging smoke tests (D-N-13) |
+| `just versions-check` | the chart and compose files carry the workspace version |
+| `just release-prep <version>` | set a release version everywhere and date the changelog (D-N-5) |
 
 Required tools:
 - `rustup` (the toolchain is pinned in `rust-toolchain.toml`)
@@ -180,6 +185,7 @@ All of these will be renamed mechanically once the product has its real name (D4
 
 - Small commits with a short imperative subject (e.g. `Add WAL group commit`). One sub-phase gives one commit unless the plan says otherwise.
 - Don't commit generated artifacts (`target/`, `node_modules/`, `dist/`, `.venv/`).
+- A user-visible change adds a line to `CHANGELOG.md` § `[Unreleased]` (`Added`, `Changed`, `Fixed`, `Removed`); one that needs action on upgrade goes under `### Upgrade notes` (D-N-5).
 - When you finish, report:
   - what was done;
   - any deviation from the plan or spec, and why;

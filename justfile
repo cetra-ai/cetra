@@ -251,3 +251,19 @@ helm-check:
 # Install the chart with an image on a throwaway kind cluster and smoke-test it (D-N-10)
 helm-smoke tag="llmobs:dev":
     tools/packaging/helm-smoke.sh {{tag}}
+
+# Check that the chart and compose files carry the workspace version (D-N-5)
+versions-check:
+    tools/packaging/versions-check.sh
+
+# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0` (D-N-5)
+release-prep version:
+    tools/packaging/release-prep.sh {{version}}
+
+# Release workflow gate: tag = version, files agree, changelog section, tag on origin/main (D-N-5)
+release-verify tag:
+    tools/packaging/release-verify.sh {{tag}}
+
+# Print a version's changelog section (the GitHub release notes)
+release-notes version:
+    tools/packaging/release-notes.sh {{version}}
