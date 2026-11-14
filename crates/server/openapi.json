@@ -16267,6 +16267,7 @@
           "org_id",
           "slug",
           "name",
+          "trace_completion_timeout_s",
           "created_at"
         ],
         "properties": {
@@ -16300,6 +16301,12 @@
           "slug": {
             "type": "string",
             "description": "URL slug, unique within the org."
+          },
+          "trace_completion_timeout_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds without a new span after which a trace counts as complete for online rules (D-I-7).\n10 to 3600; 60 unless set.",
+            "minimum": 0
           }
         }
       },
@@ -18853,6 +18860,12 @@
             "type": "integer",
             "format": "int32",
             "description": "Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.",
+            "minimum": 0
+          },
+          "trace_completion_timeout_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.\nAbsent leaves it unchanged.",
             "minimum": 0
           }
         },
