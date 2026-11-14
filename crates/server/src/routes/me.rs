@@ -72,7 +72,7 @@ async fn change_password(
 ) -> Result<Response, ApiError> {
     let (user, session_hash) = match &principal {
         Principal::Session { user, session_hash } => (user, session_hash),
-        Principal::ApiKey { .. } | Principal::Pat { .. } => {
+        Principal::ApiKey { .. } | Principal::Pat { .. } | Principal::ControlPlane { .. } => {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::Forbidden,
             });

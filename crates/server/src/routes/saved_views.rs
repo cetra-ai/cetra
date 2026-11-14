@@ -264,11 +264,12 @@ async fn delete_view(
     }
 }
 
-/// A user sees their own and shared views; a key sees shared views.
+/// A user sees their own and shared views; a key sees shared views. The control plane has no
+/// user, so it sees shared views only, like a key.
 fn viewer(principal: &Principal) -> Viewer {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => Viewer::User(user.id),
-        Principal::ApiKey { .. } => Viewer::Key,
+        Principal::ApiKey { .. } | Principal::ControlPlane { .. } => Viewer::Key,
     }
 }
 

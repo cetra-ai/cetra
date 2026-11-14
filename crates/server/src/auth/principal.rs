@@ -76,6 +76,13 @@ pub(crate) enum Principal {
         /// The token has the `write` scope.
         write: bool,
     },
+    /// The cloud control plane, by a `kind: control_plane` token (D-P-24, D-P-28).
+    ControlPlane {
+        /// Payload `id`, for audit logs.
+        token_id: Uuid,
+        /// The token's scope.
+        scope: String,
+    },
 }
 
 /// A cached successful key lookup. `expires_at` is checked on every use.
@@ -135,6 +142,11 @@ impl fmt::Debug for Principal {
                 .field("token_id", token_id)
                 .field("write", write)
                 .finish(),
+            Self::ControlPlane { token_id, scope } => formatter
+                .debug_struct("ControlPlane")
+                .field("token_id", token_id)
+                .field("scope", scope)
+                .finish(),
         }
     }
 }
@@ -147,7 +159,7 @@ impl fmt::Debug for Principal {
 pub(crate) fn session_user(principal: &Principal) -> Result<&AuthUser, ApiError> {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => Ok(user),
-        Principal::ApiKey { .. } => Err(ApiError::Forbidden {
+        Principal::ApiKey { .. } | Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
             code: ProblemCode::Forbidden,
         }),
     }
@@ -208,10 +220,13 @@ pub(crate) async fn bearer_principal(
     headers: &HeaderMap,
 ) -> Result<Principal, ApiError> {
     let token = bearer_token(headers)?;
+    let now = state.clock.now_ns();
+    if token.starts_with(&format!("{}.", llmobs_token::TOKEN_TAG)) {
+        return control_plane_principal(state, token, now);
+    }
     let Some(kind) = secret::parse_key(token) else {
         return Err(ApiError::Unauthorized);
     };
-    let now = state.clock.now_ns();
     let hash = secret::hash_token(token);
     if kind == KeyKind::Personal {
         return personal_principal(state, &hash, now).await;
@@ -235,6 +250,31 @@ pub(crate) async fn bearer_principal(
     state.key_cache.put(hash, cached, now);
     state.last_used.record(cached.id, now);
     Ok(principal_from_cached(cached))
+}
+
+/// The caller of a `control_plane` token. It must verify, name this cell as its audience,
+/// live at most 5 minutes and be valid within 60 s of skew. It is not single-use: a captured
+/// one works until it expires, which the idempotent internal endpoints accept (D-P-28).
+fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
+    let Ok(verified) = llmobs_token::verify(token) else {
+        return Err(ApiError::Unauthorized);
+    };
+    let llmobs_token::Claims::ControlPlane(claims) = verified.claims else {
+        return Err(ApiError::Unauthorized);
+    };
+    let five_minutes = 300 * 1_000_000_000;
+    let skew = 60 * 1_000_000_000;
+    if claims.audience != state.config.public_url.origin()
+        || claims.expires_at.saturating_sub(claims.issued_at) > five_minutes
+        || now < claims.issued_at.saturating_sub(skew)
+        || now >= claims.expires_at
+    {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(Principal::ControlPlane {
+        token_id: claims.id,
+        scope: claims.scope,
+    })
 }
 
 fn principal_from_cached(cached: CachedKey) -> Principal {
@@ -340,10 +380,14 @@ pub(crate) type PatCache = KeyCache<CachedPat>;
 mod tests {
     use uuid::Uuid;
 
-    use super::{AuthUser, Principal};
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use llmobs_core::ids::{OrgId, ProjectId};
+    use serde_json::json;
+
+    use super::{AuthUser, Principal, bearer_principal};
     use crate::auth::roles::{KeyScope, KeyScopes};
     use crate::auth::secret::KeyKind;
-    use llmobs_core::ids::ProjectId;
+    use crate::test_support::{TestApp, control_plane_token, license_key, org_token, sign_token};
 
     #[test]
     fn debug_omits_the_email_and_the_session_hash() {
@@ -375,5 +419,115 @@ mod tests {
         };
         let text = format!("{principal:?}");
         assert!(!text.contains("sk-llmobs-"), "{text}");
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
+    }
+
+    /// A dev-signed `control_plane` token with the given times, audience and scope.
+    fn control_plane(issued_at: &str, expires_at: &str, audience: &str, scope: &str) -> String {
+        sign_token(&json!({
+            "kind": "control_plane",
+            "id": Uuid::now_v7().to_string(),
+            "issued_at": issued_at,
+            "expires_at": expires_at,
+            "audience": audience,
+            "scope": scope,
+        }))
+    }
+
+    #[tokio::test]
+    async fn control_plane_token_resolves() {
+        let app = TestApp::new().await;
+        let token = control_plane_token("orgs");
+        let Ok(principal) = bearer_principal(&app.state, &bearer_headers(&token)).await else {
+            panic!("a valid control-plane token resolves");
+        };
+        let Principal::ControlPlane { scope, .. } = principal else {
+            panic!("expected a control-plane principal");
+        };
+        assert_eq!(scope, "orgs");
+    }
+
+    #[tokio::test]
+    async fn control_plane_refusals() {
+        let app = TestApp::new().await;
+        let origin = app.state.config.public_url.origin().to_owned();
+        let org = org_token(
+            OrgId::from_uuid(Uuid::nil()),
+            "2026-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            &["retention_management"],
+            &json!({}),
+        );
+        let tampered = {
+            let mut token = control_plane_token("orgs");
+            let last = token.pop().expect("a token is not empty");
+            token.push(if last == 'A' { 'B' } else { 'A' });
+            token
+        };
+        // (case, token, whether the token itself verifies). The refusal must come from the
+        // control-plane checks, not from a token that does not parse.
+        let cases = [
+            (
+                "lifetime 6 minutes",
+                control_plane(
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:06:00Z",
+                    &origin,
+                    "orgs",
+                ),
+                true,
+            ),
+            (
+                "before the skew window",
+                control_plane(
+                    "2026-01-01T00:02:00Z",
+                    "2026-01-01T00:07:00Z",
+                    &origin,
+                    "orgs",
+                ),
+                true,
+            ),
+            (
+                "expired",
+                control_plane(
+                    "2025-12-31T23:55:00Z",
+                    "2026-01-01T00:00:00Z",
+                    &origin,
+                    "orgs",
+                ),
+                true,
+            ),
+            (
+                "another audience",
+                control_plane(
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:05:00Z",
+                    "http://other.example",
+                    "orgs",
+                ),
+                true,
+            ),
+            ("org token", org, true),
+            ("licence token", license_key(&["project_roles"]), true),
+            ("bad signature", tampered, false),
+        ];
+        for (case, token, verifies) in cases {
+            assert_eq!(llmobs_token::verify(&token).is_ok(), verifies, "{case}");
+            assert!(
+                bearer_principal(&app.state, &bearer_headers(&token))
+                    .await
+                    .is_err(),
+                "{case}"
+            );
+        }
     }
 }

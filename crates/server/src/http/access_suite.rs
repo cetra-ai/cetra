@@ -18,7 +18,7 @@ use crate::config::Secret;
 use crate::meta::MetaError;
 use crate::meta::members::add_org_member;
 use crate::meta::users::set_instance_admin;
-use crate::test_support::{TestApp, TestResponse, capture_logs, license_key};
+use crate::test_support::{TestApp, TestResponse, capture_logs, control_plane_token, license_key};
 
 /// 43 characters of the base64url alphabet. Substituted for `{token}`.
 const TOKEN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -71,6 +71,7 @@ enum Who {
     KeyIngest,
     KeyPublic,
     KeyForeign,
+    ControlPlane,
 }
 
 struct Caller {
@@ -192,7 +193,9 @@ async fn build(app: &TestApp) -> World {
         create_key(app, &ada.cookie, &project_a, "secret", &["read"], "extra").await;
     let (_, key_foreign) =
         create_key(app, &bob.cookie, &project_b, "secret", &["read"], "foreign").await;
+    let control_plane = control_plane_token("orgs");
     for secret in [
+        control_plane.clone(),
         pat_read.clone(),
         pat_write.clone(),
         token_extra,
@@ -248,6 +251,7 @@ async fn build(app: &TestApp) -> World {
             bearer(Who::KeyIngest, key_ingest),
             bearer(Who::KeyPublic, key_public),
             bearer(Who::KeyForeign, key_foreign),
+            bearer(Who::ControlPlane, control_plane),
         ],
     }
 }
@@ -374,7 +378,7 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
     route
         .path
         .replace("{org}", &world.org_slug)
-        .replace("{org_id}", "01900000-0000-7000-8000-000000009999")
+        .replace("{org_id}", &world.org_id.to_string())
         .replace("{project}", &world.project_a)
         .replace("{score_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{trace_id}", "a1000000000000000000000000000001")
@@ -451,7 +455,7 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
     match access {
         Access::Public => Outcome::Allowed,
         Access::User { session_only } => {
-            if is_key(who) || (session_only && !is_session(who)) {
+            if is_key(who) || who == Who::ControlPlane || (session_only && !is_session(who)) {
                 Outcome::Denied403
             } else {
                 Outcome::Allowed
@@ -465,7 +469,7 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
             }
         }
         Access::Org { perm, session_only } => {
-            if is_key(who) {
+            if is_key(who) || who == Who::ControlPlane {
                 return Outcome::Denied404;
             }
             if session_only && !is_session(who) {
@@ -493,7 +497,17 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
                 Outcome::Denied403
             }
         }
+        Access::ControlPlane { scope } => {
+            if who == Who::ControlPlane && scope == "orgs" {
+                Outcome::Allowed
+            } else {
+                Outcome::Denied403
+            }
+        }
         Access::Project { perm, session_only } => {
+            if who == Who::ControlPlane {
+                return Outcome::Denied404;
+            }
             if is_key(who) {
                 if !key_on_a1(who) {
                     return Outcome::Denied404;
@@ -527,7 +541,8 @@ fn org_membership(who: Who) -> Option<OrgRole> {
         | Who::KeyRead
         | Who::KeyIngest
         | Who::KeyPublic
-        | Who::KeyForeign => None,
+        | Who::KeyForeign
+        | Who::ControlPlane => None,
     }
 }
 
@@ -544,7 +559,8 @@ fn project_role(who: Who) -> Option<Role> {
         | Who::KeyRead
         | Who::KeyIngest
         | Who::KeyPublic
-        | Who::KeyForeign => None,
+        | Who::KeyForeign
+        | Who::ControlPlane => None,
     }
 }
 
@@ -603,7 +619,8 @@ fn assert_every_route_declares_access() {
             | Access::Org { .. }
             | Access::Project { .. }
             | Access::Key { .. }
-            | Access::Pat => {}
+            | Access::Pat
+            | Access::ControlPlane { .. } => {}
         }
         if route.path.contains("{project}") {
             assert!(
