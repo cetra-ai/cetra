@@ -1,7 +1,11 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
+import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
+import channelsDocument from "../../../fixtures/api/static/channels.json";
+import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
+import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
@@ -11,6 +15,7 @@ import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
+import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
 import setupResponseDocument from "../../../fixtures/api/static/setup-response.json";
 import signupResponseDocument from "../../../fixtures/api/static/signup-response.json";
 
@@ -90,6 +95,41 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "delete",
     path: "/api/v1/projects/{project}/members/{user}",
   },
+  {
+    operationId: "post_evaluator",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators",
+  },
+  {
+    operationId: "patch_evaluator",
+    method: "patch",
+    path: "/api/v1/projects/{project}/evaluators/{id}",
+  },
+  {
+    operationId: "delete_evaluator",
+    method: "delete",
+    path: "/api/v1/projects/{project}/evaluators/{id}",
+  },
+  {
+    operationId: "post_evaluator_test",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators/test",
+  },
+  {
+    operationId: "post_score_definition",
+    method: "post",
+    path: "/api/v1/projects/{project}/score-definitions",
+  },
+  {
+    operationId: "patch_score_definition",
+    method: "patch",
+    path: "/api/v1/projects/{project}/score-definitions/{id}",
+  },
+  {
+    operationId: "delete_score_definition",
+    method: "delete",
+    path: "/api/v1/projects/{project}/score-definitions/{id}",
+  },
   { operationId: "post_admin_user", method: "post", path: "/api/v1/admin/users" },
   { operationId: "patch_admin_user", method: "patch", path: "/api/v1/admin/users/{id}" },
   {
@@ -101,6 +141,37 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_admin_settings_test_email",
     method: "post",
     path: "/api/v1/admin/settings/test-email",
+  },
+  { operationId: "create_channel", method: "post", path: "/api/v1/projects/{project}/channels" },
+  {
+    operationId: "update_channel",
+    method: "patch",
+    path: "/api/v1/projects/{project}/channels/{id}",
+  },
+  {
+    operationId: "delete_channel",
+    method: "delete",
+    path: "/api/v1/projects/{project}/channels/{id}",
+  },
+  {
+    operationId: "test_channel",
+    method: "post",
+    path: "/api/v1/projects/{project}/channels/{id}/test",
+  },
+  {
+    operationId: "create_alert_rule",
+    method: "post",
+    path: "/api/v1/projects/{project}/alert-rules",
+  },
+  {
+    operationId: "update_alert_rule",
+    method: "patch",
+    path: "/api/v1/projects/{project}/alert-rules/{id}",
+  },
+  {
+    operationId: "delete_alert_rule",
+    method: "delete",
+    path: "/api/v1/projects/{project}/alert-rules/{id}",
   },
 ];
 
@@ -260,6 +331,16 @@ const RESPONSES: Record<string, Respond> = {
     });
   },
   delete_project_member: () => noContent(),
+  post_evaluator: ({ body }) =>
+    HttpResponse.json({ ...evaluatorDocument, ...named(body) }, { status: 201 }),
+  patch_evaluator: ({ body }) => HttpResponse.json({ ...evaluatorDocument, ...named(body) }),
+  delete_evaluator: () => noContent(),
+  post_evaluator_test: () => HttpResponse.json(evaluatorTestResultDocument),
+  post_score_definition: ({ body }) =>
+    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }, { status: 201 }),
+  patch_score_definition: ({ body }) =>
+    HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
+  delete_score_definition: () => noContent(),
 
   post_admin_user: ({ body }) => {
     const { name: _name, ...unnamedUser } = adminUserCreatedDocument.user;
@@ -301,6 +382,60 @@ const RESPONSES: Record<string, Respond> = {
     return HttpResponse.json({ url: adminUserCreatedDocument.reset_url });
   },
   post_admin_settings_test_email: () => problem(400, "bad_request", "email is not configured"),
+
+  create_channel: ({ body }) => {
+    const sample =
+      channelsDocument.data.find((row) => row.kind === body.kind) ??
+      channelsDocument.data.find(() => true);
+    return HttpResponse.json(
+      { ...sample, name: trimmed(body.name) ?? sample?.name },
+      { status: 201 },
+    );
+  },
+  update_channel: ({ body, params }) => {
+    const channel =
+      channelsDocument.data.find((row) => row.id === params.id) ??
+      channelsDocument.data.find(() => true);
+    return HttpResponse.json({ ...channel, name: trimmed(body.name) ?? channel?.name });
+  },
+  delete_channel: () => noContent(),
+  test_channel: () => HttpResponse.json({ ok: true }),
+  create_alert_rule: ({ body }) => {
+    const sample = alertRulesDocument.data.find((row) => row.name === "High error rate");
+    if (!sample) {
+      return problem(404, "not_found");
+    }
+    const {
+      last_count: _count,
+      last_evaluated_at: _evaluated,
+      last_fired_at: _fired,
+      last_value: _value,
+      ...rest
+    } = sample;
+    return HttpResponse.json(
+      {
+        ...rest,
+        name: trimmed(body.name) ?? rest.name,
+        condition: body.condition ?? rest.condition,
+        channel_ids: Array.isArray(body.channel_ids) ? body.channel_ids : rest.channel_ids,
+        enabled: typeof body.enabled === "boolean" ? body.enabled : rest.enabled,
+        cooldown_s: typeof body.cooldown_s === "number" ? body.cooldown_s : rest.cooldown_s,
+        notify_while_firing:
+          typeof body.notify_while_firing === "boolean"
+            ? body.notify_while_firing
+            : rest.notify_while_firing,
+        state: "ok",
+      },
+      { status: 201 },
+    );
+  },
+  update_alert_rule: ({ body, params }) => {
+    const rule =
+      alertRulesDocument.data.find((row) => row.id === params.id) ??
+      alertRulesDocument.data.find(() => true);
+    return HttpResponse.json({ ...rule, ...body });
+  },
+  delete_alert_rule: () => noContent(),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {

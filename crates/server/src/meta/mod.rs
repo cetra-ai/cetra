@@ -6,9 +6,11 @@
 //! migration is not this binary's.
 #![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` opens this from P5 on
 
+pub(crate) mod alerts;
 pub(crate) mod api_keys;
 pub(crate) mod connections;
 pub(crate) mod email_verifications;
+pub(crate) mod evaluators;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
@@ -18,6 +20,7 @@ pub(crate) mod password_resets;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
 pub(crate) mod saved_views;
+pub(crate) mod score_definitions;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
 
@@ -387,7 +390,7 @@ mod tests {
             .fetch_one(db.reader())
             .await
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 6);
         let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(db.reader())
             .await
@@ -411,7 +414,7 @@ mod tests {
                 sqlx::query(
                     "INSERT INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (5, 'future', 1, ?, 0)",
+                     VALUES (7, 'future', 1, ?, 0)",
                 )
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
@@ -426,8 +429,8 @@ mod tests {
         let error = MetaDb::open_existing(dir.path()).await.unwrap_err();
         match error {
             MetaError::SchemaMismatch { found, expected } => {
-                assert_eq!(found, 5);
-                assert_eq!(expected, 4);
+                assert_eq!(found, 7);
+                assert_eq!(expected, 6);
             }
             other => panic!("{other}"),
         }

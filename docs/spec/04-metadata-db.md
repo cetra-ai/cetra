@@ -41,7 +41,6 @@ CREATE TABLE web_sessions (
 
 CREATE TABLE orgs (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
-  limits TEXT NOT NULL DEFAULT '{}',  -- unused; track P's M2 drops it for org_entitlements (D179, D-P-9)
   state TEXT NOT NULL DEFAULT 'active', -- 'active' | 'deleting'
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
@@ -213,10 +212,12 @@ CREATE TABLE score_definitions (
   min_value REAL, max_value REAL,
   description TEXT,
   archived_at INTEGER,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  UNIQUE(project_id, name)
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL;
 ```
+
+`DELETE` archives; a name is unique among live definitions (D-I-26).
 
 ## Saved views
 
@@ -310,13 +311,17 @@ CREATE TABLE evaluators (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,                 -- 'llm_judge' | 'check' | 'webhook'
+  kind TEXT NOT NULL,                 -- 'llm_judge' | 'check' | 'webhook'; immutable
   config TEXT NOT NULL,               -- JSON, schema per kind (06)
   output_score TEXT NOT NULL,         -- JSON {name, data_type, categories?}
+  connection_id TEXT REFERENCES llm_connections(id),
+  secret_enc BLOB,                    -- webhook: sealed {signing_secret, url, headers}
   version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   UNIQUE(project_id, name)
 );
+CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL;
 
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
@@ -361,6 +366,8 @@ CREATE TABLE pending_traces (         -- trace-completion detector state (06)
   PRIMARY KEY (project_id, trace_id)
 );
 ```
+
+`connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
 Done/failed `eval_jobs` are pruned after 7 days.
 
@@ -443,6 +450,26 @@ CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id);
 CREATE INDEX notification_deliveries_channel ON notification_deliveries(channel_id, updated_at);
 ```
 
+## Entitlements (track P)
+
+```sql
+CREATE TABLE org_entitlements (           -- the newest accepted org token (D-P-11)
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  token TEXT NOT NULL,                    -- as received; never logged
+  token_id TEXT NOT NULL,
+  issued_at INTEGER NOT NULL,
+  received_at INTEGER NOT NULL
+);
+CREATE TABLE org_window_ends (            -- data windows that stopped applying, kept 30 days (D-P-30)
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  ended_at INTEGER NOT NULL,
+  data_access_days INTEGER,               -- NULL = unlimited
+  PRIMARY KEY (org_id, ended_at)
+);
+```
+
+`orgs` has no `limits` column: track P's M2 drops it (D179, D-P-9).
+
 ## Metering & instance
 
 ```sql
@@ -462,6 +489,8 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `instance_settings` is created by track I (migration `0004`, D156).
 
 Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+
+`spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 
 ## Encryption of secrets
 

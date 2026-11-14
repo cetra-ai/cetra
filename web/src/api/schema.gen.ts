@@ -691,6 +691,66 @@ export interface paths {
         patch: operations["patch_project"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/alert-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List alert rules */
+        get: operations["list_alert_rules"];
+        put?: never;
+        /**
+         * Create an alert rule
+         * @description Needs role member. The filter is checked by the query layer (400 invalid_filter). At most 100 rules per project (409). An enabled rule beyond the org's plan limit is 403 plan_limit.
+         */
+        post: operations["create_alert_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/alert-rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get an alert rule */
+        get: operations["get_alert_rule"];
+        put?: never;
+        post?: never;
+        /** Delete an alert rule */
+        delete: operations["delete_alert_rule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an alert rule
+         * @description A new condition, or a change of enabled, resets the state to ok without an event. Re-enabling a rule beyond the org's plan limit is 403 plan_limit.
+         */
+        patch: operations["update_alert_rule"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/alert-rules/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List a rule's events */
+        get: operations["list_alert_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/api-keys": {
         parameters: {
             query?: never;
@@ -724,6 +784,157 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List notification channels */
+        get: operations["list_channels"];
+        put?: never;
+        /**
+         * Create a notification channel
+         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409).
+         */
+        post: operations["create_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/channels/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a notification channel */
+        delete: operations["delete_channel"];
+        options?: never;
+        head?: never;
+        /** Update a notification channel */
+        patch: operations["update_channel"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/channels/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test notification
+         * @description Sends one sample message now and reports the result. Nothing is stored. Needs role member.
+         */
+        post: operations["test_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluator-templates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List built-in judge templates
+         * @description Any project member can read. The list is fixed; the UI copies a template into the editor.
+         */
+        get: operations["list_evaluator_templates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List evaluators
+         * @description Any project member can read.
+         */
+        get: operations["list_evaluators"];
+        put?: never;
+        /**
+         * Create an evaluator
+         * @description Project members and above. API keys cannot call it.
+         */
+        post: operations["post_evaluator"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluators/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run an evaluator once
+         * @description Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.
+         */
+        post: operations["post_evaluator_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/evaluators/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an evaluator
+         * @description Any project member can read.
+         */
+        get: operations["get_evaluator"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an evaluator
+         * @description Project members and above. API keys cannot call it.
+         */
+        delete: operations["delete_evaluator"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an evaluator
+         * @description Project members and above. API keys cannot call it.
+         */
+        patch: operations["patch_evaluator"];
         trace?: never;
     };
     "/api/v1/projects/{project}/media/{sha256}": {
@@ -864,6 +1075,54 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/score-definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List score definitions
+         * @description Any project member can read.
+         */
+        get: operations["list_score_definitions"];
+        put?: never;
+        /**
+         * Create a score definition
+         * @description Project members and above. API keys cannot call it.
+         */
+        post: operations["post_score_definition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/score-definitions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Archive a score definition
+         * @description Project members and above. API keys cannot call it. Archives the definition; score writes stop being checked against it.
+         */
+        delete: operations["delete_score_definition"];
+        options?: never;
+        head?: never;
+        /**
+         * Update or restore a score definition
+         * @description Project members and above. API keys cannot call it.
+         */
+        patch: operations["patch_score_definition"];
         trace?: never;
     };
     "/api/v1/projects/{project}/scores": {
@@ -1246,6 +1505,213 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /**
+         * @description What a rule measures and when it breaches (D-K-2).
+         *
+         *     Fields that do not apply to `metric` must be absent. A stored or returned
+         *     condition always has its defaults filled in.
+         */
+        AlertCondition: {
+            /** @description `score` only. Default `avg`. */
+            aggregation?: components["schemas"]["ScoreAggregation"];
+            /** @description How the value is compared with `threshold`. */
+            comparator: components["schemas"]["Comparator"];
+            /** @description Filter DSL expression over `traces`. Absent means every trace. */
+            filter?: string;
+            /** @description What is measured. */
+            metric: components["schemas"]["AlertMetric"];
+            /**
+             * Format: int64
+             * @description Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`.
+             */
+            min_count?: number;
+            /** @description `score` only: the score name. */
+            score_name?: string;
+            /** @description `latency_p95` only. Default `trace`. */
+            target?: components["schemas"]["LatencyTarget"];
+            /**
+             * Format: double
+             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`.
+             */
+            threshold: number;
+            /** @description Sliding window. */
+            window: components["schemas"]["AlertWindow"];
+        };
+        /** @description One delivery of an event to a channel. */
+        AlertDelivery: {
+            /**
+             * Format: int64
+             * @description Attempts made so far.
+             */
+            attempts: number;
+            /**
+             * Format: uuid
+             * @description The channel.
+             */
+            channel_id: string;
+            /** @description The channel's kind. */
+            channel_kind: components["schemas"]["ChannelKind"];
+            /** @description The channel's current name. */
+            channel_name: string;
+            /**
+             * Format: uuid
+             * @description Delivery id; the webhook's `X-Llmobs-Delivery`.
+             */
+            id: string;
+            /** @description The last attempt's error. */
+            last_error?: string;
+            /** @description Where the delivery stands. */
+            status: components["schemas"]["DeliveryStatus"];
+            /**
+             * Format: date-time
+             * @description Last change.
+             */
+            updated_at: string;
+        };
+        /** @description One fired, resolved or reminder event, with the rule as it was then. */
+        AlertEvent: {
+            /** @description The comparator then. */
+            comparator: components["schemas"]["Comparator"];
+            /**
+             * Format: int64
+             * @description The sample count.
+             */
+            count?: number;
+            /**
+             * Format: date-time
+             * @description When the event was recorded.
+             */
+            created_at: string;
+            /** @description One per channel the rule had then. */
+            deliveries: components["schemas"]["AlertDelivery"][];
+            /**
+             * Format: uuid
+             * @description Event id; the webhook payload's `event_id`.
+             */
+            id: string;
+            /** @description What happened. */
+            kind: components["schemas"]["AlertEventKind"];
+            /** @description The metric then. */
+            metric: components["schemas"]["AlertMetric"];
+            /**
+             * Format: uuid
+             * @description The rule.
+             */
+            rule_id: string;
+            /**
+             * Format: double
+             * @description The threshold then.
+             */
+            threshold: number;
+            /**
+             * Format: double
+             * @description The measured value. Absent when there was none (e.g. resolved by too few samples).
+             */
+            value?: number;
+            /** @description The window then. */
+            window: components["schemas"]["AlertWindow"];
+            /**
+             * Format: date-time
+             * @description Window start.
+             */
+            window_from: string;
+            /**
+             * Format: date-time
+             * @description Window end (exclusive).
+             */
+            window_to: string;
+        };
+        /**
+         * @description What an event records.
+         * @enum {string}
+         */
+        AlertEventKind: "fired" | "resolved" | "reminder";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AlertEventPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AlertEvent"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description What a rule measures (D-K-2).
+         * @enum {string}
+         */
+        AlertMetric: "error_rate" | "cost" | "latency_p95" | "score";
+        /** @description One alert rule (D-K-2, D-K-4). */
+        AlertRule: {
+            /** @description Channels notified on fired, resolved and reminder events. Ordered by id. */
+            channel_ids: string[];
+            /** @description What is measured and when it breaches, with defaults filled in. */
+            condition: components["schemas"]["AlertCondition"];
+            /**
+             * Format: int64
+             * @description Minimum seconds between two reminders while firing.
+             */
+            cooldown_s: number;
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Disabled rules are not evaluated. */
+            enabled: boolean;
+            /**
+             * Format: uuid
+             * @description Rule id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Sample count of the last successful evaluation.
+             */
+            last_count?: number;
+            /** @description Why the last evaluation failed. Absent after a successful one. */
+            last_error?: string;
+            /**
+             * Format: date-time
+             * @description Last evaluation, successful or not.
+             */
+            last_evaluated_at?: string;
+            /**
+             * Format: date-time
+             * @description Last `fired` event.
+             */
+            last_fired_at?: string;
+            /**
+             * Format: double
+             * @description Value of the last successful evaluation.
+             */
+            last_value?: number;
+            /** @description Display name, unique in the project. */
+            name: string;
+            /** @description Send a reminder every `cooldown_s` while firing. */
+            notify_while_firing: boolean;
+            /** @description Current state. */
+            state: components["schemas"]["AlertState"];
+            /**
+             * Format: date-time
+             * @description Last change.
+             */
+            updated_at: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AlertRulePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AlertRule"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Where a rule stands (D-K-4).
+         * @enum {string}
+         */
+        AlertState: "ok" | "firing" | "no_data";
+        /**
+         * @description Sliding window length (D-K-3).
+         * @enum {string}
+         */
+        AlertWindow: "1m" | "5m" | "15m" | "1h" | "6h" | "24h";
         /** @description A project API key. The secret is not a field. */
         ApiKey: {
             /**
@@ -1352,6 +1818,37 @@ export interface components {
             /** @description The replacement password. */
             new_password: string;
         };
+        /** @description The newest finished delivery of a channel. */
+        ChannelDelivery: {
+            /**
+             * Format: date-time
+             * @description When it finished.
+             */
+            at: string;
+            /** @description Why it failed. Never contains a URL, a secret or an address. */
+            error?: string;
+            /** @description `sent` or `failed`. */
+            status: components["schemas"]["DeliveryStatus"];
+        };
+        /**
+         * @description A notification channel's kind (D-K-6).
+         * @enum {string}
+         */
+        ChannelKind: "slack" | "webhook" | "email";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ChannelPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["NotificationChannel"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description The result of `POST /channels/{id}/test`. */
+        ChannelTestResult: {
+            /** @description Why it did not. Never contains a URL, a secret or an address. */
+            error?: string;
+            /** @description The channel accepted the message. */
+            ok: boolean;
+        };
         /**
          * @description One column of a logical view.
          *
@@ -1374,6 +1871,11 @@ export interface components {
          * @enum {string}
          */
         ColumnType: "string" | "integer" | "float" | "boolean" | "timestamp" | "string_list" | "string_map" | "json";
+        /**
+         * @description How the value is compared with the threshold.
+         * @enum {string}
+         */
+        Comparator: "gt" | "gte" | "lt" | "lte";
         /**
          * @description Whether the connection's last test reached the provider.
          * @enum {string}
@@ -1402,6 +1904,24 @@ export interface components {
             /** @description Display name. Absent when the admin does not set one. */
             name?: string;
         };
+        /** @description Body of `POST /alert-rules`. */
+        CreateAlertRuleRequest: {
+            /** @description At most 10 channels of this project. Default none. */
+            channel_ids?: string[];
+            /** @description The condition. Defaults are filled in. */
+            condition: components["schemas"]["AlertCondition"];
+            /**
+             * Format: int64
+             * @description 300–604800. Default 3600.
+             */
+            cooldown_s?: number;
+            /** @description Default true. */
+            enabled?: boolean;
+            /** @description 1–100 characters after trimming. */
+            name: string;
+            /** @description Default false. */
+            notify_while_firing?: boolean;
+        };
         /** @description `POST /api/v1/projects/{project}/api-keys` body. */
         CreateApiKeyRequest: {
             /** @description When the key stops working. Absent when the key does not expire. */
@@ -1412,6 +1932,40 @@ export interface components {
             name?: string;
             /** @description Secret keys default to ingest, read, and write. Public keys default to feedback. */
             scopes?: components["schemas"]["ApiKeyScope"][];
+        };
+        /** @description Body of `POST /channels`. Send the fields of `kind` only. */
+        CreateChannelRequest: {
+            /** @description `webhook`: extra headers, at most 10. */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @description The kind. Cannot change later. */
+            kind: components["schemas"]["ChannelKind"];
+            /** @description Display name, 1–100 characters after trimming. */
+            name: string;
+            /** @description `email`: 1–20 addresses. */
+            recipients?: string[];
+            /** @description `webhook`: the signing secret, 16–256 characters. */
+            secret?: string;
+            /** @description `slack` and `webhook`: the URL. */
+            url?: string;
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/evaluators` body.
+         *
+         *     Its `Debug` prints flags, not the config or the secret.
+         */
+        CreateEvaluatorRequest: {
+            /** @description The kind-specific configuration. For a webhook, the full `{url, timeout_ms?, headers?}` document. */
+            config: Record<string, never>;
+            /** @description What the evaluator does. Immutable once created. */
+            kind: components["schemas"]["EvaluatorKind"];
+            /** @description Display name, 1 to 128 characters. */
+            name: string;
+            /** @description The score the evaluator writes. */
+            output_score: components["schemas"]["OutputScoreBody"];
+            /** @description Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook. */
+            webhook_secret?: string;
         };
         /** @description `POST /api/v1/orgs/{org}/invites`. */
         CreateInviteRequest: {
@@ -1497,6 +2051,27 @@ export interface components {
             /** @description Opaque UI state: list-page URL params, or `{query, params, range}` / `{query, params, from, to}` for SQL (D-H-7). */
             state: Record<string, never>;
         };
+        /** @description `POST /api/v1/projects/{project}/score-definitions` body. */
+        CreateScoreDefinitionRequest: {
+            /** @description Labels of a categorical score: 1 to 100, unique. Only for categorical scores. */
+            categories?: components["schemas"]["ScoreDefinitionCategory"][];
+            /** @description Score data type. Immutable once created. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description What the score means, at most 1 000 characters. */
+            description?: string;
+            /**
+             * Format: double
+             * @description Highest allowed value. Only for numeric scores, above `min_value`.
+             */
+            max_value?: number;
+            /**
+             * Format: double
+             * @description Lowest allowed value. Only for numeric scores.
+             */
+            min_value?: number;
+            /** @description Score name, 1 to 255 bytes after trimming. */
+            name: string;
+        };
         /**
          * @description `POST /api/v1/admin/users` returns 201.
          *
@@ -1533,6 +2108,11 @@ export interface components {
             /** @description The stored token, without the secret. */
             token: components["schemas"]["PersonalToken"];
         };
+        /**
+         * @description A delivery's status.
+         * @enum {string}
+         */
+        DeliveryStatus: "pending" | "sent" | "failed";
         /**
          * @description User summary plus the most recent sessions.
          *
@@ -1595,6 +2175,158 @@ export interface components {
             trace_count: number;
             /** @description End-user id. */
             user_id: string;
+        };
+        /** @description An evaluator. Sealed values (a webhook's signing secret and header values) are not included. */
+        Evaluator: {
+            /** @description The kind-specific configuration as stored. A webhook keeps only its URL host, timeout and header names. */
+            config: Record<string, never>;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who created the evaluator. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /** @description Whether a signing secret is stored. True for a webhook. */
+            has_signing_secret: boolean;
+            /**
+             * Format: uuid
+             * @description Evaluator id.
+             */
+            id: string;
+            /** @description What the evaluator does. */
+            kind: components["schemas"]["EvaluatorKind"];
+            /** @description Display name, 1 to 128 characters. */
+            name: string;
+            /** @description The score the evaluator writes. */
+            output_score: components["schemas"]["OutputScoreBody"];
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description Starts at 1 and increases on every change to the config, the output or the sealed values.
+             */
+            version: number;
+        };
+        /**
+         * @description What an evaluator does. Stored as `evaluators.kind`; `kind` cannot change.
+         * @enum {string}
+         */
+        EvaluatorKind: "llm_judge" | "check" | "webhook";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        EvaluatorPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Evaluator"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description A built-in judge template. The UI copies it into the editor; the server does not create evaluators from it. */
+        EvaluatorTemplate: {
+            /** @description The variables of the prompt and the expressions that fill them, in display order. */
+            default_mapping: components["schemas"]["TemplateMapping"][];
+            /** @description One-line description. */
+            description: string;
+            /** @description Stable id: `hallucination`, `relevance`, `toxicity`, `correctness` or `custom`. */
+            id: string;
+            /** @description Display name. */
+            name: string;
+            /** @description The score the judge must produce, as the judge output JSON. */
+            output: Record<string, never>;
+            /** @description Name of the score the template writes. */
+            output_score_name: string;
+            /** @description The prompt template. */
+            prompt: string;
+        };
+        /** @description `GET /api/v1/projects/{project}/evaluator-templates` response. The list is fixed. */
+        EvaluatorTemplateList: {
+            /** @description The built-in templates, in display order. */
+            data: components["schemas"]["EvaluatorTemplate"][];
+        };
+        /** @description Why a test run did not produce a value. */
+        EvaluatorTestError: {
+            /** @description What the caller should do with the failure. */
+            class: components["schemas"]["TestErrorClass"];
+            /** @description The error text, without payload content or secrets. */
+            message: string;
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/evaluators/test` body.
+         *
+         *     Deserialize only: `TimeParam` has no `Serialize`. Its `Debug` prints flags and counts, not
+         *     the variables, the mapping or the evaluator.
+         */
+        EvaluatorTestRequest: {
+            /** @description The evaluator to run. With `evaluator_id` too, it is merged over the saved one. */
+            evaluator?: components["schemas"]["TestEvaluatorBody"];
+            /**
+             * Format: uuid
+             * @description The saved evaluator to run. Needed unless `evaluator` is given.
+             */
+            evaluator_id?: string;
+            /** @description Span of the trace to target, 16 hex digits. */
+            span_id?: string;
+            /** @description Stored trace to load, 32 hex digits. */
+            trace_id?: string;
+            /** @description Start of the trace, to narrow the lookup. */
+            trace_start?: components["schemas"]["TimeParam"];
+            /** @description Prompt variable to mapping expression, for a stored trace. */
+            variable_mapping?: {
+                [key: string]: string;
+            };
+            /** @description Literal prompt variables, instead of a stored trace. At most 32, 256 KiB in total. */
+            variables?: Record<string, never>;
+        };
+        /** @description `POST /api/v1/projects/{project}/evaluators/test` response. Also used when the evaluator failed. */
+        EvaluatorTestResult: {
+            /** @description The failure. Omitted when `ok` is true. */
+            error?: components["schemas"]["EvaluatorTestError"];
+            /** @description The judge trace the run wrote (environment `llmobs-eval`). Omitted when no judge trace was written. */
+            judge_trace_id?: components["schemas"]["TraceId"];
+            /**
+             * Format: int64
+             * @description Time the run took, in milliseconds.
+             */
+            latency_ms: number;
+            /** @description Whether the evaluator produced a value. */
+            ok: boolean;
+            /** @description The rendered prompt. Omitted for checks, webhooks and failures before rendering. */
+            prompt?: string;
+            /** @description The judge's explanation, when it gave one. Omitted otherwise. */
+            reason?: string;
+            /** @description Whether the target trace was cut to fit the loading limits. Always false for literal variables. */
+            trace_truncated: boolean;
+            /** @description Judge usage. Omitted when the run made no LLM call. */
+            usage?: components["schemas"]["EvaluatorTestUsage"];
+            /** @description The score value. Omitted unless `ok`. */
+            value?: components["schemas"]["ScoreValue"];
+            /** @description Each prompt variable as rendered, cut to 2 000 characters. Empty when the run failed before rendering. */
+            variables: {
+                [key: string]: string;
+            };
+        };
+        /** @description Judge usage of one test run. */
+        EvaluatorTestUsage: {
+            /**
+             * Format: double
+             * @description Estimated cost in USD. Omitted when no price is known.
+             */
+            cost_usd?: number;
+            /**
+             * Format: int64
+             * @description Input tokens the provider counted. Omitted when unknown.
+             */
+            input_tokens?: number;
+            /**
+             * Format: int64
+             * @description Output tokens the provider counted. Omitted when unknown.
+             */
+            output_tokens?: number;
         };
         /**
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
@@ -1748,6 +2480,11 @@ export interface components {
          * @enum {string}
          */
         KpiMetric: "traces" | "error_rate" | "latency_p95" | "cost_total" | "total_tokens";
+        /**
+         * @description Which latency a `latency_p95` rule measures.
+         * @enum {string}
+         */
+        LatencyTarget: "trace" | "llm_span";
         /**
          * @description Where the instance licence stands (D-P-7).
          * @enum {string}
@@ -2010,6 +2747,38 @@ export interface components {
              */
             total_tokens?: number;
         };
+        /** @description A notification channel. The URL, the secret and header values are never returned (D-K-6). */
+        NotificationChannel: {
+            /** @description False for an email channel while SMTP is not configured. */
+            available: boolean;
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Names of the extra webhook headers. Empty for other kinds. */
+            header_names: string[];
+            /**
+             * Format: uuid
+             * @description Channel id.
+             */
+            id: string;
+            /** @description `slack`, `webhook` or `email`. */
+            kind: components["schemas"]["ChannelKind"];
+            /** @description The newest finished delivery. Absent when none finished yet. */
+            last_delivery?: components["schemas"]["ChannelDelivery"];
+            /** @description Display name, unique in the project. */
+            name: string;
+            /** @description Email recipients. Empty for other kinds. */
+            recipients: string[];
+            /** @description Where it sends, without secrets: `hooks.slack.com/…/abcd`, a host, or the first address and `+N`. */
+            target_hint: string;
+            /**
+             * Format: date-time
+             * @description Last change.
+             */
+            updated_at: string;
+        };
         /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage. */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
@@ -2077,6 +2846,15 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
+        /** @description The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`. */
+        OutputScoreBody: {
+            /** @description Category labels of a categorical score. Omitted otherwise. */
+            categories?: string[];
+            /** @description Score data type. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description Score name, 1 to 255 bytes. */
+            name: string;
+        };
         /** @description One part of a canonical message. Spec 01 § Canonical message format. */
         Part: components["schemas"]["TextPart"] | components["schemas"]["ReasoningPart"] | components["schemas"]["ToolCallPart"] | components["schemas"]["ToolCallResponsePart"] | components["schemas"]["UriPart"] | components["schemas"]["BlobPart"] | components["schemas"]["UnknownPart"];
         /** @description Parsed span payload: messages, any JSON, or plain text. Spec 09 § Response shapes. */
@@ -2173,7 +2951,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -2404,6 +3182,11 @@ export interface components {
             /** @description The score value. Spec 01 `data_type`, `value_num`, `value_str`. */
             value: components["schemas"]["ScoreValue"];
         };
+        /**
+         * @description How a `score` rule aggregates.
+         * @enum {string}
+         */
+        ScoreAggregation: "avg" | "pass_rate";
         /** @description `POST …/scores` and `POST /api/v1/scores` body. */
         ScoreBatch: {
             /** @description Between 1 and 1000 scores. */
@@ -2452,6 +3235,71 @@ export interface components {
             user_id?: string;
             /** @description The score value. */
             value: components["schemas"]["ScoreValue"];
+        };
+        /**
+         * @description The kind of value a score carries.
+         *
+         *     Spec 01 § Score `data_type`.
+         * @enum {string}
+         */
+        ScoreDataType: "numeric" | "boolean" | "categorical" | "text";
+        /** @description A named score shape. Archived definitions are kept but not checked against. */
+        ScoreDefinition: {
+            /**
+             * Format: date-time
+             * @description When the definition was archived. Omitted while it is live. JSON is RFC 3339.
+             */
+            archived_at?: string;
+            /** @description Labels of a categorical score. Empty otherwise. */
+            categories: components["schemas"]["ScoreDefinitionCategory"][];
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description Score data type. Immutable. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description What the score means. Omitted when unset. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Definition id.
+             */
+            id: string;
+            /**
+             * Format: double
+             * @description Highest allowed value of a numeric score. Omitted when unset.
+             */
+            max_value?: number;
+            /**
+             * Format: double
+             * @description Lowest allowed value of a numeric score. Omitted when unset.
+             */
+            min_value?: number;
+            /** @description Score name, unique among live definitions of the project. */
+            name: string;
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+        };
+        /** @description One label of a categorical score definition. */
+        ScoreDefinitionCategory: {
+            /** @description The label, 1 to 255 bytes. */
+            label: string;
+            /**
+             * Format: double
+             * @description Numeric value of the label. Omitted when the label has none.
+             */
+            value?: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ScoreDefinitionPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["ScoreDefinition"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
         };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         ScorePage: {
@@ -3077,11 +3925,41 @@ export interface components {
          * @enum {string}
          */
         StructuredOutputMode: "native" | "tool" | "prompt";
+        /** @description One mapping of a template: the prompt variable and the expression that fills it. */
+        TemplateMapping: {
+            /** @description Mapping expression, such as `trace.input`. */
+            expression: string;
+            /** @description Prompt variable name. */
+            variable: string;
+        };
         /**
          * @description What the caller should do with a failed connection test.
          * @enum {string}
          */
         TestErrorClass: "retryable" | "pause" | "permanent";
+        /**
+         * @description An evaluator to test, possibly partial. Absent fields come from the saved evaluator.
+         *
+         *     Its `Debug` prints flags, not the config or the secret.
+         */
+        TestEvaluatorBody: {
+            /**
+             * @description The kind-specific configuration. Absent: the saved configuration, which needs `evaluator_id`.
+             *     For a webhook, a present configuration needs `webhook_secret` too.
+             */
+            config?: Record<string, never>;
+            /** @description What the evaluator does. Must match the saved evaluator's kind. */
+            kind: components["schemas"]["EvaluatorKind"];
+            /** @description Display name. Absent: the saved name, or `Test`. */
+            name?: string;
+            /** @description The score the evaluator writes. */
+            output_score: components["schemas"]["OutputScoreBody"];
+            /**
+             * @description Signing secret of a webhook. Absent: the saved secret, which needs `evaluator_id`.
+             *     Required with a webhook `config`.
+             */
+            webhook_secret?: string;
+        };
         /** @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. */
         TestLlmConnectionRequest: {
             /** @description Model to call. Default: the connection's `default_model`. */
@@ -3316,6 +4194,63 @@ export interface components {
             is_instance_admin?: boolean;
         };
         /**
+         * @description Body of `PATCH /alert-rules/{id}`. An absent field keeps its value. A new
+         *     `condition`, or a change of `enabled`, resets the state to `ok` (D-K-4).
+         */
+        UpdateAlertRuleRequest: {
+            /** @description New channels of this project, at most 10. `[]` removes every channel. */
+            channel_ids?: string[];
+            /** @description New condition. Defaults are filled in. */
+            condition?: components["schemas"]["AlertCondition"];
+            /**
+             * Format: int64
+             * @description New cooldown, 300–604800 seconds.
+             */
+            cooldown_s?: number;
+            /** @description New enabled flag. */
+            enabled?: boolean;
+            /** @description New display name, 1–100 characters after trimming. */
+            name?: string;
+            /** @description New `notify_while_firing` flag. */
+            notify_while_firing?: boolean;
+        };
+        /** @description Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map. */
+        UpdateChannelRequest: {
+            /** @description `webhook`: the new header map. */
+            headers?: {
+                [key: string]: string;
+            };
+            /** @description New display name. */
+            name?: string;
+            /** @description `email`: the new recipient list. */
+            recipients?: string[];
+            /** @description `webhook`: a new signing secret. */
+            secret?: string;
+            /** @description `slack` and `webhook`: a new URL. */
+            url?: string;
+        };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/evaluators/{id}` body. Absent means unchanged.
+         *
+         *     Its `Debug` prints flags, not the config or the secret.
+         */
+        UpdateEvaluatorRequest: {
+            /**
+             * @description The kind-specific configuration. For a webhook, replaces the URL, the headers and the
+             *     timeout together, so it must come with `webhook_secret` (400 otherwise).
+             */
+            config?: Record<string, never>;
+            /** @description Display name, 1 to 128 characters. */
+            name?: string;
+            /** @description The score the evaluator writes. */
+            output_score?: components["schemas"]["OutputScoreBody"];
+            /**
+             * @description Replaces the signing secret of a webhook, 16 to 256 characters. Required with a webhook
+             *     `config`, so a saved secret never signs requests to a new URL. An empty string is refused.
+             */
+            webhook_secret?: string;
+        };
+        /**
          * @description `PATCH /api/v1/orgs/{org}/llm-connections/{id}` body. Absent means
          *     unchanged; an empty body is valid and changes only `updated_at`.
          */
@@ -3394,6 +4329,31 @@ export interface components {
             shared?: boolean;
             /** @description Opaque UI state: list-page URL params, or `{query, params, range}` / `{query, params, from, to}` for SQL (D-H-7). */
             state?: Record<string, never>;
+        };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/score-definitions/{id}` body. Absent means unchanged.
+         *
+         *     `min_value` and `max_value` cannot be cleared once set. Archive the definition instead.
+         */
+        UpdateScoreDefinitionRequest: {
+            /** @description `true` archives the definition; `false` restores it, unless another live one has its name. */
+            archived?: boolean;
+            /** @description Labels of a categorical score: 1 to 100, unique. */
+            categories?: components["schemas"]["ScoreDefinitionCategory"][];
+            /** @description What the score means. An empty string clears it. */
+            description?: string;
+            /**
+             * Format: double
+             * @description Highest allowed value. Only for numeric scores, above `min_value`.
+             */
+            max_value?: number;
+            /**
+             * Format: double
+             * @description Lowest allowed value. Only for numeric scores.
+             */
+            min_value?: number;
+            /** @description Score name, 1 to 255 bytes after trimming. */
+            name?: string;
         };
         /** @description Media addressed by a URI, including `media://` after extraction. */
         UriPart: {
@@ -5736,6 +6696,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Too many requests. */
             429: {
                 headers: {
@@ -6422,6 +7391,460 @@ export interface operations {
             };
         };
     };
+    list_alert_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every rule of the project, by name. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRulePage"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_alert_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateAlertRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The created rule. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_alert_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Alert rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule and its state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_alert_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Alert rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted, with its events. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_alert_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Alert rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAlertRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated rule. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_alert_events: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Alert rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Events, newest first, with their deliveries. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_api_keys: {
         parameters: {
             query?: {
@@ -6617,6 +8040,882 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every channel of the project, by name. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelPage"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description The created channel. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationChannel"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Channel id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. Rules that used it no longer do. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Channel id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateChannelRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated channel. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationChannel"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Channel id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Whether the channel accepted the message. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelTestResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_evaluator_templates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The built-in templates, in display order. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluatorTemplateList"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_evaluators: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of evaluators. Sealed values are not included. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluatorPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_evaluator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateEvaluatorRequest"];
+            };
+        };
+        responses: {
+            /** @description The created evaluator. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Evaluator"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_evaluator_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvaluatorTestRequest"];
+            };
+        };
+        responses: {
+            /** @description The outcome. An evaluator failure is ok: false, not an error status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvaluatorTestResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_evaluator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The evaluator. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Evaluator"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_evaluator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_evaluator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Evaluator id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateEvaluatorRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated evaluator. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Evaluator"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7428,6 +9727,313 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_score_definitions: {
+        parameters: {
+            query?: {
+                /** @description Include archived definitions. Default false. */
+                include_archived?: boolean;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of score definitions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScoreDefinitionPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_score_definition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateScoreDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description The created score definition. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScoreDefinition"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_score_definition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Score definition id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_score_definition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Score definition id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateScoreDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated score definition. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScoreDefinition"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

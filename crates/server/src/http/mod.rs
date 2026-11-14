@@ -74,6 +74,10 @@ pub(crate) struct AppInner {
     pub(crate) eval_runner: Arc<llmobs_eval::EvalRunner>,
     /// Decrypted connections, keyed by id and `updated_at`.
     pub(crate) connections: crate::eval::connection::ConnectionCache,
+    /// Trace-load permits (D-I-23).
+    pub(crate) trace_loads: crate::eval::trace_load::TraceLoads,
+    /// Live score definitions (D-I-26).
+    pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
 }

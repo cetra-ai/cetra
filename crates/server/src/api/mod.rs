@@ -5,10 +5,12 @@
 
 pub mod account;
 pub mod admin;
+pub mod alerts;
 pub mod common;
 pub mod connections;
 pub(crate) mod convert;
 pub mod entitlements;
+pub mod evaluators;
 pub mod invites;
 pub mod keys;
 pub mod members;
@@ -17,6 +19,7 @@ pub mod openapi;
 pub mod payload;
 pub mod saved_views;
 pub mod schema;
+pub mod score_definitions;
 pub mod scores;
 pub mod sessions;
 pub mod sql;

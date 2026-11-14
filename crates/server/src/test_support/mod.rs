@@ -1,8 +1,10 @@
 //! HTTP tests: a real `meta.db` and storage, a manual clock, `oneshot` (D151).
 #![cfg(test)]
 
+pub(crate) mod hook_receiver;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
+pub(crate) mod mock_webhook;
 
 use std::future::Future;
 use std::io::{self, Write};
@@ -283,6 +285,8 @@ impl TestApp {
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
+            trace_loads: crate::eval::trace_load::TraceLoads::default(),
+            definitions: crate::eval::definitions::DefinitionCache::default(),
             entitlements: crate::entitlements::EntitlementsState::new(license),
         });
         let router = if let Some(table) = table {

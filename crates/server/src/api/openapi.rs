@@ -33,6 +33,12 @@ use super::admin::{
     AdminLicense, AdminResetLink, AdminSettings, AdminUser, CreateAdminUserRequest,
     CreatedAdminUser, UpdateAdminUserRequest,
 };
+use super::alerts::{
+    AlertCondition, AlertDelivery, AlertEvent, AlertEventKind, AlertMetric, AlertRule, AlertState,
+    AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
+    CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
+    NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
+};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
@@ -40,6 +46,11 @@ use super::connections::{
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
 use super::entitlements::{Feature, OrgEntitlements};
+use super::evaluators::{
+    CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
+    EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
+    OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
+};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -49,6 +60,10 @@ use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, Update
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
+use super::score_definitions::{
+    CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
+    ScoreDefinitionListParams, UpdateScoreDefinitionRequest,
+};
 use super::scores::{
     FeedbackRequest, FeedbackResult, FeedbackValue, ScoreBatch, ScoreCreate, ScoreListParams,
     ScoreWriteResult,
@@ -192,6 +207,48 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<ProjectApiKey>("ApiKeyPage");
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
+    set.insert::<EvaluatorKind>();
+    set.insert::<OutputScoreBody>();
+    set.insert::<Evaluator>();
+    set.insert::<CreateEvaluatorRequest>();
+    set.insert::<UpdateEvaluatorRequest>();
+    set.insert::<TemplateMapping>();
+    set.insert::<EvaluatorTemplate>();
+    set.insert::<EvaluatorTemplateList>();
+    set.insert::<TestEvaluatorBody>();
+    set.insert::<EvaluatorTestRequest>();
+    set.insert::<EvaluatorTestError>();
+    set.insert::<EvaluatorTestUsage>();
+    set.insert::<EvaluatorTestResult>();
+    set.insert_page::<Evaluator>("EvaluatorPage");
+    set.insert::<ScoreDefinitionCategory>();
+    set.insert::<ScoreDefinition>();
+    set.insert::<CreateScoreDefinitionRequest>();
+    set.insert::<UpdateScoreDefinitionRequest>();
+    set.insert_page::<ScoreDefinition>("ScoreDefinitionPage");
+    set.insert::<ChannelKind>();
+    set.insert::<DeliveryStatus>();
+    set.insert::<ChannelDelivery>();
+    set.insert::<NotificationChannel>();
+    set.insert::<ChannelTestResult>();
+    set.insert::<CreateChannelRequest>();
+    set.insert::<UpdateChannelRequest>();
+    set.insert_page::<NotificationChannel>("ChannelPage");
+    set.insert::<AlertMetric>();
+    set.insert::<AlertWindow>();
+    set.insert::<Comparator>();
+    set.insert::<LatencyTarget>();
+    set.insert::<ScoreAggregation>();
+    set.insert::<AlertState>();
+    set.insert::<AlertCondition>();
+    set.insert::<AlertRule>();
+    set.insert::<CreateAlertRuleRequest>();
+    set.insert::<UpdateAlertRuleRequest>();
+    set.insert::<AlertEventKind>();
+    set.insert::<AlertDelivery>();
+    set.insert::<AlertEvent>();
+    set.insert_page::<AlertRule>("AlertRulePage");
+    set.insert_page::<AlertEvent>("AlertEventPage");
     set
 }
 
@@ -273,11 +330,23 @@ pub fn openapi() -> OpenApi {
             tag("sessions", "Session list and detail."),
             tag("users", "End users."),
             tag("scores", "Scores attached to spans, traces, and sessions."),
+            tag(
+                "evaluation",
+                "Evaluators, built-in templates and test runs.",
+            ),
+            tag(
+                "score_definitions",
+                "Named score shapes that score writes and evaluators must fit.",
+            ),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
             tag("sql", "SQL console over the project's views."),
             tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
+            tag(
+                "alerts",
+                "Alert rules, alert events and notification channels.",
+            ),
         ]))
         .components(Some(components(&schemas)))
         .security(Some([
@@ -553,8 +622,12 @@ fn paths() -> Paths {
     let paths = trace_paths(paths);
     let paths = session_paths(paths);
     let paths = score_paths(paths);
+    let paths = evaluator_paths(paths);
+    let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
+    let paths = channel_paths(paths);
+    let paths = alert_rule_paths(paths);
     media_paths(paths).build()
 }
 
@@ -1253,7 +1326,7 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         ResponseBuilder::new()
             .description("The connection is deleted.")
             .build(),
-        &[400, 401, 403, 404, 429],
+        &[400, 401, 403, 404, 409, 429],
     ))
     .build();
     let test = operation(
@@ -1709,6 +1782,197 @@ fn sql_paths(paths: PathsBuilder) -> PathsBuilder {
     )
 }
 
+fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Evaluator id.");
+    let list = operation("list_evaluators", "evaluation", "List evaluators")
+        .description(Some("Any project member can read."))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named(
+                "EvaluatorPage",
+                "One page of evaluators. Sealed values are not included.",
+            ),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_evaluator", "evaluation", "Create an evaluator")
+        .description(Some("Project members and above. API keys cannot call it."))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateEvaluatorRequest")))
+        .responses(responses(
+            "201",
+            json_of::<Evaluator>("The created evaluator."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_evaluator", "evaluation", "Get an evaluator")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Evaluator>("The evaluator."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_evaluator", "evaluation", "Update an evaluator")
+        .description(Some("Project members and above. API keys cannot call it."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateEvaluatorRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Evaluator>("The updated evaluator."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_evaluator", "evaluation", "Delete an evaluator")
+        .description(Some("Project members and above. API keys cannot call it."))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let templates = operation(
+        "list_evaluator_templates",
+        "evaluation",
+        "List built-in judge templates",
+    )
+    .description(Some(
+        "Any project member can read. The list is fixed; the UI copies a template into the editor.",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_of::<EvaluatorTemplateList>("The built-in templates, in display order."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let test = operation("post_evaluator_test", "evaluation", "Run an evaluator once")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("EvaluatorTestRequest")))
+        .responses(responses(
+            "200",
+            json_of::<EvaluatorTestResult>(
+                "The outcome. An evaluator failure is ok: false, not an error status.",
+            ),
+            &[400, 401, 403, 404, 429, 503],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/evaluators"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/evaluators"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/evaluator-templates"),
+            PathItem::new(HttpMethod::Get, templates),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/test"),
+            PathItem::new(HttpMethod::Post, test),
+        )
+}
+
+fn score_definition_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Score definition id.");
+    let list = operation(
+        "list_score_definitions",
+        "score_definitions",
+        "List score definitions",
+    )
+    .description(Some("Any project member can read."))
+    .parameters(Some(with_query::<ScoreDefinitionListParams>(vec![
+        project_param(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("ScoreDefinitionPage", "One page of score definitions."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let create = operation(
+        "post_score_definition",
+        "score_definitions",
+        "Create a score definition",
+    )
+    .description(Some("Project members and above. API keys cannot call it."))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("CreateScoreDefinitionRequest")))
+    .responses(responses(
+        "201",
+        json_of::<ScoreDefinition>("The created score definition."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_score_definition",
+        "score_definitions",
+        "Update or restore a score definition",
+    )
+    .description(Some("Project members and above. API keys cannot call it."))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("UpdateScoreDefinitionRequest")))
+    .responses(responses(
+        "200",
+        json_of::<ScoreDefinition>("The updated score definition."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_score_definition",
+        "score_definitions",
+        "Archive a score definition",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Archives the definition; score writes stop being checked against it.",
+    ))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Archived.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/score-definitions"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/score-definitions"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/score-definitions/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/score-definitions/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
 fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
     let list = operation("list_saved_views", "saved_views", "List saved views")
         .description(Some(
@@ -1780,6 +2044,178 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation("list_channels", "alerts", "List notification channels")
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_named("ChannelPage", "Every channel of the project, by name."),
+            AUTH_ERRORS,
+        ))
+        .build();
+    let create = operation("create_channel", "alerts", "Create a notification channel")
+        .description(Some(
+            "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateChannelRequest")))
+        .responses(responses(
+            "201",
+            json_of::<NotificationChannel>("The created channel."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let update = operation("update_channel", "alerts", "Update a notification channel")
+        .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
+        .request_body(Some(json_body("UpdateChannelRequest")))
+        .responses(responses(
+            "200",
+            json_of::<NotificationChannel>("The updated channel."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_channel", "alerts", "Delete a notification channel")
+        .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new()
+                .description("Deleted. Rules that used it no longer do.")
+                .build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let test = operation("test_channel", "alerts", "Send a test notification")
+        .description(Some(
+            "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+        ))
+        .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
+        .responses(responses(
+            "200",
+            json_of::<ChannelTestResult>("Whether the channel accepted the message."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/channels"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/channels"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/channels/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/channels/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/channels/{{id}}/test"),
+            PathItem::new(HttpMethod::Post, test),
+        )
+}
+
+fn alert_rule_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation("list_alert_rules", "alerts", "List alert rules")
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_named("AlertRulePage", "Every rule of the project, by name."),
+            AUTH_ERRORS,
+        ))
+        .build();
+    let create = operation("create_alert_rule", "alerts", "Create an alert rule")
+        .description(Some(
+            "Needs role member. The filter is checked by the query layer (400 invalid_filter). At most 100 rules per project (409). An enabled rule beyond the org's plan limit is 403 plan_limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateAlertRuleRequest")))
+        .responses(responses(
+            "201",
+            json_of::<AlertRule>("The created rule."),
+            &[400, 401, 403, 404, 409, 429, 503],
+        ))
+        .build();
+    let get = operation("get_alert_rule", "alerts", "Get an alert rule")
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Alert rule id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<AlertRule>("The rule and its state."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let update = operation("update_alert_rule", "alerts", "Update an alert rule")
+        .description(Some(
+            "A new condition, or a change of enabled, resets the state to ok without an event. Re-enabling a rule beyond the org's plan limit is 403 plan_limit.",
+        ))
+        .parameters(Some(vec![project_param(), path_uuid("id", "Alert rule id.")]))
+        .request_body(Some(json_body("UpdateAlertRuleRequest")))
+        .responses(responses(
+            "200",
+            json_of::<AlertRule>("The updated rule."),
+            &[400, 401, 403, 404, 409, 429, 503],
+        ))
+        .build();
+    let delete = operation("delete_alert_rule", "alerts", "Delete an alert rule")
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Alert rule id."),
+        ]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new()
+                .description("Deleted, with its events.")
+                .build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let events = operation("list_alert_events", "alerts", "List a rule's events")
+        .parameters(Some(with_query::<PageParams>(vec![
+            project_param(),
+            path_uuid("id", "Alert rule id."),
+        ])))
+        .responses(responses(
+            "200",
+            json_named(
+                "AlertEventPage",
+                "Events, newest first, with their deliveries.",
+            ),
+            QUERY_ERRORS,
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/alert-rules"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/alert-rules/{{id}}/events"),
+            PathItem::new(HttpMethod::Get, events),
         )
 }
 
