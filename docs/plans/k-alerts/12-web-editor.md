@@ -92,9 +92,11 @@ Client checks in `conditionFromForm` (messages exact):
  *  threshold becomes 0, a blank score name stays blank. Never sent. */
 export function previewCondition(form: RuleFormValues): Schema<"AlertCondition">;
 
-/** The condition-related form fields of `a` and `b` differ (metric, window, trimmed filter,
- *  comparator, threshold, minCount, target, trimmed scoreName, aggregation, compared as
- *  strings after trimming). Used to decide whether a PATCH sends `condition`. */
+/** The condition-related form fields of `a` and `b` differ, compared as strings after trimming.
+ *  Metric, window, filter, comparator and threshold always count. minCount counts for every
+ *  metric but cost. target counts only for latency_p95; scoreName and aggregation only for
+ *  score. A field the metric does not use is ignored, so switching metric and back is not a
+ *  change. Used to decide whether a PATCH sends `condition`. */
 export function conditionChanged(a: RuleFormValues, b: RuleFormValues): boolean;
 ```
 
