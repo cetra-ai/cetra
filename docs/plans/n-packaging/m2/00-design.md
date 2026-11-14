@@ -101,7 +101,9 @@ the request and prints the report. It is the only command on the socket in M2.
 Why a socket:
 - it works with `docker compose exec llmobs llmobs admin backup …` (Q's cells) and over SSH;
 - authentication: the server checks the connecting process's uid (`SO_PEERCRED`, through
-  `UnixStream::peer_cred`) and accepts only the data directory's owner or root. File permissions
+  `UnixStream::peer_cred`) and accepts only its own uid or root. Its own uid is the owner of the
+  socket file it just bound, not the data directory's owner: a Kubernetes PVC root stays root's under
+  `fsGroup`, and `kubectl exec` runs as the server's uid (review N-1). File permissions
   alone are not enough: macOS ignores them on `connect`;
 - it adds no network surface and no token.
 

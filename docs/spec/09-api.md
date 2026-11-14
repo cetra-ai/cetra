@@ -179,7 +179,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `llmobs admin create-user / reset-password / list-users / rotate-encryption-key / check` | local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3) |
 | `llmobs admin reapply-deletions --from <data_dir>` | after a backup restore: copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`; the server redoes them (D-M-9, 12 § Backups) |
 | `llmobs admin backup --to <dir> [--meta-only]` | online backup of the running server through `<data_dir>/admin.sock`; the server writes `<dir>` (N M2, D-N-17–D-N-19) |
-| `llmobs admin gc-orphans [--min-age 1h] [--dry-run]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`) and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
+| `llmobs admin gc-orphans [--min-age 1h] [--dry-run] [--rollback-bucket]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`); in S3 mode a real run needs `--rollback-bucket`, since it rolls the bucket back and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
 | `llmobs admin migrate` | with the server stopped: run the migrations of `meta.db` and `catalog.db`, then exit (restores of older backups, D-N-22) |
 | `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` | maintenance |
 | `llmobs login --url …` · `llmobs logout` | PAT login |

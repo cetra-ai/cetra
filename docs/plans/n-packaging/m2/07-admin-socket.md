@@ -17,7 +17,7 @@ features. `UnixListener` and `UnixStream` need it; today it is only on through f
 
 - `crates/server/src/serve.rs`: `bind` (where `tasks` are pushed), `Running::shutdown`, and the
   tests that start and stop a server.
-- B6's `backup::run`, `BackupRequest`, `BackupReport`, `BackupError::code`.
+- B6's `backup::run`, `BackupReport`, `BackupError::code`.
 
 ## Protocol
 
@@ -72,8 +72,10 @@ pub(crate) fn spawn(state: AppState, data_dir: &Path) -> Option<JoinHandle<()>>
   `std::fs::rename` it to `admin.sock`. The socket never exists under its real name with a wider
   mode.
 - **Authentication:** for each accepted connection, read `stream.peer_cred()?.uid()` and compare
-  it with `std::fs::metadata(data_dir)?.uid()` (`std::os::unix::fs::MetadataExt`). Accept the
-  owner or uid 0. Any other caller gets `{"ok":false,"code":"forbidden",…}` and the connection is
+  it with the server's own uid, read once at bind time as the owner of the socket file it just
+  created (`std::fs::metadata(socket)?.uid()`, `std::os::unix::fs::MetadataExt`; no `unsafe`
+  `geteuid`). Accept that uid or uid 0. Not the data directory's owner: on a Kubernetes PVC it is
+  root, while the server and `kubectl exec` run as 65532 (review N-1). Any other caller gets `{"ok":false,"code":"forbidden",…}` and the connection is
   closed. macOS ignores socket file permissions on `connect`, so this check, not the mode, is the
   authentication.
 - **Connections in a `JoinSet`:** the accept loop owns a `tokio::task::JoinSet`. Each connection is
@@ -85,7 +87,7 @@ pub(crate) fn spawn(state: AppState, data_dir: &Path) -> Option<JoinHandle<()>>
      the length), within a 10 s `tokio::time::timeout`. On timeout, close the connection and send
      nothing.
   2. Parses `AdminRequest`.
-  3. Runs `backup::run(&state, BackupRequest { to, meta_only })`.
+  3. Runs `backup::run(&state, &to, meta_only)`.
   4. Writes the response line and shuts the stream down.
 
   A backup can take minutes, so put no timeout on the request.

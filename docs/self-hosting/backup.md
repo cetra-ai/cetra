@@ -47,15 +47,15 @@ took: 4.2 s
   65532 in the image). The target's parent directory must be writable by that user.
 - `<dir>` must be absent or empty, and outside the data directory (symlinks are resolved first).
 - One backup runs at a time. A second request fails with `busy`.
-- If a backup fails, or the server stops while it runs, `<dir>` is left without `manifest.json`. It is
-  incomplete: do not restore from it.
+- If a backup fails, or the server stops while it runs, the server removes what it wrote to `<dir>`.
+  A directory without `manifest.json` (after a crash, say) is incomplete: do not restore from it.
 - `--meta-only` is for S3 mode only. In local mode the command refuses it (`meta_only_needs_s3`),
   because such a backup could not be restored.
 
 The command fails with `backup failed (<code>): <message>` when the server refuses or cannot finish.
 The codes are `bad_request`, `target_not_empty`, `target_inside_data_dir`, `meta_only_needs_s3`,
 `busy`, `flush_failed`, `meta_copy_failed`, `snapshot_failed`, `objects_failed`, `forbidden` (the
-caller is neither the data directory's owner nor root) and `io`. When no server answers, the command
+caller is neither the server's user nor root) and `io`. When no server answers, the command
 says so and names the socket.
 
 What the server does:
@@ -106,10 +106,21 @@ docker run --rm -v llmobs_backups:/backups busybox:1.37 chown 65532:65532 /backu
 docker compose exec llmobs llmobs admin backup --to /backups/$(date +%F)
 ```
 
-**Kubernetes.** The Helm chart has no value for a second volume yet. Add a PersistentVolumeClaim
-`llmobs-backups`, writable by uid 65532, and mount it at `/backups` in the `llmobs` container of the
-StatefulSet. A `kubectl` patch is overwritten by the next `helm upgrade`: keep the change in a
-post-renderer or in your own copy of the chart. Then run:
+**Kubernetes.** Create a PersistentVolumeClaim `llmobs-backups`, writable by uid 65532 (the chart's
+`fsGroup` makes it group-writable), and mount it with the chart's `extraVolumes` and
+`extraVolumeMounts`:
+
+```yaml
+extraVolumes:
+  - name: backups
+    persistentVolumeClaim:
+      claimName: llmobs-backups
+extraVolumeMounts:
+  - name: backups
+    mountPath: /backups
+```
+
+Then run:
 
 ```bash
 kubectl -n llmobs exec llmobs-0 -- llmobs admin backup --to /backups/$(date +%F)
@@ -220,6 +231,26 @@ Restore with the server stopped. The steps are the same for an online and a cold
 where the step says so. The order matters: the server must not start before the deletions are
 re-applied.
 
+**Only one server may use the data.** When you restore onto a new machine, first make sure the old
+server is stopped and cannot start again (stop its service, scale it to 0, or revoke its bucket
+credentials). In S3 mode two servers on one bucket prefix delete each other's objects.
+
+**Running the admin commands in a container.** The commands below need the server's configuration
+and data volume, with the server stopped:
+- **docker-compose:** `docker compose stop llmobs`, then prefix each command with
+  `docker compose run --rm --no-deps llmobs`, for example
+  `docker compose run --rm --no-deps llmobs admin gc-orphans --dry-run`. To fill the named volume,
+  mount it in a helper container, e.g.
+  `docker run --rm -v llmobs_llmobs-data:/data -v /srv/backups/2026-11-14:/backup:ro busybox:1.37 sh -c 'cp -a /backup/. /data/ && chown -R 65532:65532 /data'`.
+- **Kubernetes:** scale the StatefulSet to 0. The image has no shell, so fill the PVC
+  `data-llmobs-0` from a helper pod (busybox, uid 65532) that mounts it and the backup volume. Then
+  run each admin command as a one-off pod from the llmobs image with `restartPolicy: Never`: the
+  pod mounts `data-llmobs-0` at `/data` (and the config at `/etc/llmobs`), carries the
+  StatefulSet's env, Secret and ConfigMap (`kubectl -n llmobs get statefulset llmobs -o yaml`
+  shows them), runs as uid 65532, and its `args` are the command, e.g.
+  `["admin", "gc-orphans", "--dry-run"]`. Read its output with `kubectl logs`, delete it, and
+  scale back to 1 after the last step.
+
 1. Stop llmobs.
 2. Keep the current data directory aside (move it, or keep a copy of its `meta.db`): you need it
    for step 8.
@@ -229,7 +260,7 @@ re-applied.
      backup, `objects/`. There is no `wal/` to copy: the server creates it, and the WAL resumes after
      the catalog's flushed sequence.
 
-   Copy with `cp -a`, which keeps the hard links' content. The data directory must belong to the
+   Copy with `cp -a` (the copies are independent of the backup's hard links). The data directory must belong to the
    server's user (uid 65532 in the image); in the image, `tar --numeric-owner` as root keeps the owner.
 4. In S3 mode:
    - **cold backup:** make the bucket prefix identical to the backup copy, deleting newer objects:

@@ -80,8 +80,8 @@ async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, Catal
 }
 
 /// Before migrations that change an existing database, copies `<name>` to
-/// `<name>.pre-<binary version>` with `VACUUM INTO`, and removes the other
-/// `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
+/// `<name>.pre-m<applied, 4 digits>` with `VACUUM INTO` (an existing copy is
+/// kept), and removes the other `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
 /// current one (`applied >= expected`) get no copy. File errors arrive as
 /// `sqlx::Error::Io`.
 async fn pre_migration_copy(

@@ -18,3 +18,4 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `llmobs admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
+- Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).

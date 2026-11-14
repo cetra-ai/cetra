@@ -10,7 +10,7 @@ What happens on upgrade:
   They only go forward.
 - Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named
   `meta.db.pre-m<N>` and `catalog.db.pre-m<N>` in the data directory, where `<N>` is the highest
-  migration applied before the upgrade (for example `meta.db.pre-m12`). Only the copy from the last
+  migration applied before the upgrade (for example `meta.db.pre-m0012`). Only the copy from the last
   upgrade is kept.
   Delete the `*.pre-m*` files once the upgrade is verified. Until then they are copies of your data,
   like a backup, and count against your backup retention (GDPR).

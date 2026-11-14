@@ -66,8 +66,8 @@ Errors map to `CatalogError::PreMigrationCopy`. Add the variant in `error.rs`.
 
 The sentence about the automatic pre-migration copies currently says "(not built)" and "are track N's
 M2". Make it: "Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named
-`meta.db.pre-<version>` / `catalog.db.pre-<version>` (by `VACUUM INTO`), and only the copy from the
-last upgrade (D-N-22)."
+`meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration
+applied before the upgrade, and only the copy from the last upgrade (D-N-22)."
 
 ## Tests
 
