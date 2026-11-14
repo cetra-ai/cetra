@@ -43,8 +43,6 @@ pub(crate) enum Writer {
     /// A `pk` key on `POST /api/public/feedback`.
     EndUser { key_id: Uuid },
     /// An evaluator through the queue: a rule's job, or a manual run (`rule_id: None`).
-    // I3.6 writes evaluator scores.
-    #[allow(dead_code)]
     Evaluator {
         kind: EvaluatorKind,
         evaluator_id: Uuid,

@@ -149,7 +149,7 @@ pub(crate) async fn run(
                             errors: Vec::new(),
                         });
                     }
-                    Err(LoadError::Busy) => {
+                    Err(LoadError::Busy | LoadError::Saturated) => {
                         return Err(ApiError::Unavailable {
                             detail: "storage is busy",
                         });

@@ -82,6 +82,8 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// The eval queue's in-memory state (D-I-6).
+    pub(crate) eval: crate::eval::EvalQueue,
 }
 
 impl AppState {
