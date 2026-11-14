@@ -648,6 +648,56 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             params(&[("org", "acme")]),
             "static/deletion-org.json",
         ),
+        example(
+            "list_online_rules",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rules.json",
+            "application/json",
+        ),
+        example(
+            "get_online_rule",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/online-rule.json",
+            "application/json",
+        ),
+        example_created(
+            "post_online_rule",
+            BTreeMap::new(),
+            "static/online-rule.json",
+        ),
+        example(
+            "post_online_rule_resume",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/online-rule.json",
+            "application/json",
+        ),
+        example(
+            "list_eval_jobs",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/eval-jobs.json",
+            "application/json",
+        ),
+        example(
+            "get_eval_job",
+            params(&[("id", "01900000-0000-7000-8000-000000000800")]),
+            BTreeMap::new(),
+            "static/eval-job.json",
+            "application/json",
+        ),
+        Example {
+            status: 202,
+            ..example(
+                "post_evaluator_run",
+                params(&[("id", "01900000-0000-7000-8000-000000000500")]),
+                BTreeMap::new(),
+                "static/eval-job-queued.json",
+                "application/json",
+            )
+        },
     ]);
     out.manifest.sort_by(|left, right| {
         left.operation_id
