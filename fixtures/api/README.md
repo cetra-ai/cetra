@@ -33,6 +33,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Personal token | `01900000-0000-7000-8000-000000000201`, prefix `pat-llmobs-EXAMPL`. `personal-token-created.json` uses the synthetic `pat-llmobs-EXAMPLE0…` secret. It is not a live token |
 | Invitation | `01900000-0000-7000-8000-000000000300` for `guest@example.com`. `invite-created.json` uses the synthetic accept token `EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA`. It is not a live invitation |
 | LLM connection | `01900000-0000-7000-8000-000000000400`, `OpenAI`. `requests/llm-connection-create.json` holds a synthetic key; it is not a live key |
+| Deletions | `01900000-0000-7000-8000-000000000900` (`trace_ids`), `…0901` (`filter`), `…0902` (`user`), `…0903` (`project`), `…0904` (`org`), `…0905` (`user`, `resolving`, the `202` answer of `create_deletion`). `deletions.json`, `deletion.json`, `deletion-project.json`, `deletion-org.json` and `deletion-resolving.json` use them. They are not live deletions |
 | Evaluator | `01900000-0000-7000-8000-000000000500`, `Relevance`, an LLM judge on connection `…0400`, score `relevance` |
 | Score definition | `01900000-0000-7000-8000-000000000600`, `relevance`, numeric from 0 to 1 |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |

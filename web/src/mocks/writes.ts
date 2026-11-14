@@ -4,6 +4,10 @@ import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
+import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
+import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
+import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
+import deletionResolvingDocument from "../../../fixtures/api/static/deletion-resolving.json";
 import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
@@ -79,11 +83,23 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   },
   { operationId: "post_project", method: "post", path: "/api/v1/orgs/{org}/projects" },
   { operationId: "patch_project", method: "patch", path: "/api/v1/projects/{project}" },
+  { operationId: "delete_project", method: "delete", path: "/api/v1/projects/{project}" },
+  { operationId: "delete_org", method: "delete", path: "/api/v1/orgs/{org}" },
   { operationId: "post_api_key", method: "post", path: "/api/v1/projects/{project}/api-keys" },
   {
     operationId: "delete_api_key",
     method: "delete",
     path: "/api/v1/projects/{project}/api-keys/{id}",
+  },
+  {
+    operationId: "create_deletion",
+    method: "post",
+    path: "/api/v1/projects/{project}/deletions",
+  },
+  {
+    operationId: "preview_deletion",
+    method: "post",
+    path: "/api/v1/projects/{project}/deletions/preview",
   },
   {
     operationId: "put_project_member",
@@ -218,6 +234,10 @@ const RESPONSES: Record<string, Respond> = {
       { status: 201 },
     );
   },
+  create_deletion: () => HttpResponse.json(deletionResolvingDocument, { status: 202 }),
+  delete_project: () => HttpResponse.json(deletionProjectDocument, { status: 202 }),
+  delete_org: () => HttpResponse.json(deletionOrgDocument, { status: 202 }),
+  preview_deletion: () => HttpResponse.json(deletionPreviewDocument),
   delete_current_token: () => noContent(),
   delete_personal_token: () => noContent(),
 

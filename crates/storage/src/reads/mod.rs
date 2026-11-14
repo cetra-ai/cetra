@@ -6,6 +6,7 @@
 
 mod alerts;
 mod cursor;
+mod deletions;
 pub(crate) mod metrics;
 mod scores;
 mod sessions;
@@ -21,6 +22,10 @@ use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, TimeWindow};
 
 pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value, check_alert_filter};
+pub use deletions::{
+    FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
+    filter_trace_ids, user_deletion_scope,
+};
 pub use metrics::{
     Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,
     Point, Series, SeriesName,

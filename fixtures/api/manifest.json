@@ -1,5 +1,31 @@
 [
   {
+    "operation_id": "create_deletion",
+    "path_params": {},
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-resolving.json"
+  },
+  {
+    "operation_id": "delete_org",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-org.json"
+  },
+  {
+    "operation_id": "delete_project",
+    "path_params": {},
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-project.json"
+  },
+  {
     "operation_id": "get_admin_license",
     "path_params": {},
     "query": {},
@@ -32,6 +58,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/auth-config.json"
+  },
+  {
+    "operation_id": "get_deletion",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000902"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletion.json"
   },
   {
     "operation_id": "get_evaluator",
@@ -447,6 +483,14 @@
     "file": "static/channels.json"
   },
   {
+    "operation_id": "list_deletions",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletions.json"
+  },
+  {
     "operation_id": "list_evaluator_templates",
     "path_params": {},
     "query": {},
@@ -471,6 +515,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/llm-connections.json"
+  },
+  {
+    "operation_id": "list_org_deletions",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-deletions.json"
   },
   {
     "operation_id": "list_org_invites",
@@ -714,6 +768,14 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/signup-response.json"
+  },
+  {
+    "operation_id": "preview_deletion",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletion-preview.json"
   },
   {
     "operation_id": "run_sql",
