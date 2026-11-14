@@ -29,7 +29,7 @@ The results are written up so they can back a "fast and solid" claim.
 Reading the durability paths for this design (`wal/segment.rs`, `wal/writer.rs`, `wal/replay.rs`, `objects.rs`, `gc.rs`, `read_cache.rs`) found candidate bugs. M2 confirms each one with a lossy-crash test before fixing it.
 
 1. **WAL rotation in interval mode** (`wal.sync = "<duration>"`). `IoJob::commit` writes a group and rotates without syncing the old segment, then drops it, so that segment's tail stays dirty. On power loss the old segment is torn but is no longer the last one. Replay treats a bad record in a non-final segment as corruption and **refuses to start** (spec 03 §1 Recovery). The default `"always"` mode is not affected.
-2. **GC unlink is not made durable.** `collect_obsolete` deletes a local object, then its `data_files` row, with no directory fsync in between. After a power loss the file can come back with no row pointing to it. Nothing lists the object tree, so the file leaks forever.
+2. **GC unlink is not made durable.** `collect_obsolete` deletes a local object, then its `data_files` row, with no directory fsync in between. After a power loss the file can come back with no row pointing to it. Nothing lists the object tree today, so the file leaks forever. N's `collect_orphans` (N M2, B5) will reclaim such files when an operator runs `llmobs admin gc-orphans`, but the leak itself is a durability bug and M2 fixes it.
 3. **Failed WAL group.** `discard_unacked` removes a new empty segment without a directory fsync. It also runs `rewind` (`set_len` + `sync_all`) after a failed `fdatasync`, which is a second fsync after the first one failed. The writer stops either way. After a restart, an unacknowledged group may still be on disk and be replayed. That is acceptable (the client got an error and may retry, and duplicates are tolerated), but it must be documented and tested.
 4. **Read cache `size` file.** It is written through `write_renamed` with no fsync and no checksum. A torn write that still parses as a number would give a wrong object size. That size bounds block reads, so it could serve short or wrong ranges. The blocks themselves carry a CRC.
 5. **Catalog fsync errors.** SQLite reports `SQLITE_IOERR_FSYNC`, but nothing defines what the committer does next. Today a failed commit is a retryable job error, which repeats the fsyncgate mistake on `catalog.db`.
@@ -47,13 +47,35 @@ What we take from each (research brief of this design session; no code copied):
 - **`object_store` crate.** `ThrottledStore` adds per-call latency only. The AWS client retries 5xx (503 included), 429, 408, connection errors and resets, up to 10 times within 3 minutes. It retries timeouts only for requests marked idempotent. Toxiproxy works at the TCP level, so it can reset or stall a connection but cannot return an HTTP 503 (M4).
 - **S3 multipart.** An incomplete multipart upload is kept, and billed, until it is aborted or a lifecycle rule removes it. Hetzner documents such a rule. Our flush and compaction must abort what they start, and the self-hosting docs must recommend the rule (M4).
 
+## Other tracks in `crates/storage`
+
+Two other tracks change the same crate while R runs (cross-track review X20):
+
+- **N's M2, online backups** (`docs/plans/n-packaging/m2/`, B1–B5 and B9):
+  - `gc.grace` up to 30 days;
+  - `Storage::flush_now`;
+  - an `object_gc_gate` and a pinned catalog snapshot (`snapshot_catalog`);
+  - `Storage::copy_objects`, which hard-links objects into a backup;
+  - `Storage::collect_orphans`, which lists the object store;
+  - pre-migration copies.
+- **P's M4, the data-access window** (D-P-21): `QueryOptions::visible_from` on every provider.
+
+How R handles them:
+- **Rebase points.** M1's code is test-only (`src/model_tests/`), so it conflicts with neither, except on the `mod` lines of `lib.rs`. M2 (the `fs` seam) rebases onto whatever of B3–B5 and B9 has merged when M2 starts. Its inventory of file operations then includes `copy_objects`' hard links and the pre-migration copies, and the § Durability table covers them.
+- **Model coverage.**
+  - Once B2 merges, the M1 model gets a `Flush` op through `flush_now`, a flush without a restart.
+  - Once P's M4 merges, a follow-up sub-phase adds `visible_from` to the model's reads: spans and traces hidden by their own `start_time` (D-P-21's straddling-trace rule stays P's design).
+  - M6's targeted race tests cover the `object_gc_gate` against GC and the snapshot against concurrent commits.
+- **Orphans.** M4's orphan audit is `collect_orphans` in dry-run mode (§ M4).
+- **Dependencies.** R's roadmap row lists N's M2 and P's M4 as ordering constraints for M2, M4 and the `visible_from` follow-up.
+
 ## Milestones
 
 The order puts first what the user called most important: wrong results (D-R-1). Each milestone ends with its tests in `just test` or a documented `just` recipe, the bugs they found fixed (D-R-2), and a findings section in `docs/research/storage/hardening.md`.
 
 ### M1 — Model-based correctness
 
-A proptest state machine runs against a simple in-memory model of every read the server makes. It replaces `compaction/model.rs` (D-R-3).
+A proptest state machine runs against a simple in-memory model of the reads behind every page, plus the scope reads of deletions and the alert measures. It replaces `compaction/model.rs` (D-R-3).
 - **Operations:** appends of whole traces and of late spans (with re-sends), score writes, updates and deletes, trace and user deletions, retention, compaction passes, GC, deletion passes, clean restarts, and **crashes without shutdown** (D-R-4). All of these run across two projects.
 - **Checked reads:** through the public `reads` API on a `QueryContext`, the same functions the server calls:
   - `trace_list` (unwindowed and windowed), `trace_detail`, `span_list`, `span_detail`;
@@ -87,7 +109,10 @@ Plan: `01-m1-model.md`.
 
 ### M3 — Fuzzing
 
-- **Layout.** `fuzz/` at the repository root is a cargo-fuzz crate with its own empty `[workspace]` and its own `Cargo.lock`, outside the main workspace (the cargo-fuzz norm). It needs nightly Rust and libFuzzer, which `just check` must not depend on (D-R-7).
+- **Layout.** `fuzz/` at the repository root is a cargo-fuzz crate with its own empty `[workspace]` and its own `Cargo.lock`, outside the main workspace (the cargo-fuzz norm). It needs nightly Rust and libFuzzer, which `just check` must not depend on (D-R-7). It still goes through the repository's supply-chain checks (cross-track review X23):
+  - `just deny` also runs `cargo deny --manifest-path fuzz/Cargo.toml check`, with the same `deny.toml`;
+  - `.github/dependabot.yml` gets a `/fuzz` cargo entry;
+  - AGENTS.md § Dependencies records the exception: `fuzz/` pins its fuzz-only crates (`libfuzzer-sys`, `arbitrary`) in its own manifest, and everything else comes through its path dependencies on the workspace crates.
 - **Entry points.** Each target calls one function of the crate under test. That function is `pub` and `#[doc(hidden)]` under `cfg(any(test, fuzzing))` (cargo-fuzz sets `--cfg fuzzing`), so the decoders stay crate-private for everyone else.
 - **Targets:**
   - `storage`:
@@ -119,7 +144,7 @@ Plan: `01-m1-model.md`.
   - no wrong result (the M1 model gets an S3 mode with `ChaosStore`);
   - every staged object either becomes a file or is collected;
   - every multipart upload we start is completed or aborted;
-  - an orphan audit (list the bucket, compare it with `catalog.db`) is clean after GC.
+  - an orphan audit is clean after GC. It is N's `Storage::collect_orphans` in dry-run mode (N M2, B5), not a second lister. If R's M4 lands before B5, M4 writes the audit as a test helper, and B5 replaces it.
 - **Real S3.** The `tests/s3.rs` suite and the M1 model's S3 mode run once against a Hetzner Object Storage bucket the user provides when M4 starts (credentials in environment variables only). The run also probes conditional puts, list-after-write, multipart limits and the abort lifecycle rule. Results go in `hardening.md`; `docs/self-hosting/` recommends the lifecycle rule.
 
 ### M5 — Resource exhaustion
@@ -160,11 +185,18 @@ The rule, written into spec 03 (new § Format versions), D-R-12:
   `just golden-dir` writes a small data directory (two projects, every table, a pending and an applied deletion, a retention watermark, L0 and L1 files, WAL tail records). Each release commits its directory as `fixtures/storage/golden/<version>.tar.zst`. A CI test unpacks every one, opens it with the current binary, and checks the M1 model's reads against its `expected.json`.
 - **Which directories CI keeps (user):** the 0.x directories until 1.0. 1.0 may drop them, with an upgrade note to pass through the last 0.x first. From 1.0, every release's directory stays.
 
-M8's plan is written once the release date is close. Until then the golden-dir tooling is not built.
+- **Release step.** Producing `fixtures/storage/golden/<version>.tar.zst` is a step of N's release process: `release-prep` runs `just golden-dir`, and `release-verify` checks that the directory exists. M8 asks the coordinating session to add it to N's scripts (cross-track review X21).
+
+**Held (cross-track review X30).** The trigger for "first public release" is being settled by the coordinator and the user in a plain-numbered decision, because Q's cloud cells may hold data that must survive before any public tag, and spec 12 § Upgrades disagrees today. D-R-12 and M8 follow that decision: M8's plan is written, and scheduled before that trigger, once it is made. Until then the golden-dir tooling is not built.
 
 ## Cross-cutting rules
 
-- **Scope of edits.** `crates/storage/`, `crates/otel/` (fuzz entry points and fixes only), `fuzz/`, `tools/lazyfs/`, `justfile`, `.github/workflows/nightly.yml` (M3), `docs/`. Changes to `llmobs-core` or to the server are requested from the coordinating session.
+- **Scope of edits.**
+  - `crates/storage/`, `crates/otel/` (fuzz entry points and fixes only), `fuzz/`, `tools/lazyfs/`, `justfile`, `docs/`;
+  - `AGENTS.md`, for its Commands, Tests, Layout and CI sections, whenever R adds a recipe, an environment variable, a directory or a workflow;
+  - `.github/workflows/nightly.yml`, `.github/dependabot.yml` and the `just deny` recipe (M3, for `fuzz/`).
+
+  Changes to `llmobs-core`, to the server or to N's release scripts (M8's golden-directory step) are requested from the coordinating session.
 - **Fixes** (D-R-2). A bug found by an R test is fixed in R, in a sub-phase of its own, with the shrunk case as a named regression test. The fix and the test share a commit. A fix that needs a format, public API or spec semantic change stops and is raised first.
 - **No production cost.** Test seams compile to nothing outside `cfg(test)`/`cfg(fuzzing)`, as `hooks.rs` does. The `fs` module's production path is a direct call.
 - **Findings log.** `docs/research/storage/hardening.md` records every bug found: milestone, test, shrunk case, cause, fix commit. Each run has its machine and command. This is the public record behind the robustness claims.
