@@ -14,13 +14,11 @@ use crate::api::online_rules::BudgetPeriod;
 pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
 
 /// The UTC midnight at or before `now`.
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) fn day_start(now: i64) -> i64 {
     now - now.rem_euclid(DAY_NS)
 }
 
 /// 00:00 UTC on the first day of `now`'s month, or the day start if that cannot be built.
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) fn month_start(now: i64) -> i64 {
     DateTime::<Utc>::from_timestamp_nanos(now)
         .date_naive()
@@ -31,7 +29,6 @@ pub(crate) fn month_start(now: i64) -> i64 {
 }
 
 /// The start of the current period.
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) fn period_start(period: BudgetPeriod, now: i64) -> i64 {
     match period {
         BudgetPeriod::Day => day_start(now),
@@ -40,7 +37,6 @@ pub(crate) fn period_start(period: BudgetPeriod, now: i64) -> i64 {
 }
 
 /// The judge model's price row when it prices both input and output, else `None` (D-I-15).
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) fn model_price<'a>(
     prices: &'a PriceTable,
     model: &str,
@@ -55,7 +51,6 @@ pub(crate) fn model_price<'a>(
 /// The cost estimate of one judge call: `ceil(prompt_chars / 4)` input tokens and
 /// `max_output_tokens` output tokens at the row's base prices (USD per million tokens).
 /// Tiers are ignored. Rows come from [`model_price`], which guarantees both prices.
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) fn estimate_usd(prompt_chars: usize, max_output_tokens: u32, price: &PriceRow) -> f64 {
     let input_tokens = prompt_chars.div_ceil(4) as f64;
     let input_price = price.price_input.unwrap_or(0.0);
@@ -65,7 +60,6 @@ pub(crate) fn estimate_usd(prompt_chars: usize, max_output_tokens: u32, price: &
 
 /// Spend and reservations of every rule, for the current period of each (D-I-15).
 #[derive(Debug, Default)]
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) struct Budgets {
     rules: Mutex<HashMap<Uuid, RuleBudget>>,
 }
@@ -81,7 +75,6 @@ struct RuleBudget {
 #[derive(Debug)]
 pub(crate) enum Reserve<'a> {
     /// Reserved: settle the guard after the call, or drop it to give the amount back.
-    #[allow(dead_code)] // I3.6 uses it.
     Reserved(Reservation<'a>),
     /// `spent + reserved + estimate > budget`: pause the rule.
     Over,
@@ -103,7 +96,6 @@ pub(crate) struct Reservation<'a> {
 
 impl Reservation<'_> {
     /// After a call: the reservation becomes `actual` spend.
-    #[allow(dead_code)] // I3.6 uses it.
     pub(crate) fn settle(mut self, actual: f64) {
         self.done = true;
         let mut rules = self.budgets.lock();
@@ -142,7 +134,6 @@ impl Budgets {
     }
 
     /// Reserves `estimate` for `rule` when `spent + reserved + estimate` is within `budget`.
-    #[allow(dead_code)] // I3.6 uses it.
     pub(crate) fn try_reserve(
         &self,
         rule: Uuid,
@@ -173,7 +164,6 @@ impl Budgets {
     /// Sets the spend read from `rule_spend` for `period_start`, only when the rule has no entry
     /// for that period. An entry for the same period is kept as it is: another job loaded it first,
     /// and settles may have added to it since that read.
-    #[allow(dead_code)] // I3.6 uses it.
     pub(crate) fn load(&self, rule: Uuid, period_start: i64, spent: f64) {
         let mut rules = self.lock();
         if rules

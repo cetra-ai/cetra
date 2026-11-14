@@ -336,6 +336,7 @@ impl TestApp {
             entitlements,
             trace_loads: crate::eval::trace_load::TraceLoads::default(),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            eval: crate::eval::EvalQueue::default(),
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)

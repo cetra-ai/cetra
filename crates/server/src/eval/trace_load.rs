@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
@@ -79,6 +80,8 @@ pub(crate) enum LoadError {
     EvaluationTrace,
     #[error("storage is busy")]
     Busy,
+    #[error("storage is busy")]
+    Saturated,
     #[error("storage read failed")]
     Failed(#[source] RunError),
     #[error("could not read the spans")]
@@ -93,11 +96,21 @@ pub(crate) async fn load_trace(
     target_span: Option<SpanId>,
     around: Option<i64>,
 ) -> Result<LoadedTrace, LoadError> {
-    load_trace_capped(state, project, trace_id, target_span, around, MAX_SPANS).await
+    load_trace_capped(
+        state,
+        project,
+        trace_id,
+        target_span,
+        around,
+        MAX_SPANS,
+        READ_TIMEOUT,
+    )
+    .await
 }
 
-/// [`load_trace`] with the span cap as a parameter, so a test can reach `truncated` with a few
-/// spans. `load_trace` passes [`MAX_SPANS`].
+/// [`load_trace`] with the span cap and the permit wait as parameters, so a test can reach
+/// `truncated` with a few spans and `Saturated` without waiting 30 s. `load_trace` passes
+/// [`MAX_SPANS`] and [`READ_TIMEOUT`].
 async fn load_trace_capped(
     state: &AppState,
     project: ProjectId,
@@ -105,11 +118,14 @@ async fn load_trace_capped(
     target_span: Option<SpanId>,
     around: Option<i64>,
     max_spans: usize,
+    permit_wait: Duration,
 ) -> Result<LoadedTrace, LoadError> {
-    let _permit = tokio::time::timeout(READ_TIMEOUT, state.trace_loads.semaphore().acquire())
-        .await
-        .map_err(|_| LoadError::Busy)?
-        .map_err(|_| LoadError::Busy)?;
+    // No permit within the wait: this trace did not fail, the other loads are busy (D-I-23).
+    let _permit =
+        match tokio::time::timeout(permit_wait, state.trace_loads.semaphore().acquire()).await {
+            Ok(permit) => permit.map_err(|_| LoadError::Busy)?,
+            Err(_) => return Err(LoadError::Saturated),
+        };
     let source = state
         .storage
         .query(project, QueryOptions { around })
@@ -350,15 +366,31 @@ mod tests {
         app.commit_spans(&seeded.project, vec![root, early, late])
             .await;
 
-        let loaded = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 2)
-            .await
-            .expect("loaded");
+        let loaded = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            trace_id(),
+            None,
+            None,
+            2,
+            READ_TIMEOUT,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(loaded.spans.len(), 2);
         assert!(loaded.truncated);
 
-        let whole = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 3)
-            .await
-            .expect("loaded");
+        let whole = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            trace_id(),
+            None,
+            None,
+            3,
+            READ_TIMEOUT,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(whole.spans.len(), 3);
         assert!(!whole.truncated);
     }
@@ -462,6 +494,29 @@ mod tests {
 
         let result = load_trace(&app.state, seeded.project.id, trace_id(), None, None).await;
         assert!(matches!(result, Err(LoadError::EvaluationTrace)));
+    }
+
+    #[tokio::test]
+    async fn no_permit_within_the_wait_is_saturated() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let _held = app
+            .state
+            .trace_loads
+            .semaphore()
+            .try_acquire_many(MAX_LOADS)
+            .expect("permits");
+        let result = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            trace_id(),
+            None,
+            None,
+            MAX_SPANS,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(result, Err(LoadError::Saturated)));
     }
 
     #[tokio::test]

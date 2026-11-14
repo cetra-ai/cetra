@@ -12,7 +12,6 @@ pub(crate) const MIN_JOBS: usize = 20;
 
 /// The recent outcomes of each rule's jobs, `true` for a failure.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // I3.6 uses it.
 pub(crate) struct Breakers {
     windows: Mutex<HashMap<Uuid, VecDeque<bool>>>,
 }
@@ -24,7 +23,6 @@ impl Breakers {
 
     /// Records one job that reached the evaluator (`failed` true when it failed). True when the
     /// rule must pause: at least `MIN_JOBS` recorded and half or more failed. A trip clears the window.
-    #[allow(dead_code)] // I3.6 uses it.
     pub(crate) fn record(&self, rule: Uuid, failed: bool) -> bool {
         let mut windows = self.lock();
         let window = windows.entry(rule).or_default();
