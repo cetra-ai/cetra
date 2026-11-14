@@ -522,6 +522,16 @@ Decisions of track P (`docs/plans/p-entitlements/00-design.md`), numbered `D-P-<
 | D-P-31 | User-created orgs | **(user; Q's R4).** `orgs.user_create = false` → `POST /api/v1/orgs` is 403 and the UI links to `orgs.create_url`; bootstrap still creates the first org. |
 | D-P-32 | Plan page | **(user).** The entitlements response carries the plan (name, add-ons, source, token status, dates) and the limits; org settings get a read-only Plan page; `llmobs admin entitlements show <org>`. M3 adds usage. |
 | D-P-33 | Token push limiter | **(Q's R15, amends D-P-11).** Only tokens that fail verification count against the per-IP limiter; the path is `/api/internal/v1/orgs/{org_id}/entitlements`. |
+| D-P-34 | SDK pause on 402 | **(user).** After a 402, exporters log once and drop spans until `Retry-After` (default 1 h); score writes log once and drop. |
+| D-P-35 | gRPC rate limit | **`UNAVAILABLE` (amends D-P-19).** Retried by OTel exporters without `RetryInfo`; HTTP keeps 429; the cap stays `RESOURCE_EXHAUSTED` without `RetryInfo`. |
+| D-P-36 | Month counters | Per org and month in `Usage`, loaded from `usage_daily` plus unflushed counts under a flush lock, incremented by `Usage::add`; load errors fail open. |
+| D-P-37 | Cap response | `402` with `Retry-After` = seconds to 00:00 UTC on the 1st; checked before reading the body (HTTP), before reserving (gRPC), and in `scores::write`. |
+| D-P-38 | Notices | A 60 s task records 80 % and 100 % of `units_included` in `usage_notices` and emails owners once; owners and admins see a banner. |
+| D-P-39 | Users API | **(user; Q's R14).** Revoke, disable and delete a user by its control-plane identity subject (scope `users`); delete returns the orgs the user solely owned. |
+| D-P-40 | Memberships API | **(user; Q's R6).** Lookup by subject or email, and an org's members by role (scope `members`). |
+| D-P-41 | Teams SSO | **Federated by the control plane (user, amends D-P-25).** Cloud cells keep the control plane as their only provider; P's M5 serves self-hosted instances. |
+| D-P-42 | Usage view | **(user).** Month bar and daily chart on the Plan page from `GET /api/v1/orgs/{org}/usage`. |
+| D-P-43 | Q's other requests | R7, R13, R16 to a small auth track; R5, R17 to P's M4 once track M is implemented. |
 
 ## Open
 
