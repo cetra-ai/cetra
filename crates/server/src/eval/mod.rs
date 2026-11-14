@@ -8,8 +8,10 @@ pub(crate) mod dispatch;
 pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
+pub(crate) mod pending;
 pub(crate) mod retry;
 pub(crate) mod rule_limit;
+pub(crate) mod sampling;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
 
