@@ -8,7 +8,7 @@ import {
   typescriptSnippet,
   vercelSnippet,
 } from "@/components/onboarding/snippets";
-import { tracesNeedOnboarding } from "@/components/onboarding/state";
+import { onboardingShown, tracesNeedOnboarding } from "@/components/onboarding/state";
 
 const ORIGIN = "https://llmobs.example";
 
@@ -58,4 +58,11 @@ it("keeps onboarding for a preset and drops it when the list is constrained", ()
       { kind: "absolute", from: "2026-01-01T00:00:00.000Z", to: "2026-01-02T00:00:00.000Z" },
     ),
   ).toBe(false);
+});
+
+it("shows onboarding only when the all-time probe found no trace", () => {
+  expect(onboardingShown(true, 0)).toBe(true);
+  expect(onboardingShown(true, 1)).toBe(false);
+  expect(onboardingShown(true, undefined)).toBe(false);
+  expect(onboardingShown(false, 0)).toBe(false);
 });

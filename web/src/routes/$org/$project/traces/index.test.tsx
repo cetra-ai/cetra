@@ -592,6 +592,61 @@ it("replaces onboarding with the table when a trace arrives", async () => {
   }
 });
 
+it("asks for one trace over all time before it shows onboarding", async () => {
+  savedViewHandlers([]);
+  const probes: URL[] = [];
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        probes.push(url);
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  expect(probes[0]?.searchParams.get("limit")).toBe("1");
+  expect(probes[0]?.searchParams.has("filter")).toBe(false);
+  expect(probes[0]?.searchParams.has("include_eval")).toBe(false);
+});
+
+it("shows the empty range, not onboarding, when the project has traces outside it", async () => {
+  savedViewHandlers([]);
+  setOnboardingPollMs(20);
+  const dataset = createDataset({ seed: 1, now: Date.now(), traces: 1 });
+  const trace = dataset.traces[0];
+  if (!trace) {
+    throw new Error("missing trace");
+  }
+  const listed: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces") && url.searchParams.has("from")) {
+      listed.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      const probe = !url.searchParams.has("from");
+      return HttpResponse.json({ data: probe ? [trace] : [], next_cursor: null });
+    }),
+  );
+  try {
+    await renderApp("/acme/support-bot/traces");
+    expect(await screen.findByText("No traces in this time range.")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    const before = listed.length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(listed.length).toBe(before);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+    setOnboardingPollMs(ONBOARDING_POLL_MS);
+  }
+});
+
 it("opens the trace stream with the list filter and search", async () => {
   const streams: URL[] = [];
   const onStart = ({ request }: { request: Request }) => {

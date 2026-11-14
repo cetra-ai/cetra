@@ -53,3 +53,31 @@ export function traceListOptions(
     getNextPageParam: (page: Schema<"TracePage">) => page.next_cursor ?? undefined,
   };
 }
+
+/**
+ * The all-time probe that tells whether a project has any trace: one row, no window and no
+ * filter, so eval and experiment traces are excluded as the list excludes them by default.
+ */
+export function traceProbeOptions(org: string, project: string) {
+  const path = { project: projectRef(org, project) };
+  const query = { limit: 1 };
+  const { queryKey } = $api.queryOptions("get", "/api/v1/projects/{project}/traces", {
+    params: { path, query },
+  });
+  return {
+    queryKey,
+    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+      const { data, error } = await api.GET("/api/v1/projects/{project}/traces", {
+        params: { path, query },
+        signal,
+      });
+      if (error) {
+        throw error;
+      }
+      if (!data) {
+        throw new Error("Empty trace list response");
+      }
+      return data;
+    },
+  };
+}

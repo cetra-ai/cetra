@@ -13,3 +13,11 @@ export function tracesNeedOnboarding(
     range.kind === "preset"
   );
 }
+
+/**
+ * Onboarding replaces an empty list only when the list is unconstrained and the all-time
+ * probe found no trace (`probeRows` is undefined while the probe loads).
+ */
+export function onboardingShown(needs: boolean, probeRows: number | undefined): boolean {
+  return needs && probeRows === 0;
+}
