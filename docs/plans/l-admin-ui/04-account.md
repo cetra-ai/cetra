@@ -715,6 +715,8 @@ just check
 
 **Goal.** D-L-9: `llmobs login` opens `/cli-auth?port=&state=&host=`. The signed-in user confirms, the page creates a personal access token and hands it to the CLI's localhost callback. The page is not public. A signed-out user goes through `/login?redirect=…` (L5) and comes back.
 
+Hardening (L-4): the token expires after 90 days; Authorize sends it by a form POST to the callback, not in a URL; the page warns about a crafted link and labels the host "reported by the CLI". The CLI side (the POST callback and the expiry) is owned by the CLI and server sessions.
+
 **Edit only:**
 - `web/src/lib/external-navigation.ts` (new);
 - `web/src/lib/cli-auth.ts` (new);
