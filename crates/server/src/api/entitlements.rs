@@ -88,6 +88,7 @@ pub struct OrgPlan {
     pub name: String,
     /// Add-ons, e.g. `teams`.
     pub add_ons: Vec<String>,
+    /// Where the plan comes from.
     pub source: PlanSource,
     /// Omitted with the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]

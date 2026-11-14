@@ -137,7 +137,12 @@ async fn put_org_token(
             tracing::info!(target: "audit", org_id = %org, token_id = %token_id, "org entitlements updated");
             Ok(StatusCode::NO_CONTENT)
         }
-        PutOutcome::Same => Ok(StatusCode::NO_CONTENT),
+        // A retry after a cancelled request: the token is stored but memory may not hold it.
+        // `put_grant` ignores a grant that is not newer, so this is idempotent.
+        PutOutcome::Same => {
+            state.entitlements.put_grant(org, grant);
+            Ok(StatusCode::NO_CONTENT)
+        }
         PutOutcome::Stale => Err(ApiError::Conflict {
             detail: "a token with the same or a newer issued_at is stored",
         }),
@@ -197,7 +202,8 @@ async fn store_token(
         }
         Some(held) => {
             record_window_end(conn, org, held.grace_ends_at, held.limits.data_access_days).await?;
-            if defaults_window != new_window {
+            // At the held grace end the defaults row would share its key and replace it.
+            if defaults_window != new_window && now != held.grace_ends_at {
                 record_window_end(conn, org, now, defaults_window).await?;
             }
         }
@@ -598,6 +604,13 @@ mod tests {
         }
     }
 
+    /// The org's recorded window ends, newest first.
+    async fn windows(app: &TestApp, org: OrgId) -> Vec<(i64, Option<u64>)> {
+        window_ends_since(app.state.meta.reader(), org, 0)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn window_shrink_is_recorded() {
         let app = TestApp::new().await;
@@ -618,19 +631,118 @@ mod tests {
             "2025-12-03T00:00:00Z",
             &json!({"data_access_days": 30}),
         );
+        let day = 86_400 * 1_000_000_000_i64;
 
+        // The defaults' window is unlimited, so the first token ends it.
+        let first = app.state.clock.now_ns();
         assert_eq!(put(&app, org, &long).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(windows(&app, org).await, vec![(first, None)]);
+
+        let second = first + day;
+        app.state.clock.set(second);
         assert_eq!(put(&app, org, &short).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            windows(&app, org).await,
+            vec![(second, Some(1825)), (first, None)]
+        );
+
+        app.state.clock.set(second + day);
         assert_eq!(
             put(&app, org, &shorter).await.status,
             StatusCode::NO_CONTENT
         );
+        assert_eq!(
+            windows(&app, org).await,
+            vec![(second, Some(1825)), (first, None)],
+            "the same window adds no row"
+        );
+    }
 
-        let now = app.state.clock.now_ns();
-        let rows = window_ends_since(app.state.meta.reader(), org, 0)
+    #[tokio::test]
+    async fn replacing_at_the_held_grace_end_records_one_row() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        // The held token's grace ends exactly at the clock's start (2026-01-01T00:00:00Z).
+        let grace = app.state.clock.now_ns();
+        let held = org_token(
+            org,
+            "2025-11-01T00:00:00Z",
+            "2025-12-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            &[],
+            &json!({"data_access_days": 1825}),
+        );
+        let before = grace - 86_400 * 1_000_000_000_i64;
+        app.state.clock.set(before);
+        assert_eq!(put(&app, org, &held).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(windows(&app, org).await, vec![(before, None)]);
+
+        // Replaced at the instant the held token's grace ends: only the held window's end is
+        // recorded. The defaults row would have the same key and would replace it.
+        app.state.clock.set(grace);
+        let new = valid_token(
+            org,
+            "2025-12-25T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        assert_eq!(put(&app, org, &new).await.status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            windows(&app, org).await,
+            vec![(grace, Some(1825)), (before, None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_token_repairs_memory() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        let token = valid_token(org, "2025-12-01T00:00:00Z", &json!({}));
+        let defaults = app.state.entitlements.defaults().limits;
+        let (_, grant) = grant_from_token(&token, app.state.config.public_url.origin(), &defaults)
+            .expect("valid");
+        // The row was committed, but the request was cancelled before `put_grant`.
+        let row = StoredToken {
+            org_id: org,
+            token: token.clone(),
+            token_id: grant.token_id,
+            issued_at: grant.issued_at,
+            received_at: app.state.clock.now_ns(),
+        };
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { put_token(conn, &row).await }))
             .await
             .unwrap();
-        assert_eq!(rows, vec![(now, Some(1825))]);
+        assert!(app.state.entitlements.grant(org).is_none());
+
+        assert_eq!(put(&app, org, &token).await.status, StatusCode::NO_CONTENT);
+        assert!(app.state.entitlements.grant(org).is_some());
+    }
+
+    #[tokio::test]
+    async fn inactive_orgs_refuse_tokens() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        app.state
+            .meta
+            .write(|conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE orgs SET state = 'deleting' WHERE slug = 'acme'")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let token = valid_token(org, "2025-12-01T00:00:00Z", &json!({}));
+        assert_eq!(put(&app, org, &token).await.status, StatusCode::NOT_FOUND);
+        assert!(stored(&app, org).await.is_none());
+        assert!(app.state.entitlements.grant(org).is_none());
     }
 
     #[tokio::test]

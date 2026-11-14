@@ -214,14 +214,19 @@ pub(crate) async fn authenticate(
     response
 }
 
-/// The caller of a bearer token: a key, a PAT, or `Unauthorized`. Shared by HTTP and gRPC.
+/// The caller of a bearer token: a key, a PAT, a control-plane token, or `Unauthorized`. A
+/// token that starts with the format tag is a control-plane token and is never tried as a key.
+/// Shared by HTTP and gRPC.
 pub(crate) async fn bearer_principal(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Principal, ApiError> {
     let token = bearer_token(headers)?;
     let now = state.clock.now_ns();
-    if token.starts_with(&format!("{}.", llmobs_token::TOKEN_TAG)) {
+    if token
+        .strip_prefix(llmobs_token::TOKEN_TAG)
+        .is_some_and(|rest| rest.starts_with('.'))
+    {
         return control_plane_principal(state, token, now);
     }
     let Some(kind) = secret::parse_key(token) else {
@@ -265,6 +270,7 @@ fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Pr
     let five_minutes = 300 * 1_000_000_000;
     let skew = 60 * 1_000_000_000;
     if claims.audience != state.config.public_url.origin()
+        || claims.expires_at <= claims.issued_at
         || claims.expires_at.saturating_sub(claims.issued_at) > five_minutes
         || now < claims.issued_at.saturating_sub(skew)
         || now >= claims.expires_at
@@ -512,6 +518,16 @@ mod tests {
                     "2026-01-01T00:00:00Z",
                     "2026-01-01T00:05:00Z",
                     "http://other.example",
+                    "orgs",
+                ),
+                true,
+            ),
+            (
+                "expires before it is issued",
+                control_plane(
+                    "2026-01-01T00:00:30Z",
+                    "2026-01-01T00:00:10Z",
+                    &origin,
                     "orgs",
                 ),
                 true,

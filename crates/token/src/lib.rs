@@ -13,6 +13,8 @@
 
 #![warn(missing_docs)]
 
+use std::sync::OnceLock;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -258,10 +260,17 @@ pub struct Verified {
 ///
 /// Returns the first [`TokenError`] that applies. The text never contains the token.
 pub fn verify(token: &str) -> Result<Verified, TokenError> {
-    let keys: Vec<(&'static BuiltInKey, VerifyingKey)> = built_in_keys()
-        .filter_map(|key| keys::decode(key.public).map(|verifying| (key, verifying)))
-        .collect();
-    verify_with(token, &keys)
+    verify_with(token, trusted_keys())
+}
+
+/// The built-in keys decoded once, on first use.
+fn trusted_keys() -> &'static [(&'static BuiltInKey, VerifyingKey)] {
+    static KEYS: OnceLock<Vec<(&'static BuiltInKey, VerifyingKey)>> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        built_in_keys()
+            .filter_map(|key| keys::decode(key.public).map(|verifying| (key, verifying)))
+            .collect()
+    })
 }
 
 /// [`verify`] against an explicit key table.

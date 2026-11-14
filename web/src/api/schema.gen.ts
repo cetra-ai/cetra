@@ -2212,6 +2212,7 @@ export interface components {
             id?: string;
             /** @description Display name. */
             name: string;
+            /** @description Where the plan comes from. */
             source: components["schemas"]["PlanSource"];
             /** @description Omitted with the defaults. */
             status?: components["schemas"]["PlanStatus"];

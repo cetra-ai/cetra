@@ -9473,7 +9473,8 @@
             "description": "Display name."
           },
           "source": {
-            "$ref": "#/components/schemas/PlanSource"
+            "$ref": "#/components/schemas/PlanSource",
+            "description": "Where the plan comes from."
           },
           "status": {
             "$ref": "#/components/schemas/PlanStatus",
