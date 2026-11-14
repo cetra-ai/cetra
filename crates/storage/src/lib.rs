@@ -109,6 +109,8 @@ mod deletion_tests;
 #[cfg(test)]
 mod drop_tests;
 #[cfg(test)]
+mod model_tests;
+#[cfg(test)]
 mod quarantine_tests;
 #[cfg(test)]
 mod retention;
