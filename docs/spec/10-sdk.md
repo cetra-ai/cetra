@@ -165,6 +165,7 @@ Known, accepted differences that the fixtures do not cover. The SDK READMEs list
 - **Zero-argument functions and `None`/`undefined`** (§ Testing).
 - **Integral floats.** JavaScript has one number type, and OTel JS encodes an integral number as `intValue`. So Python `params={"temperature": 1.0}`, `set_cost(1.0)` or metadata `2.0` give a double, TypeScript gives an int. Python always converts `set_cost`'s argument with `float()`. The server reads both (spec 02 rule 20).
 - **Large integers.** Python ints beyond ±(2^53−1) inside JSON payloads are written as JSON numbers; TypeScript `bigint` becomes a decimal string. As attributes (metadata) both write a JSON string.
+- **Usage counts.** TypeScript `setUsage` records only safe integers (`Number.isSafeInteger`, at most 2^53−1); larger values, non-integers and negatives are skipped with a debug line. Python `set_usage` records any non-negative `int` (not `bool`), including values beyond 2^53.
 - **Resource attributes:** see § Names.
 - **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to llmobs too; TypeScript sends only ours. The Python README warns about it.
 - **Abandoned generators.** A half-consumed Python sync generator that is garbage-collected ends its span with status ok; TypeScript (no finalizer) and Python async generators leave it unexported.
