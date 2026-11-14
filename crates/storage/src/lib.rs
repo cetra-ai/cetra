@@ -66,6 +66,7 @@ mod query_error;
 mod query_text;
 pub(crate) mod read_cache;
 mod reads;
+mod snapshot;
 mod sql;
 pub(crate) mod verify;
 mod views;
@@ -73,7 +74,7 @@ mod views;
 pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-pub use crate::error::{CompactionError, FlushNowError};
+pub use crate::error::{CompactionError, FlushNowError, SnapshotError};
 pub use crate::gc::ObsoleteReport;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
@@ -91,6 +92,7 @@ pub use reads::{
     session_detail, session_list, span_detail, span_list, trace_detail, trace_list,
     trace_list_plan, trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list,
 };
+pub use snapshot::{CatalogSnapshot, LiveObject};
 pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
@@ -675,8 +677,15 @@ impl Storage {
             .await?;
         drop(gate);
         // A second call finishes a drop whose media step failed, whether the
-        // commit above was the first or a no-op.
-        self.media.finish_drop(project).await?;
+        // commit above was the first or a no-op. While a catalog snapshot (a
+        // backup) holds the gate, the media step is left to the GC task's
+        // `finish_drops`, so this call does not wait for the whole backup
+        // (N M2, D-N-18).
+        if self.committer.object_gc_gate.try_read().is_ok() {
+            self.media.finish_drop(project).await?;
+        } else {
+            tracing::info!(project = %project, "project media deletion deferred to GC");
+        }
         if dropped {
             tracing::info!(project = %project, "project dropped");
         }
@@ -886,6 +895,37 @@ impl Storage {
             grace,
         )
         .await
+    }
+
+    /// Writes a consistent copy of `catalog.db` to `path` and pins every object it
+    /// lists until the returned [`CatalogSnapshot`] is dropped (N M2, D-N-18).
+    ///
+    /// The gate is taken before the committer lock, and held while the copy is
+    /// written and read. Media deletions wait for it; appends, flushes and
+    /// compaction commits do not.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotError`] when `path` exists or is not UTF-8, or when SQLite fails.
+    pub async fn snapshot_catalog(&self, path: &Path) -> Result<CatalogSnapshot, SnapshotError> {
+        if path.exists() {
+            return Err(SnapshotError::Exists);
+        }
+        let Some(target) = path.to_str() else {
+            return Err(SnapshotError::NonUtf8Path);
+        };
+        let gate = Arc::clone(&self.committer.object_gc_gate)
+            .write_owned()
+            .await;
+        let catalog = self.committer.snapshot_into(target).await?;
+        let (objects, flushed_seq) = snapshot::read_copy(path).await?;
+        Ok(CatalogSnapshot::new(
+            path.to_path_buf(),
+            objects,
+            flushed_seq,
+            catalog,
+            gate,
+        ))
     }
 
     /// One compaction pass at `now` (ns), run to completion. The background

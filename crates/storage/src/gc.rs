@@ -205,10 +205,16 @@ pub(crate) async fn collect_obsolete(
             .obsolete_before(cutoff, after, PAGE as u32)
             .await?;
         for file in &page {
-            match committer
-                .collect_obsolete_file(file, hooks, || objects.delete_len(&file.path))
-                .await?
-            {
+            // Taken outside the committer lock. Files a backup's verify pass
+            // quarantines leave the catalog without entering `retired`, so
+            // the gate is what keeps them (N M2, D-N-18).
+            let removal = {
+                let _gate = committer.object_gc_gate.read().await;
+                committer
+                    .collect_obsolete_file(file, hooks, || objects.delete_len(&file.path))
+                    .await?
+            };
+            match removal {
                 ObsoleteRemoval::Deleted { bytes } => {
                     report.deleted += 1;
                     report.bytes = report.bytes.saturating_add(bytes);
