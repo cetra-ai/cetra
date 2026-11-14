@@ -153,6 +153,7 @@ Run everything through `just`:
 | `just compose-smoke [tag] [s3]` · `just helm-check` · `just helm-smoke [tag]` · `just install-smoke` | packaging smoke tests (D-N-13) |
 | `just versions-check` | the chart and compose files carry the workspace version |
 | `just release-prep <version>` | set a release version everywhere and date the changelog (D-N-5) |
+| `just check-packaging` | packaging checks on x86_64 Linux (archive, image, compose, chart, install script); CI's `packaging` job (D-N-13) |
 
 Required tools:
 - `rustup` (the toolchain is pinned in `rust-toolchain.toml`)
@@ -162,12 +163,13 @@ Required tools:
 - `pnpm` (version in the root `package.json` `packageManager`)
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
+- for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI
 
 `.github/workflows/ci.yml` runs on every pull request and every push to `main`. `ci-ok` is the required status.
 
-CI runs the `just` recipes from the table. A branch that passes `just check` locally and leaves a clean tree passes CI, except for the runtime matrix (Python 3.15, Node 22.12).
+CI runs the `just` recipes from the table. A branch that passes `just check` locally and leaves a clean tree passes CI, except for the runtime matrix (Python 3.15, Node 22.12). The `packaging` job also needs `just check-packaging` (D-N-13).
 
 Actions are pinned by commit SHA with the tag in a comment; Dependabot updates them. Never use a tag or branch reference.
 

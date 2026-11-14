@@ -267,3 +267,14 @@ release-verify tag:
 # Print a version's changelog section (the GitHub release notes)
 release-notes version:
     tools/packaging/release-notes.sh {{version}}
+
+# Packaging checks on x86_64 Linux: what CI's packaging job runs (D-N-13)
+check-packaging: versions-check helm-check js-install
+    pnpm exec biome check tools/packaging
+    just dist x86_64-unknown-linux-musl
+    just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
+    just install-smoke
+    just image llmobs:dev
+    just image-smoke llmobs:dev
+    just compose-smoke llmobs:dev
+    just compose-smoke llmobs:dev s3
