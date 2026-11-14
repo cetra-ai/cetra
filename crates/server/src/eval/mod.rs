@@ -3,5 +3,6 @@
 pub(crate) mod connection;
 pub(crate) mod definitions;
 pub(crate) mod evaluator;
+pub(crate) mod execute;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
