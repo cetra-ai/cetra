@@ -13,7 +13,7 @@ What is left is server work: resolving which traces a request covers, a status l
 
 **Prerequisites** (checked when this plan was written, 2026-11-14):
 - A1 M5 (deletion, retention, project drop) and G M1–M5 are merged into `main`. L is implemented.
-- H (console) is merged. I (online evaluation) is being implemented; its M1 (connections, migration `0004_connections.sql`) is merged. M1–M7 and M9–M12 do not depend on I. **M8 needs I's M3 merged** (the `eval_jobs` table and the job executor). If it has not merged when you reach M8, stop and report.
+- H (console) is merged. I (online evaluation) is being implemented; its M1 and M2 are merged and its M3 is planned in [`../i-online-eval/03-m3-queue-rules.md`](../i-online-eval/03-m3-queue-rules.md). M1–M7 and M9–M12 do not depend on I. **M8 needs I's M3 merged** (the `eval_jobs` table, the job executor and manual runs). If it has not merged when you reach M8, stop and report.
 - Track P (plans and entitlements, D179) is not built. M leaves two call sites for it (§ Plans and cloud). Track Q (cloud control plane, D170) is not built either; M leaves one hook for it.
 - All of M is MIT core code (D172): nothing goes under `ee/`.
 - Node `26.13.0` is installed at `$HOME/.local/share/nvm/v26.13.0/bin`. It is not on the non-interactive `PATH`.
