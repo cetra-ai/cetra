@@ -76,6 +76,14 @@ const DROP_POINTS: &[(&str, HookPoint)] = &[
     ("MediaBeforeDelete", HookPoint::MediaBeforeDelete),
 ];
 
+const RETENTION_POINTS: &[(&str, HookPoint)] = &[("CatalogCommit", HookPoint::CatalogCommit)];
+
+/// Retention child cases: each hook in [`RETENTION_POINTS`], plus a crash after
+/// `apply_retention` returns while rows of the dropped day are still only in the WAL.
+const RETENTION_CASES: &[&str] = &["CatalogCommit", AFTER_RETENTION];
+
+const AFTER_RETENTION: &str = "AfterRetention";
+
 fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
 }
@@ -109,6 +117,7 @@ fn parse_point(name: &str) -> Option<HookPoint> {
         DELETION_POINTS,
         MEDIA_POINTS,
         DROP_POINTS,
+        RETENTION_POINTS,
     ];
     LISTS
         .iter()
@@ -1019,5 +1028,232 @@ async fn a_flush_syncs_the_file_before_the_catalog_commit() {
             HookPoint::FlushAfterTruncate,
         ],
         "durability order: {steps:?}"
+    );
+}
+
+/// The day retention drops: D-2, where D is `crash_at`'s day.
+fn old_day() -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(2026, 3, 3).unwrap()
+}
+
+/// The watermark the retention child commits: D-1, so the whole of
+/// `old_day` is before it.
+fn keep_from() -> chrono::NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(2026, 3, 4).unwrap()
+}
+
+/// Two spans of `old_day`, noon on that day plus `index` minutes.
+fn old_day_rows(index: u8) -> arrow::array::RecordBatch {
+    use chrono::Datelike;
+    let midnight = (i64::from(old_day().num_days_from_ce()) - 719_163) * 86_400_000_000_000;
+    let start = midnight + 12 * 3_600 * 1_000_000_000 + i64::from(index) * 60 * 1_000_000_000;
+    let spans = vec![
+        crate::test_support::span_row(0, index * 2, start, start + 1_000_000_000),
+        crate::test_support::span_row(
+            0,
+            index * 2 + 1,
+            start + 1_000_000_000,
+            start + 2_000_000_000,
+        ),
+    ];
+    crate::test_support::span_rows(&spans)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by every_retention_hook_aborts_safely"]
+async fn retention_child() {
+    let Ok(dir) = std::env::var("LLMOBS_RETENTION_CRASH_DIR") else {
+        return;
+    };
+    let name = std::env::var("LLMOBS_RETENTION_CRASH_POINT").unwrap();
+    let point = if name == AFTER_RETENTION {
+        None
+    } else {
+        Some(parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}")))
+    };
+
+    // A flushed batch of D-2, then a batch of D-2 that only the WAL holds.
+    let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
+        .await
+        .unwrap();
+    storage
+        .append_spans(project(), old_day_rows(0))
+        .await
+        .unwrap();
+    storage.shutdown().await.unwrap();
+
+    let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
+        .await
+        .unwrap();
+    storage
+        .append_spans(project(), old_day_rows(1))
+        .await
+        .unwrap();
+    if let Some(point) = point {
+        storage.hooks().abort_at(point);
+    }
+    storage
+        .apply_retention(project(), keep_from())
+        .await
+        .unwrap();
+    if point.is_none() {
+        // The watermark is committed and the second batch was never flushed.
+        std::process::abort();
+    }
+    panic!("retention finished without reaching {name}");
+}
+
+/// The paths of the active files of `old_day` in all three tables.
+fn active_old_day_paths(storage: &crate::Storage) -> Vec<String> {
+    let mut files = storage.catalog_files(Table::Spans);
+    files.extend(storage.catalog_files(FileTable::Traces));
+    files.extend(storage.catalog_files(Table::Scores));
+    files
+        .iter()
+        .filter(|file| file.day == old_day())
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// The `keep_from` stored for the test project, if a retention committed.
+async fn stored_watermark(dir: &Path) -> Option<String> {
+    let mut connection = connect_readonly(dir).await;
+    sqlx::query_scalar("SELECT keep_from FROM retention_watermarks WHERE project_id = ?")
+        .bind(project().to_string())
+        .fetch_optional(&mut connection)
+        .await
+        .unwrap()
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]: a spawned
+/// child holds a copy of every open file descriptor until it execs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_retention_hook_aborts_safely() {
+    for name in RETENTION_CASES {
+        let dir = tempfile::tempdir().unwrap();
+        run_child(
+            "crash_tests::retention_child",
+            "LLMOBS_RETENTION_CRASH_DIR",
+            "LLMOBS_RETENTION_CRASH_POINT",
+            name,
+            dir.path(),
+        );
+
+        let storage = crate::Storage::open(quiet_config(dir.path()))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+        // Either the commit never happened and the flushed D-2 files are still
+        // active, or it did and no D-2 file is active.
+        let watermark = stored_watermark(dir.path()).await;
+        let active = active_old_day_paths(&storage);
+        match &watermark {
+            None => assert_eq!(active.len(), 2, "{name}: active D-2 files {active:?}"),
+            Some(keep_from_stored) => {
+                assert_eq!(keep_from_stored, "2026-03-04", "{name}: the watermark");
+                assert!(
+                    active.is_empty(),
+                    "{name}: D-2 files are active: {active:?}"
+                );
+            }
+        }
+        // The flush writes the WAL-only rows. With a watermark they belong to a
+        // dropped day and must not come back as a file.
+        storage.shutdown().await.unwrap();
+        if watermark.is_some() {
+            let storage = crate::Storage::open(quiet_config(dir.path()))
+                .await
+                .unwrap_or_else(|error| panic!("{name}: second reopen failed: {error}"));
+            let active = active_old_day_paths(&storage);
+            assert!(
+                active.is_empty(),
+                "{name}: a D-2 file appeared after the flush: {active:?}"
+            );
+            storage.shutdown().await.unwrap();
+        }
+    }
+}
+
+// Compaction's durability order: the spans output is published, then the
+// traces output is written, and only then is the catalog committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compaction_syncs_each_output_before_the_catalog_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = compaction_config(dir.path());
+    // Two L0 spans files of one day, each with its traces file.
+    for index in 0..2_u8 {
+        let storage = crate::Storage::open(config.clone()).await.unwrap();
+        let start = crash_at(10, 0) + i64::from(index) * 60 * 1_000_000_000;
+        let spans = vec![
+            crate::test_support::span_row(0, index * 2, start, start + 1_000_000_000),
+            crate::test_support::span_row(
+                0,
+                index * 2 + 1,
+                start + 1_000_000_000,
+                start + 2_000_000_000,
+            ),
+        ];
+        storage
+            .append_spans(project(), crate::test_support::span_rows(&spans))
+            .await
+            .unwrap();
+        storage.shutdown().await.unwrap();
+    }
+
+    // A fresh open has an empty hook log, so only the compaction's points follow.
+    let storage = crate::Storage::open(config).await.unwrap();
+    let report = storage.compact(crash_at(12, 0)).await.unwrap();
+    assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+    let steps: Vec<HookPoint> = storage
+        .hooks()
+        .points()
+        .into_iter()
+        .filter(|point| {
+            matches!(
+                point,
+                HookPoint::ObjectWrite
+                    | HookPoint::ObjectSync
+                    | HookPoint::ObjectRename
+                    | HookPoint::ObjectDirSync
+                    | HookPoint::CompactionAfterWrite
+                    | HookPoint::CatalogCommit
+                    | HookPoint::CompactionAfterCommit
+                    | HookPoint::GcObsoleteBeforeDelete
+                    | HookPoint::GcObsoleteAfterDelete
+            )
+        })
+        .collect();
+    let commit = steps
+        .iter()
+        .position(|point| *point == HookPoint::CatalogCommit)
+        .unwrap_or_else(|| panic!("no CatalogCommit: {steps:?}"));
+    // The spans output (publish: sync, rename, dir sync), then the traces
+    // output (write, sync, rename, dir sync), then the write barrier. Only
+    // then the commit; no GC delete comes before it.
+    let before_commit = vec![
+        HookPoint::ObjectSync,
+        HookPoint::ObjectRename,
+        HookPoint::ObjectDirSync,
+        HookPoint::ObjectWrite,
+        HookPoint::ObjectSync,
+        HookPoint::ObjectRename,
+        HookPoint::ObjectDirSync,
+        HookPoint::CompactionAfterWrite,
+    ];
+    assert_eq!(&steps[..commit], before_commit.as_slice(), "{steps:?}");
+    assert_eq!(
+        steps.get(commit + 1),
+        Some(&HookPoint::CompactionAfterCommit),
+        "{steps:?}"
+    );
+    let after = &steps[commit + 2..];
+    assert!(!after.is_empty(), "collect_obsolete deleted nothing");
+    assert!(
+        after.iter().all(|point| matches!(
+            point,
+            HookPoint::GcObsoleteBeforeDelete | HookPoint::GcObsoleteAfterDelete
+        )),
+        "{steps:?}"
     );
 }
