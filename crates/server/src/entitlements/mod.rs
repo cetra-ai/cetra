@@ -15,6 +15,7 @@ use crate::http::error::ApiError;
 use crate::meta::entitlements::window_ends_since;
 use crate::meta::{MetaDb, MetaError};
 
+pub(crate) mod rate;
 pub(crate) mod tokens;
 pub(crate) mod units;
 
