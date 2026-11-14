@@ -429,4 +429,26 @@ mod tests {
             ["evaluator.config", "evaluator.output_score.data_type"]
         );
     }
+
+    #[test]
+    fn a_categorical_webhook_without_categories_is_refused() {
+        let categorical = OutputScore {
+            name: "quality".to_owned(),
+            data_type: ScoreDataType::Categorical,
+            categories: None,
+        };
+        let Err(errors) = prepare(
+            Uuid::nil(),
+            "Hook",
+            EvaluatorKind::Webhook,
+            &json!({"url": "https://example.com/hook"}),
+            &categorical,
+            Some("signing-secret-0123456789"),
+            "",
+        ) else {
+            panic!("a categorical webhook without categories is accepted");
+        };
+        let fields: Vec<&str> = errors.iter().map(|error| error.field.as_str()).collect();
+        assert_eq!(fields, ["output_score.categories"]);
+    }
 }

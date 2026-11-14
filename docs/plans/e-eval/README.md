@@ -165,7 +165,6 @@ SSRF (`allow_private_network = false`): `localhost.`, `127.1`, `2130706433`, `0x
 Needs a decision:
 - **D166 edge ranges.** The guard allows `0.0.0.0/8` other than `0.0.0.0`, `240.0.0.0/4`, IPv4-compatible `::a.b.c.d`, `64:ff9b:1::/48` (local-use NAT64), `2002::/16` (6to4) and the deprecated `fec0::/10`. None reached the loopback mock; denying them is a one-line change each in `egress.rs`.
 - **D160 quota.** Pause on exhausted quota is detected only for OpenAI's `insufficient_quota` at 429. Anthropic's low-credit error is a 400 (permanent), and Gemini's `RESOURCE_EXHAUSTED` is a 429 (retryable, the same code as a rate limit).
-- **Webhook categorical output without `categories`** passes validation (E2 lists only the data types), but every response is then `unknown label`.
 - **Header precedence.** A judge's `extra_headers` replace the adapter's own headers (documented), including `content-type` and the auth header. Webhook headers are checked against the reserved names only by `validate()`, so a struct built without it can override `content-type`.
 - **D164 wording.** This README's D164 says an empty `values` list is invalid; spec 06 and the code compare with `expected` when both `value` and `values` are absent.
 

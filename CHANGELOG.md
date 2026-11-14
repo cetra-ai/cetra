@@ -17,3 +17,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 - A password reset (forgot-password link or admin reset link) now revokes the user's personal
   access tokens as well as their web sessions, as a password change already did.
+- A categorical webhook evaluator must list its categories; one saved without them is refused with
+  400 (`output_score.categories`) instead of failing every run with `unknown label`.
