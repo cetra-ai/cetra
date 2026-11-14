@@ -387,9 +387,12 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
       create.mutate(
         { params: { path: { project: ref } }, body: createBodyOf(values, judge, sample) },
         {
-          onSuccess: () => {
+          onSuccess: (created) => {
             void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
-            void navigate({ to: "/$org/$project/online-rules", params: { org, project } });
+            void navigate({
+              to: "/$org/$project/online-rules/$ruleId",
+              params: { org, project, ruleId: created.id },
+            });
           },
           onError,
         },
@@ -398,7 +401,10 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
     }
     const body = patchBodyOf(values, rule, judge, sample);
     if (Object.keys(body).length === 0) {
-      void navigate({ to: "/$org/$project/online-rules", params: { org, project } });
+      void navigate({
+        to: "/$org/$project/online-rules/$ruleId",
+        params: { org, project, ruleId: rule.id },
+      });
       return;
     }
     patch.mutate(
@@ -410,7 +416,10 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: onlineRulesKey(org, project) });
           void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, rule.id) });
-          void navigate({ to: "/$org/$project/online-rules", params: { org, project } });
+          void navigate({
+            to: "/$org/$project/online-rules/$ruleId",
+            params: { org, project, ruleId: rule.id },
+          });
         },
         onError,
       },

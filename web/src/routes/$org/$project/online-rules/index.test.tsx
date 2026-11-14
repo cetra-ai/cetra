@@ -39,13 +39,13 @@ it("lists the rules with their status, sample, spend and jobs", async () => {
   expect(screen.getByText("2 active rules in this organization")).toBeInTheDocument();
 });
 
-it("links each name to its editor", async () => {
+it("links each name to its rule page", async () => {
   await renderApp("/acme/support-bot/online-rules");
 
   const table = await screen.findByRole("table", { name: "Online rules" });
   expect(within(table).getByRole("link", { name: "Relevance on answers" })).toHaveAttribute(
     "href",
-    "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700/edit",
+    "/acme/support-bot/online-rules/01900000-0000-7000-8000-000000000700",
   );
   expect(screen.getByRole("link", { name: "New rule" })).toHaveAttribute(
     "href",

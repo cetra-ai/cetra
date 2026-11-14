@@ -8,6 +8,7 @@ import projectFixture from "../../../../../../../fixtures/api/static/project.jso
 
 const RULE_ID = "01900000-0000-7000-8000-000000000700";
 const EDIT_URL = `/acme/support-bot/online-rules/${RULE_ID}/edit`;
+const RULE_URL = `/acme/support-bot/online-rules/${RULE_ID}`;
 
 /** Records the body of the next PATCH of the rule and answers it with the fixture rule. */
 function capturePatch(): { body: () => unknown; calls: () => number } {
@@ -33,9 +34,7 @@ it("sends only the changed fields", async () => {
   await user.click(screen.getByRole("button", { name: "Save" }));
 
   await waitFor(() => expect(patched.body()).toEqual({ name: "Relevance on answers v2" }));
-  await waitFor(() =>
-    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules"),
-  );
+  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
 });
 
 it("sends clear_budget when the spend limit is unchecked", async () => {
@@ -93,16 +92,14 @@ it("shows a viewer a read-only form", async () => {
   expect(save.parentElement).toHaveAccessibleDescription("Only members can edit online rules");
 });
 
-it("saves an unchanged rule without a PATCH and opens the list", async () => {
+it("saves an unchanged rule without a PATCH and opens its rule page", async () => {
   const patched = capturePatch();
   const { user, router } = await renderApp(EDIT_URL);
 
   await screen.findByLabelText("Name");
   await user.click(screen.getByRole("button", { name: "Save" }));
 
-  await waitFor(() =>
-    expect(router.state.location.pathname).toBe("/acme/support-bot/online-rules"),
-  );
+  await waitFor(() => expect(router.state.location.pathname).toBe(RULE_URL));
   expect(patched.calls()).toBe(0);
 });
 

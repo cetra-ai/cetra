@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { fieldErrors, problemMessage } from "@/api/problem";
+import { fieldErrors, type Problem, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorKey, evaluatorsKey, evaluatorTemplatesInit } from "@/api/queries-evaluation";
 import { connectionsInit } from "@/api/queries-settings";
@@ -32,6 +32,7 @@ import { TestPanel, TestPanelLocked } from "@/components/evaluators/test-panel";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { RuleConflicts } from "@/components/online-rules/rule-conflicts";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -407,6 +408,8 @@ export function EvaluatorForm({
   const [templateId, setTemplateId] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | undefined>();
+  // The 409 of a save that the online rules block (D-I-19): its rules are listed under the message.
+  const [conflict, setConflict] = useState<Problem | undefined>();
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const create = $api.useMutation("post", "/api/v1/projects/{project}/evaluators", { gcTime: 0 });
   const patch = $api.useMutation("patch", "/api/v1/projects/{project}/evaluators/{id}", {
@@ -464,6 +467,7 @@ export function EvaluatorForm({
   }
 
   function onError(caught: unknown) {
+    setConflict(problemOf(caught));
     const placed: Record<string, string> = {};
     const unplaced: string[] = [];
     for (const [field, message] of Object.entries(fieldErrors(caught))) {
@@ -485,6 +489,7 @@ export function EvaluatorForm({
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     setFormError(undefined);
+    setConflict(undefined);
     const parts = buildParts(values, saved);
     if (Object.keys(parts.errors).length > 0) {
       setErrors(parts.errors);
@@ -949,6 +954,7 @@ export function EvaluatorForm({
           />
 
           <FormError message={formError} />
+          <RuleConflicts org={org} project={project} problem={conflict} />
           <div className="flex justify-end">
             <DisabledReason reason={canEdit ? undefined : NO_PERMISSION}>
               <SubmitButton pending={pending}>{saved ? "Save" : "Create evaluator"}</SubmitButton>

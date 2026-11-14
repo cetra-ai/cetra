@@ -2,12 +2,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, notFound, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { $api } from "@/api/client";
-import { problemMessage, problemOf } from "@/api/problem";
+import { type Problem, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery, evaluatorsKey } from "@/api/queries-evaluation";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EvaluatorForm } from "@/components/evaluators/evaluator-form";
+import { RuleConflicts } from "@/components/online-rules/rule-conflicts";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { canManageEvaluation } from "@/lib/roles";
@@ -42,7 +43,9 @@ function EvaluatorPage() {
   const detail = useQuery(evaluatorQuery(org, project, evaluatorId));
   const remove = $api.useMutation("delete", "/api/v1/projects/{project}/evaluators/{id}");
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | undefined>();
+  const [deleteFailure, setDeleteFailure] = useState<
+    { message: string; problem: Problem | undefined } | undefined
+  >();
   const canManage = canManageEvaluation(data.role);
 
   if (detail.isPending) {
@@ -54,7 +57,7 @@ function EvaluatorPage() {
   const evaluator = detail.data;
 
   function onDelete() {
-    setDeleteError(undefined);
+    setDeleteFailure(undefined);
     remove.mutate(
       { params: { path: { project: projectRef(org, project), id: evaluator.id } } },
       {
@@ -63,7 +66,10 @@ function EvaluatorPage() {
           void navigate({ to: "/$org/$project/evaluators", params: { org, project } });
         },
         onError: (caught) => {
-          setDeleteError(problemMessage(caught, "Could not delete the evaluator."));
+          setDeleteFailure({
+            message: problemMessage(caught, "Could not delete the evaluator."),
+            problem: problemOf(caught),
+          });
         },
       },
     );
@@ -84,7 +90,7 @@ function EvaluatorPage() {
             variant="outline"
             disabled={!canManage}
             onClick={() => {
-              setDeleteError(undefined);
+              setDeleteFailure(undefined);
               setConfirmOpen(true);
             }}
           >
@@ -108,7 +114,8 @@ function EvaluatorPage() {
         confirmLabel="Delete"
         destructive
         pending={remove.isPending}
-        error={deleteError}
+        error={deleteFailure?.message}
+        details={<RuleConflicts org={org} project={project} problem={deleteFailure?.problem} />}
         onConfirm={onDelete}
       />
     </div>
