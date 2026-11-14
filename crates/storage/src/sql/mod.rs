@@ -11,7 +11,10 @@ mod params;
 mod run;
 mod validate;
 
-pub use run::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
+pub use run::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
+    SqlColumn, SqlJson, SqlRequest,
+};
 
 use std::collections::HashSet;
 

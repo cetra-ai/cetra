@@ -7,8 +7,10 @@
 //! CSV writes those JSON values as RFC 4180 fields. NDJSON writes one object
 //! per line. Parquet writes the Arrow batches with ZSTD level 1.
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
+use arrow::array::Array;
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::error::ArrowError;
@@ -16,6 +18,7 @@ use arrow::json::{ArrayWriter, LineDelimitedWriter, WriterBuilder};
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -29,15 +32,100 @@ const PARQUET_CHUNK_BYTES: usize = 32 * 1024 * 1024;
 /// Rows per Parquet row group in exports (parquet's default).
 const PARQUET_ROW_GROUP_ROWS: usize = 1024 * 1024;
 
+/// The output limit of one encoding pass.
+///
+/// Output past `max_bytes` is refused, and so is a reservation that `pool`
+/// refuses. Both surface as [`RunError::TooLarge`].
+pub(crate) struct Budget {
+    /// Largest output, in bytes.
+    pub(crate) max_bytes: usize,
+    /// Pool the output bytes are reserved from while they are built.
+    pub(crate) pool: Arc<dyn MemoryPool>,
+}
+
+/// Estimate of the bytes the encoder writes for `batch`: the Arrow buffers of
+/// every column, summed. A column that appears under several aliases counts
+/// once per alias, because the encoder writes it once per alias.
+///
+/// # Errors
+///
+/// Returns [`RunError::Internal`] when a column cannot be sized. The message
+/// carries no values.
+pub(crate) fn encoded_estimate(batch: &RecordBatch) -> Result<usize, RunError> {
+    let mut total = 0usize;
+    for column in batch.columns() {
+        let size = column.to_data().get_slice_memory_size().map_err(|_| {
+            RunError::Internal(DataFusionError::Internal(
+                "failed to size a result column".into(),
+            ))
+        })?;
+        total = total.saturating_add(size);
+    }
+    Ok(total)
+}
+
+/// Output buffer of one encoding pass. A write that the budget or the pool
+/// refuses fails and sets `refused`, which tells that apart from a real
+/// encoding failure.
+struct CappedBuffer<'a> {
+    bytes: Vec<u8>,
+    budget: &'a Budget,
+    reservation: MemoryReservation,
+    refused: bool,
+}
+
+impl Write for CappedBuffer<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let fits = self.bytes.len().saturating_add(buf.len()) <= self.budget.max_bytes;
+        if !fits || self.reservation.try_grow(buf.len()).is_err() {
+            self.refused = true;
+            return Err(io::Error::other("encoded output is over its budget"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Run `write` into a fresh [`CappedBuffer`] and return the bytes it wrote.
+///
+/// # Errors
+///
+/// [`RunError::TooLarge`] when the budget or the pool refuses a write; otherwise
+/// [`RunError::Internal`] with `message`.
+fn encode_within(
+    budget: &Budget,
+    message: &str,
+    write: impl FnOnce(&mut CappedBuffer<'_>) -> Result<(), ArrowError>,
+) -> Result<Vec<u8>, RunError> {
+    let reservation = MemoryConsumer::new("sql result encoding").register(&budget.pool);
+    let mut sink = CappedBuffer {
+        bytes: Vec::new(),
+        budget,
+        reservation,
+        refused: false,
+    };
+    match write(&mut sink) {
+        Ok(()) => Ok(sink.bytes),
+        Err(_) if sink.refused => Err(RunError::TooLarge),
+        Err(error) => Err(encoding_failure(message, error)),
+    }
+}
+
 /// Encode `batches` as JSON objects, one per row, in column order.
 ///
 /// # Errors
 ///
-/// Returns [`RunError::Internal`] when a timestamp cannot be normalized or the
-/// JSON writer fails. The message does not include cell values.
+/// Returns [`RunError::TooLarge`] when the output passes `budget`. Returns
+/// [`RunError::Internal`] when a timestamp cannot be normalized or the JSON
+/// writer fails. The message does not include cell values.
 pub(crate) fn json_rows(
     batches: &[RecordBatch],
     schema: &Schema,
+    budget: &Budget,
 ) -> Result<Vec<Map<String, Value>>, RunError> {
     if batches.iter().all(|batch| batch.num_rows() == 0) {
         return Ok(Vec::new());
@@ -46,17 +134,13 @@ pub(crate) fn json_rows(
         .iter()
         .map(|batch| normalize_timestamps(batch, schema))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut buffer = Vec::new();
-    let mut writer: ArrayWriter<&mut Vec<u8>> = json_writer().build(&mut buffer);
-    for batch in &normalized {
-        writer
-            .write(batch)
-            .map_err(|error| encoding_failure("failed to encode rows", error))?;
-    }
-    writer
-        .finish()
-        .map_err(|error| encoding_failure("failed to finish encoded rows", error))?;
-    drop(writer);
+    let buffer = encode_within(budget, "failed to encode rows", |sink| {
+        let mut writer: ArrayWriter<&mut CappedBuffer> = json_writer().build(sink);
+        for batch in &normalized {
+            writer.write(batch)?;
+        }
+        writer.finish()
+    })?;
     serde_json::from_slice(&buffer).map_err(|_| {
         RunError::Internal(DataFusionError::Internal(
             "failed to read encoded rows".into(),
@@ -129,8 +213,12 @@ pub(crate) fn csv_header(schema: &Schema) -> Bytes {
 /// # Errors
 ///
 /// Returns [`RunError::Internal`] when JSON encoding fails.
-pub(crate) fn csv_rows(batch: &RecordBatch, schema: &Schema) -> Result<Option<Bytes>, RunError> {
-    let rows = json_rows(std::slice::from_ref(batch), schema)?;
+pub(crate) fn csv_rows(
+    batch: &RecordBatch,
+    schema: &Schema,
+    budget: &Budget,
+) -> Result<Option<Bytes>, RunError> {
+    let rows = json_rows(std::slice::from_ref(batch), schema, budget)?;
     if rows.is_empty() {
         return Ok(None);
     }
@@ -177,20 +265,20 @@ fn push_csv_field(out: &mut String, text: &str) {
 /// # Errors
 ///
 /// Returns [`RunError::Internal`] when encoding fails.
-pub(crate) fn ndjson_rows(batch: &RecordBatch, schema: &Schema) -> Result<Option<Bytes>, RunError> {
+pub(crate) fn ndjson_rows(
+    batch: &RecordBatch,
+    schema: &Schema,
+    budget: &Budget,
+) -> Result<Option<Bytes>, RunError> {
     if batch.num_rows() == 0 {
         return Ok(None);
     }
     let batch = normalize_timestamps(batch, schema)?;
-    let mut buffer = Vec::new();
-    let mut writer: LineDelimitedWriter<&mut Vec<u8>> = json_writer().build(&mut buffer);
-    writer
-        .write(&batch)
-        .map_err(|error| encoding_failure("failed to encode rows", error))?;
-    writer
-        .finish()
-        .map_err(|error| encoding_failure("failed to finish encoded rows", error))?;
-    drop(writer);
+    let buffer = encode_within(budget, "failed to encode rows", |sink| {
+        let mut writer: LineDelimitedWriter<&mut CappedBuffer> = json_writer().build(sink);
+        writer.write(&batch)?;
+        writer.finish()
+    })?;
     Ok(Some(Bytes::from(buffer)))
 }
 
@@ -273,7 +361,7 @@ fn parquet_failure(error: parquet::errors::ParquetError) -> RunError {
     RunError::Internal(DataFusionError::ParquetError(Box::new(error)))
 }
 
-fn io_failure(error: std::io::Error) -> RunError {
+fn io_failure(error: io::Error) -> RunError {
     RunError::Internal(DataFusionError::IoError(error))
 }
 

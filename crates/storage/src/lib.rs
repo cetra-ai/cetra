@@ -91,7 +91,10 @@ pub use reads::{
     session_detail, session_list, span_detail, span_list, trace_detail, trace_list,
     trace_list_plan, trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list,
 };
-pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
+pub use sql::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
+    SqlColumn, SqlJson, SqlRequest,
+};
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
     ViewColumns, ViewName, function_catalog, view_catalog,
