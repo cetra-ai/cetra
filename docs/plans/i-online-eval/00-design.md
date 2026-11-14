@@ -144,7 +144,7 @@ crates/server/src/
   routes/ same split
 crates/server/src/admin.rs  rotate_encryption_key (M1)
 crates/server/migrations/meta/
-  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0007_eval_queue.sql (M3)  0008_pending_traces.sql (M4)  0009_backfills.sql (M6)
+  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0008_eval_queue.sql (M3)  0008_pending_traces.sql (M4)  0009_backfills.sql (M6)
 ```
 
 Every background loop exposes a `*_once(&AppState)` function that tests call directly, with `Clock::Manual`. The loops themselves only call `*_once` on a tokio interval from `EvalTiming`. The end-to-end test in M6 uses `EvalTiming::TEST` and real time.
@@ -194,7 +194,7 @@ CREATE TABLE score_definitions (
 );
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL;
 
--- 0007_eval_queue.sql (M3)
+-- 0008_eval_queue.sql (M3)
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
