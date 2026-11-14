@@ -248,6 +248,13 @@ pub enum CatalogError {
         #[source]
         source: sqlx::migrate::MigrateError,
     },
+    /// The copy of `catalog.db` taken before a migration failed (D-N-22).
+    #[error("catalog pre-migration copy: {source}")]
+    PreMigrationCopy {
+        /// The SQLite error, or the file error as `sqlx::Error::Io`.
+        #[source]
+        source: sqlx::Error,
+    },
     /// A query failed.
     #[error("catalog database: {source}")]
     Db {
