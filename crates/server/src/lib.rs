@@ -10,6 +10,7 @@ pub mod admin;
 pub(crate) mod alerts;
 pub mod api;
 pub(crate) mod auth;
+pub mod backup;
 pub(crate) mod bootstrap;
 pub(crate) mod clock;
 pub mod config;

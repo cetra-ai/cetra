@@ -82,6 +82,8 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// The single backup slot: a second backup answers `busy` (N M2, D-N-19).
+    pub(crate) backup_slot: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
