@@ -3,7 +3,7 @@
 Read [00-design.md](00-design.md) first, especially § Design › Pre-migration copies (D-N-22).
 
 **Goal:** before the migrations of `meta.db` or `catalog.db` change an existing database, the server
-copies it to `<name>.pre-<binary version>` with `VACUUM INTO`. Afterwards, the other `<name>.pre-*`
+copies it to `<name>.pre-m<applied>` with `VACUUM INTO`. Afterwards, the other `<name>.pre-*`
 copies are deleted, so only the copy from the last upgrade remains.
 
 **Edit only:** `crates/server/src/meta/mod.rs`, `crates/storage/src/catalog/db.rs`,
@@ -26,7 +26,7 @@ The crates do not depend on each other, so each gets its own private function, a
 ```text
 fn pre_migration_copy(connection, dir, name, applied, expected):
     if applied == 0 (no migrations table: a new database) or applied >= expected: return
-    target = dir / "{name}.pre-{CARGO_PKG_VERSION}"
+    target = dir / format!("{name}.pre-m{applied:04}")   (not the package version: X14)
     if target exists: keep it and skip the copy (a previous start of this version made it; an
         upgrade that failed half-way must not replace the good copy with a half-migrated one)
     else:
@@ -84,11 +84,11 @@ last upgrade (D-N-22)."
      Then `MetaDb::open` sees version 1 < expected and migrates the rest.
   2. Add an old `meta.db.pre-0.0.0-old` file.
   3. Call `MetaDb::open`.
-  4. `meta.db.pre-<CARGO_PKG_VERSION>` exists and has the first migration's version; the old copy is
+  4. `meta.db.pre-m<applied>` exists and has the first migration's version; the old copy is
      gone.
 - `a_new_or_current_meta_db_gets_no_copy`: open a fresh directory twice; no `meta.db.pre-*` file.
 - `an_existing_pre_migration_copy_is_kept`:
-  1. Before opening an older `meta.db`, create `meta.db.pre-<CARGO_PKG_VERSION>` with known
+  1. Before opening an older `meta.db`, create `meta.db.pre-m<applied>` with known
      content.
   2. After `MetaDb::open`, its content is unchanged.
 
