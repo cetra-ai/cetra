@@ -2,7 +2,7 @@
 # Builds the release archive of one target into target/dist (D-N-1, D-N-16):
 #
 #   target/dist/llmobs-<version>-<target>.tar.gz
-#     llmobs-<version>-<target>/llmobs
+#     llmobs-<version>-<target>/llmobs                   the binary, debug info stripped
 #     llmobs-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
 #     llmobs-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
 #     llmobs-<version>-<target>/THIRD-PARTY-NOTICES.md
@@ -74,6 +74,14 @@ stage="target/dist/${name}"
 rm -rf "$stage" "target/dist/${name}.tar.gz"
 mkdir -p "$stage"
 install -m 0755 "$bin" "$stage/llmobs"
+# Drop the DWARF debug info (about 75 % of the file) but keep the symbol table, so backtraces
+# still name functions, and the `.dep-v0` section cargo auditable adds (D-N-16).
+if [[ "$target" == *-apple-darwin ]]; then
+  strip -S "$stage/llmobs"
+else
+  strip --strip-debug "$stage/llmobs"
+fi
+"$stage/llmobs" version | grep -qx 'ui: embedded'
 install -m 0644 LICENSE "$stage/LICENSE"
 install -m 0644 crates/server/src/ee/LICENSE "$stage/LICENSE-ELASTIC"
 install -m 0644 target/dist/THIRD-PARTY-NOTICES.md "$stage/THIRD-PARTY-NOTICES.md"

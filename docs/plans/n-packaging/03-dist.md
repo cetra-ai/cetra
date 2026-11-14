@@ -39,7 +39,10 @@ cargo-about 0.9.3, Node on `PATH`, python3, curl, `file`.
    also be static (`file` says `static`).
 7. Writes the notices (N2).
 8. Stages `target/dist/llmobs-<version>-<target>/` with `llmobs`, `LICENSE`, `LICENSE-ELASTIC` and
-   `THIRD-PARTY-NOTICES.md`, and tars it.
+   `THIRD-PARTY-NOTICES.md`, and tars it. The staged binary has its DWARF debug info stripped
+   (`strip --strip-debug`, `strip -S` on macOS): the workspace release profile keeps line tables,
+   which make the binary about 600 MB; stripped it is about 150 MB and keeps its symbol table and
+   cargo-auditable's `.dep-v0` section.
 9. On Linux, calls `image-context.sh` on the archive.
 
 `image-context.sh` stages the image context from the archive rather than from
@@ -79,7 +82,7 @@ echo "$version"
 # Builds the release archive of one target into target/dist (D-N-1, D-N-16):
 #
 #   target/dist/llmobs-<version>-<target>.tar.gz
-#     llmobs-<version>-<target>/llmobs
+#     llmobs-<version>-<target>/llmobs                   the binary, debug info stripped
 #     llmobs-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
 #     llmobs-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
 #     llmobs-<version>-<target>/THIRD-PARTY-NOTICES.md
@@ -151,6 +154,14 @@ stage="target/dist/${name}"
 rm -rf "$stage" "target/dist/${name}.tar.gz"
 mkdir -p "$stage"
 install -m 0755 "$bin" "$stage/llmobs"
+# Drop the DWARF debug info (about 75 % of the file) but keep the symbol table, so backtraces
+# still name functions, and the `.dep-v0` section cargo auditable adds (D-N-16).
+if [[ "$target" == *-apple-darwin ]]; then
+  strip -S "$stage/llmobs"
+else
+  strip --strip-debug "$stage/llmobs"
+fi
+"$stage/llmobs" version | grep -qx 'ui: embedded'
 install -m 0644 LICENSE "$stage/LICENSE"
 install -m 0644 crates/server/src/ee/LICENSE "$stage/LICENSE-ELASTIC"
 install -m 0644 target/dist/THIRD-PARTY-NOTICES.md "$stage/THIRD-PARTY-NOTICES.md"
@@ -420,14 +431,15 @@ just assert-clean
 ```
 
 Expected:
-- `tar -tzf` lists exactly `llmobs-0.0.0-x86_64-unknown-linux-musl/` and its four files.
+- `tar -tzf` lists exactly `llmobs-0.0.0-x86_64-unknown-linux-musl/` and its four files. The
+  archive is about 50 MB.
 - The staged binary is `-rwxr-xr-x`.
 - `binary-smoke` prints, in order:
   - `smoke: … /readyz is ready`;
   - `smoke: the web UI is embedded`;
   - `smoke: span sent to …`;
   - `smoke: trace <id> read back`;
-  - `binary-smoke: … passed`.
+  - `binary-smoke: … passed` (`llmobs health` before it prints nothing on success).
 - `SHA256SUMS` has one line per archive in `target/dist`.
 
 The first musl release build takes 10–20 minutes. If `cargo auditable build` fails while compiling
