@@ -15,6 +15,7 @@ pub mod invites;
 pub mod keys;
 pub mod members;
 pub mod metrics;
+pub mod online_rules;
 pub mod openapi;
 pub mod payload;
 pub mod saved_views;
