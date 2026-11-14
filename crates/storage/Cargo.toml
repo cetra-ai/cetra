@@ -38,6 +38,8 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# `setrlimit` keeps the crash tests' aborting children from writing core dumps.
+rustix = { workspace = true, features = ["process"] }
 proptest.workspace = true
 tempfile.workspace = true
 toml.workspace = true

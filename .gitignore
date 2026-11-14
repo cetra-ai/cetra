@@ -15,3 +15,5 @@ web/src/routeTree.gen.ts
 !.env.example
 .DS_Store
 *.swp
+# Core dumps (the storage crash tests abort child processes on purpose)
+core.[0-9]*
