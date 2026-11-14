@@ -6,6 +6,7 @@ import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import apiKeyCreated from "../../../../fixtures/api/static/api-key-created.json";
+import authConfig from "../../../../fixtures/api/static/auth-config.json";
 import meFixture from "../../../../fixtures/api/static/me.json";
 import orgFixture from "../../../../fixtures/api/static/org.json";
 import projectFixture from "../../../../fixtures/api/static/project.json";
@@ -75,6 +76,44 @@ it("creates the org, the project and a secret key, then shows the key", async ()
     expect(cached()).not.toContain("sk-llmobs-EXAMPLE0");
     expect(cached()).not.toContain('"name":"Default"');
   });
+});
+
+it("links to the create URL instead of a form when users may not create orgs", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({
+        ...authConfig,
+        org_create_allowed: false,
+        org_create_url: "https://cloud.example.com/new",
+      }),
+    ),
+  );
+  const calls = handlers();
+  await renderApp("/setup/workspace");
+  expect(
+    await screen.findByText("Organizations are created from your account."),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Create an organization" })).toHaveAttribute(
+    "href",
+    "https://cloud.example.com/new",
+  );
+  expect(screen.queryByLabelText("Organization name")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Create workspace" })).toBeNull();
+  expect(calls.orgBodies).toEqual([]);
+});
+
+it("shows the text alone when users may not create orgs and no URL is set", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({ ...authConfig, org_create_allowed: false }),
+    ),
+  );
+  await renderApp("/setup/workspace");
+  expect(
+    await screen.findByText("Organizations are created from your account."),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Create an organization" })).toBeNull();
+  expect(screen.queryByLabelText("Organization name")).toBeNull();
 });
 
 it("does not create the org again when the project fails", async () => {

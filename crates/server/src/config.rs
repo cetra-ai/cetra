@@ -546,6 +546,25 @@ impl Default for EntitlementDefaults {
     }
 }
 
+/// `[orgs]` (D-P-31).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct OrgsConfig {
+    /// Users may create orgs. `false` on a cloud cell, where the control plane creates them.
+    pub user_create: bool,
+    /// Where "New organization" sends users when `user_create` is false. Unset: no link.
+    pub create_url: Option<String>,
+}
+
+impl Default for OrgsConfig {
+    fn default() -> Self {
+        Self {
+            user_create: true,
+            create_url: None,
+        }
+    }
+}
+
 /// Everything `llmobs serve` reads from the environment and `llmobs.toml`.
 ///
 /// Keys that spec 12 lists for later work (telemetry, compaction, gc, deletion,
@@ -601,6 +620,9 @@ pub struct ServerConfig {
     /// `[entitlements]` settings (D-P-15).
     #[serde(default)]
     pub entitlements: EntitlementsConfig,
+    /// `[orgs]` settings (D-P-31).
+    #[serde(default)]
+    pub orgs: OrgsConfig,
     /// 32 bytes in standard base64. Unset: `<data_dir>/secret.key` (D-I-1).
     #[serde(default)]
     pub encryption_key: Option<Secret<String>>,
@@ -835,6 +857,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     )?;
     validate_email(config)?;
     validate_entitlements(&mut config.entitlements)?;
+    validate_orgs(&config.orgs)?;
     if config
         .license_key
         .as_ref()
@@ -1343,22 +1366,36 @@ fn validate_upgrade_url(template: &str) -> Result<(), ConfigError> {
         reason: "must be an http or https URL; {org} is the only placeholder",
     };
     let sample = template.replace("{org}", "00000000-0000-7000-8000-000000000000");
-    if sample.contains('{') || sample.contains('}') {
+    if sample.contains('{') || sample.contains('}') || !is_http_url(&sample) {
         return Err(invalid);
     }
+    Ok(())
+}
+
+fn validate_orgs(orgs: &OrgsConfig) -> Result<(), ConfigError> {
+    let Some(url) = orgs.create_url.as_deref() else {
+        return Ok(());
+    };
+    if url.contains('{') || url.contains('}') || !is_http_url(url) {
+        return Err(ConfigError::Invalid {
+            key: "orgs.create_url",
+            reason: "must be an http or https URL",
+        });
+    }
+    Ok(())
+}
+
+/// An absolute http or https URL with a host.
+fn is_http_url(value: &str) -> bool {
     // `url` reads `https:///host` as host `host`; the empty authority is refused here.
-    let has_authority = sample
+    let has_authority = value
         .split_once("://")
         .is_some_and(|(_, rest)| !rest.starts_with(['/', '\\']));
-    match url::Url::parse(&sample) {
-        Ok(url)
-            if has_authority
-                && matches!(url.scheme(), "http" | "https")
-                && url.host().is_some() =>
-        {
-            Ok(())
+    match url::Url::parse(value) {
+        Ok(url) => {
+            has_authority && matches!(url.scheme(), "http" | "https") && url.host().is_some()
         }
-        _ => Err(invalid),
+        Err(_) => false,
     }
 }
 
@@ -1647,8 +1684,8 @@ mod tests {
     use llmobs_storage::config::{ObjectStoreUrl, WalSync};
 
     use super::{
-        ConfigError, IngestConfig, LogFormat, MediaConfig, Secret, ServerConfig, SmtpUrl, Tls,
-        load_from,
+        ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
+        SmtpUrl, Tls, load_from,
     };
     use crate::api::account::SignupPolicy;
 
@@ -2140,6 +2177,60 @@ mod tests {
             config.entitlements.upgrade_url.as_deref(),
             Some("https://example.com/up")
         );
+    }
+
+    #[test]
+    fn orgs_default_allows_user_created_orgs_without_a_link() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.orgs, OrgsConfig::default());
+        assert!(config.orgs.user_create);
+        assert_eq!(config.orgs.create_url, None);
+    }
+
+    #[test]
+    fn orgs_user_create_off_with_a_create_url() {
+        let config = load_from(
+            Some("[orgs]\nuser_create = false\ncreate_url = \"https://cloud.example.com/new\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert!(!config.orgs.user_create);
+        assert_eq!(
+            config.orgs.create_url.as_deref(),
+            Some("https://cloud.example.com/new")
+        );
+    }
+
+    #[test]
+    fn orgs_from_env() {
+        let config = load_from(None, &[("LLMOBS_ORGS__USER_CREATE", "false")]).unwrap();
+        assert!(!config.orgs.user_create);
+    }
+
+    #[test]
+    fn orgs_create_url_rejects_placeholders_and_non_http_urls() {
+        for value in [
+            "https://x.example/{org}",
+            "ftp://x.example",
+            "not a url",
+            "https:///nohost",
+        ] {
+            let toml = format!("[orgs]\ncreate_url = \"{value}\"\n");
+            let error = load_from(Some(&toml), &[]).unwrap_err();
+            match error {
+                ConfigError::Invalid { key, reason } => {
+                    assert_eq!(key, "orgs.create_url", "{value}");
+                    assert_eq!(reason, "must be an http or https URL", "{value}");
+                }
+                other => panic!("{value}: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn orgs_refuses_unknown_keys() {
+        let error = load_from(Some("[orgs]\nallow_all = true\n"), &[]).unwrap_err();
+        assert!(error.to_string().contains("allow_all"), "{error}");
     }
 
     #[test]

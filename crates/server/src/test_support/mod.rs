@@ -43,7 +43,7 @@ use crate::auth::session::start_session;
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    PublicUrl, SecurityConfig, ServerConfig,
+    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -764,6 +764,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),

@@ -25,6 +25,11 @@ pub struct AuthConfig {
     pub smtp_enabled: bool,
     /// New accounts must verify their email before signing in.
     pub email_verification_required: bool,
+    /// Users may create orgs (D-P-31).
+    pub org_create_allowed: bool,
+    /// Where "New organization" goes when users may not create orgs. Omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_create_url: Option<String>,
 }
 
 /// Who may register after the first user exists.
@@ -391,6 +396,8 @@ mod tests {
             ],
             smtp_enabled: false,
             email_verification_required: false,
+            org_create_allowed: true,
+            org_create_url: None,
         };
         let me = Me {
             user: user(),

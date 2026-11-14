@@ -1001,7 +1001,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "201",
             json_of::<OrgMembership>("The new organization. The caller is its owner."),
-            &[400, 401, 409, 429],
+            &[400, 401, 403, 409, 429],
         ))
         .build();
     let get_org = operation("get_org", "orgs", "Get an organization")

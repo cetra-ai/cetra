@@ -2106,6 +2106,16 @@
               }
             }
           },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "409": {
             "description": "The request conflicts with the current state.",
             "content": {
@@ -7816,12 +7826,21 @@
           "signup",
           "providers",
           "smtp_enabled",
-          "email_verification_required"
+          "email_verification_required",
+          "org_create_allowed"
         ],
         "properties": {
           "email_verification_required": {
             "type": "boolean",
             "description": "New accounts must verify their email before signing in."
+          },
+          "org_create_allowed": {
+            "type": "boolean",
+            "description": "Users may create orgs (D-P-31)."
+          },
+          "org_create_url": {
+            "type": "string",
+            "description": "Where \"New organization\" goes when users may not create orgs. Omitted when unset."
           },
           "password_enabled": {
             "type": "boolean",

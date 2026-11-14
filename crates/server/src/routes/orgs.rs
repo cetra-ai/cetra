@@ -10,7 +10,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
-use crate::api::common::{FieldError, Page, PageParams};
+use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::auth::principal::{self, Principal};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
@@ -88,6 +88,11 @@ async fn create_org(
     error::Json(body): error::Json<CreateOrgRequest>,
 ) -> Result<Response, ApiError> {
     let user = principal::session_user(&principal)?;
+    if !state.config.orgs.user_create {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
+        });
+    }
     let name = trimmed_name(&body.name)?;
     if let Some(slug) = &body.slug {
         orgs::validate_slug(slug).map_err(slug_error)?;
@@ -245,7 +250,7 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::auth::session::start_session;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, capture_logs};
+    use crate::test_support::{TestApp, capture_logs, control_plane_token};
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -380,6 +385,48 @@ mod tests {
         let fetched: OrgMembership = fetched.json();
         assert_eq!(fetched.role, OrgRole::Owner);
         assert_eq!(fetched.id, org.id);
+    }
+
+    #[tokio::test]
+    async fn user_create_off_refuses_new_orgs() {
+        let app = TestApp::with_config(|config| config.orgs.user_create = false).await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+
+        let refused = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Widgets" }))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.problem().code, ProblemCode::Forbidden);
+        assert!(refused.problem().detail.is_none());
+
+        let listed = app
+            .request(Method::GET, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(listed.status, 200);
+        let page: Page<OrgMembership> = listed.json();
+        assert!(page.data.is_empty());
+
+        // The control plane still creates orgs on a cell with `user_create = false`.
+        let id = Uuid::now_v7();
+        let created = app
+            .request(Method::POST, "/api/internal/v1/orgs")
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", control_plane_token("orgs")),
+            )
+            .json(&serde_json::json!({
+                "id": id,
+                "name": "Cloud",
+                "owner": { "email": "owner@example.com" },
+            }))
+            .send()
+            .await;
+        assert_eq!(created.status, 201);
     }
 
     #[tokio::test]

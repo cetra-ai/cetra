@@ -1347,6 +1347,10 @@ export interface components {
         AuthConfig: {
             /** @description New accounts must verify their email before signing in. */
             email_verification_required: boolean;
+            /** @description Users may create orgs (D-P-31). */
+            org_create_allowed: boolean;
+            /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
+            org_create_url?: string;
             /** @description Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set. */
             password_enabled: boolean;
             /** @description Configured OAuth and OIDC providers. */
@@ -5229,6 +5233,15 @@ export interface operations {
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

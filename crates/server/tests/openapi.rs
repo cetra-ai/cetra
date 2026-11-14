@@ -440,7 +440,7 @@ fn document_lint() {
         } else if *id == "list_orgs" {
             expected_errors.extend(["400", "401", "429"]);
         } else if *id == "post_org" {
-            expected_errors.extend(["400", "401", "409", "429"]);
+            expected_errors.extend(["400", "401", "403", "409", "429"]);
         } else if *id == "patch_org_member" || *id == "delete_org_member" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "put_project_member"
