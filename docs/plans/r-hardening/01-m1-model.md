@@ -597,7 +597,7 @@ Retention { project: P, keep: u8 },
 DropB,
 ```
 
-Weights: `DeleteTraces 3`, `DeleteUser 2`, `ApplyDeletions 2`, `Retention 1`, `DropB 1`. `Op::project()` returns `Some(project)` for `DeleteTraces`, `DeleteUser` and `Retention`, `Some(P::B)` for `DropB`, and `None` for `ApplyDeletions` (both projects are checked).
+Weights: `DeleteTraces 3`, `DeleteUser 2`, `ApplyDeletions 2`, `Retention 1`, `DropB 1`. `Op::project()` returns `Some(project)` for `DeleteTraces`, `DeleteUser` and `Retention`, and `None` for `ApplyDeletions` and `DropB`: both projects are checked after them, so a drop that disturbs project A is caught at once (R1.3's rule).
 
 - **`keep` never equals `D + 2`.** Class-2 traces have rows on days `D + 1` and `D + 2` whose partition depends on the anchor (spec 03 § Trace anchor). Every allowed `keep` treats both days alike, so the model needs no anchor logic (D-R-3).
 - **Deletion ids** are `Uuid::now_v7()`; the cutoff is `clock` after the op's tick.
@@ -631,7 +631,7 @@ Commit: `storage: check sessions, users, metrics and windows in the model test (
 
 All of these are in `check_full`, per project. Each one is compared **only when no visible trace of the project is unsettled**: unmerged re-sends count twice in the traces view, so the aggregates would only have bounds. The read still runs in that case, and it must return `Ok`.
 
-- **Windowed trace list.** `observe_traces` with `window = TimeWindow::new(midnight(D+1), midnight(D+2)).unwrap()` (`new` returns a `Result`). Expected: the traces whose merged `start_time` lies in `[from, to)`. That is class 1 and class 2, since class 2 starts at 23:50 on `D + 1`. Their partials sit within minutes of each other, so `trace_lookback` doesn't matter.
+- **Windowed trace list.** `observe_traces` with `window = TimeWindow::new(midnight(D+1), midnight(D+2)).unwrap()` (`new` returns a `Result`). Expected: the traces whose merged `start_time` lies in `[from, to)`, computed from the expected traces, never from the class. It is usually class 1 and class 2, but a class-2 trace whose spans 0–9 were deleted and 10–11 appended later starts at `midnight(D+2)` and falls outside. All partials of a trace sit within minutes of each other, so `trace_lookback` doesn't matter.
 - **Eval exclusion.** `observe_traces` with `include_eval: false`. Expected: the traces whose environment is not `environment::EVAL`.
 - **Sessions.** `session_list` (`ListScope` with no window, `include_eval: true`, `include_experiments: true`, `sort: SessionSort::StartTime`, `order: SortOrder::Desc`). Compare per `session_id`: `trace_count`, `error_count` (sum of the traces' `error_count`), `total_tokens` and `cost_total` (sums, `None` when no trace has one). The expected rows come from `expected_traces` grouped by `session_id`, with `None` sessions excluded (`views/sessions.rs` filters them).
 - **Users.** `user_list` with the same scope, `sort: UserSort::TraceCount`, `order: SortOrder::Desc`. Compare per `user_id`: the trace count (column `trace_count`). The expected rows are the `expected_traces` grouped by `user_id`, with `None` excluded: `user_list` drops null users (`reads/users.rs`).
@@ -647,7 +647,7 @@ All of these are in `check_full`, per project. Each one is compared **only when 
   - the cost sum;
   - the token sum.
 
-  All four are `None` when there is no such trace. `previous` covers `[midnight(D−4), midnight(D))` and is always `None`. `LatencyP95` is not compared (approximate percentile); it only has to be present. Floats compare with `1e-9`.
+  `Traces` and `ErrorRate` are `None` when there is no such trace. `CostTotal` and `TotalTokens` are SQL sums (`reads/metrics.rs`, `kpi_values`): `None` when no such trace has a value, even when traces exist (a trace whose only visible span is span 0 has neither), and `Some(sum)` otherwise. Alert `Cost` below follows a different rule (always `Some`). `previous` covers `[midnight(D−4), midnight(D))` and is always `None`. `LatencyP95` is not compared (approximate percentile); it only has to be present. Floats compare with `1e-9`.
 - **Filter-deletion scope** (track M's resolve read, D-M-2). `filter_trace_ids` with:
   - `filter: None`, `search: None`;
   - `window = [midnight(D), midnight(D+4))`;
