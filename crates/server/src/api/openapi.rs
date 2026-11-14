@@ -1763,7 +1763,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-            &[400, 401, 403, 404, 413, 429, 503],
+            &[400, 401, 402, 403, 404, 413, 429, 503],
         ))
         .build();
     let delete = operation("delete_score", "scores", "Delete a score")
@@ -1796,7 +1796,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
     .responses(responses(
         "200",
         json_of::<ScoreWriteResult>("The id of each written score, in input order."),
-        &[400, 401, 403, 404, 413, 429, 503],
+        &[400, 401, 402, 403, 404, 413, 429, 503],
     ))
     .build();
     let feedback = operation("post_feedback", "scores", "Send end-user feedback")
@@ -1811,7 +1811,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<FeedbackResult>("The stored feedback score."),
-            &[400, 401, 403, 404, 413, 429],
+            &[400, 401, 402, 403, 404, 413, 429],
         ))
         .build();
     let schema = operation("get_schema", "schema", "Get the schema")
@@ -2614,6 +2614,9 @@ fn problem(code: u16) -> Response {
     let description = match code {
         400 => "The request is malformed or a filter is invalid.",
         401 => "No credentials, or the credentials are invalid.",
+        402 => {
+            "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets."
+        }
         403 => {
             "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required)."
         }

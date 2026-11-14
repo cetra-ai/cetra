@@ -13,6 +13,7 @@ use axum::routing::post;
 use llmobs_core::ids::ProjectId;
 
 use crate::auth::roles::KeyScope;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::ApiError;
@@ -41,6 +42,15 @@ async fn export(
     body: Body,
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
+    if let Err(cap) = check_cap(&state, access.project.org_id).await {
+        tracing::debug!(
+            target: "ingest",
+            project_id = %access.project.id,
+            reason = "quota",
+            "request refused"
+        );
+        return Err(cap.into());
+    }
     match export_body(&state, &access.project, &headers, body, started).await {
         Ok(response) => Ok(response),
         Err(error) => {
@@ -183,7 +193,7 @@ mod tests {
     use super::*;
     use crate::api::common::ProblemCode;
     use crate::ingest::body::{BodyEncoding, BodyFormat};
-    use crate::test_support::{Seeded, TestApp, assert_logs_clean, capture_logs};
+    use crate::test_support::{Seeded, TestApp, assert_logs_clean, capture_logs, set_limits};
 
     const MARKER: &str = "SECRET-BODY-MARKER";
     const ATTRIBUTE_VALUE: &str = "attr-secret-value";
@@ -804,5 +814,60 @@ mod tests {
             .join("../../fixtures/otlp")
             .join(relative);
         std::fs::read(&path).expect("fixture is readable")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_gets_402() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+        let body = export_json("", &[span_json(0, "")]);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::PAYMENT_REQUIRED);
+        assert!(response.header("retry-after").is_some());
+        assert_eq!(response.problem().code, ProblemCode::QuotaExceeded);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_below_the_cap_is_accepted_whole() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            9,
+            0,
+            0,
+        );
+        let spans: Vec<String> = (0..5).map(|index| span_json(index, "")).collect();
+        let body = export_json("", &spans);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 5);
     }
 }

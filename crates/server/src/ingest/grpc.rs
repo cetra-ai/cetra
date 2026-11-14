@@ -22,6 +22,7 @@ use super::otlp::partial_success;
 use super::{Accepted, CommitTarget, IngestError};
 use crate::auth::principal::{Principal, bearer_principal};
 use crate::auth::roles::KeyScope;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
@@ -96,6 +97,9 @@ async fn export_request(
     let project = key_only_project(state, project_id)
         .await
         .map_err(|error| api_status(&error))?;
+    if let Err(cap) = check_cap(state, project.org_id).await {
+        return Err(tonic::Status::resource_exhausted(cap.detail));
+    }
     let message = request.into_inner();
     let bytes = u64::try_from(message.encoded_len()).unwrap_or(u64::MAX);
     let reservation = state.ingest.reserve_exact(bytes)?;
@@ -209,7 +213,7 @@ mod tests {
     use tonic::Code;
 
     use super::*;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, set_limits};
 
     const TRACES: &str =
         include_str!("../../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
@@ -342,6 +346,36 @@ mod tests {
             "missing or invalid credentials",
         );
 
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_gets_resource_exhausted() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+        let service = GrpcTraces {
+            state: app.state.clone(),
+        };
+        let status = service
+            .export(with_key(traces(), &seeded.ingest_key))
+            .await
+            .expect_err("the org is at its cap");
+        assert_eq!(status.code(), Code::ResourceExhausted);
+        assert!(status.message().contains("10 units"), "{status:?}");
         assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
     }
 }

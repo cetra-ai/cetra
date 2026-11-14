@@ -943,6 +943,16 @@
               }
             }
           },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
             "content": {
@@ -8472,6 +8482,16 @@
               }
             }
           },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
             "content": {
@@ -10301,6 +10321,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13961,6 +13991,7 @@
           "unsupported_media_type",
           "range_not_satisfiable",
           "conflict",
+          "quota_exceeded",
           "rate_limited",
           "internal"
         ]

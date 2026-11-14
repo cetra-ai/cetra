@@ -92,7 +92,7 @@ fn month_key(now_ns: i64) -> i32 {
 
 /// The first day of the UTC month of `now_ns` and the first day of the next month.
 #[allow(clippy::expect_used)]
-fn month_bounds(now_ns: i64) -> (NaiveDate, NaiveDate) {
+pub(crate) fn month_bounds(now_ns: i64) -> (NaiveDate, NaiveDate) {
     let day = DateTime::from_timestamp_nanos(now_ns).date_naive();
     // Invariant: every month has a day 1, and the month after any date a timestamp can
     // express is still inside chrono's date range.
@@ -208,7 +208,6 @@ impl Usage {
     /// # Errors
     ///
     /// Returns [`MetaError`] when the load query fails.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn month_units(
         &self,
         meta: &MetaDb,

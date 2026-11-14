@@ -615,14 +615,14 @@ fn document_lint() {
         } else if *id == "post_logout" {
             // The handler always answers 204. CSRF is the shared origin check.
         } else if *id == "create_scores" || *id == "create_key_scores" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "delete_score" || *id == "delete_saved_view" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_saved_view" || *id == "update_saved_view" {
             // 409: unsharing a view whose owner was deleted.
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+            expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
         } else if *id == "post_llm_connection"

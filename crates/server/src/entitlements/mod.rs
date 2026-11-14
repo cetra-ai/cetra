@@ -16,6 +16,7 @@ use crate::meta::entitlements::window_ends_since;
 use crate::meta::{MetaDb, MetaError};
 
 pub(crate) mod tokens;
+pub(crate) mod units;
 
 pub(crate) use crate::api::entitlements::Feature;
 use tokens::{OrgGrant, OrgTokenError, grant_from_token};
