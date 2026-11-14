@@ -11,13 +11,18 @@ mod traces;
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use llmobs_server::admin::{self, EntitlementsReport, UserSummary};
+use llmobs_server::admin_socket::{ADMIN_SOCKET, AdminRequest, AdminResponse};
 use llmobs_server::api::entitlements::OrgLimits;
+use llmobs_server::backup::BackupMode;
 use llmobs_server::config::{LogConfig, LogFormat, ServerConfig};
 use llmobs_server::serve::{self, ServeError};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tracing_subscriber::EnvFilter;
 
 #[global_allocator]
@@ -135,6 +140,39 @@ enum AdminCommand {
         /// directory as it was before the restore).
         #[arg(long)]
         from: PathBuf,
+        /// Config file. Overrides `LLMOBS_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Back up the running server into DIR (online; the server writes DIR).
+    Backup {
+        /// Target directory on the server's filesystem: absent or empty, outside the data directory.
+        #[arg(long)]
+        to: PathBuf,
+        /// Metadata only (S3-compatible object storage; objects stay in the bucket).
+        #[arg(long)]
+        meta_only: bool,
+        /// Config file. Overrides `LLMOBS_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Delete objects the catalog does not know and report the ones it misses. Stop the server first.
+    GcOrphans {
+        /// Leave unknown objects younger than this (e.g. `1h`, `30m`).
+        #[arg(long, default_value = "1h", value_parser = humantime_duration)]
+        min_age: Duration,
+        /// Report only; delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Required in S3 mode without `--dry-run`: deleting orphans there rolls the live bucket back.
+        #[arg(long)]
+        rollback_bucket: bool,
+        /// Config file. Overrides `LLMOBS_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Migrate `meta.db` and `catalog.db` to this version's schema, then exit. Stop the server first.
+    Migrate {
         /// Config file. Overrides `LLMOBS_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -442,6 +480,60 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
                 )?;
             }
         }
+        AdminCommand::Backup {
+            to,
+            meta_only,
+            config,
+        } => backup_command(&to, meta_only, config.as_deref()).await?,
+        AdminCommand::GcOrphans {
+            min_age,
+            dry_run,
+            rollback_bucket,
+            config,
+        } => {
+            let loaded = load_config(config.as_deref())?;
+            let report = admin::gc_orphans(&loaded, min_age, dry_run, rollback_bucket).await?;
+            let mut stdout = io::stdout().lock();
+            let verb = if report.dry_run {
+                "orphans found"
+            } else {
+                "orphans deleted"
+            };
+            writeln!(
+                stdout,
+                "{verb}: {} ({})",
+                report.orphans,
+                format_bytes(report.orphan_bytes)
+            )?;
+            writeln!(
+                stdout,
+                "recent unknown objects kept: {}",
+                report.recent_unknown
+            )?;
+            writeln!(stdout, "missing objects: {}", report.missing)?;
+            if report.missing_media > 0 {
+                writeln!(
+                    stdout,
+                    "missing media: {} (attachments only; traces are intact)",
+                    report.missing_media
+                )?;
+            }
+            if report.missing > 0 {
+                anyhow::bail!(
+                    "the catalog needs objects the store does not have: the restore is incomplete (backup older than gc.grace, or objects/ not copied)"
+                );
+            }
+        }
+        AdminCommand::Migrate { config } => {
+            let loaded = load_config(config.as_deref())?;
+            admin::migrate(&loaded)
+                .await
+                .context("migrating the databases")?;
+            writeln!(
+                io::stdout().lock(),
+                "meta.db and catalog.db are at this version's schema"
+            )?;
+        }
         AdminCommand::ReapplyDeletions { from, config } => {
             let loaded = load_config(config.as_deref())?;
             let report = admin::reapply_deletions(&loaded, &from)
@@ -461,6 +553,121 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
 
 fn load_config(path: Option<&Path>) -> anyhow::Result<ServerConfig> {
     ServerConfig::load(path).context("loading config")
+}
+
+/// Asks the running server, through `<data_dir>/admin.sock`, to write a backup into `to`
+/// (N M2, D-N-17). The server writes `to`, so the path is resolved here, against this
+/// process's working directory.
+async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> anyhow::Result<()> {
+    let loaded = load_config(config)?;
+    let to = std::path::absolute(to).context("resolving the backup directory")?;
+    let socket = loaded.data_dir.join(ADMIN_SOCKET);
+    let mut stream = match UnixStream::connect(&socket).await {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            anyhow::bail!(
+                "no running llmobs serve answers on {}; start it, or for a stopped server copy the data directory (docs/self-hosting/backup.md)",
+                socket.display()
+            );
+        }
+        Err(error) => return Err(error).context("connecting to the admin socket"),
+    };
+    let request = serde_json::to_string(&AdminRequest::Backup { to, meta_only })?;
+    stream
+        .write_all(format!("{request}\n").as_bytes())
+        .await
+        .context("sending the backup request")?;
+    let mut line = String::new();
+    BufReader::new(stream)
+        .read_line(&mut line)
+        .await
+        .context("reading the server's answer")?;
+    if line.is_empty() {
+        anyhow::bail!("the server closed the connection without an answer");
+    }
+    match serde_json::from_str::<AdminResponse>(&line).context("reading the server's answer")? {
+        AdminResponse::Done { report, .. } => {
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "backup written to {}", report.dir.display())?;
+            match report.mode {
+                BackupMode::Full => {
+                    writeln!(stdout, "mode: full")?;
+                    writeln!(
+                        stdout,
+                        "objects: {} ({}; {} linked, {} copied)",
+                        report.objects,
+                        format_bytes(report.object_bytes),
+                        report.linked,
+                        report.copied
+                    )?;
+                }
+                BackupMode::MetaOnly => {
+                    writeln!(stdout, "mode: meta-only")?;
+                    writeln!(
+                        stdout,
+                        "objects: {} ({}; in the bucket)",
+                        report.objects,
+                        format_bytes(report.object_bytes)
+                    )?;
+                }
+            }
+            writeln!(
+                stdout,
+                "took: {}.{} s",
+                report.duration_ms / 1000,
+                report.duration_ms % 1000 / 100
+            )?;
+            Ok(())
+        }
+        AdminResponse::Failed { code, message, .. } => {
+            anyhow::bail!("backup failed ({code}): {message}")
+        }
+    }
+}
+
+/// `<n>s`, `<n>m`, `<n>h` or `<n>d`, for `--min-age`. A small parser: the workspace has no
+/// `humantime` crate, and one flag does not justify adding it.
+fn humantime_duration(text: &str) -> Result<Duration, String> {
+    let invalid = || format!("invalid duration {text:?}: use <n>s, <n>m, <n>h or <n>d");
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (digits, unit) = text.split_at(split);
+    let unit_seconds: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        "d" => 86_400,
+        _ => return Err(invalid()),
+    };
+    let amount: u64 = digits.parse().map_err(|_| invalid())?;
+    amount
+        .checked_mul(unit_seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(|| format!("duration {text:?} is too long"))
+}
+
+/// Binary units with one decimal, for example `3.0 GiB`. Integer arithmetic only.
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut whole = bytes;
+    let mut tenth = 0;
+    let mut unit = 0;
+    while whole >= 1024 && unit + 1 < UNITS.len() {
+        tenth = (whole % 1024) * 10 / 1024;
+        whole /= 1024;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{whole}.{tenth} {}", UNITS[unit])
+    }
 }
 
 /// One stdin line, with a trailing `\n` or `\r\n` removed. The password itself is not trimmed.
@@ -657,15 +864,19 @@ impl Signals {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use clap::Parser;
 
-    use super::{AdminCommand, Cli, Command, EntitlementsCommand, log_filter, run_cli};
+    use super::{
+        AdminCommand, Cli, Command, EntitlementsCommand, humantime_duration, log_filter, run_cli,
+    };
     use crate::output;
+    use crate::test_server::TestServer;
     use llmobs_server::admin::EntitlementsReport;
     use llmobs_server::api::entitlements::{Feature, OrgLimits};
+    use std::time::Duration;
 
     #[test]
     fn log_filter_caps_rmcp() {
@@ -965,5 +1176,243 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&from);
+    }
+
+    #[test]
+    fn backup_parses() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Admin {
+                command: AdminCommand::Backup { to, meta_only, .. },
+            } => (to, meta_only),
+            _ => panic!("expected the backup command"),
+        };
+        let (to, meta_only) = parse(&["llmobs", "admin", "backup", "--to", "/b"]);
+        assert_eq!(to, PathBuf::from("/b"));
+        assert!(!meta_only);
+        let (_, meta_only) = parse(&["llmobs", "admin", "backup", "--to", "/b", "--meta-only"]);
+        assert!(meta_only);
+    }
+
+    #[test]
+    fn gc_orphans_parses_defaults() {
+        let parse = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Admin {
+                command:
+                    AdminCommand::GcOrphans {
+                        min_age, dry_run, ..
+                    },
+            } => (min_age, dry_run),
+            _ => panic!("expected the gc-orphans command"),
+        };
+        assert_eq!(
+            parse(&["llmobs", "admin", "gc-orphans"]),
+            (Duration::from_secs(3_600), false)
+        );
+        assert_eq!(
+            parse(&["llmobs", "admin", "gc-orphans", "--min-age", "30m"]),
+            (Duration::from_secs(1_800), false)
+        );
+        assert_eq!(
+            parse(&["llmobs", "admin", "gc-orphans", "--dry-run"]),
+            (Duration::from_secs(3_600), true)
+        );
+    }
+
+    #[test]
+    fn duration_flag_parses_units() {
+        assert_eq!(humantime_duration("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(humantime_duration("30m"), Ok(Duration::from_secs(1_800)));
+        assert_eq!(humantime_duration("2h"), Ok(Duration::from_secs(7_200)));
+        assert_eq!(humantime_duration("1d"), Ok(Duration::from_secs(86_400)));
+        for bad in ["", "m", "10", "10w", "1.5h", "-1m"] {
+            assert!(humantime_duration(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// A config file that sets only the data directory and disables the OTLP listeners.
+    fn config_file(dir: &Path, data: &Path) -> PathBuf {
+        let path = dir.join("llmobs.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "data_dir = {:?}\notlp_http_addr = \"\"\ngrpc_addr = \"\"\n",
+                data.display().to_string()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// The first `.parquet` file under `dir`, searched depth first.
+    fn first_parquet_under(dir: &Path) -> Option<PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            let found = if path.is_dir() {
+                first_parquet_under(&path)
+            } else {
+                Some(path).filter(|file| file.extension().is_some_and(|ext| ext == "parquet"))
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn backup_without_a_server_names_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(dir.path(), &dir.path().join("data"));
+        let target = dir.path().join("backup");
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("admin.sock"), "{text}");
+        assert!(text.contains("docs/self-hosting/backup.md"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn backup_through_a_running_server() {
+        let server = TestServer::start().await;
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join("backup");
+        run_cli([
+            "llmobs",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+        assert!(target.join("manifest.json").is_file());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn backup_meta_only_in_local_mode_is_refused() {
+        let server = TestServer::start().await;
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join("backup");
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "backup",
+            "--to",
+            target.to_str().unwrap(),
+            "--meta-only",
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("meta_only_needs_s3"), "{text}");
+        assert!(!target.exists());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_refuses_a_data_dir_without_a_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_file(dir.path(), &dir.path().join("data"));
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("no catalog.db"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_on_a_stopped_server_reports_zero_missing() {
+        let server = TestServer::start().await;
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        run_cli([
+            "llmobs",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_orphans_fails_when_objects_are_missing() {
+        let server = TestServer::start().await;
+        let data = server.data_dir();
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        // The stop flushed the trace to Parquet; removing one file makes the catalog need
+        // an object the store does not have.
+        let parquet = first_parquet_under(&data.join("objects").join("tables"))
+            .expect("a flushed Parquet file");
+        std::fs::remove_file(&parquet).unwrap();
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "gc-orphans",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("the restore is incomplete"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn migrate_on_a_stopped_server_succeeds() {
+        let server = TestServer::start().await;
+        let config = server.config_path();
+        let _dir = server.stop().await;
+        run_cli([
+            "llmobs",
+            "admin",
+            "migrate",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrate_while_the_server_runs_is_refused() {
+        let server = TestServer::start().await;
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "migrate",
+            "--config",
+            server.config_path().to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("the server is running: stop it first"),
+            "{text}"
+        );
+        server.stop().await;
     }
 }

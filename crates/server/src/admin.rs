@@ -1,12 +1,17 @@
 //! Local admin operations on an existing `meta.db` (spec 09 § CLI).
 //!
 //! These open the database without migrating and without the data-dir lock, so
-//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`
-//! is the exception: it takes the lock and needs the server stopped (D-I-3).
+//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`,
+//! `gc_orphans` and `migrate` are the exceptions: they take the lock (through
+//! `Storage::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
 
 use std::path::Path;
+use std::time::Duration;
 
 use llmobs_core::ids::OrgId;
+use llmobs_storage::Storage;
+use llmobs_storage::config::ObjectStoreUrl;
+use llmobs_storage::error::{OpenError, OrphanError, StorageError};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -114,9 +119,27 @@ pub enum AdminError {
     /// SQLite failed. The text is [`MetaError`]'s display, which names no row values.
     #[error("{0}")]
     Database(String),
-    /// Another process holds `<data_dir>/LOCK`.
-    #[error("the server is running: stop it before rotating the key")]
+    /// Another process holds `<data_dir>/LOCK`: the server is running.
+    #[error("the server is running: stop it first")]
     Locked,
+    /// `catalog.db` is missing. `Storage::open` would create an empty one, and every
+    /// object would then look like an orphan.
+    #[error("no catalog.db in the data directory: restore it before running gc-orphans")]
+    NoCatalog,
+    /// A real `gc-orphans` run in S3 mode needs `--rollback-bucket`.
+    #[error(
+        "in S3 mode this deletes every object written after the backup from the live bucket; run with --dry-run first, then add --rollback-bucket"
+    )]
+    RollbackNeedsConfirmation,
+    /// The storage did not open.
+    #[error("opening the storage: {0}")]
+    Storage(OpenError),
+    /// Listing the store, or deleting an orphan, failed.
+    #[error("{0}")]
+    Orphans(OrphanError),
+    /// Closing the storage failed.
+    #[error("closing the storage: {0}")]
+    Close(StorageError),
     /// The key could not be loaded, does not match, or a value did not open.
     #[error("{0}")]
     Crypto(String),
@@ -361,6 +384,88 @@ async fn copy_all(target: &MetaDb, source: &MetaDb) -> Result<ReapplyReport, Adm
         }
     }
     Ok(report)
+}
+
+/// What [`gc_orphans`] found: the storage's `OrphanReport`, as the CLI prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcOrphansReport {
+    /// Unknown objects older than `min_age` (deleted unless `dry_run`).
+    pub orphans: u64,
+    /// Bytes of the objects counted in `orphans`.
+    pub orphan_bytes: u64,
+    /// Unknown objects younger than `min_age`, left alone.
+    pub recent_unknown: u64,
+    /// Objects the catalog needs that the store does not have.
+    pub missing: u64,
+    /// Media blobs the catalog references that the store does not have.
+    pub missing_media: u64,
+    /// Whether the run only reported and deleted nothing.
+    pub dry_run: bool,
+}
+
+/// Deletes the objects under `tables/` and `media/` that the catalog does not know and that
+/// are older than `min_age`, and reports the ones the catalog needs but the store lacks
+/// (N M2, D-N-21). With `dry_run`, it deletes nothing. The server must be stopped.
+///
+/// In S3 mode a real run rolls the live bucket back to the restored catalog, so it needs
+/// `rollback_bucket`.
+///
+/// # Errors
+///
+/// [`AdminError::NoCatalog`] without `catalog.db`, [`AdminError::RollbackNeedsConfirmation`]
+/// in S3 mode without `rollback_bucket`, [`AdminError::Locked`] while the server runs,
+/// [`AdminError::Storage`] when the storage does not open, and [`AdminError::Orphans`] or
+/// [`AdminError::Close`] when the listing, a deletion or the shutdown fails.
+pub async fn gc_orphans(
+    config: &ServerConfig,
+    min_age: Duration,
+    dry_run: bool,
+    rollback_bucket: bool,
+) -> Result<GcOrphansReport, AdminError> {
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    let s3 = matches!(config.storage.object_store_url(), ObjectStoreUrl::S3 { .. });
+    if s3 && !dry_run && !rollback_bucket {
+        return Err(AdminError::RollbackNeedsConfirmation);
+    }
+    let storage = Storage::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let outcome = storage.collect_orphans(min_age, dry_run).await;
+    let closed = storage.shutdown().await;
+    let report = outcome.map_err(AdminError::Orphans)?;
+    closed.map_err(AdminError::Close)?;
+    Ok(GcOrphansReport {
+        orphans: report.orphans,
+        orphan_bytes: report.orphan_bytes,
+        recent_unknown: report.recent_unknown,
+        missing: report.missing,
+        missing_media: report.missing_media,
+        dry_run: report.dry_run,
+    })
+}
+
+/// Migrates `meta.db` and `catalog.db` to this binary's schema, with the server stopped, and
+/// closes them (N M2, D-N-22: the pre-migration copies are taken on the way). A restore of an
+/// older backup runs it before `reapply_deletions`.
+///
+/// The storage opens first: its `LOCK` keeps a running server's `meta.db` from being migrated
+/// under it.
+///
+/// # Errors
+///
+/// [`AdminError::Locked`] while the server runs, [`AdminError::Storage`] when the storage
+/// does not open, [`AdminError::Database`] or [`AdminError::Schema`] for `meta.db`.
+pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError> {
+    let storage = Storage::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let opened = MetaDb::open(&config.data_dir).await;
+    let closed = storage.shutdown().await;
+    let meta = opened.map_err(map_meta)?;
+    meta.close().await;
+    closed.map_err(AdminError::Close)
 }
 
 const PAGE: u32 = 500;
@@ -639,6 +744,13 @@ fn source_row_error(id: Option<Uuid>, error: &MetaError) -> AdminError {
     AdminError::Database(format!(
         "deletion {id} of the --from meta.db cannot be copied ({error}); repair the source row, then re-run"
     ))
+}
+
+fn map_open(error: OpenError) -> AdminError {
+    match error {
+        OpenError::Locked { .. } => AdminError::Locked,
+        other => AdminError::Storage(other),
+    }
 }
 
 fn map_meta(error: MetaError) -> AdminError {
