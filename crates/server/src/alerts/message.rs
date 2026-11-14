@@ -127,8 +127,30 @@ fn slack_escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Slack rejects button URLs longer than this many characters.
+pub(crate) const SLACK_URL_MAX: usize = 3000;
+
+/// The "View traces" URL for Slack. A URL over [`SLACK_URL_MAX`] loses its `filter` and keeps
+/// `from` and `to`; a URL that does not parse falls back to the rule link.
+fn slack_traces_url(notice: &Notice) -> String {
+    if notice.traces_url.len() <= SLACK_URL_MAX {
+        return notice.traces_url.clone();
+    }
+    let Ok(mut url) = url::Url::parse(&notice.traces_url) else {
+        return notice.rule_url.clone();
+    };
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key == "from" || key == "to")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut().clear().extend_pairs(kept);
+    url.into()
+}
+
 /// The Slack Block Kit body (D-K-8). The sender serializes it.
 pub(crate) fn slack_body(notice: &Notice) -> serde_json::Value {
+    let traces_url = slack_traces_url(notice);
     let value = value_text(notice.metric, notice.value);
     let threshold = value_text(notice.metric, Some(notice.threshold));
     let symbol = slack_escape(notice.comparator.symbol());
@@ -156,7 +178,7 @@ pub(crate) fn slack_body(notice: &Notice) -> serde_json::Value {
             ]},
             {"type": "actions", "elements": [
                 {"type": "button", "text": {"type": "plain_text", "text": "View rule"}, "url": notice.rule_url},
-                {"type": "button", "text": {"type": "plain_text", "text": "View traces"}, "url": notice.traces_url},
+                {"type": "button", "text": {"type": "plain_text", "text": "View traces"}, "url": traces_url},
             ]},
         ],
     })
@@ -345,6 +367,47 @@ mod tests {
             .as_str()
             .expect("text");
         assert!(text.contains("&lt;="), "{text}");
+    }
+
+    #[test]
+    fn slack_traces_link_drops_a_long_filter() {
+        let mut notice = sample_notice(MessageKind::Fired, 1_000_000_000_000);
+        let filter = "a".repeat(4000);
+        notice.traces_url = traces_url(&public(), "acme", "bot", 0, 300_000_000_000, Some(&filter));
+        assert!(notice.traces_url.len() > 4000);
+
+        let body = slack_body(&notice);
+        let button = body["blocks"][2]["elements"][1]["url"]
+            .as_str()
+            .expect("url");
+        assert!(button.len() <= SLACK_URL_MAX, "{} characters", button.len());
+        let parsed = url::Url::parse(button).expect("a URL");
+        let keys: Vec<String> = parsed
+            .query_pairs()
+            .map(|(key, _)| key.into_owned())
+            .collect();
+        assert_eq!(keys, ["from", "to"]);
+        assert!(button.contains("from=1970-01-01T00%3A00%3A00.000000000Z"));
+        assert!(button.contains("to=1970-01-01T00%3A05%3A00.000000000Z"));
+
+        // The webhook keeps the full URL, filter included.
+        let webhook: Value = serde_json::from_slice(&webhook_body(&notice)).expect("json");
+        assert_eq!(webhook["url"], notice.traces_url.as_str());
+        assert!(
+            webhook["url"]
+                .as_str()
+                .is_some_and(|url| url.contains("filter="))
+        );
+    }
+
+    #[test]
+    fn slack_traces_link_keeps_a_short_url() {
+        let notice = sample_notice(MessageKind::Fired, 1_000_000_000_000);
+        let body = slack_body(&notice);
+        assert_eq!(
+            body["blocks"][2]["elements"][1]["url"],
+            notice.traces_url.as_str()
+        );
     }
 
     #[test]
