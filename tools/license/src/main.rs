@@ -2,7 +2,8 @@
 //! Signs llmobs licence keys and entitlement tokens with a seed file (D-P-5, D-P-6).
 //!
 //! Development fixtures and trial licences only; the tool is never shipped. Its output
-//! format is the one `crates/server/src/ee/token.rs` verifies: `llmobs1.<kid>.<payload>.<signature>`.
+//! format is the one `llmobs_token` (`crates/token`) signs and verifies:
+//! `llmobs1.<kid>.<payload>.<signature>`.
 
 // A CLI tool prints its result to stdout and its errors to stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -12,12 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand};
-use ed25519_dalek::{Signer, SigningKey};
-
-/// Format tag. The server's `TOKEN_TAG` holds the same value.
-const TAG: &str = "llmobs1";
+use ed25519_dalek::SigningKey;
 
 /// The development key id, trusted by debug builds only.
 const DEV_KID: &str = "dev-1";
@@ -103,27 +101,11 @@ fn run(command: Command) -> Result<(), ToolError> {
 
 /// Signs `payload` as `llmobs1.<kid>.<base64url(json)>.<base64url(signature)>`.
 fn sign(seed: &[u8; 32], kid: &str, payload: &serde_json::Value) -> Result<String, ToolError> {
-    if !valid_kid(kid) {
-        return Err(ToolError::BadKid);
-    }
     if !payload.is_object() {
         return Err(ToolError::NotObject);
     }
     let json = serde_json::to_vec(payload).map_err(|_| ToolError::Encode)?;
-    let signed = format!("{TAG}.{kid}.{}", URL_SAFE_NO_PAD.encode(json));
-    let signature = SigningKey::from_bytes(seed).sign(signed.as_bytes());
-    Ok(format!(
-        "{signed}.{}",
-        URL_SAFE_NO_PAD.encode(signature.to_bytes())
-    ))
-}
-
-/// `[a-z0-9-]{1,32}`, the same rule the server applies to kids.
-fn valid_kid(kid: &str) -> bool {
-    (1..=32).contains(&kid.len())
-        && kid
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    llmobs_token::sign_raw(&SigningKey::from_bytes(seed), kid, &json).map_err(|_| ToolError::BadKid)
 }
 
 fn public_key(seed: &[u8; 32]) -> String {

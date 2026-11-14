@@ -159,8 +159,8 @@ mod tests {
     use super::*;
     use crate::config::Secret;
     use crate::ee::license::InvalidLicense;
-    use crate::ee::token::TokenError;
     use crate::test_support::{TestApp, capture_logs, license_key, license_key_until};
+    use llmobs_token::TokenError;
 
     #[test]
     fn feature_names_round_trip() {

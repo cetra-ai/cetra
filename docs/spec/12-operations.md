@@ -81,7 +81,7 @@ A file lock (`flock` on `<data_dir>/LOCK`) prevents two processes from opening t
 
 The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P-25).
 
-**Open core.** The core is MIT. `crates/server/src/ee/`, `web/src/ee/` and `tools/license/` are under the Elastic License 2.0 and compiled into the same binary (D172, D-P-1, D-P-2). Every source file there starts with `// SPDX-License-Identifier: Elastic-2.0`; `just check-ee` checks the headers and the licence files.
+**Open core.** The core is MIT. `crates/server/src/ee/`, `crates/token/`, `web/src/ee/` and `tools/license/` are under the Elastic License 2.0 and compiled into the same binary (D172, D-P-1, D-P-2). Every source file there starts with `// SPDX-License-Identifier: Elastic-2.0`; `just check-ee` checks the headers and the licence files.
 
 **Signed tokens.** Licence keys, org entitlement tokens and control-plane requests share one format, implemented once in the `llmobs-token` crate (Elastic-2.0, D-P-26): `llmobs1.<kid>.<base64url JSON payload>.<base64url ed25519 signature>`, the signature covering `llmobs1.<kid>.<payload>`, at most 16 KiB. Release builds trust only the public keys compiled into the binary, each bound to the kinds it may sign: `prod-1` licences; `cloud-1` (and its offline spare `cloud-2`) org and control-plane tokens. Debug builds also trust the development key `dev-1` for every kind (D-P-5, D-P-6, D-P-27).
 

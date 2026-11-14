@@ -64,6 +64,19 @@ pub(crate) const TEST_KEY: [u8; 32] = [7; 32];
 /// The development signing seed (`fixtures/license/dev-1.key`, D-P-6).
 const DEV_SEED: &str = include_str!("../../../../fixtures/license/dev-1.key");
 
+/// The `dev-1` signing key. Debug builds trust its public half.
+pub(crate) fn dev_signing_key() -> ed25519_dalek::SigningKey {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let seed: [u8; 32] = STANDARD
+        .decode(DEV_SEED.trim())
+        .expect("dev seed is base64")
+        .try_into()
+        .expect("dev seed is 32 bytes");
+    ed25519_dalek::SigningKey::from_bytes(&seed)
+}
+
 /// Signs `payload` as a `dev-1` token (D-P-5). Debug builds trust it.
 pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
     sign_raw(&serde_json::to_vec(payload).expect("payload serializes"))
@@ -71,20 +84,7 @@ pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
 
 /// Signs the bytes `payload` as a `dev-1` token, whatever they are (not necessarily JSON).
 pub(crate) fn sign_raw(payload: &[u8]) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-    use ed25519_dalek::Signer;
-
-    let seed: [u8; 32] = STANDARD
-        .decode(DEV_SEED.trim())
-        .expect("dev seed is base64")
-        .try_into()
-        .expect("dev seed is 32 bytes");
-    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let body = URL_SAFE_NO_PAD.encode(payload);
-    let signed = format!("{}.dev-1.{body}", crate::ee::token::TOKEN_TAG);
-    let signature = URL_SAFE_NO_PAD.encode(key.sign(signed.as_bytes()).to_bytes());
-    format!("{signed}.{signature}")
+    llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
 }
 
 /// A `dev-1` licence listing `features`, issued 2025-01-01, active until 2099-01-01.

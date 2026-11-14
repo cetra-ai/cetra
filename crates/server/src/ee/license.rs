@@ -1,25 +1,10 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Licence keys (D172, D-P-7): claims, the status over time, and the features they grant.
 
-use serde::Deserialize;
+use llmobs_token::{Claims, TokenError};
 use uuid::Uuid;
 
-use crate::ee::token::{self, TokenError};
 use crate::entitlements::FeatureSet;
-
-/// The payload of a `license` token, after [`Kind`] matched. Unknown fields are ignored (D-P-5).
-#[derive(Debug, Deserialize)]
-struct Claims {
-    id: Uuid,
-    #[serde(with = "llmobs_core::time_serde")]
-    issued_at: i64,
-    customer: String,
-    features: Vec<String>,
-    #[serde(with = "llmobs_core::time_serde")]
-    expires_at: i64,
-    #[serde(with = "llmobs_core::time_serde")]
-    grace_ends_at: i64,
-}
 
 /// A licence whose signature and claims are valid. Its dates may be past.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,15 +28,10 @@ pub(crate) struct License {
 /// Why a configured key was refused. Shown to instance admins and logged; never the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum InvalidLicense {
-    /// The token itself was refused.
+    /// The token itself was refused, or it is not a licence (`WrongKind`) or its payload is
+    /// not a licence payload (`Payload`).
     #[error(transparent)]
     Token(#[from] TokenError),
-    /// The payload is not a licence JSON object with every required field.
-    #[error("the licence payload is invalid")]
-    Payload,
-    /// The token is not of kind `license`.
-    #[error("the token is not a licence key")]
-    WrongKind,
     /// `grace_ends_at` is before `expires_at`, or `customer` is empty or over 200 characters.
     #[error("the licence fields are inconsistent")]
     Fields,
@@ -125,21 +105,11 @@ impl LicenseState {
     }
 }
 
-/// The `kind` field alone, read before the full claims.
-#[derive(Debug, Deserialize)]
-struct Kind {
-    kind: String,
-}
-
 fn parse(key: &str) -> Result<License, InvalidLicense> {
-    let verified = token::verify(key)?;
-    let kind: Kind =
-        serde_json::from_slice(&verified.payload).map_err(|_| InvalidLicense::Payload)?;
-    if kind.kind != "license" {
-        return Err(InvalidLicense::WrongKind);
-    }
-    let claims: Claims =
-        serde_json::from_slice(&verified.payload).map_err(|_| InvalidLicense::Payload)?;
+    let verified = llmobs_token::verify(key)?;
+    let Claims::License(claims) = verified.claims else {
+        return Err(InvalidLicense::Token(TokenError::WrongKind));
+    };
     let customer = claims.customer.trim();
     if claims.grace_ends_at < claims.expires_at
         || customer.is_empty()
@@ -262,7 +232,7 @@ mod tests {
 
         assert_eq!(
             LicenseState::from_key(Some(WRONG_KIND_TOKEN)),
-            LicenseState::Invalid(InvalidLicense::WrongKind)
+            LicenseState::Invalid(InvalidLicense::Token(TokenError::WrongKind))
         );
     }
 
@@ -274,9 +244,12 @@ mod tests {
         );
         assert_eq!(
             refused(&sign_token(&json!({"kind": "license"}))),
-            InvalidLicense::Payload
+            InvalidLicense::Token(TokenError::Payload)
         );
-        assert_eq!(refused(&sign_raw(b"not json")), InvalidLicense::Payload);
+        assert_eq!(
+            refused(&sign_raw(b"not json")),
+            InvalidLicense::Token(TokenError::Payload)
+        );
 
         let swapped = claims("2026-03-01T00:00:00Z", "2026-02-01T00:00:00Z");
         assert_eq!(refused(&sign_token(&swapped)), InvalidLicense::Fields);
@@ -291,7 +264,10 @@ mod tests {
 
         let mut bad_time = claims("2026-02-01T00:00:00Z", "2026-03-01T00:00:00Z");
         bad_time["expires_at"] = json!("next tuesday");
-        assert_eq!(refused(&sign_token(&bad_time)), InvalidLicense::Payload);
+        assert_eq!(
+            refused(&sign_token(&bad_time)),
+            InvalidLicense::Token(TokenError::Payload)
+        );
     }
 
     #[test]
@@ -301,8 +277,9 @@ mod tests {
             InvalidLicense::Token(TokenError::TooLarge),
             InvalidLicense::Token(TokenError::UnknownKey),
             InvalidLicense::Token(TokenError::BadSignature),
-            InvalidLicense::Payload,
-            InvalidLicense::WrongKind,
+            InvalidLicense::Token(TokenError::KeyNotAllowed),
+            InvalidLicense::Token(TokenError::Payload),
+            InvalidLicense::Token(TokenError::WrongKind),
             InvalidLicense::Fields,
         ];
         for reason in reasons {

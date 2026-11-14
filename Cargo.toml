@@ -38,6 +38,7 @@ llmobs-core = { path = "crates/core" }
 llmobs-eval = { path = "crates/eval" }
 llmobs-otel = { path = "crates/otel" }
 llmobs-storage = { path = "crates/storage" }
+llmobs-token = { path = "crates/token" }
 llmobs-server = { path = "crates/server" }
 llmobs-ui = { path = "crates/ui" }
 
