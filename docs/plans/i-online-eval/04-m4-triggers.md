@@ -5,7 +5,7 @@ Implementation plan for milestone M4 of track I. It has 8 sub-phases, I4.1 to I4
 **Prerequisites** (check them before you start):
 - M3 is implemented: `crates/server/src/eval/dispatch.rs`, `eval/hourly.rs`, `meta/online_rules.rs`, `meta/eval_jobs.rs` and `routes/online_rules.rs` exist. Start from `main` once M3 has merged, otherwise from M3's integration branch with `main` merged in.
 - G's fix F4 is on `main`: `crates/server/src/ingest/mod.rs` has `commit_in_task` and `wait_for_commits`. It had landed when this plan was written.
-- This plan lives on branch `claude/i-m3-plan`. Check with `git log --oneline -1 -- docs/plans/i-online-eval/04-m4-triggers.md` that it is there.
+- This plan lives on branch `claude/i-m3-impl` (M3's integration branch). Check with `git log --oneline -1 -- docs/plans/i-online-eval/04-m4-triggers.md` that it is there.
 - Node `26.13.0` is installed at `$HOME/.local/share/nvm/v26.13.0/bin`. It is not on the non-interactive `PATH`.
 
 **Read first** (every sub-phase):
@@ -86,7 +86,7 @@ Each wave starts when the waves before it are merged into the M4 integration bra
 | Wave | Sub-phases | Depends on | Shared files to merge by hand |
 |---|---|---|---|
 | 1 | I4.1 storage `match_count` · I4.2 `pending_traces` table, trigger rule read, guarded rule enqueue · I4.3 project timeout setting (server and contract) · I4.4 sampling and `PendingTraces` (memory only) | M3 | `crates/server/src/eval/mod.rs` (I4.4 adds module lines only); `crates/server/openapi.json`, `web/src/api/schema.gen.ts` (I4.3 only; I4.1 changes no operation) |
-| 2 | I4.5 wiring: `commit` argument, `AppInner.pending`, flusher, startup load · I4.6 preview API | I4.2, I4.4 (I4.5); I4.1 (I4.6) | none |
+| 2 | I4.5 wiring: `commit` argument, `AppInner.pending`, flusher, startup load · I4.6 preview API | I4.2, I4.3, I4.4 (I4.5: I4.3 supplies the `COMPLETION_TIMEOUT_*` constants); I4.1 (I4.6) | none |
 | 3 | I4.7 the sweeper and the end-to-end test · I4.8 web: match counter, timeout field, specs and roadmap | I4.5 (I4.7); I4.3, I4.6 (I4.8) | none |
 
 The Sonnet code reviews fit the waves: after wave 1 (I4.1–I4.4), and after waves 2–3 (I4.5–I4.8).
@@ -125,14 +125,14 @@ web/src/routes/$org/$project/settings/general.tsx                               
 
 ### The migration number
 
-The next free number when you start I4.2, which is M3's `eval_queue` number plus one. When this plan was written, `main` had `0007_deletions.sql`, so M3's was expected to be `0008` and M4's `0009`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `MM` below. Everything that depends on it is the list in M3 § The migration number:
+The next free number when you start I4.2, which is M3's `eval_queue` number plus one. `main` has `0008_entitlements.sql` (track P's M2), so M3's is `0009` and M4's is `0010`. Check `crates/server/migrations/meta/` on your base **and** `git log origin/main --oneline -- crates/server/migrations/meta/`. Call it `MM` below. Everything that depends on it:
 - the file name `crates/server/migrations/meta/00MM_pending_traces.sql`;
-- `meta/mod.rs` tests: the migration count in `open_twice_is_idempotent`, and `open_existing_checks_the_file_and_the_version` (inserts `MM + 1`, expects `found == MM + 1`, `expected == MM`);
-- `admin.rs` `schema_mismatch_names_the_versions`: inserts `MM + 1` and expects `"this binary expects schema MM, found MM+1"` with the numbers written out;
 - the `meta_schema` snapshot;
-- `docs/spec/04-metadata-db.md`, and `00-design.md` § Modules and § Tables, which name the file `0009_pending_traces.sql` (edit them when `MM` is not `0009`).
+- `docs/spec/04-metadata-db.md` (the table), and `00-design.md` § Modules and § Tables, which name the file `0010_pending_traces.sql` (edit them only when `MM` is not `0010`).
 
-Track P's M2 (branch `claude/p-m2-impl`) also takes `0008`. If it lands on `main` before M3, M3's migration becomes `0009` and M4's `0010`; whichever lands first keeps its number.
+The migration tests need no edit: `open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` (`meta/mod.rs`) and `schema_mismatch_names_the_versions` (`admin.rs`) all compute the version with `expected_version()`, which reads the highest embedded migration.
+
+If another branch lands a migration on `main` before M4 merges, the one that merges second renumbers (00-design § Scope).
 
 ### Fixed identifiers (fixtures and tests)
 
@@ -148,7 +148,7 @@ The rule, job and evaluator ids are M3's (`03-m3-queue-rules.md` § Fixed identi
 For one tracked project with timeout `T` seconds, at time `now`:
 - an entry is **completed** when `root_ended && now − last_seen >= 5 s`, or `now − last_seen >= T s`;
 - the sweeper takes at most 2 000 completed entries, ordered by `min_start` then trace id, and cuts them into **batches**: a batch has at most 500 entries, and its last entry's `min_start` is at most 12 h after its first's. A new batch starts when either limit is reached. The batch's `around` is `first + (last − first) / 2`;
-- per batch, one `QueryContext` with `QueryOptions { around: Some(around), ..QueryOptions::default() }`, then one read per rule of the project. The `..QueryOptions::default()` keeps this compiling when track P adds `visible_from` (D-I-34):
+- per batch, one `QueryContext` with `QueryOptions { around: Some(around) }`, then one read per rule of the project. `QueryOptions` has the one field `around` today (`crates/storage/src/lib.rs`); `..QueryOptions::default()` would be `clippy::needless_update`. Whoever adds `visible_from` (D-I-34) updates this call site:
   - trace rule: `trace_refresh` with the rule's filter, the batch's ids and `strict_exclusions: true`;
   - span rule: `span_refresh` with the rule's filter, the ids, `per_trace: 200` and `strict_exclusions: true`;
 - every matched row is sampled (`sampling::sampled`). For a span rule, the sampled spans of one trace are kept in `start_time` order and cut at 50. The kept rows are the batch's **candidates**;
@@ -172,7 +172,7 @@ For one tracked project with timeout `T` seconds, at time `now`:
 
 **Goal:** one storage read that counts the rows of the traces or spans view matching a filter in a window, with strict exclusions, stopping at a cap. The preview (I4.6) is its caller.
 
-**Edit only:** `crates/storage/src/reads/traces.rs`, `crates/storage/src/reads/mod.rs` (re-exports), `crates/storage/src/lib.rs` (re-exports), `docs/spec/05-query.md`.
+**Edit only:** `crates/storage/src/reads/traces.rs` (`match_count`, and `trace_refresh`'s strict columns), `crates/storage/src/reads/mod.rs` (re-exports), `crates/storage/src/lib.rs` (re-exports), `docs/spec/05-query.md`.
 
 **Commit:** `Add a capped match count to storage reads`
 
@@ -223,11 +223,22 @@ Read `list_frame` first: the steps above are its first half without the cursor, 
 
 Export `MatchCountRequest`, `match_count` and `MAX_MATCH_COUNT` from `reads/mod.rs` and `lib.rs`, next to M3's `span_refresh` exports.
 
-`match_count` has no production caller before I4.6. It is a public storage read with its own tests, so it is not dead code.
+`match_count` has no production caller before I4.6. It is a public storage read with its own tests, so it is not dead code. Its `strict_exclusions: false` branch has no production caller at all (the preview always passes `true`); it stays, because `match_count_strict_drops_eval_and_experiment_traces` compares both.
+
+### `trace_refresh`: two columns when strict
+
+M3's `trace_refresh` returns every column of the traces view. Its strict reads are the sweeper's (I4.7), which needs only the trace id and the start time, for up to 500 traces per rule per tick. In `trace_refresh`'s frame, when `request.strict_exclusions` is true, select only those two columns after the filter: `frame.select_columns(&[traces::TRACE_ID, traces::START_TIME])` (use the column-name constants the module already uses; `rg -n "START_TIME" crates/storage/src/reads/traces.rs`). Add, next to M3's `SPAN_REFRESH_COLUMNS`:
+
+```rust
+/// The columns `trace_refresh` returns with `strict_exclusions: true`, in this order.
+pub const TRACE_REFRESH_STRICT_COLUMNS: &[&str] = &[traces::TRACE_ID, traces::START_TIME];
+```
+
+and export it from `reads/mod.rs` and `lib.rs`. Non-strict calls (the list refresh routes) are unchanged. If an M3 test of `trace_refresh` with `strict_exclusions: true` reads another column, change it to read `trace_id` only, and say so in the report.
 
 ### Spec
 
-`docs/spec/05-query.md`, after M3's **Strict exclusions** paragraph: "**Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show '10 000 or more' without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window (§ Strict exclusions). On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded."
+`docs/spec/05-query.md`, after M3's **Strict exclusions** paragraph: "**Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show '10 000 or more' without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window (§ Strict exclusions). On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded. With strict exclusions, `trace_refresh` returns only `trace_id` and `start_time`, the two columns the trigger needs."
 
 The cost described in that last sentence is accepted by this plan. Do not bound the subquery.
 
@@ -238,6 +249,7 @@ The cost described in that last sentence is accepted by this plan. Do not bound 
 - `match_count_strict_drops_eval_and_experiment_traces`: a normal, an `llmobs-eval` and an experiment trace; filter `environment = 'llmobs-eval'` → 0 with strict, 1 without.
 - `match_count_counts_spans`: a trace of 3 spans, 2 with `span_kind = 'llm'`; view spans, filter `span_kind = 'llm'` → 2.
 - `match_count_stops_at_cap_plus_one`: 5 traces, `cap: 2` → 3.
+- `strict_trace_refresh_returns_two_columns`: a `trace_refresh` with `strict_exclusions: true` → the batches' schema has exactly `TRACE_REFRESH_STRICT_COLUMNS`; with `false` → the full row, as before.
 - `match_count_validates_its_request`: `ViewName::Sessions`, `cap: 0` and `cap: 10_001` are `InvalidRequest`; a bad filter is `Invalid`.
 
 ### Done when
@@ -250,7 +262,7 @@ The cost described in that last sentence is accepted by this plan. Do not bound 
 
 **Goal:** migration `00MM_pending_traces.sql`; `meta/pending_traces.rs` to load and write the table; `meta::online_rules::trigger_rules`, the one query the sweeper runs each tick; `meta::eval_jobs::insert_rule_job`, a rule enqueue that does nothing when the rule is gone or disabled.
 
-**Edit only:** `crates/server/migrations/meta/00MM_pending_traces.sql` (new), `crates/server/src/meta/pending_traces.rs` (new), `crates/server/src/meta/mod.rs` (module list and its migration tests), `crates/server/src/meta/online_rules.rs` (one struct and one function, with tests), `crates/server/src/meta/eval_jobs.rs` (one function, with tests), `crates/server/src/admin.rs` (the schema-mismatch test only), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `MM` is not `0009`).
+**Edit only:** `crates/server/migrations/meta/00MM_pending_traces.sql` (new), `crates/server/src/meta/pending_traces.rs` (new), `crates/server/src/meta/mod.rs` (module list), `crates/server/src/meta/online_rules.rs` (one struct and one function, with tests), `crates/server/src/meta/eval_jobs.rs` (one function, with tests), the `meta_schema` snapshot, `docs/spec/04-metadata-db.md`, `docs/plans/i-online-eval/00-design.md` (the migration's name, only when `MM` is not `0010`).
 
 **Commit:** `Store pending traces and read the rules the trigger needs`
 
@@ -272,7 +284,7 @@ CREATE TABLE pending_traces (
 
 The failed-read count is not stored: a restart gives every trace five fresh tries, which is fine.
 
-**Existing tests:** the migration count, `open_existing_checks_the_file_and_the_version` and `admin.rs` `schema_mismatch_names_the_versions`, as § The migration number says. Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the table and SQLite's automatic index of its primary key. Say so in the report.
+**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the table and SQLite's automatic index of its primary key. Say so in the report.
 
 ### `meta/pending_traces.rs`
 
@@ -412,7 +424,7 @@ With `crate::meta::test_db()`, an org, two projects, a connection, an evaluator 
 
 **Goal:** `trace_completion_timeout_s` is stored in `projects.settings`, read into `ProjectRow`, shown in `Project` and set by `PATCH /projects/{project}`.
 
-**Edit only:** `crates/server/src/meta/projects.rs`, `crates/server/src/api/account.rs`, `crates/server/src/routes/projects.rs`, any other server file that builds an `api::account::Project` (`rg -n "Project \{" crates/server/src` lists them; add the field only), `crates/server/openapi.json`, `fixtures/api/static/project.json`, `fixtures/api/static/projects.json`, `web/src/api/schema.gen.ts`, and the `web/src` files where `just check-web` reports a missing `trace_completion_timeout_s` (type errors only: add `trace_completion_timeout_s: 60`), `docs/spec/09-api.md`.
+**Edit only:** `crates/server/src/meta/projects.rs`, `crates/server/src/api/account.rs`, `crates/server/src/routes/projects.rs`, `crates/server/src/routes/auth.rs` (the `Project` literal of the setup response only), `crates/server/tests/snapshots/project.snap`, `crates/server/openapi.json`, `fixtures/api/static/project.json`, `fixtures/api/static/projects.json`, `web/src/api/schema.gen.ts`, and the `web/src` files where `just check-web` reports a missing `trace_completion_timeout_s` (type errors only: add `trace_completion_timeout_s: 60`), `docs/spec/09-api.md`.
 
 **Commit:** `Add the project trace completion timeout`
 
@@ -426,7 +438,7 @@ pub(crate) const COMPLETION_TIMEOUT_MAX_S: u32 = 3600;
 ```
 
 - `ProjectRow` gains, after `retention_days`: `/// `settings.trace_completion_timeout_s`; `None` means the default (D-I-7). pub(crate) trace_completion_timeout_s: Option<u32>,` and a method `pub(crate) fn completion_timeout_s(&self) -> u32` (the value, else `COMPLETION_TIMEOUT_DEFAULT_S`). Update the struct's doc ("`settings` is not read in D." → "Of `settings`, only `trace_completion_timeout_s` is read (D-I-7).").
-- `ProjectRecord` gains `trace_completion_timeout_s: Option<i64>`. Every `SELECT` and `RETURNING` list in this file that builds a `ProjectRecord` adds `CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s` (with `projects.settings` in the queries that join `orgs`). `rg -n "retention_days, state, created_at" crates/server/src/meta/projects.rs` finds them.
+- `ProjectRecord` gains `trace_completion_timeout_s: Option<i64>`. Every `SELECT` and `RETURNING` list in this file that builds a `ProjectRecord` adds `CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s` (with `projects.settings` in the query that joins `orgs`). They are the four queries of `insert_project` (its `RETURNING`), `project_by_id`, `project_by_slugs` (columns written `projects.retention_days, projects.state, …`) and `projects_of_org`; `rg -n "ProjectRecord" crates/server/src/meta/projects.rs` checks that none is missed.
 - `project_row` maps it: a value in `COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S` → `Some`, anything else (including a hand-edited out-of-range value) → `None`. Out-of-range is not `Corrupt`: the setting is advisory, and the default is safe.
 - `ProjectPatch` gains `/// New completion timeout, already range-checked. pub(crate) trace_completion_timeout_s: Option<u32>,`. Every `ProjectPatch { … }` literal (`rg -n "ProjectPatch \{" crates/server/src`) gets `trace_completion_timeout_s: None` where it is not the PATCH route.
 - `update_project` becomes one statement (the four-arm `match` goes away):
@@ -446,12 +458,13 @@ pub(crate) const COMPLETION_TIMEOUT_MAX_S: u32 = 3600;
 
 - `Project` gains, after `retention_days`: `/// Seconds without a new span after which a trace counts as complete for online rules (D-I-7). 10 to 3600; 60 unless set. pub trace_completion_timeout_s: u32,` (always present).
 - `UpdateProjectRequest` gains: `/// Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600. Absent leaves it unchanged. #[serde(default, skip_serializing_if = "Option::is_none")] pub trace_completion_timeout_s: Option<u32>,`. There is no way to unset it; sending 60 restores the default behaviour.
-- The test that builds a `Project` in this file (`rg -n "let project = Project" crates/server/src/api/account.rs`) adds the field.
+- The test that builds a `Project` in this file (`rg -n "let project = Project" crates/server/src/api/account.rs`) adds `trace_completion_timeout_s: 60`. Its snapshot `crates/server/tests/snapshots/project.snap` changes: run `INSTA_UPDATE=always cargo test -p llmobs-server project`; the diff must be only `"trace_completion_timeout_s": 60,` after `"retention_days": 30,`.
+- `routes/auth.rs` builds a `Project` for the setup response (`project: Project {` near line 193): add `trace_completion_timeout_s: created.created.project.completion_timeout_s(),`. No other server file builds an `api::account::Project` (`rg -n "Project \{" crates/server/src` also lists `Access::Project` and `WebhookProject`, which are other types).
 
 ### Route (`routes/projects.rs`)
 
 `update_project`:
-- Add the extractor `Extension(principal): Extension<Principal>` (`crate::auth::principal::{self, Principal}`, as `routes/alert_rules.rs` imports it), before `Extension(access)`.
+- The handler already has `Extension(principal)` and `let actor_id = principal::session_user(&principal)?.id;`. Reuse them; add no extractor.
 - After the retention check, `let timeout = body.trace_completion_timeout_s.map(checked_timeout).transpose()?;`, with a new helper next to `checked_retention` in the same style:
   ```rust
   fn checked_timeout(seconds: u32) -> Result<u32, ApiError> {
@@ -464,7 +477,7 @@ pub(crate) const COMPLETION_TIMEOUT_MAX_S: u32 = 3600;
   ```
   Like the name and retention checks, it returns the first error at once.
 - Pass `timeout` as `ProjectPatch.trace_completion_timeout_s`.
-- After the write, when `timeout` is `Some(seconds)`, write the audit line. The actor is the session or PAT user when there is one: `let actor_id = principal::session_user(&principal).ok().map(|user| user.id);` then `tracing::info!(target: "audit", project_id = %id, actor_id = ?actor_id, seconds, "trace completion timeout changed")`. An API key has no user, so its line carries `actor_id = None`. `project_json` sets `trace_completion_timeout_s: project.completion_timeout_s()`. The permission stays the route's (`ManageSettings`).
+- After the write, when `timeout` is `Some(seconds)`, write the audit line with the existing `actor_id`: `tracing::info!(target: "audit", project_id = %id, actor_id = %actor_id, seconds, "trace completion timeout changed")`. `project_json` sets `trace_completion_timeout_s: project.completion_timeout_s()`. The permission stays the route's (`ManageSettings`).
 
 The trigger reads the value itself each tick (I4.2's query), so nothing else changes here.
 
@@ -593,9 +606,9 @@ Methods (each takes the lock once, briefly):
 | Method | What |
 |---|---|
 | `new(max: usize) -> Self` | an empty map holding at most `max` traces (tests pass small values) |
-| `observe(&self, project: ProjectId, spans: &[Span], now: i64)` | Nothing when `project` is not tracked. For each span: skip it when `span.environment.as_deref() == Some(environment::EVAL)` or `span.metadata.contains_key(metadata_key::EXPERIMENT_ID)` (D-I-17). Otherwise for `(project, span.trace_id)`: an existing entry gets `last_seen = now`, `min_start = min(min_start, span.start_time)`, `root_ended |= span.parent_span_id.is_none()`; a new one, when `len < max`, is inserted with `first_seen = last_seen = now`, `min_start = span.start_time`, `root_ended = span.parent_span_id.is_none()`, `failed_reads = 0` (and `len += 1`); when `len >= max`, `dropped_full += 1` and nothing is inserted. Every inserted or updated key goes into `changed` and out of `removed`. The warning decision is made and recorded under the lock: the call dropped at least one trace, and `warned_at` is `None` or at least `WARN_EVERY_NS` before `now`. When it holds, set `warned_at` and copy `dropped_full` and `len` into locals. After the guard is dropped, `tracing::warn!(dropped = <dropped_full>, pending = <len>, "online-rule trigger map is full; new traces are not evaluated")`. |
+| `observe(&self, project: ProjectId, spans: &[Span], now: i64)` | Nothing when `project` is not tracked. For each span: skip it when `span.environment.as_deref() == Some(environment::EVAL)` or `span.metadata.contains_key(metadata_key::EXPERIMENT_ID)` (D-I-17). Otherwise for `(project, span.trace_id)`: an existing entry gets `last_seen = max(last_seen, now)` (concurrent commits can call with an older `now`; `last_seen` must never move back, or `finish` could remove a trace that grew), `min_start = min(min_start, span.start_time)`, `root_ended |= span.parent_span_id.is_none()`; a new one, when `len < max`, is inserted with `first_seen = last_seen = now`, `min_start = span.start_time`, `root_ended = span.parent_span_id.is_none()`, `failed_reads = 0` (and `len += 1`); when `len >= max`, `dropped_full += 1` and nothing is inserted. Every inserted or updated key goes into `changed` and out of `removed`. The warning decision is made and recorded under the lock: the call dropped at least one trace, and `warned_at` is `None` or at least `WARN_EVERY_NS` before `now`. When it holds, set `warned_at` and copy `dropped_full` and `len` into locals. After the guard is dropped, `tracing::warn!(dropped = <dropped_full>, pending = <len>, "online-rule trigger map is full; new traces are not evaluated")`. |
 | `set_tracked(&self, projects: HashSet<ProjectId>)` | Replaces the tracked set. Every entry of a project not in the new set is removed, its key put in `removed` and taken out of `changed`. |
-| `completed(&self, project, now, timeout_ns: i64, limit: usize) -> Vec<Completed>` | The project's entries with `root_ended && now − last_seen >= ROOT_IDLE_NS` or `now − last_seen >= timeout_ns` (saturating subtraction). **Under the lock**, only collect the matching entries into a `Vec<Completed>` (one pass, no sort). **After the guard is dropped**, sort it by `(min_start, trace_id)` (`TraceId`'s bytes) and keep the first `limit`. When the vector is longer than `limit`, use `select_nth_unstable_by` first, then sort only the first `limit`. Every `commit` takes this lock, so it must not be held across a sort of up to 200 000 entries. |
+| `completed(&self, project, now, timeout_ns: i64, limit: usize) -> Vec<Completed>` | The project's entries with `root_ended && now − last_seen >= ROOT_IDLE_NS` or `now − last_seen >= timeout_ns` (saturating subtraction). **Under the lock**, one pass over the project's map that pushes each matching entry as a `Completed` (`trace_id`, `last_seen`, `min_start`: 40 bytes) into a `Vec` created with `Vec::with_capacity(limit * 4)`, and **stops once it holds `limit * 4`** (at most 8 000 entries, 320 KB, for `PER_PROJECT_TICK`). No sort under the lock. **After the guard is dropped**, sort by `(min_start, trace_id)` (`TraceId`'s bytes) and keep the first `limit` (`select_nth_unstable_by` then sort the first `limit`, when longer). Every `commit` takes this lock, so it must not be held across a sort or a 200 000-entry copy. Because the pass stops early in hash order, a tick does not always take the globally oldest completed traces; the rest are taken on the next ticks. That is accepted. |
 | `finish(&self, project, done: &[Completed])` | Removes each entry whose `last_seen` still equals the `Completed`'s (a trace that grew during the reads stays, D-I-9); removed keys go into `removed`. |
 | `read_failed(&self, project, failed: &[Completed]) -> usize` | For each entry still present: `failed_reads += 1`; at `MAX_FAILED_READS` the entry is removed (into `removed`). Returns how many were removed. It does not mark entries `changed` (the count is not stored). |
 | `take_changes(&self) -> Changes` | **Under the lock:** take both sets out with `std::mem::take`. Build `upserts`, every key of `changed` whose entry exists, with a copy of the entry; `deletes` is every key of `removed`. **After the guard is dropped:** sort both lists by key (project id, then trace id bytes), so the flush order is deterministic. |
@@ -618,6 +631,8 @@ Helpers: `span(trace: u8, parent: bool, start: i64) -> Span` built from `test_su
 - `observe_tracks_first_last_min_and_root`: two calls at `now` 10 and 20 with starts 500 and 300, the second with a root → `first_seen 10`, `last_seen 20`, `min_start 300`, `root_ended`.
 - `the_map_is_capped`: `new(2)`, three traces → `len() == 2`. A span of an existing trace still updates it. With `capture_logs`, the warning is logged once (`dropped=1`) for two overflowing calls within a minute, and again after a minute.
 - `completed_uses_root_idle_and_timeout`: a rooted trace at `last_seen` 0 is complete at 5 s, not at 4.9 s; an unrooted one only at the timeout; sorted by `min_start`; `limit` cuts.
+- `completed_collects_at_most_four_times_the_limit`: 50 completed traces, `limit` 5 → 5 returned, all from completed traces, sorted.
+- `last_seen_never_moves_back`: observe at `now` 20, then at 10 → `last_seen` is 20.
 - `finish_keeps_a_trace_that_grew`: take `completed`, observe the trace again, `finish` → it stays; another trace leaves and appears in `deletes`.
 - `read_failed_drops_after_five`: four calls keep it, the fifth removes it and returns 1.
 - `set_tracked_drops_other_projects`.
@@ -723,7 +738,7 @@ pub(crate) async fn flush_once(state: &AppState) -> Result<FlushReport, MetaErro
 - `load_restores_tracked_entries_and_deletes_the_rest`: write two rows (A tracked, B untracked) with `write_pending`, `load` → `pending.len() == 1`; `flush_once` → B's row is gone.
 - `shutdown_flushes_the_map`, in `serve.rs`'s tests, next to `shutdown_flushes_usage`. It copies that test's setup: `bind(with_init(config(dir.path())), None)` and `running.state`.
   - Create a real rule, so the sweeper's per-tick refresh (I4.7) keeps the project tracked. In one `state.meta.write`, insert a check evaluator and an enabled trace rule in the init project, with M3's `meta::evaluators` and `meta::online_rules` functions. `with_init` creates exactly one project, "Support bot". Read its id and its org's with `SELECT id, org_id FROM projects` on `state.meta.reader()`.
-  - Call `crate::eval::trigger::refresh_rules(&state).await.unwrap()`.
+  - Call `crate::eval::trigger::refresh_rules(&state).await.unwrap()`. A sweeper tick of the running server (I4.7) that read the rules before the insert could still apply its stale tracked set after this call. Rule it out: sleep twice the `sweep_every` of the timing `bind` uses (once I4.7 exists; before it, no sweeper runs and one call is enough), then call `refresh_rules` again. Every tick that starts after the insert tracks the project too.
   - Then `state.pending.observe(project, &[span], state.clock.now_ns())` with one unrooted span (`test_support::dataset_span(0)` with `parent_span_id` set). An unrooted trace stays pending for 60 s, so no sweep takes it.
   - Run `running.shutdown().await.unwrap()`, reopen `MetaDb`, and assert that the `pending_traces` row exists.
 
@@ -897,9 +912,18 @@ fn batches(completed: &[Completed]) -> Vec<(i64, &[Completed])>;
 
 `sweep_once`, step by step:
 1. `rules = refresh_rules(state).await?` (I4.5; this also updates the tracked set).
-2. For each `(project, project_rules)`: `completed = state.pending.completed(project, now, project_rules.timeout_ns, PER_PROJECT_TICK)`; skip when empty. For each `(around, batch)` of `batches(&completed)`: `match sweep_batch(state, project, &project_rules.rules, around, batch, now, &mut report).await`:
-   - `Ok(())` → `state.pending.finish(project, batch)`;
-   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`.
+2. For each `(project, project_rules)`: `completed = state.pending.completed(project, now, project_rules.timeout_ns, PER_PROJECT_TICK)`; skip when empty. For each `(around, batch)` of `batches(&completed)`: `let outcome = sweep_batch(state, project, &project_rules.rules, around, batch, now, &mut report).await;` then `settle(state, project, batch, outcome, &mut report)`.
+
+```rust
+/// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for
+/// each and drops those at `MAX_FAILED_READS`. Returns the traces dropped.
+fn settle(state: &AppState, project: ProjectId, batch: &[Completed], outcome: Result<(), ()>, report: &mut SweepReport) -> usize
+```
+
+   - `Ok(())` → `state.pending.finish(project, batch)`; return 0.
+   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`; return `dropped`.
+
+   `settle` takes `&AppState` only for `state.pending`; its unit test builds a `TestApp`.
 3. `report.completed` is the sum of the `completed` lengths. When `report.enqueued > 0`, `state.eval.wake()`. Return the report.
 
 `sweep_batch(…) -> Result<(), ()>`. The error has already been logged inside; `()` keeps the signature honest about that. It has three steps in this order: read, then admit, then enqueue. Only the reads can fail before any hourly-cap unit is spent.
@@ -925,10 +949,10 @@ fn admit_targets(hourly: &HourlyCaps, targets: Vec<(&TriggerRule, MatchRow)>, no
 ```
 
 `read_candidates` takes neither `&HourlyCaps` nor `&mut SweepReport`. That signature is what guarantees a failed read spends no cap unit and counts nothing.
-1. `source = state.storage.query(project, QueryOptions { around: Some(around), ..QueryOptions::default() }).await`; `ctx = QueryContext::new(source, None)`, as `routes/read.rs` `open_query_on` does. On any error, log `warn!(project_id, "a trigger read could not start")` and return `Err(())`.
+1. `source = state.storage.query(project, QueryOptions { around: Some(around) }).await` (the one field `QueryOptions` has; § Completion and sweeping in one place); `ctx = QueryContext::new(source, None)`, as `routes/read.rs` `open_query_on` does. On any error, log `warn!(project_id, "a trigger read could not start")` and return `Err(())`.
 2. `ids: Vec<String>` is the batch's trace ids as lowercase hex (`TraceId::to_string`), then `refs: Vec<&str>`.
 3. For each rule:
-   - `"trace"` → `llmobs_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: rule.filter.as_deref(), search: None, trace_ids: &refs, include_eval: false, include_experiments: false, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, false)`.
+   - `"trace"` → `llmobs_storage::trace_refresh(&ctx, TraceRefreshRequest { filter: rule.filter.as_deref(), search: None, trace_ids: &refs, include_eval: false, include_experiments: false, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, false)` (strict, so the batches have exactly `TRACE_REFRESH_STRICT_COLUMNS`, I4.1).
    - `"span"` → `llmobs_storage::span_refresh(&ctx, SpanRefreshRequest { filter: rule.filter.as_deref(), trace_ids: &refs, per_trace: MAX_REFRESH_SPANS_PER_TRACE, strict_exclusions: true, timeout: READ_TIMEOUT })`, then `match_rows(&batches, true)`.
    - Errors follow § Error outcomes of a batch read. A skipped rule goes on to the next rule. A batch failure logs `warn!(project_id, rule_id, kind = error.kind(), "a trigger read failed")` and returns `Err(())`.
    - Add `rows.len()` to `matched`, then push the rule's sampled rows:
@@ -979,7 +1003,7 @@ That a failed read spends no cap unit is guaranteed by the types: `read_candidat
 
 - `a_trace_completed_twice_gets_one_job`: sweep, commit another span of the same trace, sweep again → still one job.
 - `a_rule_with_an_unreadable_filter_is_skipped`: rule A's filter set by SQL to `status = = 'x'`, rule B fine → B's job is queued, the trace leaves the map, and the log has the skip warning (`capture_logs`, plain `#[tokio::test]`).
-- `a_failed_batch_keeps_its_traces`: a storage read cannot be made to fail reliably in a test, so step 2's two arms are one function, `fn settle(pending: &PendingTraces, project, batch: &[Completed], outcome: Result<(), ()>) -> usize` (returns the traces dropped), and `sweep_once` calls it. Unit-test it: `Err` four times keeps the trace, the fifth drops it and returns 1; `Ok` finishes it.
+- `a_failed_batch_keeps_its_traces`: a storage read cannot be made to fail reliably in a test, so test `settle` (step 2) directly: `Err` four times keeps the trace and counts `failed_batches == 4`, the fifth drops it, returns 1 and counts `dropped == 1`; `Ok` finishes it.
 - `a_deleted_rule_during_the_sweep_enqueues_nothing`: call the enqueue helper with a `NewJob` of a deleted rule → `Ok`, 0 inserted.
 - `untracked_projects_are_not_read`: a project without rules → its trace never enters the map.
 - **End to end:** `a_trace_rule_runs_from_commit_to_score` (`#[tokio::test(flavor = "multi_thread")]`, M3 § Conventions' test clock: set the manual clock to the real time first): a judge evaluator on `MockLlm` (as M3's `execute.rs` tests), a trace rule created over HTTP (`POST …/online-rules`, rate 1), then `trigger::refresh_rules(&app.state).await.unwrap()` so the project is tracked before the commit (the sweeper's first pass would otherwise race it), `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `commit_spans` of a rooted trace, then `app.state.clock.advance(Duration::from_secs(6))`; poll `GET …/eval-jobs?rule_id=` every 50 ms for at most 10 s until one job is `done`; `GET /scores?rule_id=` has one `llm_judge` score on the trace; finally `EvalTasks::shutdown`. Run it five times in a row (`for i in 1 2 3 4 5; do cargo test -p llmobs-server a_trace_rule_runs_from_commit_to_score || break; done`); a flaky run must be fixed, not retried.
@@ -994,7 +1018,7 @@ That a failed read spends no cap unit is guaranteed by the types: `read_candidat
 
 **Goal:** the rule editor shows how many traces or spans its filter matched in the last 24 hours; the project's general settings set the trace completion timeout; spec 11 and the roadmap describe M4.
 
-**Edit only:** `web/src/components/online-rules/match-counter.tsx` and `.test.tsx` (new), `web/src/components/online-rules/rule-form.tsx` (render the counter), `web/src/routes/$org/$project/online-rules/new.test.tsx` (new cases), `web/src/routes/$org/$project/settings/general.tsx` and `.test.tsx`, `docs/spec/11-ui.md`, `docs/roadmap.md` (the I row), `docs/plans/i-online-eval/00-design.md` (only to check that this plan's four design changes are there; if they are not, add them as written in § Decisions this plan relies on and say so in the report).
+**Edit only:** `web/src/components/online-rules/match-counter.tsx` and `.test.tsx` (new), `web/src/components/online-rules/rule-form.tsx` (render the counter), `web/src/test/online-rule-preview.ts` (new: the default preview handler), `web/src/test/setup.ts` (install it in `beforeEach`), `web/src/routes/$org/$project/online-rules/new.test.tsx` and `$ruleId/edit.test.tsx` (new cases only), `web/src/routes/$org/$project/settings/general.tsx` and `.test.tsx`, `docs/spec/11-ui.md`, `docs/roadmap.md` (the I row), `docs/plans/i-online-eval/00-design.md` (only to check that this plan's four design changes are there; if they are not, add them as written in § Decisions this plan relies on and say so in the report).
 
 **Commit:** `Show rule match counts and the trace completion timeout`
 
@@ -1010,9 +1034,18 @@ That a failed read spends no cap unit is guaranteed by the types: `read_candidat
 
 `rule-form.tsx`: render `<MatchCounter … />` right under the filter field, for members only (the preview needs `ManageEvaluation`; viewers see the read-only form without it). Pass the form's current target, filter and sample rate (as a fraction).
 
+### The default preview handler (`web/src/test/online-rule-preview.ts`)
+
+`web/src/test/setup.ts` throws "Unhandled requests" after any test that made an unmocked request, and I4.6 adds no dev-mode mock. Every test that mounts `RuleForm` as a member (M3's `new.test.tsx` and `$ruleId/edit.test.tsx`, and the rule-form tests) would now send an unmocked `POST …/online-rules/preview`. So:
+- `online-rule-preview.ts` exports `onlineRulePreviewHandler()`: `http.post("*/api/v1/projects/:project/online-rules/preview", () => HttpResponse.json(<fixtures/api/static/online-rule-preview.json>))`. Import the fixture by relative path, as `web/src/mocks/saved-views.ts` imports `fixtures/api/static/me.json`.
+- `setup.ts`'s `beforeEach` adds it: `server.use(...savedViewHandlers(seedSavedViews()), onlineRulePreviewHandler());`.
+- A test that needs another answer overrides it with its own `server.use(http.post(…))`, which takes precedence (MSW checks the latest handlers first).
+
+M3's existing tests then pass unchanged.
+
 ### General settings (`settings/general.tsx`)
 
-A second section under the existing form, "Online evaluation", with its own form and Save button (admins only, like the rest of the page; the same `DisabledReason`):
+A second section under the existing form, "Online evaluation", with its own `<form aria-label="Online evaluation">` and a submit button named **"Save timeout"** (admins only, like the rest of the page; the same `DisabledReason`). Not "Save": `settings/general.test.tsx` finds the first form's button with `getByRole("button", { name: "Save" })` about seven times, and a second "Save" would make those queries ambiguous. Testing Library matches a string name exactly, so "Save timeout" does not collide:
 - a number input labelled "Trace completion timeout (seconds)", initial value `data.trace_completion_timeout_s`, `min 10`, `max 3600`, step 1;
 - help: "Online rules evaluate a trace when its root span has ended and 5 seconds pass without a new span, or after this many seconds without a new span. 10 to 3600; default 60.";
 - Save sends `PATCH` with `{ trace_completion_timeout_s }` only; a value outside 10–3600 or not an integer shows "Enter a whole number from 10 to 3600." under the field and sends nothing; a `400` with a field error shows it under the field; success shows the existing `FormSuccess` pattern and invalidates the project query (`projectQuery` key, as the first form does).
@@ -1033,9 +1066,9 @@ A second section under the existing form, "Online evaluation", with its own form
 - `shows an invalid filter`: a `400 invalid_filter` → "The filter is invalid: …".
 - `shows a load error`: a `503` → "The match count could not be loaded."
 
-`online-rules/new.test.tsx`: the existing tests still pass (the counter must not break the exact `POST` body assertion). `$ruleId/edit.test.tsx`: `a viewer sees no counter` (add it there if the edit page test file holds the viewer case).
+`online-rules/new.test.tsx`: the existing tests still pass with the default handler (the counter must not break the exact `POST` body assertion: the preview is a different request). `$ruleId/edit.test.tsx`: `a viewer sees no counter` (no `status` element with "matched").
 
-`settings/general.test.tsx`: `saves the trace completion timeout` (the `PATCH` body is exactly `{trace_completion_timeout_s: 120}`); `refuses an out-of-range timeout` (5 → the message, no request); `shows a server field error`; `a non-admin cannot change it`.
+`settings/general.test.tsx`: the existing tests pass unchanged (their `name: "Save"` queries still find one button). `saves the trace completion timeout` (click "Save timeout"; the `PATCH` body is exactly `{trace_completion_timeout_s: 120}`); `refuses an out-of-range timeout` (5 → the message, no request); `shows a server field error`; `a non-admin cannot change it`.
 
 ### Done when
 
