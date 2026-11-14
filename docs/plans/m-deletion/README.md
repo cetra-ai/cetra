@@ -125,7 +125,7 @@ A judge trace (track I) is a trace in the same project, with environment `llmobs
 | `pending_traces` (I) | kept; the sweeper reads through storage, which hides the traces | cascade | cascade |
 | `saved_views` (H), evaluators, rules, score definitions, API keys, members, alert tables (K) | kept | cascade | cascade |
 | `llm_connections`, `invites`, `org_members` | kept | kept | cascade from `orgs` |
-| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | deleted, after one `Usage::flush` |
+| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7; until P's M4 lands, the drop still deletes them after one `Usage::flush`) |
 | `deletions` and its scope tables | kept forever (audit, D-M-8) | kept | kept |
 | live streams (SSE) | `resync` event on the project's streams when registered | `resync` | `resync` per project |
 | `GET /metrics` cache | entries of the project dropped | dropped | dropped |
@@ -218,7 +218,7 @@ Three call sites for tracks P and Q. Each is one plain function call in M's code
 
 | Hook | Where (M) | M's behaviour | Who replaces it, with what |
 |---|---|---|---|
-| Retention cap (D175) | `retention::retention_once`: `let cap: Option<u32> = None;` passed to `effective_days` | no cap | P: `state.entitlements.of(org).retention_cap_days()` (plan data-access window + 30 days; `None` without a plan, e.g. self-hosted without a licence) |
+| Retention cap (D175) | `retention::retention_once`: `let cap: Option<u32> = None;` passed to `effective_days` | no cap | P (M4, D-P-45): the largest data window of the last 30 days plus 30 days, `state.entitlements.retention_window_at(&state.meta, org, now).await?` plus 30 (`None` when unlimited, e.g. self-hosted without a licence) |
 | Retention management (D177) | `routes/projects.rs::may_manage_retention(state, org) -> bool`, called by `create_project` and `update_project` when the body sets `retention_days` to a number | returns `true` | P: the body becomes `state.entitlements.of(org).allows(Feature::RetentionManagement)` (free when self-hosted, Pro on the cloud) |
 | Dropped (D170) | `deletion::on_dropped(state, &Dropped)`, called once by the worker after a project or org drop committed (at most once: a crash right after the commit skips it) | emits the audit event `org dropped` / `project dropped` | Q: also sends the control-plane notification (org → cell mapping cleanup); for durability Q reconciles from `deletions` rows of kind `project`/`org` in status `applied`, which are never deleted |
 
