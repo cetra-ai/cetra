@@ -12,6 +12,8 @@ Data model in 01; written through:
 | `POST /api/public/feedback` with `pk` key | `end_user` |
 | Online rules / experiment server evaluators | `llm_judge` \| `check` \| `webhook` |
 
+Evaluator scores (`llm_judge`, `check`, `webhook`) are written by the eval queue with `evaluator_id` set, and `rule_id` set for rule jobs; their derived id's author is the rule, or the evaluator for a manual run (D-I-18).
+
 Scores go through a WAL + memtable exactly like spans (03), so they are durable on `200` and visible in seconds. Update = write a new row with the same `score_id` and later `updated_at`; delete = row with `deleted = true`. Every version keeps the first version's `created_at` (03 §5): a UUIDv7 `score_id` takes it from the id's time, any other id from the live version, and a new id from the write time (D-G-26).
 
 The caller decides `source` (D-G-27): a session on the project route writes `human` (with `author_user_id`); a PAT or `sk` key there writes `api`, or `sdk` when the body says so; `POST /api/v1/scores` writes `sdk`; feedback writes `end_user`. Any other `source` in a request is a `400`.

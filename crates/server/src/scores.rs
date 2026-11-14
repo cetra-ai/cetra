@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::api::common::FieldError;
 use crate::api::convert;
+use crate::api::evaluators::EvaluatorKind;
 use crate::api::scores::ScoreCreate;
 use crate::http::AppState;
 use crate::http::error::ApiError;
@@ -41,6 +42,14 @@ pub(crate) enum Writer {
     Sdk { key_id: Uuid },
     /// A `pk` key on `POST /api/public/feedback`.
     EndUser { key_id: Uuid },
+    /// An evaluator through the queue: a rule's job, or a manual run (`rule_id: None`).
+    // I3.6 writes evaluator scores.
+    #[allow(dead_code)]
+    Evaluator {
+        kind: EvaluatorKind,
+        evaluator_id: Uuid,
+        rule_id: Option<Uuid>,
+    },
 }
 
 impl Writer {
@@ -52,6 +61,12 @@ impl Writer {
             (Self::Api { .. }, Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::Sdk { .. }, None | Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::EndUser { .. }, None | Some(ScoreSource::EndUser)) => Some(ScoreSource::EndUser),
+            (Self::Evaluator { kind, .. }, None) => Some(evaluator_source(kind)),
+            (Self::Evaluator { kind, .. }, Some(requested))
+                if requested == evaluator_source(kind) =>
+            {
+                Some(requested)
+            }
             _ => None,
         }
     }
@@ -62,6 +77,11 @@ impl Writer {
             Self::Human { user_id } => user_id,
             Self::Api { author } => author,
             Self::Sdk { key_id } | Self::EndUser { key_id } => key_id,
+            Self::Evaluator {
+                evaluator_id,
+                rule_id,
+                ..
+            } => rule_id.unwrap_or(evaluator_id),
         }
     }
 
@@ -69,8 +89,33 @@ impl Writer {
     fn author_user(self) -> Option<Uuid> {
         match self {
             Self::Human { user_id } => Some(user_id),
-            Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } => None,
+            Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } | Self::Evaluator { .. } => {
+                None
+            }
         }
+    }
+
+    /// `evaluator_id` and `rule_id` of the stored rows. Only an evaluator has them.
+    fn evaluator_ids(self) -> (Option<Uuid>, Option<Uuid>) {
+        match self {
+            Self::Evaluator {
+                evaluator_id,
+                rule_id,
+                ..
+            } => (Some(evaluator_id), rule_id),
+            Self::Human { .. } | Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } => {
+                (None, None)
+            }
+        }
+    }
+}
+
+/// The `source` an evaluator's scores are stored with (spec 06 § Scores).
+fn evaluator_source(kind: EvaluatorKind) -> ScoreSource {
+    match kind {
+        EvaluatorKind::LlmJudge => ScoreSource::LlmJudge,
+        EvaluatorKind::Check => ScoreSource::Check,
+        EvaluatorKind::Webhook => ScoreSource::Webhook,
     }
 }
 
@@ -139,6 +184,7 @@ pub(crate) async fn write(
     let live = live_scores(state, project.id, &lookup).await?;
 
     let author_user = writer.author_user();
+    let (evaluator_id, rule_id) = writer.evaluator_ids();
     let rows: Vec<Score> = kept
         .into_iter()
         .map(|pending| {
@@ -168,8 +214,8 @@ pub(crate) async fn write(
                 value,
                 reason,
                 source,
-                evaluator_id: None,
-                rule_id: None,
+                evaluator_id,
+                rule_id,
                 experiment_id: None,
                 dataset_item_id: None,
                 author_user_id: author_user,
@@ -908,6 +954,118 @@ mod tests {
         let helpful = rows.iter().find(|row| row.name == "helpful").unwrap();
         assert_eq!(helpful.source, ScoreSource::EndUser);
         assert_eq!(helpful.author_user_id, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_writer_sets_source_ids_and_author() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator: Uuid = "01900000-0000-7000-8000-000000000500".parse().unwrap();
+        let rule: Uuid = "01900000-0000-7000-8000-000000000700".parse().unwrap();
+        let project = seeded.project.id;
+
+        let through_rule = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: evaluator,
+            rule_id: Some(rule),
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            through_rule,
+            vec![item("same", 1.0)],
+        )
+        .await
+        .unwrap();
+        // A manual run has no rule: its author is the evaluator.
+        let manual = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: evaluator,
+            rule_id: None,
+        };
+        write(&app.state, &seeded.project, manual, vec![item("same", 0.0)])
+            .await
+            .unwrap();
+
+        let rows = stored(&app, project).await;
+        assert_eq!(rows.len(), 2);
+        let by_rule = rows.iter().find(|row| row.rule_id == Some(rule)).unwrap();
+        assert_eq!(by_rule.source, ScoreSource::Check);
+        assert_eq!(by_rule.evaluator_id, Some(evaluator));
+        assert_eq!(by_rule.author_user_id, None);
+        assert_eq!(
+            by_rule.score_id,
+            derive_id(project, &span_target(), "same", ScoreSource::Check, rule)
+        );
+        let by_evaluator = rows.iter().find(|row| row.rule_id.is_none()).unwrap();
+        assert_eq!(by_evaluator.evaluator_id, Some(evaluator));
+        assert_eq!(
+            by_evaluator.score_id,
+            derive_id(
+                project,
+                &span_target(),
+                "same",
+                ScoreSource::Check,
+                evaluator
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_writer_refuses_another_source() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::LlmJudge,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                writer,
+                vec![ScoreCreate {
+                    source: Some(ScoreSource::Human),
+                    ..item("same", 1.0)
+                }],
+            )
+            .await,
+        );
+        assert_eq!(
+            errors,
+            vec![(
+                "scores[0].source".to_owned(),
+                "source human is not allowed here".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_scores_count_in_usage() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::Webhook,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        write(&app.state, &seeded.project, writer, vec![item("same", 1.0)])
+            .await
+            .unwrap();
+        app.state
+            .usage
+            .flush(&app.state.meta)
+            .await
+            .expect("usage flushes");
+        let scores: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(scores), 0) FROM usage_daily WHERE project_id = ?",
+        )
+        .bind(seeded.project.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("usage reads");
+        assert_eq!(scores, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
