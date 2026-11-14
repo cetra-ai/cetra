@@ -84,7 +84,7 @@ Every request is a row in `meta.db` `deletions`. `POST` answers `202` with that 
 - **`pending`**: `register_deletion` returned, `handed_over_at` is set. Storage hides the covered rows from every read (tombstones). The worker polls `Storage::deletion_status` every tick.
 - **`applied`**: storage reported the deletion applied (spec 03 § 7: bytes gone from Parquet files within `storage.deletion.max_delay`, 24 h by default). `applied_at` is set.
 - **`failed`**: resolution gave up. `error` is `too_many_traces` (a filter matched more than 100,000 traces at resolution time) or `resolution_failed` (5 failed attempts in a row, or an error that cannot succeed on retry). Nothing was hidden or deleted. The caller may submit a new request.
-- **Project and org kinds** are created in `pending` with `handed_over_at` NULL. The project or org is set to `state = 'deleting'` in the same transaction, so every route answers 404 for it at once and ingest is refused. The worker calls `drop_project` (once per project), deletes the `meta.db` rows (foreign-key cascades), and sets `applied` in one step. These kinds never fail. A storage error is retried every minute, forever, and logged.
+- **Project and org kinds** are created in `pending` with `handed_over_at` NULL. The project or org is set to `state = 'deleting'` in the same transaction, so every route answers 404 for it at once and ingest is refused. For an org, only the org row is set; its projects are hidden through the org-state check, not marked themselves. The worker calls `drop_project` (once per project), deletes the `meta.db` rows (foreign-key cascades), and sets `applied` in one step. These kinds never fail. A storage error is retried every minute, forever, and logged.
 - **Restart**: the worker's first tick handles every open row:
   - a `resolving` row with `trace_count` NULL is resolved again;
   - a `resolving` row with `trace_count` set is registered with its stored scope;
@@ -161,17 +161,17 @@ A read-only PAT is refused on every non-GET route by the existing check in `http
 
 ### Worker (D-M-3, D-M-13)
 
-`deletion::run_once(&AppState)` processes every open row, oldest first. The task `spawn_deletions` (in `serve.rs`) runs it:
+`deletion::run_once(&AppState)` processes every open row: drops (`project`, `org`) first, then rows with a stored scope or `pending`, then `trace_ids` rows, then `filter` and `user` rows still to resolve; oldest first within each group. A row that does not decode is logged and skipped. The task `spawn_deletions` (in `serve.rs`) runs it:
 - when `state.deletions.wake` is notified (every create notifies it);
 - otherwise every 2 s.
 
 Rows are processed one at a time. A large `user` resolution can delay the others, but a project or org being dropped is already hidden.
 
 Failures are counted per row in memory (`attempts: HashMap<Uuid, Attempt>`). After a failure the row is skipped until `now + 60 s`.
-- `RunError::Timeout`, `QueryError::Busy` and `DeletionError::Catalog`/`StorageError` are retried.
+- `RunError::Timeout`, `RunError::TooLarge` (the shared memory pool), `RunError::Failed` on a `trace_ids` or `user` row, `QueryError::Busy` and `DeletionError::Catalog`/`StorageError` are retried.
 - `trace_ids`, `filter` and `user` rows end `failed` / `resolution_failed`:
   - after 5 consecutive failures;
-  - at once on `RunError::Invalid`, `RunError::InvalidRequest`, `RunError::Failed` or `RunError::TooLarge`;
+  - at once on `RunError::Invalid`, `RunError::InvalidRequest`, or `RunError::Failed` on a `filter` row (its text fails at execution);
   - only while no scope is stored (`trace_count` NULL): once the scope and its cascades are stored, the row retries registration until storage takes it, so `failed` always means nothing was hidden or deleted.
 - `project` and `org` rows are retried forever.
 

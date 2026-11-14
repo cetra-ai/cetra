@@ -45,6 +45,9 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::deletions::{
+    CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
+};
 use super::entitlements::{Feature, OrgEntitlements};
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
@@ -107,6 +110,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<Problem>();
     set.insert::<Limit>();
     set.insert::<TimeParam>();
+    set.insert::<Deletion>();
+    set.insert::<CreateDeletion>();
+    set.insert::<DeletionPreviewRequest>();
+    set.insert::<DeletionPreview>();
+    set.insert_page::<Deletion>("DeletionPage");
     set.insert::<SortOrder>();
     set.insert::<TraceSort>();
     set.insert::<SpanSort>();
@@ -343,6 +351,7 @@ pub fn openapi() -> OpenApi {
             tag("sql", "SQL console over the project's views."),
             tag("metrics", "Dashboard metrics."),
             tag("media", "Extracted media blobs."),
+            tag("deletions", "GDPR deletions and their status."),
             tag(
                 "alerts",
                 "Alert rules, alert events and notification channels.",
@@ -626,6 +635,7 @@ fn paths() -> Paths {
     let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
+    let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
     media_paths(paths).build()
@@ -1124,6 +1134,20 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let mut orgs = PathItem::new(HttpMethod::Get, list_orgs);
     orgs.post = Some(post_org);
+    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners)")
+        .description(Some(
+            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.",
+        ))
+        .parameters(Some(with_query::<DropParams>(vec![path_string(
+            "org",
+            "Org UUID or slug.",
+        )])))
+        .responses(responses(
+            "202",
+            json_of::<Deletion>("The deletion, in status pending."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
     let get_entitlements = operation(
         "get_org_entitlements",
         "orgs",
@@ -1141,10 +1165,27 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
+    org.delete = Some(delete_org);
     let mut projects = PathItem::new(HttpMethod::Get, list);
     projects.post = Some(post_project);
+    let delete_project = operation(
+        "delete_project",
+        "projects",
+        "Delete a project (org admins; API keys are refused)",
+    )
+    .description(Some(
+        "Answers 202; the project is gone from every route at once and its data is erased in the background.",
+    ))
+    .parameters(Some(with_query::<DropParams>(vec![project_param()])))
+    .responses(responses(
+        "202",
+        json_of::<Deletion>("The deletion, in status pending."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
     let mut project = PathItem::new(HttpMethod::Get, get);
     project.patch = Some(patch_project);
+    project.delete = Some(delete_project);
     paths
         .path("/api/v1/orgs", orgs)
         .path("/api/v1/orgs/{org}", org)
@@ -2047,6 +2088,77 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn deletion_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation("list_deletions", "deletions", "List deletions")
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("DeletionPage", "One page of deletions, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("create_deletion", "deletions", "Request a deletion")
+        .description(Some(
+            "Kinds `trace_ids` (an `sk` key with `write` may use it), `filter` and `user` (project admins). Answers 202; the deletion is resolved and applied in the background. A filter matching more than 100,000 traces is 422 `too_many_traces`.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDeletion")))
+        .responses(responses(
+            "202",
+            json_of::<Deletion>("The deletion, in status resolving."),
+            &[400, 401, 403, 404, 409, 422, 429, 503],
+        ))
+        .build();
+    let preview = operation("preview_deletion", "deletions", "Count a filter deletion")
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("DeletionPreviewRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DeletionPreview>("How many traces would be deleted."),
+            &[400, 401, 403, 404, 422, 429, 503],
+        ))
+        .build();
+    let get = operation("get_deletion", "deletions", "Get a deletion")
+        .parameters(Some(vec![project_param(), path_uuid("id", "Deletion id.")]))
+        .responses(responses(
+            "200",
+            json_of::<Deletion>("The deletion."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let list_org = operation(
+        "list_org_deletions",
+        "deletions",
+        "List an organization's deletions",
+    )
+    .parameters(Some(with_query::<PageParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_named("DeletionPage", "One page of deletions, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let mut deletions = PathItem::new(HttpMethod::Get, list);
+    deletions.post = Some(create);
+    paths
+        .path(format!("{PROJECT}/deletions"), deletions)
+        .path(
+            "/api/v1/orgs/{org}/deletions",
+            PathItem::new(HttpMethod::Get, list_org),
+        )
+        .path(
+            format!("{PROJECT}/deletions/preview"),
+            PathItem::new(HttpMethod::Post, preview),
+        )
+        .path(
+            format!("{PROJECT}/deletions/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+}
+
 fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
     let list = operation("list_channels", "alerts", "List notification channels")
         .parameters(Some(vec![project_param()]))
@@ -2448,7 +2560,9 @@ fn problem(code: u16) -> Response {
         413 => "The request body is larger than the limit.",
         416 => "The Range header does not overlap the blob.",
         415 => "The request body is not JSON.",
-        422 => "The query took longer than its time limit or needed more memory than allowed.",
+        422 => {
+            "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces."
+        }
         429 => "Too many requests.",
         503 => "The server is busy or a dependency is unavailable. Retry later.",
         _ => "Request failed.",

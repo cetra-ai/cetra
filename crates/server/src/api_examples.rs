@@ -54,6 +54,21 @@ fn example_created(
     }
 }
 
+fn example_accepted(
+    operation_id: &str,
+    path_params: BTreeMap<String, String>,
+    file: &str,
+) -> Example {
+    Example {
+        operation_id: operation_id.to_owned(),
+        path_params,
+        query: BTreeMap::new(),
+        status: 202,
+        content_type: "application/json".to_owned(),
+        file: file.to_owned(),
+    }
+}
+
 fn example_status(operation_id: &str, file: &str, status: u16) -> Example {
     Example {
         operation_id: operation_id.to_owned(),
@@ -599,6 +614,39 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             BTreeMap::new(),
             "static/saved-views.json",
             "application/json",
+        ),
+        example(
+            "list_deletions",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/deletions.json",
+            "application/json",
+        ),
+        example(
+            "get_deletion",
+            params(&[("id", "01900000-0000-7000-8000-000000000902")]),
+            BTreeMap::new(),
+            "static/deletion.json",
+            "application/json",
+        ),
+        example_status("preview_deletion", "static/deletion-preview.json", 200),
+        example_status("create_deletion", "static/deletion-resolving.json", 202),
+        example(
+            "list_org_deletions",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-deletions.json",
+            "application/json",
+        ),
+        example_accepted(
+            "delete_project",
+            BTreeMap::new(),
+            "static/deletion-project.json",
+        ),
+        example_accepted(
+            "delete_org",
+            params(&[("org", "acme")]),
+            "static/deletion-org.json",
         ),
     ]);
     out.manifest.sort_by(|left, right| {
