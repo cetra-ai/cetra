@@ -205,3 +205,76 @@ check-capture: capture-py-sync capture-ts-sync
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
     cargo run -q -p llmobs-capture -- run --all --check
+
+# Packaging and release (track N, docs/plans/n-packaging/)
+
+# Write target/dist/THIRD-PARTY-NOTICES.md: licences of the crates and web packages in the binary (D-N-8)
+notices: js-install
+    tools/packaging/notices.sh
+
+# Build the release archive of one target into target/dist; Linux targets also stage the image context (D-N-1, D-N-16)
+dist target: js-install
+    tools/packaging/dist.sh {{target}}
+
+# Stage target/dist/image/linux-<arch> from a Linux release archive (D-N-3)
+image-context archive arch:
+    tools/packaging/image-context.sh {{archive}} {{arch}}
+
+# Start a binary on free ports and smoke-test it: /readyz, the UI, one OTLP span read back (D-N-13)
+binary-smoke binary:
+    tools/packaging/binary-smoke.sh {{binary}}
+
+# Write SHA256SUMS for the archives in a directory (D-N-7)
+checksums dir:
+    tools/packaging/checksums.sh {{dir}}
+
+# Build the image for this machine's architecture from target/dist/image (run `just dist` first) (D-N-3)
+image tag="llmobs:dev":
+    docker build -f deploy/docker/Dockerfile -t {{tag}} .
+
+# Run an image with a fresh volume and smoke-test it, healthcheck included (D-N-13)
+image-smoke tag="llmobs:dev":
+    tools/packaging/image-smoke.sh {{tag}}
+
+# Run deploy/install.sh against target/dist served on loopback (D-N-15)
+install-smoke:
+    tools/packaging/install-smoke.sh
+
+# Run deploy/compose with an image and smoke-test it; `just compose-smoke llmobs:dev s3` adds Garage (D-N-9)
+compose-smoke tag="llmobs:dev" *mode:
+    tools/packaging/compose-smoke.sh {{tag}} {{mode}}
+
+# Lint the Helm chart and validate its manifests with kubeconform (D-N-10)
+helm-check:
+    tools/packaging/helm-check.sh
+
+# Install the chart with an image on a throwaway kind cluster and smoke-test it (D-N-10)
+helm-smoke tag="llmobs:dev":
+    tools/packaging/helm-smoke.sh {{tag}}
+
+# Check that the chart and compose files carry the workspace version (D-N-5)
+versions-check:
+    tools/packaging/versions-check.sh
+
+# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0` (D-N-5)
+release-prep version:
+    tools/packaging/release-prep.sh {{version}}
+
+# Release workflow gate: tag = version, files agree, changelog section, tag on origin/main (D-N-5)
+release-verify tag:
+    tools/packaging/release-verify.sh {{tag}}
+
+# Print a version's changelog section (the GitHub release notes)
+release-notes version:
+    tools/packaging/release-notes.sh {{version}}
+
+# Packaging checks on x86_64 Linux: what CI's packaging job runs (D-N-13)
+check-packaging: versions-check helm-check js-install
+    pnpm exec biome check tools/packaging
+    just dist x86_64-unknown-linux-musl
+    just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
+    just install-smoke
+    just image llmobs:dev
+    just image-smoke llmobs:dev
+    just compose-smoke llmobs:dev
+    just compose-smoke llmobs:dev s3

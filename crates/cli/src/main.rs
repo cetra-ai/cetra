@@ -1,5 +1,6 @@
 mod client;
 mod credentials;
+mod health;
 mod login;
 mod output;
 mod projects;
@@ -43,6 +44,12 @@ enum Command {
     },
     /// Print the llmobs version.
     Version,
+    /// Exit 0 if the server answers `GET <url>/readyz` with 200 (the container healthcheck).
+    Health {
+        /// Server URL.
+        #[arg(long, default_value = health::DEFAULT_URL)]
+        url: String,
+    },
     /// Save a personal access token for a server.
     Login {
         /// Server URL, for example `http://127.0.0.1:8080`.
@@ -179,6 +186,7 @@ async fn run_cli(
     };
     match cli.command {
         Command::Version => print_version()?,
+        Command::Health { url } => health::check(&url).await?,
         Command::Serve { config } => serve(config.as_deref()).await?,
         Command::Admin { command } => admin_command(command).await?,
         Command::Login { url, no_browser } => {
@@ -592,6 +600,19 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn health_parses_with_and_without_url() {
+        let url_of = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+            Command::Health { url } => url,
+            other => panic!("unexpected command {other:?}"),
+        };
+        assert_eq!(url_of(&["llmobs", "health"]), "http://127.0.0.1:8080");
+        assert_eq!(
+            url_of(&["llmobs", "health", "--url", "http://10.0.0.1:9000"]),
+            "http://10.0.0.1:9000"
+        );
     }
 
     #[test]

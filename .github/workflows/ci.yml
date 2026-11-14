@@ -213,6 +213,29 @@ jobs:
       - run: just e2e
       - run: just assert-clean
 
+  packaging:
+    runs-on: ubuntu-24.04
+    environment:
+      name: s3-cache
+      deployment: false
+    timeout-minutes: 75
+    env:
+      # Build the archive exactly as release.yml does: the default linker, not ci.yml's mold.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+        with:
+          cache: ${{ env.CI_CACHE_ALLOWED }}
+          s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
+          s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - uses: ./.github/actions/packaging # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - run: just check-packaging
+      - run: just assert-clean
+
   ci-ok:
     if: always()
     needs:
@@ -226,6 +249,7 @@ jobs:
         python-sdk,
         workflows,
         e2e,
+        packaging,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -1,0 +1,35 @@
+# `just helm-check` renders the chart with this file (every optional block on).
+publicUrl: https://llmobs.example.com
+config:
+  storage:
+    flush:
+      max_age: 60s
+  auth:
+    signup: invite_only
+env:
+  - name: LLMOBS_LOG
+    value: debug
+secret:
+  values:
+    LLMOBS_SMTP_URL: smtps://user:password@smtp.example.com:465
+    LLMOBS_EMAIL_FROM: llmobs <llmobs@example.com>
+ingress:
+  enabled: true
+  className: nginx
+  host: llmobs.example.com
+  tls:
+    - secretName: llmobs-tls
+      hosts: [llmobs.example.com]
+persistence:
+  size: 50Gi
+  storageClassName: fast
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    memory: 8Gi
+podAnnotations:
+  example.com/team: observability
+nodeSelector:
+  kubernetes.io/os: linux

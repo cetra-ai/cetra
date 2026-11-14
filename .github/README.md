@@ -1,6 +1,6 @@
 # CI compiler cache
 
-The Rust lint, test, and e2e jobs use kache 2.0.0 with the Garage bucket `kache`
+The Rust lint, test, e2e and packaging jobs use kache 2.0.0 with the Garage bucket `kache`
 served at `https://s3.chapu.is`. The S3 endpoint and bucket are configured in
 `actions/rust/action.yml`; the region is `us-east-1`.
 
@@ -74,7 +74,7 @@ change changes every kache cache key, so one cold run repopulates the store.
 
 After the secrets are configured, a qualifying owner PR or a run on `main` can
 populate the cache. The first run against the empty bucket compiles everything;
-run it again and compare the complete `rust-lint`, `rust-test`, and `e2e` job
+run it again and compare the complete `rust-lint`, `rust-test`, `e2e` and `packaging` job
 durations, including kache setup and its post step.
 
 The kache setup step should report the configured S3 remote. Its job summary
@@ -96,3 +96,7 @@ large cached executables, grey-cloud the `s3` DNS record or set
 References:
 [kache action](https://github.com/kunobi-ninja/kache-action/tree/ad7317540dcdd71c904f7a60a87b620a0c0e67ed),
 [kache CI write policy](https://ninja.kunobi.com/docs/kache/remote-cache/ci#who-may-write).
+
+## Release workflow
+
+`workflows/release.yml` runs on tags `v*` (D-N-14). Its `run:` steps call `just` recipes, except steps that only pass values between steps (reading the version, the image and chart names, `helm push`, `gh release create`), which stay inline. (docs/plans/n-packaging/README.md § Releasing, D-N-5–D-N-7). It uses no compiler cache. Its `publish` job runs in the GitHub environment `release` (create it under Settings → Environments, limited to tags `v*`; add a required reviewer to approve each publish) and is the only job with write permissions: `contents` (the GitHub release), `packages` (GHCR), `id-token` and `attestations` (build provenance). It needs no secret besides the workflow's own `GITHUB_TOKEN`.

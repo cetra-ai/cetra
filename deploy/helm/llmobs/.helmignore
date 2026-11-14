@@ -1,0 +1,3 @@
+# Not packaged into the chart archive.
+ci/
+.helmignore

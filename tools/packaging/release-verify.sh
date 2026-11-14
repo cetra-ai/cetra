@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# The release workflow's first step (D-N-5): the tag is v<workspace version>, every versioned file
+# agrees, CHANGELOG.md has the section, and the tagged commit is on origin/main.
+#
+# Usage: release-verify.sh <tag>, e.g. v0.1.0. Needs `git fetch origin main` first.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$root"
+if [[ $# -ne 1 ]]; then
+  echo "usage: release-verify.sh <tag>" >&2
+  exit 2
+fi
+tag="$1"
+version="$(tools/packaging/version.sh)"
+if [[ "$tag" != "v$version" ]]; then
+  echo "release-verify: tag $tag does not match the workspace version $version" >&2
+  exit 1
+fi
+tools/packaging/versions-check.sh
+tools/packaging/release-notes.sh "$version" >/dev/null
+if ! git merge-base --is-ancestor HEAD origin/main; then
+  echo "release-verify: $tag is not on origin/main" >&2
+  exit 1
+fi
+echo "release-verify: $tag is ready"

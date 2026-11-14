@@ -1,0 +1,19 @@
+# Third-party notices: Rust crates
+
+The `llmobs` binary includes the following Rust crates. Each licence text is
+followed by the crates it covers.
+
+{{#each licenses}}
+## {{name}} ({{id}})
+
+Used by:
+
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+```text
+{{{text}}}
+```
+
+{{/each}}

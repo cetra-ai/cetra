@@ -1,0 +1,39 @@
+name: Packaging tools
+description: Install the release-build and packaging tools (musl-gcc, cargo-auditable, cargo-about; on Linux also helm and kubeconform)
+
+runs:
+  using: composite
+  steps:
+    - name: Install musl-gcc
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -q
+        sudo apt-get install -y -q musl-tools
+
+    - name: Install cargo-auditable and cargo-about
+      uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      with:
+        tool: cargo-auditable@0.7.7,cargo-about@0.9.3
+
+    - name: Install helm
+      if: runner.os == 'Linux'
+      uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      with:
+        version: v4.3.1
+
+    - name: Install kubeconform
+      if: runner.os == 'Linux'
+      shell: bash
+      # Checksums from the v0.8.0 release's CHECKSUMS file.
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) arch=amd64; sum=9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 ;;
+          aarch64) arch=arm64; sum=1f53fc8e81258197a35e8603054162a5af1de8c5af13746c71ab680d9534ed87 ;;
+          *) echo "no kubeconform for $(uname -m)" >&2; exit 1 ;;
+        esac
+        curl -fsSL -o "$RUNNER_TEMP/kubeconform.tar.gz" "https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-${arch}.tar.gz"
+        echo "${sum}  $RUNNER_TEMP/kubeconform.tar.gz" | sha256sum -c -
+        sudo tar -xzf "$RUNNER_TEMP/kubeconform.tar.gz" -C /usr/local/bin kubeconform
