@@ -1,5 +1,31 @@
 [
   {
+    "operation_id": "create_deletion",
+    "path_params": {},
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-resolving.json"
+  },
+  {
+    "operation_id": "delete_org",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-org.json"
+  },
+  {
+    "operation_id": "delete_project",
+    "path_params": {},
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/deletion-project.json"
+  },
+  {
     "operation_id": "get_admin_license",
     "path_params": {},
     "query": {},
@@ -16,12 +42,42 @@
     "file": "static/admin-settings.json"
   },
   {
+    "operation_id": "get_alert_rule",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000510"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rule.json"
+  },
+  {
     "operation_id": "get_auth_config",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/auth-config.json"
+  },
+  {
+    "operation_id": "get_deletion",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000902"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletion.json"
+  },
+  {
+    "operation_id": "get_evaluator",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000500"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator.json"
   },
   {
     "operation_id": "get_invite_preview",
@@ -393,12 +449,62 @@
     "file": "static/admin-users.json"
   },
   {
+    "operation_id": "list_alert_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000510"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-events.json"
+  },
+  {
+    "operation_id": "list_alert_rules",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/alert-rules.json"
+  },
+  {
     "operation_id": "list_api_keys",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/api-keys.json"
+  },
+  {
+    "operation_id": "list_channels",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/channels.json"
+  },
+  {
+    "operation_id": "list_deletions",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletions.json"
+  },
+  {
+    "operation_id": "list_evaluator_templates",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-templates.json"
+  },
+  {
+    "operation_id": "list_evaluators",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluators.json"
   },
   {
     "operation_id": "list_llm_connections",
@@ -409,6 +515,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/llm-connections.json"
+  },
+  {
+    "operation_id": "list_org_deletions",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-deletions.json"
   },
   {
     "operation_id": "list_org_invites",
@@ -471,6 +587,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/saved-views.json"
+  },
+  {
+    "operation_id": "list_score_definitions",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/score-definitions.json"
   },
   {
     "operation_id": "list_scores",
@@ -559,6 +683,22 @@
     "file": "static/api-key-created.json"
   },
   {
+    "operation_id": "post_evaluator",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/evaluator.json"
+  },
+  {
+    "operation_id": "post_evaluator_test",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/evaluator-test-result.json"
+  },
+  {
     "operation_id": "post_llm_connection",
     "path_params": {
       "org": "acme"
@@ -606,6 +746,14 @@
     "file": "static/personal-token-created.json"
   },
   {
+    "operation_id": "post_score_definition",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/score-definition.json"
+  },
+  {
     "operation_id": "post_setup",
     "path_params": {},
     "query": {},
@@ -620,6 +768,14 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/signup-response.json"
+  },
+  {
+    "operation_id": "preview_deletion",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/deletion-preview.json"
   },
   {
     "operation_id": "run_sql",

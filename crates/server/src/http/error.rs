@@ -68,6 +68,12 @@ pub(crate) enum ApiError {
         /// Which 403 this is.
         code: ProblemCode,
     },
+    /// The org's plan limit is reached (D178).
+    #[error("plan limit")]
+    PlanLimit {
+        /// Names the limit; never holds payload.
+        detail: String,
+    },
     /// The org's plan does not include the feature (D177, D-P-14). `detail` names it.
     #[error("plan required")]
     PlanRequired {
@@ -80,6 +86,9 @@ pub(crate) enum ApiError {
     /// The resource does not exist.
     #[error("not found")]
     NotFound,
+    /// A filter deletion would cover more than 100,000 traces (D-M-5).
+    #[error("too many traces")]
+    TooManyTraces,
     /// The request conflicts with the current state.
     #[error("conflict")]
     Conflict {
@@ -148,6 +157,9 @@ impl ApiError {
             }
             Self::Unauthorized => Problem::new(ProblemCode::Unauthorized, None),
             Self::Forbidden { code } => Problem::new(*code, None),
+            Self::PlanLimit { detail } => {
+                Problem::new(ProblemCode::PlanLimit, Some(detail.clone()))
+            }
             Self::PlanRequired { detail } => {
                 Problem::new(ProblemCode::PlanRequired, Some((*detail).to_owned()))
             }
@@ -156,6 +168,13 @@ impl ApiError {
             Self::Conflict { detail } => {
                 Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()))
             }
+            Self::TooManyTraces => Problem::new(
+                ProblemCode::TooManyTraces,
+                Some(
+                    "the filter matches more than 100,000 traces; narrow it or the time range"
+                        .to_owned(),
+                ),
+            ),
             Self::RateLimited { .. } => Problem::new(ProblemCode::RateLimited, None),
             Self::RangeNotSatisfiable { .. } => {
                 Problem::new(ProblemCode::RangeNotSatisfiable, None)
@@ -595,6 +614,14 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn plan_required_is_a_403_problem() {
+        let (status, problem) = problem_of(ApiError::PlanRequired { detail: "x" }).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(problem.code, ProblemCode::PlanRequired);
+        assert_eq!(problem.detail.as_deref(), Some("x"));
     }
 
     #[tokio::test]

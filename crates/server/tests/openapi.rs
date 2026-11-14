@@ -227,15 +227,149 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "delete_saved_view",
     ),
     ("post", "/api/v1/projects/{project}/sql", "run_sql"),
+    (
+        "get",
+        "/api/v1/projects/{project}/channels",
+        "list_channels",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/channels",
+        "create_channel",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/channels/{id}",
+        "update_channel",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/channels/{id}",
+        "delete_channel",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/channels/{id}/test",
+        "test_channel",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-rules",
+        "list_alert_rules",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/alert-rules",
+        "create_alert_rule",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-rules/{id}",
+        "get_alert_rule",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/alert-rules/{id}",
+        "update_alert_rule",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/alert-rules/{id}",
+        "delete_alert_rule",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/alert-rules/{id}/events",
+        "list_alert_events",
+    ),
     ("get", "/api/v1/projects/{project}/metrics", "get_metrics"),
     (
         "get",
         "/api/v1/projects/{project}/media/{sha256}",
         "get_media",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/deletions",
+        "list_deletions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/deletions",
+        "create_deletion",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/deletions/preview",
+        "preview_deletion",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/deletions/{id}",
+        "get_deletion",
+    ),
+    ("delete", "/api/v1/projects/{project}", "delete_project"),
+    ("delete", "/api/v1/orgs/{org}", "delete_org"),
+    ("get", "/api/v1/orgs/{org}/deletions", "list_org_deletions"),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators",
+        "list_evaluators",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators",
+        "post_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "get_evaluator",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "patch_evaluator",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/evaluators/{id}",
+        "delete_evaluator",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/evaluator-templates",
+        "list_evaluator_templates",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators/test",
+        "post_evaluator_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/score-definitions",
+        "list_score_definitions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/score-definitions",
+        "post_score_definition",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/score-definitions/{id}",
+        "patch_score_definition",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/score-definitions/{id}",
+        "delete_score_definition",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
+    "list_alert_events",
     "list_org_members",
     "list_org_invites",
     "list_llm_connections",
@@ -254,6 +388,11 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_metrics",
+    "list_deletions",
+    "get_deletion",
+    "list_org_deletions",
+    "list_evaluators",
+    "list_score_definitions",
 ];
 
 /// Read operations with a handler (D-G-23): their errors include 422.
@@ -282,12 +421,16 @@ const TAGS: &[&str] = &[
     "sessions",
     "users",
     "scores",
+    "evaluation",
+    "score_definitions",
     "schema",
     "saved_views",
     "sql",
     "metrics",
     "media",
     "internal",
+    "deletions",
+    "alerts",
 ];
 
 const METHODS: &[&str] = &[
@@ -451,6 +594,10 @@ fn document_lint() {
             || *id == "delete_api_key"
             || *id == "delete_org_invite"
             || *id == "delete_personal_token"
+            || *id == "delete_channel"
+            || *id == "test_channel"
+            || *id == "get_alert_rule"
+            || *id == "delete_alert_rule"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
@@ -478,16 +625,40 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
-        } else if *id == "post_llm_connection" || *id == "patch_llm_connection" {
-            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_llm_connection"
+        } else if *id == "post_llm_connection"
+            || *id == "patch_llm_connection"
             || *id == "delete_llm_connection"
-            || *id == "post_llm_connection_test"
         {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_llm_connection" || *id == "post_llm_connection_test" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "create_channel"
+            || *id == "update_channel"
+            || *id == "create_alert_rule"
+            || *id == "update_alert_rule"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
-        } else if READ_OPERATIONS.contains(id) {
+        } else if *id == "create_deletion" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
+        } else if *id == "delete_project"
+            || *id == "delete_org"
+            || *id == "post_evaluator"
+            || *id == "patch_evaluator"
+            || *id == "post_score_definition"
+            || *id == "patch_score_definition"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_evaluator"
+            || *id == "delete_evaluator"
+            || *id == "delete_score_definition"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_evaluator_test" {
+            // The test only collects 4xx codes; the operation also declares 503.
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -569,6 +740,12 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("LlmConnectionPage", "LlmConnection"),
+        ("DeletionPage", "Deletion"),
+        ("EvaluatorPage", "Evaluator"),
+        ("ScoreDefinitionPage", "ScoreDefinition"),
+        ("ChannelPage", "NotificationChannel"),
+        ("AlertRulePage", "AlertRule"),
+        ("AlertEventPage", "AlertEvent"),
     ];
     for (page, item) in pages {
         let schema = &schemas[page];
@@ -819,6 +996,12 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "LlmConnectionPage",
+        "DeletionPage",
+        "EvaluatorPage",
+        "ScoreDefinitionPage",
+        "ChannelPage",
+        "AlertRulePage",
+        "AlertEventPage",
     ];
     let expected: BTreeSet<String> = pages
         .iter()

@@ -156,29 +156,44 @@ The storage catalog (data files, WAL checkpoints, media) is in `catalog.db` (03 
 CREATE TABLE deletions (
     id TEXT PRIMARY KEY,
     org_id TEXT NOT NULL,
-    project_id TEXT,                    -- NULL for kind 'org'
+    project_id TEXT,
     kind TEXT NOT NULL,                 -- 'trace_ids' | 'filter' | 'user' | 'project' | 'org'
-    user_id TEXT,                       -- kind 'user'
-    request TEXT NOT NULL,              -- JSON: the filter selection, or the dropped project/org name and slug
+    user_id TEXT,
+    request TEXT NOT NULL,              -- JSON: the filter selection, or the dropped project or org name and slug
     requested_by_kind TEXT NOT NULL,    -- 'user' | 'api_key'
-    requested_by TEXT NOT NULL,         -- users.id or api_keys.id
+    requested_by TEXT NOT NULL,
     status TEXT NOT NULL,               -- 'resolving' | 'pending' | 'applied' | 'failed'
     trace_count INTEGER,                -- NULL until the scope is stored
     session_count INTEGER,
-    created_at INTEGER NOT NULL,        -- cut-off
-    handed_over_at INTEGER,             -- set once storage has registered it
+    created_at INTEGER NOT NULL,        -- the cut-off, ns
+    handed_over_at INTEGER,
     applied_at INTEGER,
-    error TEXT                          -- 'too_many_traces' | 'resolution_failed'
+    error TEXT                          -- 'too_many_traces' | 'resolution_failed'; NULL unless failed
 );
+
 CREATE INDEX deletions_project ON deletions(project_id, created_at, id);
+
 CREATE INDEX deletions_org ON deletions(org_id, created_at, id);
+
 CREATE INDEX deletions_open ON deletions(created_at, id) WHERE status IN ('resolving', 'pending');
-CREATE TABLE deletion_traces (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
-                              trace_id BLOB NOT NULL, PRIMARY KEY (deletion_id, trace_id));
-CREATE TABLE deletion_sessions (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
-                                session_id TEXT NOT NULL, PRIMARY KEY (deletion_id, session_id));
-CREATE TABLE deletion_projects (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
-                                project_id TEXT NOT NULL, PRIMARY KEY (deletion_id, project_id));
+
+CREATE TABLE deletion_traces (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    trace_id BLOB NOT NULL,
+    PRIMARY KEY (deletion_id, trace_id)
+);
+
+CREATE TABLE deletion_sessions (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, session_id)
+);
+
+CREATE TABLE deletion_projects (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, project_id)
+);
 ```
 
 ## Pricing
@@ -212,10 +227,12 @@ CREATE TABLE score_definitions (
   min_value REAL, max_value REAL,
   description TEXT,
   archived_at INTEGER,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  UNIQUE(project_id, name)
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL;
 ```
+
+`DELETE` archives; a name is unique among live definitions (D-I-26).
 
 ## Saved views
 
@@ -309,13 +326,17 @@ CREATE TABLE evaluators (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,                 -- 'llm_judge' | 'check' | 'webhook'
+  kind TEXT NOT NULL,                 -- 'llm_judge' | 'check' | 'webhook'; immutable
   config TEXT NOT NULL,               -- JSON, schema per kind (06)
   output_score TEXT NOT NULL,         -- JSON {name, data_type, categories?}
+  connection_id TEXT REFERENCES llm_connections(id),
+  secret_enc BLOB,                    -- webhook: sealed {signing_secret, url, headers}
   version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   UNIQUE(project_id, name)
 );
+CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL;
 
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
@@ -360,6 +381,8 @@ CREATE TABLE pending_traces (         -- trace-completion detector state (06)
   PRIMARY KEY (project_id, trace_id)
 );
 ```
+
+`connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
 Done/failed `eval_jobs` are pruned after 7 days.
 
@@ -481,6 +504,8 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `instance_settings` is created by track I (migration `0004`, D156).
 
 Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+
+`spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 
 ## Encryption of secrets
 

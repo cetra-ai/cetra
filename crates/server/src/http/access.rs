@@ -143,12 +143,17 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::internal_orgs::routes());
     routes.extend(crate::routes::connections::routes());
     routes.extend(crate::routes::api_keys::routes());
+    routes.extend(crate::routes::channels::routes());
+    routes.extend(crate::routes::alert_rules::routes());
     routes.extend(crate::routes::tokens::routes());
     routes.extend(crate::routes::traces::routes());
     routes.extend(crate::routes::streams::routes());
     routes.extend(crate::routes::sessions::routes());
     routes.extend(crate::routes::users::routes());
     routes.extend(crate::routes::scores::routes());
+    routes.extend(crate::routes::deletions::routes());
+    routes.extend(crate::routes::score_definitions::routes());
+    routes.extend(crate::routes::evaluators::routes());
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());
     routes.extend(crate::routes::sql::routes());

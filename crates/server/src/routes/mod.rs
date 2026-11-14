@@ -2,10 +2,14 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) mod admin;
+pub(crate) mod alert_rules;
 pub(crate) mod api_keys;
 pub(crate) mod auth;
+pub(crate) mod channels;
 pub(crate) mod connections;
+pub(crate) mod deletions;
 pub(crate) mod entitlements;
+pub(crate) mod evaluators;
 pub(crate) mod feedback;
 pub(crate) mod internal_orgs;
 pub(crate) mod invites;
@@ -20,10 +24,12 @@ pub(crate) mod projects;
 pub(crate) mod read;
 pub(crate) mod saved_views;
 pub(crate) mod schema;
+pub(crate) mod score_definitions;
 pub(crate) mod scores;
 pub(crate) mod sessions;
 pub(crate) mod sql;
 pub(crate) mod streams;
+pub(crate) mod time_cursor;
 pub(crate) mod tokens;
 pub(crate) mod traces;
 pub(crate) mod users;

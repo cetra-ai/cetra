@@ -4,7 +4,9 @@
 //! request's timeout. Lists return Arrow batches in view-column order.
 //! Dashboard metrics return plain structs. The server maps either to API types.
 
+mod alerts;
 mod cursor;
+mod deletions;
 pub(crate) mod metrics;
 mod scores;
 mod sessions;
@@ -19,6 +21,11 @@ use crate::filter::{FilterView, exclusions, time_window};
 use crate::query_error::{RunError, classify};
 use crate::views::{QueryContext, TimeWindow};
 
+pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value, check_alert_filter};
+pub use deletions::{
+    FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
+    filter_trace_ids, user_deletion_scope,
+};
 pub use metrics::{
     Bucket, BucketWidth, Kpi, KpiName, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow,
     Point, Series, SeriesName,
@@ -32,8 +39,9 @@ pub use sessions::{
 };
 pub use traces::{
     MAX_REFRESH_IDS, MAX_TRACE_SPANS, SPAN_LIST_COLUMNS, SpanListRequest, SpanSort,
-    TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, span_detail, span_list,
-    trace_detail, trace_list, trace_list_plan, trace_refresh,
+    TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
+    TraceSpansRequest, span_detail, span_list, trace_detail, trace_list, trace_list_plan,
+    trace_refresh, trace_spans,
 };
 pub use users::{
     MAX_USER_SESSIONS, USER_COLUMNS, UserDetailData, UserListRequest, UserSort, user_detail,

@@ -6,10 +6,13 @@
 //! migration is not this binary's.
 #![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` opens this from P5 on
 
+pub(crate) mod alerts;
 pub(crate) mod api_keys;
 pub(crate) mod connections;
+pub(crate) mod deletions;
 pub(crate) mod email_verifications;
 pub(crate) mod entitlements;
+pub(crate) mod evaluators;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
@@ -19,6 +22,7 @@ pub(crate) mod password_resets;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
 pub(crate) mod saved_views;
+pub(crate) mod score_definitions;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
 
@@ -407,14 +411,15 @@ mod tests {
         MetaDb::open_existing(dir.path()).await.unwrap();
 
         let db = MetaDb::open(dir.path()).await.unwrap();
-        db.write(|connection| {
+        let future = expected_version() + 1;
+        db.write(move |connection| {
             Box::pin(async move {
                 sqlx::query(
                     "INSERT INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
                      VALUES (?, 'future', 1, ?, 0)",
                 )
-                .bind(expected_version() + 1)
+                .bind(future)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -428,7 +433,7 @@ mod tests {
         let error = MetaDb::open_existing(dir.path()).await.unwrap_err();
         match error {
             MetaError::SchemaMismatch { found, expected } => {
-                assert_eq!(found, expected_version() + 1);
+                assert_eq!(found, future);
                 assert_eq!(expected, expected_version());
             }
             other => panic!("{other}"),

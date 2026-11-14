@@ -3,7 +3,9 @@ import {
   atLeast,
   canChangeRole,
   canHaveOverride,
+  canManageAlerts,
   canManageConnections,
+  canManageEvaluation,
   canRemoveMember,
   grantableRoles,
   overrideLabel,
@@ -58,9 +60,24 @@ it("lets only admins and owners manage connections", () => {
   expect(canManageConnections(undefined)).toBe(false);
 });
 
+it("lets members and above manage alerts", () => {
+  expect(canManageAlerts("owner")).toBe(true);
+  expect(canManageAlerts("admin")).toBe(true);
+  expect(canManageAlerts("member")).toBe(true);
+  expect(canManageAlerts("viewer")).toBe(false);
+  expect(canManageAlerts(undefined)).toBe(false);
+});
+
 it("overrides only members and viewers", () => {
   expect(canHaveOverride("member")).toBe(true);
   expect(canHaveOverride("viewer")).toBe(true);
   expect(canHaveOverride("admin")).toBe(false);
   expect(canHaveOverride("owner")).toBe(false);
+});
+
+it("lets members and above manage evaluation", () => {
+  expect(canManageEvaluation("admin")).toBe(true);
+  expect(canManageEvaluation("member")).toBe(true);
+  expect(canManageEvaluation("viewer")).toBe(false);
+  expect(canManageEvaluation(undefined)).toBe(false);
 });

@@ -319,15 +319,27 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
         metrics_cache: crate::routes::metrics::MetricsCache::default(),
         usage: crate::usage::Usage::default(),
+        deletions: crate::deletion::Deletions::new(),
         secrets,
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
         entitlements,
+        trace_loads: crate::eval::trace_load::TraceLoads::default(),
+        definitions: crate::eval::definitions::DefinitionCache::default(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
         release_state(state).await;
         return Err(serve_bootstrap(error));
+    }
+    // The guard is a safety net for judge runs; the server starts without it.
+    if let Err(error) = state
+        .deletions
+        .guard
+        .load(&state.meta, state.clock.now_ns())
+        .await
+    {
+        tracing::error!(error = %error, "deletion guard load failed");
     }
     // Every socket is bound before any server starts. A failure drops the sockets
     // already bound and releases the state, so `LOCK` is free after `Err`.
@@ -358,6 +370,18 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             }
         },
     };
+    let mut tasks = vec![
+        spawn_prune(state.clone()),
+        spawn_purge(state.clone()),
+        spawn_last_used(state.clone()),
+    ];
+    tasks.extend(crate::alerts::spawn_loops(
+        &state,
+        crate::alerts::AlertTiming::DEFAULT,
+    ));
+    tasks.push(spawn_deletions(state.clone()));
+    tasks.push(spawn_retention(state.clone()));
+    tasks.push(spawn_usage(state.clone()));
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -413,13 +437,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         otlp_shutdown_tx,
         grpc_serve,
         grpc_shutdown_tx,
-        state: Some(state.clone()),
-        tasks: vec![
-            spawn_prune(state.clone()),
-            spawn_purge(state.clone()),
-            spawn_last_used(state.clone()),
-            spawn_usage(state),
-        ],
+        state: Some(state),
+        tasks,
     })
 }
 
@@ -495,6 +514,41 @@ fn spawn_last_used(state: AppState) -> JoinHandle<()> {
             if let Err(error) = state.token_last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
             }
+        }
+    })
+}
+
+fn spawn_deletions(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = crate::deletion::run_once(&state).await {
+                tracing::error!(error = %error, "deletion run failed");
+            }
+            tokio::select! {
+                () = state.deletions.wake.notified() => {}
+                () = tokio::time::sleep(crate::deletion::TICK) => {}
+            }
+        }
+    })
+}
+
+fn spawn_retention(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(crate::retention::FIRST_RUN).await;
+        loop {
+            match crate::retention::retention_once(&state).await {
+                Ok(run) if run.files > 0 || run.failures > 0 => {
+                    tracing::info!(
+                        projects = run.projects,
+                        failures = run.failures,
+                        files = run.files,
+                        "retention run"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => tracing::error!(error = %error, "retention run failed"),
+            }
+            tokio::time::sleep(crate::retention::EVERY).await;
         }
     })
 }

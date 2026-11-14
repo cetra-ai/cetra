@@ -2,6 +2,65 @@
 source: crates/server/src/meta/mod.rs
 expression: text
 ---
+table alert_events
+CREATE TABLE alert_events (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  value REAL,
+  count INTEGER,
+  threshold REAL NOT NULL,
+  window_from INTEGER NOT NULL,
+  window_to INTEGER NOT NULL,
+  details TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+)
+
+index alert_events_created
+CREATE INDEX alert_events_created ON alert_events(created_at)
+
+index alert_events_rule
+CREATE INDEX alert_events_rule ON alert_events(rule_id, created_at)
+
+table alert_rule_channels
+CREATE TABLE alert_rule_channels (
+  rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+  PRIMARY KEY (rule_id, channel_id)
+)
+
+index alert_rule_channels_channel
+CREATE INDEX alert_rule_channels_channel ON alert_rule_channels(channel_id)
+
+table alert_rules
+CREATE TABLE alert_rules (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  config TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cooldown_s INTEGER NOT NULL DEFAULT 3600,
+  notify_while_firing INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'ok',
+  clear_streak INTEGER NOT NULL DEFAULT 0,
+  last_value REAL,
+  last_count INTEGER,
+  last_evaluated_at INTEGER,
+  last_fired_at INTEGER,
+  last_notified_at INTEGER,
+  last_error TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index alert_rules_due
+CREATE INDEX alert_rules_due ON alert_rules(enabled, last_evaluated_at)
+
+index alert_rules_name
+CREATE UNIQUE INDEX alert_rules_name ON alert_rules(project_id, name)
+
 table api_keys
 CREATE TABLE api_keys (
     id TEXT PRIMARY KEY,
@@ -21,6 +80,55 @@ CREATE TABLE api_keys (
 index api_keys_project
 CREATE INDEX api_keys_project ON api_keys(project_id)
 
+table deletion_projects
+CREATE TABLE deletion_projects (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, project_id)
+)
+
+table deletion_sessions
+CREATE TABLE deletion_sessions (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, session_id)
+)
+
+table deletion_traces
+CREATE TABLE deletion_traces (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    trace_id BLOB NOT NULL,
+    PRIMARY KEY (deletion_id, trace_id)
+)
+
+table deletions
+CREATE TABLE deletions (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    project_id TEXT,
+    kind TEXT NOT NULL,
+    user_id TEXT,
+    request TEXT NOT NULL,
+    requested_by_kind TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trace_count INTEGER,
+    session_count INTEGER,
+    created_at INTEGER NOT NULL,
+    handed_over_at INTEGER,
+    applied_at INTEGER,
+    error TEXT
+)
+
+index deletions_open
+CREATE INDEX deletions_open ON deletions(created_at, id) WHERE status IN ('resolving', 'pending')
+
+index deletions_org
+CREATE INDEX deletions_org ON deletions(org_id, created_at, id)
+
+index deletions_project
+CREATE INDEX deletions_project ON deletions(project_id, created_at, id)
+
 table email_verifications
 CREATE TABLE email_verifications (
     token_hash TEXT PRIMARY KEY,
@@ -32,6 +140,26 @@ CREATE TABLE email_verifications (
 
 index email_verifications_user
 CREATE INDEX email_verifications_user ON email_verifications(user_id)
+
+table evaluators
+CREATE TABLE evaluators (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,
+  output_score TEXT NOT NULL,
+  connection_id TEXT REFERENCES llm_connections(id),
+  secret_enc BLOB,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+index evaluators_connection
+CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL
 
 table identities
 CREATE TABLE identities (
@@ -89,6 +217,43 @@ CREATE TABLE llm_connections (
   updated_at INTEGER NOT NULL,
   UNIQUE(org_id, name)
 )
+
+table notification_channels
+CREATE TABLE notification_channels (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  config_enc BLOB NOT NULL,
+  target_hint TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index notification_channels_name
+CREATE UNIQUE INDEX notification_channels_name ON notification_channels(project_id, name)
+
+table notification_deliveries
+CREATE TABLE notification_deliveries (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index notification_deliveries_channel
+CREATE INDEX notification_deliveries_channel ON notification_deliveries(channel_id, updated_at)
+
+index notification_deliveries_due
+CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next_attempt_at)
+
+index notification_deliveries_event
+CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)
 
 table org_entitlements
 CREATE TABLE org_entitlements (
@@ -206,13 +371,49 @@ CREATE INDEX saved_views_lookup ON saved_views(project_id, kind)
 index saved_views_owner
 CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id)
 
+table score_definitions
+CREATE TABLE score_definitions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  data_type TEXT NOT NULL,
+  categories TEXT,
+  min_value REAL,
+  max_value REAL,
+  description TEXT,
+  archived_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index score_definitions_live
+CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL
+
 index sqlite_autoindex__sqlx_migrations_1
+
+index sqlite_autoindex_alert_events_1
+
+index sqlite_autoindex_alert_rule_channels_1
+
+index sqlite_autoindex_alert_rules_1
 
 index sqlite_autoindex_api_keys_1
 
 index sqlite_autoindex_api_keys_2
 
+index sqlite_autoindex_deletion_projects_1
+
+index sqlite_autoindex_deletion_sessions_1
+
+index sqlite_autoindex_deletion_traces_1
+
+index sqlite_autoindex_deletions_1
+
 index sqlite_autoindex_email_verifications_1
+
+index sqlite_autoindex_evaluators_1
+
+index sqlite_autoindex_evaluators_2
 
 index sqlite_autoindex_identities_1
 
@@ -227,6 +428,10 @@ index sqlite_autoindex_invites_2
 index sqlite_autoindex_llm_connections_1
 
 index sqlite_autoindex_llm_connections_2
+
+index sqlite_autoindex_notification_channels_1
+
+index sqlite_autoindex_notification_deliveries_1
 
 index sqlite_autoindex_org_entitlements_1
 
@@ -251,6 +456,8 @@ index sqlite_autoindex_projects_1
 index sqlite_autoindex_projects_2
 
 index sqlite_autoindex_saved_views_1
+
+index sqlite_autoindex_score_definitions_1
 
 index sqlite_autoindex_usage_daily_1
 

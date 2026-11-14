@@ -122,6 +122,8 @@ pub enum ProblemCode {
     QueryTimeout,
     /// The query needed more memory than the cap.
     QueryTooLarge,
+    /// A filter deletion would cover more than 100,000 traces.
+    TooManyTraces,
     /// Admission control refused the query.
     Busy,
     /// No credentials, or the credentials are invalid.
@@ -132,6 +134,8 @@ pub enum ProblemCode {
     SsoRequired,
     /// The account has not verified its email.
     EmailNotVerified,
+    /// The org's plan does not allow this (D178). The detail names the limit.
+    PlanLimit,
     /// The organization's plan does not include this feature.
     PlanRequired,
     /// The org's owner cannot be that user (disabled or instance admin).
@@ -160,15 +164,17 @@ impl ProblemCode {
         match self {
             Self::BadRequest | Self::InvalidFilter | Self::QueryFailed => 400,
             Self::Unauthorized => 401,
-            Self::Forbidden | Self::SsoRequired | Self::EmailNotVerified | Self::PlanRequired => {
-                403
-            }
+            Self::Forbidden
+            | Self::SsoRequired
+            | Self::EmailNotVerified
+            | Self::PlanLimit
+            | Self::PlanRequired => 403,
             Self::NotFound => 404,
             Self::MethodNotAllowed => 405,
             Self::PayloadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
             Self::RangeNotSatisfiable => 416,
-            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed => 422,
+            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed | Self::TooManyTraces => 422,
             Self::Conflict => 409,
             Self::RateLimited => 429,
             Self::Internal => 500,
@@ -181,15 +187,17 @@ impl ProblemCode {
         match self {
             Self::BadRequest | Self::InvalidFilter | Self::QueryFailed => "Bad Request",
             Self::Unauthorized => "Unauthorized",
-            Self::Forbidden | Self::SsoRequired | Self::EmailNotVerified | Self::PlanRequired => {
-                "Forbidden"
-            }
+            Self::Forbidden
+            | Self::SsoRequired
+            | Self::EmailNotVerified
+            | Self::PlanLimit
+            | Self::PlanRequired => "Forbidden",
             Self::NotFound => "Not Found",
             Self::MethodNotAllowed => "Method Not Allowed",
             Self::PayloadTooLarge => "Payload Too Large",
             Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::RangeNotSatisfiable => "Range Not Satisfiable",
-            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed => {
+            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed | Self::TooManyTraces => {
                 "Unprocessable Content"
             }
             Self::Conflict => "Conflict",
@@ -460,6 +468,7 @@ mod tests {
         );
         assert_eq!(ProblemCode::SsoRequired.status(), 403);
         assert_eq!(ProblemCode::EmailNotVerified.status(), 403);
+        assert_eq!(ProblemCode::PlanLimit.status(), 403);
         assert_eq!(ProblemCode::PlanRequired.status(), 403);
         assert_eq!(ProblemCode::MethodNotAllowed.status(), 405);
         assert_eq!(ProblemCode::Conflict.status(), 409);
