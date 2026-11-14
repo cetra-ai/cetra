@@ -235,3 +235,7 @@ image tag="llmobs:dev":
 # Run an image with a fresh volume and smoke-test it, healthcheck included (D-N-13)
 image-smoke tag="llmobs:dev":
     tools/packaging/image-smoke.sh {{tag}}
+
+# Run deploy/install.sh against target/dist served on loopback (D-N-15)
+install-smoke:
+    tools/packaging/install-smoke.sh
