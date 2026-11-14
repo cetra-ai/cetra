@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/orgs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an org
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).
+         */
+        post: operations["post_internal_org"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/orgs/{org_id}/entitlements": {
         parameters: {
             query?: never;
@@ -1433,6 +1453,18 @@ export interface components {
             /** @description Secret keys default to ingest, read, and write. Public keys default to feedback. */
             scopes?: components["schemas"]["ApiKeyScope"][];
         };
+        /** @description `POST /api/internal/v1/orgs` (D-P-29). */
+        CreateInternalOrgRequest: {
+            /**
+             * Format: uuid
+             * @description The org id the control plane chose. A UUIDv7.
+             */
+            id: string;
+            /** @description Display name, 1–100 characters after trimming (as `POST /api/v1/orgs`). */
+            name: string;
+            /** @description The first owner. */
+            owner: components["schemas"]["InternalOwner"];
+        };
         /** @description `POST /api/v1/orgs/{org}/invites`. */
         CreateInviteRequest: {
             /** @description Address to invite. */
@@ -1678,6 +1710,23 @@ export interface components {
             name: string;
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
+        };
+        /** @description The created or existing org. */
+        InternalOrg: {
+            /**
+             * Format: uuid
+             * @description The org id.
+             */
+            id: string;
+            /** @description The org slug. */
+            slug: string;
+        };
+        /** @description The owner of a new org. */
+        InternalOwner: {
+            /** @description Email; normalized like every email (D136). */
+            email: string;
+            /** @description Display name for a new user. Ignored when the user exists. */
+            name?: string;
         };
         /**
          * @description One pending invitation.
@@ -2193,7 +2242,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_required" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -4056,6 +4105,84 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInternalOrgRequest"];
+            };
+        };
+        responses: {
+            /** @description The org with this id already exists. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalOrg"];
+                };
+            };
+            /** @description The org was created. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalOrg"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -7101,7 +7228,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -7610,7 +7737,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -7882,7 +8009,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -7975,7 +8102,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8082,7 +8209,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8193,7 +8320,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8300,7 +8427,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8399,7 +8526,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8490,7 +8617,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8580,7 +8707,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8755,7 +8882,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -8848,7 +8975,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The query took longer than its time limit or needed more memory than allowed. */
+            /** @description The query took longer than its time limit or needed more memory than allowed, or the owner cannot be that user (code owner_not_allowed). */
             422: {
                 headers: {
                     [name: string]: unknown;

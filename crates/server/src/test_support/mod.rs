@@ -403,7 +403,7 @@ impl TestApp {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support", "support-bot", None, now).await?;
@@ -582,7 +582,7 @@ impl TestApp {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support bot", "support-bot", Some(30), now)

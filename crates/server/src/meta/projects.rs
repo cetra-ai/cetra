@@ -285,8 +285,8 @@ mod tests {
         let (left, right, project) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let left = insert_org(conn, "Left", "left", 1).await?;
-                    let right = insert_org(conn, "Right", "right", 1).await?;
+                    let left = insert_org(conn, OrgId::new_v7(), "Left", "left", 1).await?;
+                    let right = insert_org(conn, OrgId::new_v7(), "Right", "right", 1).await?;
                     let project = insert_project(conn, left.id, "API", "login", None, 1).await?;
                     let other = insert_project(conn, right.id, "API", "login", Some(30), 1).await?;
                     assert_eq!(project.slug, "login");

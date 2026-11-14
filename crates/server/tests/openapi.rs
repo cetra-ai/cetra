@@ -74,6 +74,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/internal/v1/orgs/{org_id}/entitlements",
         "put_org_entitlements_token",
     ),
+    ("post", "/api/internal/v1/orgs", "post_internal_org"),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -346,7 +347,10 @@ fn document_lint() {
         );
 
         let operation_security = operation.get("security").and_then(Value::as_array);
-        if matches!(*id, "create_key_scores" | "post_feedback") {
+        if matches!(
+            *id,
+            "create_key_scores" | "post_feedback" | "post_internal_org"
+        ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
             assert!(security[0].get("bearer").is_some(), "{id}");
@@ -421,6 +425,8 @@ fn document_lint() {
             expected_errors.extend(["401", "403", "429"]);
         } else if *id == "put_org_entitlements_token" {
             expected_errors.extend(["400", "404", "409", "429"]);
+        } else if *id == "post_internal_org" {
+            expected_errors.extend(["400", "401", "403", "422", "429"]);
         } else if *id == "post_password_reset" || *id == "post_password_forgot" {
             expected_errors.extend(["400", "403", "429"]);
         } else if *id == "post_email_verify" {

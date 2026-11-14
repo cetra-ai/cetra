@@ -204,10 +204,12 @@ mod tests {
 
     async fn org(db: &MetaDb, slug: &str) -> OrgId {
         let slug = slug.to_owned();
-        db.write(move |conn| Box::pin(async move { insert_org(conn, "Acme", &slug, 0).await }))
-            .await
-            .unwrap()
-            .id
+        db.write(move |conn| {
+            Box::pin(async move { insert_org(conn, OrgId::new_v7(), "Acme", &slug, 0).await })
+        })
+        .await
+        .unwrap()
+        .id
     }
 
     fn token(org_id: OrgId, token: &str, received_at: i64) -> StoredToken {

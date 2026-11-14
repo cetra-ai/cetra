@@ -140,6 +140,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::members::routes());
     routes.extend(crate::ee::project_roles::routes());
     routes.extend(crate::routes::entitlements::routes());
+    routes.extend(crate::routes::internal_orgs::routes());
     routes.extend(crate::routes::connections::routes());
     routes.extend(crate::routes::api_keys::routes());
     routes.extend(crate::routes::tokens::routes());
@@ -772,8 +773,8 @@ mod tests {
                     let member = insert_user(conn, user("member@example.com", false), now).await?;
                     let viewer = insert_user(conn, user("viewer@example.com", false), now).await?;
                     let bob = insert_user(conn, user("bob@example.com", false), now).await?;
-                    let acme = insert_org(conn, "Acme", "acme", now).await?;
-                    let other = insert_org(conn, "Other", "other", now).await?;
+                    let acme = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
+                    let other = insert_org(conn, OrgId::new_v7(), "Other", "other", now).await?;
                     add_org_member(conn, acme.id, ada.id, OrgRole::Owner, now).await?;
                     add_org_member(conn, acme.id, admin.id, OrgRole::Admin, now).await?;
                     add_org_member(conn, acme.id, member.id, OrgRole::Member, now).await?;

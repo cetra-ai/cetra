@@ -1001,6 +1001,7 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::orgs::insert_org_with_derived_slug;
     use crate::meta::users::{NewUser, insert_user, set_disabled};
+    use llmobs_core::ids::OrgId;
 
     fn login_body(email: &str, password: &str) -> LoginRequest {
         LoginRequest {
@@ -1089,7 +1090,8 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let org = insert_org_with_derived_slug(conn, "Acme", now).await?;
+                    let org =
+                        insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme", now).await?;
                     add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
                     Ok(org)
                 })
@@ -1935,7 +1937,8 @@ mod tests {
                         now,
                     )
                     .await?;
-                    let org = insert_org_with_derived_slug(conn, "Acme", now).await?;
+                    let org =
+                        insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     Ok((user.id, org.slug))
                 })

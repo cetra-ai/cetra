@@ -134,6 +134,8 @@ pub enum ProblemCode {
     EmailNotVerified,
     /// The organization's plan does not include this feature.
     PlanRequired,
+    /// The org's owner cannot be that user (disabled or instance admin).
+    OwnerNotAllowed,
     /// The resource does not exist.
     NotFound,
     /// The path exists, and this method is not allowed.
@@ -166,7 +168,7 @@ impl ProblemCode {
             Self::PayloadTooLarge => 413,
             Self::UnsupportedMediaType => 415,
             Self::RangeNotSatisfiable => 416,
-            Self::QueryTimeout | Self::QueryTooLarge => 422,
+            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed => 422,
             Self::Conflict => 409,
             Self::RateLimited => 429,
             Self::Internal => 500,
@@ -187,7 +189,9 @@ impl ProblemCode {
             Self::PayloadTooLarge => "Payload Too Large",
             Self::UnsupportedMediaType => "Unsupported Media Type",
             Self::RangeNotSatisfiable => "Range Not Satisfiable",
-            Self::QueryTimeout | Self::QueryTooLarge => "Unprocessable Content",
+            Self::QueryTimeout | Self::QueryTooLarge | Self::OwnerNotAllowed => {
+                "Unprocessable Content"
+            }
             Self::Conflict => "Conflict",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",
@@ -436,6 +440,7 @@ mod tests {
         assert_eq!(ProblemCode::QueryFailed.status(), 400);
         assert_eq!(ProblemCode::QueryTimeout.status(), 422);
         assert_eq!(ProblemCode::QueryTooLarge.status(), 422);
+        assert_eq!(ProblemCode::OwnerNotAllowed.status(), 422);
         assert_eq!(ProblemCode::Busy.status(), 503);
         assert_eq!(
             Problem::new(ProblemCode::QueryFailed, None).title,

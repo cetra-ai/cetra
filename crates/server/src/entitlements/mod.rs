@@ -457,7 +457,9 @@ mod tests {
         let now = app.state.clock.now_ns();
         app.state
             .meta
-            .write(move |conn| Box::pin(async move { insert_org(conn, "Acme", &slug, now).await }))
+            .write(move |conn| {
+                Box::pin(async move { insert_org(conn, OrgId::new_v7(), "Acme", &slug, now).await })
+            })
             .await
             .unwrap()
             .id

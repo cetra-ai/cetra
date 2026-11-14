@@ -667,6 +667,7 @@ mod tests {
     };
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use llmobs_core::ids::OrgId;
 
     #[tokio::test]
     async fn an_empty_database_logs_the_setup_url_once() {
@@ -940,7 +941,7 @@ mod tests {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support", "support-bot", None, now).await?;

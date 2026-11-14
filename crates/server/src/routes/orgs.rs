@@ -17,6 +17,7 @@ use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{self, OrgRow, SlugError};
+use llmobs_core::ids::OrgId;
 
 /// Org routes. Any signed-in caller may list and create orgs (spec 08).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -99,8 +100,11 @@ async fn create_org(
         .write(move |conn| {
             Box::pin(async move {
                 let org = match &slug {
-                    Some(slug) => orgs::insert_org(conn, &name, slug, now).await?,
-                    None => orgs::insert_org_with_derived_slug(conn, &name, now).await?,
+                    Some(slug) => orgs::insert_org(conn, OrgId::new_v7(), &name, slug, now).await?,
+                    None => {
+                        orgs::insert_org_with_derived_slug(conn, OrgId::new_v7(), &name, now)
+                            .await?
+                    }
                 };
                 add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
                 Ok(org)
@@ -212,7 +216,7 @@ fn slug_error(error: SlugError) -> ApiError {
     field_error("slug", &error.to_string())
 }
 
-fn trimmed_name(value: &str) -> Result<String, ApiError> {
+pub(crate) fn trimmed_name(value: &str) -> Result<String, ApiError> {
     let name = value.trim();
     let length = name.chars().count();
     if !(1..=100).contains(&length) {
@@ -221,7 +225,7 @@ fn trimmed_name(value: &str) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-fn field_error(field: &str, message: &str) -> ApiError {
+pub(crate) fn field_error(field: &str, message: &str) -> ApiError {
     ApiError::BadRequest {
         detail: None,
         errors: vec![FieldError {
@@ -283,7 +287,7 @@ mod tests {
         (user.id, cookie_pair(&cookie))
     }
 
-    async fn add_member(app: &TestApp, org: llmobs_core::ids::OrgId, user: Uuid, role: OrgRole) {
+    async fn add_member(app: &TestApp, org: OrgId, user: Uuid, role: OrgRole) {
         let now = app.state.clock.now_ns();
         app.state
             .meta
