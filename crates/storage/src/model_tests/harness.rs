@@ -5,36 +5,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytesize::ByteSize;
-use chrono::{Datelike, NaiveDate};
 use datafusion::execution::context::{SessionConfig, SessionContext};
-use llmobs_core::ids::ProjectId;
 
+use super::shape::{HOUR_NS, P, day, midnight};
 use crate::Storage;
 use crate::config::{
     CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
 use crate::test_support::{span_row, span_rows};
 use crate::wal::Table;
-
-const PROJECT_A: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000a1";
-
-/// Day `D`, 2026-03-05 (UTC).
-const D: NaiveDate = match NaiveDate::from_ymd_opt(2026, 3, 5) {
-    Some(date) => date,
-    None => panic!("day D is a valid date"),
-};
-
-const DAY_NS: i64 = 86_400_000_000_000;
-const HOUR_NS: i64 = 3_600_000_000_000;
-
-/// Nanoseconds since the Unix epoch at 00:00 UTC of `date`.
-fn midnight(date: NaiveDate) -> i64 {
-    (i64::from(date.num_days_from_ce()) - 719_163) * DAY_NS
-}
-
-fn project() -> ProjectId {
-    PROJECT_A.parse().expect("PROJECT_A parses as a project id")
-}
 
 /// The storage config every model case uses.
 pub(super) fn model_config(dir: &std::path::Path) -> StorageConfig {
@@ -146,17 +125,17 @@ impl Drop for Harness {
 /// Appends `count` spans of trace 1 to `PROJECT_A`, numbered from `first_span`.
 /// Every row has the project set, as `append_spans` requires.
 fn append_spans_of_trace_one(harness: &Harness, first_span: u8, count: u8) {
-    let start = midnight(D) + 10 * HOUR_NS;
-    let ingest = midnight(D) + 12 * HOUR_NS;
+    let start = midnight(day(0)) + 10 * HOUR_NS;
+    let ingest = midnight(day(0)) + 12 * HOUR_NS;
     let spans: Vec<_> = (first_span..first_span + count)
         .map(|span| {
             let mut row = span_row(1, span, start, ingest);
-            row.project_id = project();
+            row.project_id = P::A.id();
             row
         })
         .collect();
     harness
-        .block_on(harness.storage().append_spans(project(), span_rows(&spans)))
+        .block_on(harness.storage().append_spans(P::A.id(), span_rows(&spans)))
         .expect("append_spans on project A");
 }
 
@@ -165,7 +144,7 @@ fn visible_span_rows(harness: &Harness) -> usize {
     harness.block_on(async {
         let storage = harness.storage();
         let query = storage
-            .query(project(), Default::default())
+            .query(P::A.id(), Default::default())
             .await
             .expect("query on project A");
         let ctx =

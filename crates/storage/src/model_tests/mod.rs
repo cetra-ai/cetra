@@ -3,3 +3,5 @@
 //! every read (docs/plans/r-hardening/01-m1-model.md).
 
 mod harness;
+mod model;
+mod shape;
