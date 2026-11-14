@@ -87,7 +87,11 @@ Plan: `01-m1-model.md`.
 
 ### M3 — Fuzzing
 
-- **Layout.** `fuzz/` at the repository root is a cargo-fuzz crate with its own empty `[workspace]` and its own `Cargo.lock`, outside the main workspace (the cargo-fuzz norm). It needs nightly Rust and libFuzzer, which `just check` must not depend on (D-R-7).
+- **Layout.** `fuzz/` at the repository root is a cargo-fuzz crate with its own empty `[workspace]`, outside the main workspace. It needs nightly Rust and libFuzzer, which `just check` must not depend on (D-R-7). It still goes through the repository's supply-chain checks (cross-track review X23):
+  - `fuzz/Cargo.lock` is generated from the root lock by `just fuzz-lock`, not committed, so it never drifts from the shipped versions;
+  - `just deny` also runs `cargo deny --manifest-path fuzz/Cargo.toml check` with the same `deny.toml` (plus a narrow NCSA licence exception for libfuzzer-sys);
+  - `.github/dependabot.yml` gets a `/fuzz` cargo entry limited to `libfuzzer-sys`;
+  - AGENTS.md § Dependencies records the exception: `fuzz/` pins its one fuzz-only crate (`libfuzzer-sys`) in its own manifest; `arbitrary` comes from the root `[workspace.dependencies]`, and everything else through path dependencies on the workspace crates.
 - **Entry points.** Each target calls one function of the crate under test. That function is `pub` and `#[doc(hidden)]` under `cfg(any(test, fuzzing))` (cargo-fuzz sets `--cfg fuzzing`), so the decoders stay crate-private for everyone else.
 - **Targets:**
   - `storage`:
@@ -103,23 +107,24 @@ Plan: `01-m1-model.md`.
 
   Structured inputs use `arbitrary` where raw bytes would rarely reach deep code, for example a valid WAL header around a fuzzed Arrow IPC payload.
 - **Corpus.** `fuzz/corpus/<target>/` is committed: minimized (`cargo fuzz cmin`), at most about 2 MiB per target, seeded from real files (WAL segments and Parquet files written by the tests, `fixtures/otlp/`). Crashes become `fuzz/regressions/<target>/<name>`, and each one gets a fix plus a named unit test.
-- **CI** (user): a `#[test]` per target replays the corpus and regressions on stable in `just test`, in seconds. A nightly workflow (`.github/workflows/nightly.yml`, outside `ci-ok`) installs nightly Rust, fuzzes each target for 10 minutes, uploads new corpus entries as an artifact, and opens an issue on a crash. The same workflow runs the long M1 model run and the LazyFS check.
+- **CI** (user): a `#[test]` per target replays the corpus and regressions on stable in `just test`, in seconds. A nightly workflow (`.github/workflows/nightly.yml`, outside `ci-ok`) installs nightly Rust, fuzzes each target for 10 minutes, uploads new corpus entries as an artifact, and opens an issue on a crash. The same workflow runs the long M1 model run, M6's stress runs (30 minutes local, 10 minutes remote), and the LazyFS check if M2's probe shows `/dev/fuse` works on runners. M5's disk-full tests do not run nightly.
+- **Panic boundary.** A panic in the Parquet or Arrow decoder of stored bytes is caught at our scan and treated as a decode error, so the files are verified and quarantined (D-A1-10, D-R-17). Today such a panic drops the request, kills the compaction task, or prevents startup.
 
 ### M4 — S3 fault injection
 
 - **`ChaosStore`** (test-only): a wrapper of `Arc<dyn ObjectStore>` implementing `object_store`'s own trait, as `CacheStore` and `FaultStore` already do. It replaces `FaultStore`. A seeded schedule injects:
   - latency (as `ThrottledStore`);
-  - 503 SlowDown and 500 errors before or after the request takes effect (the "ambiguous upload" of spec 03 §2);
-  - multipart failures (one part fails, `complete` fails, `complete` succeeds but reports an error);
-  - listing results that omit or repeat objects;
-  - reads that return short or wrong bytes.
+  - 503 SlowDown and 500 errors before or after the request takes effect (the "ambiguous upload" of spec 03 §2), as the S3 client returns them after its retries;
+  - multipart failures (one part fails, `complete` fails, `complete` succeeds but reports an error, `abort` fails);
+  - `head` and `get` errors, and bodies cut mid-stream. Wrong bytes appear only in focused tests: over TLS they are not a realistic S3 answer, and the model could not tell them from right ones;
+  - no listing faults: storage never lists the bucket, and the model asserts it.
 - **Over the network,** toxiproxy in front of Versity Gateway adds connection resets, stalls and bandwidth limits, so that `object_store`'s HTTP retry path runs for real. This is an ignored test with a `just` recipe.
 - **Checks:**
   - no acknowledged data lost;
   - no wrong result (the M1 model gets an S3 mode with `ChaosStore`);
   - every staged object either becomes a file or is collected;
-  - every multipart upload we start is completed or aborted;
-  - an orphan audit (list the bucket, compare it with `catalog.db`) is clean after GC.
+  - every multipart upload we start is completed or aborted, except those only a lifecycle rule can remove (a failed abort, a lost create answer, a cancelled task);
+  - an orphan audit is clean after GC. It is N's `Storage::collect_orphans` in dry-run mode (N M2, B5), not a second lister. If R's M4 lands before B5, M4 writes the audit as a test helper, and B5 replaces it.
 - **Real S3.** The `tests/s3.rs` suite and the M1 model's S3 mode run once against a Hetzner Object Storage bucket the user provides when M4 starts (credentials in environment variables only). The run also probes conditional puts, list-after-write, multipart limits and the abort lifecycle rule. Results go in `hardening.md`; `docs/self-hosting/` recommends the lifecycle rule.
 
 ### M5 — Resource exhaustion
