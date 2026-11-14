@@ -227,3 +227,11 @@ binary-smoke binary:
 # Write SHA256SUMS for the archives in a directory (D-N-7)
 checksums dir:
     tools/packaging/checksums.sh {{dir}}
+
+# Build the image for this machine's architecture from target/dist/image (run `just dist` first) (D-N-3)
+image tag="llmobs:dev":
+    docker build -f deploy/docker/Dockerfile -t {{tag}} .
+
+# Run an image with a fresh volume and smoke-test it, healthcheck included (D-N-13)
+image-smoke tag="llmobs:dev":
+    tools/packaging/image-smoke.sh {{tag}}
