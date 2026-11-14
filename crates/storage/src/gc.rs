@@ -303,10 +303,13 @@ pub(crate) async fn collect_orphans(
         if known.contains(key) {
             continue;
         }
-        let age = now
-            .duration_since(SystemTime::from(meta.last_modified))
-            .unwrap_or(Duration::ZERO);
-        if age < min_age {
+        // A modification time in the future (clock skew) counts as recent, so
+        // the object is never deleted, whatever `min_age` is.
+        let recent = match now.duration_since(SystemTime::from(meta.last_modified)) {
+            Ok(age) => age < min_age,
+            Err(_) => true,
+        };
+        if recent {
             report.recent_unknown += 1;
             continue;
         }
@@ -1091,6 +1094,37 @@ mod tests {
             }
         );
         assert!(object_exists(dir.path(), &recent));
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn collect_orphans_keeps_an_object_from_the_future() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let future = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &future, ORPHAN_BYTES).await;
+        // A modification time an hour ahead, as a clock that ran fast would leave.
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("objects").join(&future))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3_600))
+            .unwrap();
+
+        // `min_age` is zero: only the future mtime keeps the object.
+        let report = storage
+            .collect_orphans(Duration::ZERO, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report,
+            OrphanReport {
+                recent_unknown: 1,
+                ..OrphanReport::default()
+            }
+        );
+        assert!(object_exists(dir.path(), &future));
         storage.shutdown().await.unwrap();
     }
 

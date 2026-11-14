@@ -7,7 +7,7 @@
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
@@ -63,8 +63,8 @@ pub enum BackupError {
     /// Another backup holds the slot.
     #[error("another backup is running")]
     Busy,
-    /// The target path is not absolute.
-    #[error("the target must be an absolute path")]
+    /// The target path is not absolute, or has a `..` component.
+    #[error("the target must be an absolute path without `..`")]
     RelativeTarget,
     /// The target exists and is not an empty directory.
     #[error("the target directory is not empty")]
@@ -162,7 +162,7 @@ struct Target {
 
 /// Checks `to` and makes it an empty directory with mode `0700` (§ Consistency, step 3).
 async fn prepare_target(state: &AppState, to: &Path) -> Result<Target, BackupError> {
-    if !to.is_absolute() {
+    if !to.is_absolute() || to.components().any(|part| part == Component::ParentDir) {
         return Err(BackupError::RelativeTarget);
     }
     let target = resolve(to).await?;
@@ -661,6 +661,81 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, BackupError::RelativeTarget), "{error}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_parent_dir_component_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let target = Path::new("/tmp/x/../y");
+        let error = run(running.state(), target, false).await.unwrap_err();
+        assert!(matches!(error, BackupError::RelativeTarget), "{error}");
+        assert_eq!(error.code(), "bad_request");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_symlink_into_the_data_dir_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        // A directory inside the data directory, reached through a link outside it.
+        let inside = data.join("inside");
+        std::fs::create_dir_all(&inside).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+
+        let error = run(running.state(), &link, false).await.unwrap_err();
+        assert!(matches!(error, BackupError::TargetInsideDataDir), "{error}");
+        assert!(
+            std::fs::read_dir(&inside).unwrap().next().is_none(),
+            "a refused backup wrote inside the data directory"
+        );
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_backup_directory_is_0700_and_the_key_0600() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&target), 0o700);
+        assert_eq!(mode(&target.join("secret.key")), 0o600);
+    }
+
+    #[tokio::test]
+    async fn an_existing_empty_target_is_set_to_0700() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let target = root.path().join("backup");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[tokio::test]
+    async fn a_target_inside_a_local_object_root_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let objects = root.path().join("objects-root");
+        std::fs::create_dir_all(&objects).unwrap();
+        let mut cfg = config(&root.path().join("data"));
+        cfg.storage.object_store = Some(ObjectStoreUrl::Local(objects.clone()));
+        let running = bind(cfg, None).await.unwrap();
+        let target = objects.join("backup");
+
+        let error = run(running.state(), &target, false).await.unwrap_err();
+        assert!(matches!(error, BackupError::TargetInsideDataDir), "{error}");
+        assert!(!target.exists());
         running.shutdown().await.unwrap();
     }
 

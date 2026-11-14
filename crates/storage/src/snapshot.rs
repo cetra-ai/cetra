@@ -8,7 +8,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use llmobs_core::ids::ProjectId;
@@ -171,6 +171,18 @@ pub(crate) fn copy_all(
     dest: &Path,
     objects: &[LiveObject],
 ) -> Result<CopyReport, CopyObjectsError> {
+    // Checked before anything is created: a key must stay under `root` and `dest`.
+    for (key_index, object) in objects.iter().enumerate() {
+        if !is_plain_relative(&object.key) {
+            return Err(CopyObjectsError::Io {
+                key_index,
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "object key is not a plain relative path",
+                ),
+            });
+        }
+    }
     std::fs::create_dir_all(dest).map_err(|source| CopyObjectsError::Dir { source })?;
     let mut report = CopyReport::default();
     for (key_index, object) in objects.iter().enumerate() {
@@ -191,17 +203,33 @@ pub(crate) fn copy_all(
     Ok(report)
 }
 
-/// Hard-links `source` to `target`, or copies it and syncs the copy when a link
-/// cannot cross filesystems (`EXDEV`) or `force_copy` is set.
+/// Whether `key` names a file strictly below the store root: non-empty, made of
+/// normal components only (no `..`, root, prefix or `.`).
+fn is_plain_relative(key: &str) -> bool {
+    !key.is_empty()
+        && Path::new(key)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+/// Hard-links `source` to `target`, or copies it and syncs the copy when the
+/// link is refused or `force_copy` is set. Filesystems refuse links for many
+/// reasons (`EXDEV`, `EMLINK`, `EPERM`, `ENOTSUP`), so every link error falls
+/// back to a copy except `NotFound` (no source) and `AlreadyExists` (occupied
+/// target), which the copy would hit as well. Errors of the copy are returned.
 fn link_or_copy(source: &Path, target: &Path, force_copy: bool) -> io::Result<Linked> {
     if !force_copy {
         match std::fs::hard_link(source, target) {
             Ok(()) => return Ok(Linked::Hard),
-            // EXDEV is 18 on Linux and macOS.
             Err(error)
-                if error.kind() == io::ErrorKind::CrossesDevices
-                    || error.raw_os_error() == Some(18) => {}
-            Err(error) => return Err(error),
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists
+                ) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
         }
     }
     std::fs::copy(source, target)?;
@@ -230,7 +258,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use sqlx::ConnectOptions;
 
-    use super::{Linked, link_or_copy};
+    use super::{Linked, LiveObject, link_or_copy};
     use crate::QueryOptions;
     use crate::Storage;
     use crate::catalog::FileTable;
@@ -536,6 +564,30 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             assert_eq!(std::fs::metadata(&copied).unwrap().nlink(), 1);
         }
+    }
+
+    #[test]
+    fn copy_all_rejects_a_key_escaping_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(dir.path().join("x"), b"outside the root").unwrap();
+        let dest = dir.path().join("dest");
+        let objects = [LiveObject {
+            key: "../x".into(),
+            size_bytes: 1,
+        }];
+
+        let result = super::copy_all(&root, &dest, &objects);
+        assert!(
+            matches!(
+                result,
+                Err(CopyObjectsError::Io { key_index: 0, ref source })
+                    if source.kind() == std::io::ErrorKind::InvalidInput
+            ),
+            "{result:?}"
+        );
+        assert!(!dest.exists(), "a rejected key created the destination");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
