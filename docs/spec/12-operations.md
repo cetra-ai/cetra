@@ -58,12 +58,16 @@ TLS: terminated by a reverse proxy in the reference setups; native TLS optional 
 
 ## Packaging
 
+Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-N-16). User documentation: `docs/self-hosting/`.
+
 | Artifact | Details |
 |---|---|
-| Binary | `llmobs` for linux-x86_64, linux-aarch64 (musl, static), macOS arm64/x86_64. Web UI embedded. Built in CI with `cargo build --release` (LTO thin, `codegen-units=1`, `panic=abort` off — we want unwinding for task isolation) (release pipeline added with the server track, D81). |
-| Docker image | `ghcr.io/<org>/llmobs:<version>`, distroless/static base, non-root uid 10001, `VOLUME /data`, `EXPOSE 8080 4317 4318`, healthcheck `/healthz`. Multi-arch. |
-| docker-compose | `llmobs` only (local disk) and a variant with MinIO for S3 mode. |
-| Helm chart | One `StatefulSet` (replicas: 1, enforced), `PersistentVolumeClaim` for `/data`, `Service` (8080, 4317, 4318), optional `Ingress`, `Secret` for encryption key / SMTP / OIDC, values for S3. `podManagementPolicy: OrderedReady`, `terminationGracePeriodSeconds: 60`, `strategy: Recreate` semantics (never two pods on one volume). |
+| Binary | `llmobs` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static) and `aarch64-apple-darwin` (D-N-1). Web UI embedded. Built natively per platform with `cargo auditable build --release --locked` (the workspace release profile: LTO thin, `codegen-units=1`, unwinding kept for task isolation). Shipped as `llmobs-<version>-<target>.tar.gz` with `LICENSE`, `LICENSE-ELASTIC` and `THIRD-PARTY-NOTICES.md` (D-N-8, D-N-16) on the GitHub release, with `SHA256SUMS`, an SPDX SBOM per binary, build provenance attestations and `install.sh` (D-N-7, D-N-15). |
+| Docker image | `ghcr.io/<owner>/llmobs:<version>`, `linux/amd64` and `linux/arm64`. `gcr.io/distroless/static-debian13:nonroot` pinned by digest, uid/gid 65532, `/data` owned by it, `VOLUME /data`, `EXPOSE 8080 4317 4318`, healthcheck `llmobs health` (`/readyz`). Built from the release archives (D-N-3, D-N-4). |
+| docker-compose | `deploy/compose/compose.yaml` (`llmobs` with a named volume) and the overlay `compose.s3.yaml` (a single-node Garage and its init, S3 mode). Compose settings in `.env`, server settings in `llmobs.env` (D-N-9). |
+| Helm chart | `deploy/helm/llmobs`, pushed to `oci://ghcr.io/<owner>/charts/llmobs`, chart version = app version. One `StatefulSet` (`replicas: 1`, not configurable), a `volumeClaimTemplates` volume for `/data` kept on delete, `Service` (8080, 4317, 4318), optional `Ingress`, config through `config` (rendered to `llmobs.toml`), `env`, a Secret (`existingSecret` or chart-made) and `s3.*`. `podManagementPolicy: OrderedReady`, `terminationGracePeriodSeconds: 60`, a rolling update that replaces the one pod (never two pods on one volume) (D-N-10). |
+
+Versions: SemVer, one version for the binary, the image and the chart; `CHANGELOG.md`; a tag `v<version>` on `main` runs the release workflow. Until the product name is chosen (D46), releases are draft pre-releases and the GHCR packages are private (D-N-5, D-N-6).
 
 A file lock (`flock` on `<data_dir>/LOCK`) prevents two processes from opening the same data dir.
 
@@ -102,13 +106,15 @@ Deferred to just before release (D38). Placeholder decisions: Prometheus `/metri
 
 ## Backups (documented procedure, D37)
 
-What to back up: `meta.db` and `catalog.db` (taken together, in the same pause), the object store (`objects/` or the bucket), and `<data_dir>/secret.key` (or keep `LLMOBS_ENCRYPTION_KEY`) with the data. Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `llmobs admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it. The WAL does not need backing up if the snapshot is taken after a flush.
+What to back up: `meta.db` and `catalog.db` (taken together, in the same pause), the object store (`objects/` or the bucket), and `<data_dir>/secret.key` (or keep `LLMOBS_ENCRYPTION_KEY`) with the data. Without it, LLM connection keys and webhook secrets cannot be read, and the server refuses to start (D-I-1). `llmobs admin rotate-encryption-key` replaces the key while the server is stopped (D-I-3). A backup taken before a rotation can only be read with the key that was current then; keep that key with it.
 
-**Procedure (local disk mode):**
+**Cold snapshot (the MVP procedure, D-N-11; `docs/self-hosting/backup.md`):** stop the server (it drains and flushes, at most 60 s); copy the whole data directory (`meta.db`, `catalog.db`, `wal/`, `secret.key`, and `objects/` in local mode; `tmp/` and `LOCK` may be skipped); in S3 mode, copy the bucket prefix during the same stop; start the server.
 
-```bash
-llmobs admin backup --to /backups/llmobs-$(date +%F)   # online, consistent
-```
+**Restore:** stop the server, keep the current data directory (or a copy of its `meta.db`), put the backed-up data directory in place, in S3 mode make the bucket prefix identical to the backup copy (sync with delete), start. Then re-apply deletions (below).
+
+**GDPR and backups:** deleted data persists in backups until they expire; the docs recommend a backup retention ≤ 30 days. Before a restore, keep the current data directory (or a copy of its `meta.db`); after it, start `llmobs serve` once if the backup is from an older version, then run `llmobs admin reapply-deletions --from <kept data_dir>`: it copies every deletion the restored `meta.db` lacks, with its scope, and the server redoes them (D-M-9).
+
+**Online backups (track N's M2, not built):** `llmobs admin backup --to <dir>`, triggered on the running server (it holds the data directory's lock), consistent without stopping:
 
 1. Forces a memtable flush (so WAL content is in Parquet).
 2. Pauses compaction / deletion rewrites / retention (they create and obsolete files).
@@ -116,15 +122,11 @@ llmobs admin backup --to /backups/llmobs-$(date +%F)   # online, consistent
 4. Copies (or hard-links, when on the same filesystem) all active data files listed in the copied `catalog.db` + media objects.
 5. Resumes background tasks. Writes a manifest with checksums.
 
-**S3 mode:** run `llmobs admin backup --meta-only --to …` (steps 1–3, 5) and rely on bucket versioning / replication for objects; deleted-file cleanup by GC respects a configurable `gc.object_retention` so a metadata backup stays restorable for that period.
-
-**Restore:** stop the server, replace `meta.db`, `catalog.db` and objects, start. Objects the restored catalog doesn't list stay in the store; `llmobs admin gc-orphans` lists the object store and deletes them (the regular GC never lists the bucket, 03 §5).
-
-**GDPR and backups:** deleted data persists in backups until they expire; the docs recommend a backup retention ≤ 30 days. Before a restore, keep the current data directory (or a copy of its `meta.db`); after it, start `llmobs serve` once if the backup is from an older version, then run `llmobs admin reapply-deletions --from <kept data_dir>`: it copies every deletion the restored `meta.db` lacks, with its scope, and the server redoes them (D-M-9).
+In S3 mode, `--meta-only` does steps 1–3 and 5 and relies on bucket versioning or replication for objects; deleted-file cleanup by GC respects a configurable `gc.object_retention` so a metadata backup stays restorable for that period. After restoring such a backup, objects the restored catalog doesn't list stay in the store; `llmobs admin gc-orphans` lists the object store and deletes them (the regular GC never lists the bucket, 03 §5).
 
 ## Upgrades
 
-- Semantic versioning. Minor/patch upgrades: replace the binary/image, restart; SQLite migrations run automatically (forward-only); pre-migration copies `meta.db.pre-<version>` and `catalog.db.pre-<version>` are kept for the last upgrade.
+- Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `docs/self-hosting/upgrade.md`). Automatic pre-migration copies `meta.db.pre-<version>` and `catalog.db.pre-<version>` are track N's M2 (not built).
 - Parquet schema changes are additive only (03 §3); normalization changes bump `schema_version` without rewriting data.
 - WAL format carries a version byte in each segment header; a new binary reads the previous WAL version (replays it before writing the new format).
 - Downgrades are not supported (documented: restore the pre-upgrade backup).
@@ -140,4 +142,4 @@ llmobs admin backup --to /backups/llmobs-$(date +%F)   # online, consistent
 
 ## Documentation deliverables (part of the MVP)
 
-Quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
+Self-hosting (`docs/self-hosting/`: install by binary, Docker, compose or Helm, configuration, S3, backup/restore, upgrades; track N), quickstart (Docker, binary), OTel recipe per language, SDK guides (Python/TS), Vercel AI SDK guide, attribute reference, filter DSL + SQL schema reference, evaluators & online rules, alerts, auth/SSO setup (GitHub, Google, Okta, Entra ID, Keycloak), SMTP setup, S3 setup, backup/restore, GDPR guide, Helm values reference, API reference (rendered OpenAPI).
