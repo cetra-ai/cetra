@@ -413,7 +413,7 @@ Audit for applied, in every place above: `tracing::info!(target: "audit", deleti
 3. `state.storage.drop_project(project).await` → on error `Err(Step::RetryForever("storage"))`. `drop_project` is idempotent (spec 03 § 7).
 4. One `meta.write`: `crate::meta::projects::delete_project(conn, project)`, then `mark_dropped(conn, row.id, now)`.
 5. `state.live.publish_resync(project)`; `state.metrics_cache.clear_project(project)`.
-6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(state, &Dropped { deletion_id: row.id, org_id: row.org_id, projects: vec![project], whole_org: false })`.
+6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(&Dropped { deletion_id: row.id, org_id: row.org_id, projects: vec![project], whole_org: false })`.
 
 `drop_org_step(state, row, now)`:
 1. `projects = scope_projects(reader, row.id)` ∪ `project_ids_of_org(reader, row.org_id)` (sorted, deduped). The second list catches a project created by a request that passed the access check just before the org became `deleting` (D-M-7).
@@ -421,7 +421,7 @@ Audit for applied, in every place above: `tracing::info!(target: "audit", deleti
 3. `state.usage.flush(&state.meta).await` → on error `RetryForever("meta")`. Usage counted in memory for these projects must not land in `usage_daily` after the rows are deleted.
 4. One `meta.write`: `crate::usage::delete_org_usage(conn, row.org_id)`, then `crate::meta::orgs::delete_org(conn, row.org_id)`, then `mark_dropped(conn, row.id, now)`.
 5. For each project: `publish_resync`, `clear_project`.
-6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(state, &Dropped { deletion_id: row.id, org_id: row.org_id, projects, whole_org: true })`.
+6. When `mark_dropped` returned `true`: audit `deletion applied`, then `on_dropped(&Dropped { deletion_id: row.id, org_id: row.org_id, projects, whole_org: true })`.
 
 ### The `dropped` hook (D-M-17)
 
@@ -437,10 +437,10 @@ pub(crate) struct Dropped {
     pub(crate) whole_org: bool,
 }
 
-/// Called exactly once per drop, after its `meta.db` transaction committed (D-M-17).
-/// Track Q adds the control-plane notification here (org → cell mapping, D170), through
-/// its own outbox. Today it records the audit event.
-pub(crate) fn on_dropped(_state: &AppState, dropped: &Dropped) {
+/// Records the audit event of a drop, once, after its `meta.db` transaction committed
+/// (D-M-17). The control plane does not hook in here: it pulls the applied `project`/`org`
+/// rows of `deletions` (request R5, track P's M4), which are kept forever.
+pub(crate) fn on_dropped(dropped: &Dropped) {
     if dropped.whole_org {
         tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, projects = dropped.projects.len(), "org dropped");
     } else {

@@ -798,7 +798,7 @@ Render `SettingsPage` with title `General` and description `Name, URL and data r
 
 1. `TextField` id `project-name`, label `Name`, `required`, `maxLength={100}`, `error={nameError}`, disabled when `!canEdit` or pending.
 2. `TextField` id `project-slug`, label `Slug`, value `data.slug`, `readOnly`, `onChange={() => {}}`, description `The slug is part of every URL of this project and cannot be changed.`
-3. `TextField` id `project-retention`, `type="number"`, label `Retention (days)`, value `days`, error `daysError`, disabled when `forever`, `!canEdit` or pending. Its description is `Lowering retention drops older data right away. Deleted data cannot be recovered.`
+3. `TextField` id `project-retention`, `type="number"`, label `Retention (days)`, value `days`, error `daysError`, disabled when `forever`, `!canEdit` or pending. Its description is `Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score.` (the last sentence added by track M, D-M-10)
 4. A row `<div className="flex items-center gap-2">` with `<Checkbox id="project-retention-forever" checked={forever} onCheckedChange={(value) => setForever(value === true)} disabled={!canEdit || mutation.isPending} />` and `<Label htmlFor="project-retention-forever">Keep data forever</Label>`.
 5. `FormError`, `FormSuccess` (`Saved`), and `<DisabledReason reason={canEdit ? undefined : "Only project admins can change these settings"}><SubmitButton pending={mutation.isPending} disabled={!canEdit}>Save</SubmitButton></DisabledReason>`.
 

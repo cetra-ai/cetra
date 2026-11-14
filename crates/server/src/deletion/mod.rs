@@ -189,10 +189,10 @@ pub(crate) struct Dropped {
     pub(crate) whole_org: bool,
 }
 
-/// Called exactly once per drop, after its `meta.db` transaction committed (D-M-17).
-/// Track Q adds the control-plane notification here (org → cell mapping, D170), through
-/// its own outbox. Today it records the audit event.
-pub(crate) fn on_dropped(_state: &AppState, dropped: &Dropped) {
+/// Records the audit event of a drop, once, after its `meta.db` transaction committed
+/// (D-M-17). The control plane does not hook in here: it pulls the applied `project`/`org`
+/// rows of `deletions` (request R5, track P's M4), which are kept forever.
+pub(crate) fn on_dropped(dropped: &Dropped) {
     if dropped.whole_org {
         tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, projects = dropped.projects.len(), "org dropped");
     } else {
@@ -531,15 +531,12 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     state.metrics_cache.clear_project(project);
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(
-            state,
-            &Dropped {
-                deletion_id: row.id,
-                org_id: row.org_id,
-                projects: vec![project],
-                whole_org: false,
-            },
-        );
+        on_dropped(&Dropped {
+            deletion_id: row.id,
+            org_id: row.org_id,
+            projects: vec![project],
+            whole_org: false,
+        });
     }
     Ok(())
 }
@@ -591,15 +588,12 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
     }
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(
-            state,
-            &Dropped {
-                deletion_id: row.id,
-                org_id: row.org_id,
-                projects,
-                whole_org: true,
-            },
-        );
+        on_dropped(&Dropped {
+            deletion_id: row.id,
+            org_id: row.org_id,
+            projects,
+            whole_org: true,
+        });
     }
     Ok(())
 }

@@ -374,7 +374,7 @@ Pending `traces` and `user` deletions are kept in memory per project as the **to
 Every `IN` term is guarded by `IS NOT NULL` (`scores.trace_id`, `user_id` and `session_id` are nullable), so the predicate is never null: a row with no `user_id`, or a session score with no `trace_id`, is never covered by a term on that column.
 
 Known limits:
-- `EXPLAIN` in the SQL console prints the predicate, so project members can see the IDs of a pending deletion until it is applied (accepted, D-A1-3).
+- `EXPLAIN` in the SQL console prints the predicate. The trace ids of a pending deletion show until it is applied (accepted); user and session ids print only as a count, `user_id IN (<n redacted>)`, so the plan never names an erased person (D-A1-3).
 - For a `user` deletion, the `traces` view hides partials by the resolved trace IDs only; the server resolves every trace with a span of the user ingested up to the cut-off.
 - A row stamped with `ingest_time ≤ cut-off` but appended after its deletion is applied is neither dropped nor hidden. The server stamps `ingest_time` at receipt, so this needs a request in flight for longer than the deletion takes to apply.
 
@@ -431,7 +431,7 @@ Each project has `retention_days` in `meta.db` (null means keep forever). The se
 - commits one catalog edit that obsoletes every file of the project in days before the watermark, across `spans`, `traces` and `scores`, quarantined files included (no file is rewritten, because partitions are per day);
 - records the watermark in `retention_watermarks`, in the same transaction. The watermark is the later of the stored one and `keep_from`: it never moves back.
 
-From then on, a flush drops rows of that project older than the watermark, queries don't show memtable rows older than it, and the committer refuses a file older than it (§4), so late rows cannot recreate a dropped day. Memtable `spans` are keyed by each row's own day and files by the anchor day, so a span next to midnight at the watermark can be hidden in the memtable and kept by the flush, or the reverse; the file is what counts. Retention is day-granular. Since a trace lives in one anchor day (§ Trace anchor), it is dropped as a whole.
+From then on, a flush drops rows of that project older than the watermark, queries don't show memtable rows older than it, and the committer refuses a file older than it (§4), so late rows cannot recreate a dropped day. Memtable `spans` are keyed by each row's own day and files by the anchor day, so a span next to midnight at the watermark can be hidden in the memtable and kept by the flush, or the reverse; the file is what counts. Retention is day-granular. Since a trace lives in one anchor day (§ Trace anchor), it is dropped as a whole. Judge traces and scores are dropped by their own day, not their target's: an evaluation or a score written later about an old trace lives at most the retention plus the target's age when it was written, and can outlive its target (its trace link then leads nowhere). A deletion, unlike retention, follows the target to its judge traces and scores (§7, D-M-6, D-M-10).
 
 ## 9. Media
 
