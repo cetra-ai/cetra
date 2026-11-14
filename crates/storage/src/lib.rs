@@ -78,6 +78,13 @@ pub use crate::error::{
     CompactionError, CopyObjectsError, FlushNowError, OrphanError, SnapshotError,
 };
 pub use crate::gc::{ObsoleteReport, OrphanReport};
+
+/// The cancel flag of [`Storage::copy_objects`]. A `Mutex` rather than an
+/// `AtomicBool`: the copy checks the flag and creates each object's directory and
+/// link under the same lock, and a caller sets it under that lock before it removes
+/// the destination. An atomic flag alone would let a copy re-create a directory
+/// between the caller's removal and its check.
+pub type CopyCancel = Arc<Mutex<bool>>;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
@@ -966,14 +973,21 @@ impl Storage {
     /// hard link, or a copy when `dest` is on another filesystem (N M2, D-N-18).
     /// Local mode only.
     ///
+    /// The copy runs on a blocking thread and keeps going when the caller's future
+    /// is dropped. Once `cancel` is set (by the caller, under its lock; see
+    /// [`CopyCancel`]), the copy places no further object and returns
+    /// [`CopyObjectsError::Cancelled`].
+    ///
     /// # Errors
     ///
     /// [`CopyObjectsError::RemoteStore`] in S3 mode; [`CopyObjectsError::Io`]
-    /// when an object is missing or cannot be linked or copied.
+    /// when an object is missing or cannot be linked or copied;
+    /// [`CopyObjectsError::Cancelled`] when `cancel` is set.
     pub async fn copy_objects(
         &self,
         snapshot: &CatalogSnapshot,
         dest: &Path,
+        cancel: CopyCancel,
     ) -> Result<CopyReport, CopyObjectsError> {
         let Some(root) = self.objects.local_root() else {
             return Err(CopyObjectsError::RemoteStore);
@@ -981,7 +995,7 @@ impl Storage {
         let root = root.to_path_buf();
         let dest = dest.to_path_buf();
         let objects = snapshot.objects.clone();
-        tokio::task::spawn_blocking(move || snapshot::copy_all(&root, &dest, &objects))
+        tokio::task::spawn_blocking(move || snapshot::copy_all(&root, &dest, &objects, &cancel))
             .await
             .map_err(|_| CopyObjectsError::Task)?
     }

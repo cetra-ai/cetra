@@ -9,12 +9,13 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, PoisonError};
 
 use llmobs_core::ids::ProjectId;
 use sqlx::{ConnectOptions, Connection};
 use tokio::sync::OwnedRwLockWriteGuard;
 
+use crate::CopyCancel;
 use crate::catalog::{Catalog, table_index};
 use crate::error::{CopyObjectsError, SnapshotError};
 use crate::objects::Objects;
@@ -166,10 +167,15 @@ enum Linked {
 
 /// Places every object of `objects` under `dest` at its key, relative to the
 /// local store root `root`. Runs on a blocking thread.
+///
+/// Each object's check of `cancel`, its directory creation and its link happen
+/// under the lock, so a canceller that sets the flag under the lock and then
+/// removes `dest` cannot race a directory or link back into it.
 pub(crate) fn copy_all(
     root: &Path,
     dest: &Path,
     objects: &[LiveObject],
+    cancel: &CopyCancel,
 ) -> Result<CopyReport, CopyObjectsError> {
     // Checked before anything is created: a key must stay under `root` and `dest`.
     for (key_index, object) in objects.iter().enumerate() {
@@ -183,12 +189,16 @@ pub(crate) fn copy_all(
             });
         }
     }
-    std::fs::create_dir_all(dest).map_err(|source| CopyObjectsError::Dir { source })?;
+    {
+        let _held = not_cancelled(cancel)?;
+        std::fs::create_dir_all(dest).map_err(|source| CopyObjectsError::Dir { source })?;
+    }
     let mut report = CopyReport::default();
     for (key_index, object) in objects.iter().enumerate() {
         let io_error = |source| CopyObjectsError::Io { key_index, source };
         let source = root.join(&object.key);
         let target = dest.join(&object.key);
+        let _held = not_cancelled(cancel)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
@@ -199,8 +209,20 @@ pub(crate) fn copy_all(
         report.count += 1;
         report.bytes += object.size_bytes;
     }
+    let _held = not_cancelled(cancel)?;
     sync_dirs(dest).map_err(|source| CopyObjectsError::Dir { source })?;
     Ok(report)
+}
+
+/// Locks the cancel flag and returns the guard, or [`CopyObjectsError::Cancelled`]
+/// when it is set. The guard must be held across the filesystem calls it covers.
+fn not_cancelled(cancel: &CopyCancel) -> Result<MutexGuard<'_, bool>, CopyObjectsError> {
+    let guard = cancel.lock().unwrap_or_else(PoisonError::into_inner);
+    if *guard {
+        Err(CopyObjectsError::Cancelled)
+    } else {
+        Ok(guard)
+    }
 }
 
 /// Whether `key` names a file strictly below the store root: non-empty, made of
@@ -251,7 +273,7 @@ fn sync_dirs(dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
@@ -259,6 +281,7 @@ mod tests {
     use sqlx::ConnectOptions;
 
     use super::{Linked, LiveObject, link_or_copy};
+    use crate::CopyCancel;
     use crate::QueryOptions;
     use crate::Storage;
     use crate::catalog::FileTable;
@@ -523,7 +546,10 @@ mod tests {
         let snapshot = storage.snapshot_catalog(&target).await.unwrap();
         let dest = dir.path().join("backup-objects");
 
-        let report = storage.copy_objects(&snapshot, &dest).await.unwrap();
+        let report = storage
+            .copy_objects(&snapshot, &dest, not_cancelled())
+            .await
+            .unwrap();
         let count = u64::try_from(snapshot.objects.len()).unwrap();
         assert!(count >= 2, "{snapshot:?}");
         assert_eq!(report.count, count);
@@ -542,6 +568,32 @@ mod tests {
 
         drop(snapshot);
         storage.shutdown().await.unwrap();
+    }
+
+    /// A cancel flag that is not set.
+    fn not_cancelled() -> CopyCancel {
+        Arc::new(Mutex::new(false))
+    }
+
+    #[test]
+    fn copy_all_places_nothing_once_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("tables")).unwrap();
+        std::fs::write(root.join("tables/a.parquet"), b"object bytes").unwrap();
+        let dest = dir.path().join("dest");
+        let objects = [LiveObject {
+            key: "tables/a.parquet".into(),
+            size_bytes: 12,
+        }];
+        let cancel: CopyCancel = Arc::new(Mutex::new(true));
+
+        let result = super::copy_all(&root, &dest, &objects, &cancel);
+        assert!(
+            matches!(result, Err(CopyObjectsError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(!dest.exists(), "a cancelled copy created the destination");
     }
 
     #[test]
@@ -578,7 +630,7 @@ mod tests {
             size_bytes: 1,
         }];
 
-        let result = super::copy_all(&root, &dest, &objects);
+        let result = super::copy_all(&root, &dest, &objects, &not_cancelled());
         assert!(
             matches!(
                 result,
@@ -607,7 +659,9 @@ mod tests {
         // A directory where the first object must go: the link cannot be made.
         std::fs::create_dir_all(dest.join(&snapshot.objects[0].key)).unwrap();
 
-        let result = storage.copy_objects(&snapshot, &dest).await;
+        let result = storage
+            .copy_objects(&snapshot, &dest, not_cancelled())
+            .await;
         assert!(
             matches!(result, Err(CopyObjectsError::Io { key_index: 0, .. })),
             "{result:?}"
@@ -635,7 +689,9 @@ mod tests {
         let snapshot = storage.snapshot_catalog(&target).await.unwrap();
         let dest = dir.path().join("backup-objects");
 
-        let result = storage.copy_objects(&snapshot, &dest).await;
+        let result = storage
+            .copy_objects(&snapshot, &dest, not_cancelled())
+            .await;
         assert!(
             matches!(result, Err(CopyObjectsError::RemoteStore)),
             "{result:?}"
@@ -729,7 +785,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .copy_objects(&snapshot, &backup.join("objects"))
+            .copy_objects(&snapshot, &backup.join("objects"), not_cancelled())
             .await
             .unwrap();
         let flushed = snapshot.flushed_seq;

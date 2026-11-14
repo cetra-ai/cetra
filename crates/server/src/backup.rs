@@ -7,11 +7,12 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
-use llmobs_storage::CopyReport;
 use llmobs_storage::config::ObjectStoreUrl;
+use llmobs_storage::{CopyCancel, CopyReport};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -114,7 +115,8 @@ impl BackupError {
 /// Takes an online backup into `to` (§ Consistency of N M2's design).
 ///
 /// `to` must be absolute and absent or an empty directory, outside the data
-/// directory. A failure after the call creates `to` removes what was written.
+/// directory. A backup that does not finish, by an error or because this future is
+/// dropped, removes what it wrote (see [`Partial`]).
 pub(crate) async fn run(
     state: &AppState,
     to: &Path,
@@ -135,28 +137,49 @@ pub(crate) async fn run(
         (false, false) => BackupMode::Full,
     };
     let target = prepare_target(state, to).await?;
-    match write(state, &target.path, mode, started).await {
-        Ok(report) => {
-            tracing::info!(
-                mode = ?report.mode,
-                objects = report.objects,
-                object_bytes = report.object_bytes,
-                duration_ms = report.duration_ms,
-                "online backup written"
-            );
-            Ok(report)
-        }
-        Err(error) => {
-            undo(&target).await;
-            Err(error)
-        }
-    }
+    let cancel: CopyCancel = Arc::new(Mutex::new(false));
+    let mut partial = Partial {
+        target,
+        cancel: cancel.clone(),
+        armed: true,
+    };
+    let report = write(state, &partial.target.path, mode, started, cancel).await?;
+    partial.armed = false;
+    tracing::info!(
+        mode = ?report.mode,
+        objects = report.objects,
+        object_bytes = report.object_bytes,
+        duration_ms = report.duration_ms,
+        "online backup written"
+    );
+    Ok(report)
 }
 
 /// The backup directory, and whether this call created it.
 struct Target {
     path: PathBuf,
     created: bool,
+}
+
+/// A backup's directory until the backup succeeds. Armed from the moment the target
+/// is claimed, it removes what the backup wrote when dropped: after an error, or when
+/// the `run` future is cancelled, which an abort of the connection does. Cancelling
+/// the future does not stop the object copy, which runs on a blocking thread, so the
+/// drop also sets the copy's cancel flag, under its lock.
+struct Partial {
+    target: Target,
+    cancel: CopyCancel,
+    armed: bool,
+}
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        *self.cancel.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        undo(&self.target);
+    }
 }
 
 /// Checks `to` and makes it an empty directory with mode `0700` (§ Consistency, step 3).
@@ -234,26 +257,26 @@ async fn is_empty_dir(path: &Path) -> io::Result<bool> {
     Ok(entries.next_entry().await?.is_none())
 }
 
-/// Removes what a failed backup wrote. Unlinking a hard link leaves the data
-/// directory's file alone.
-async fn undo(target: &Target) {
+/// Removes what a failed or cancelled backup wrote. It uses `std::fs`, because it
+/// runs in `Drop`. Unlinking a hard link leaves the data directory's file alone.
+fn undo(target: &Target) {
     let result = if target.created {
-        tokio::fs::remove_dir_all(&target.path).await
+        std::fs::remove_dir_all(&target.path)
     } else {
-        remove_entries(&target.path).await
+        remove_entries(&target.path)
     };
     if let Err(error) = result {
         tracing::warn!(kind = ?error.kind(), "could not remove a failed backup");
     }
 }
 
-async fn remove_entries(path: &Path) -> io::Result<()> {
-    let mut entries = tokio::fs::read_dir(path).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.file_type().await?.is_dir() {
-            tokio::fs::remove_dir_all(entry.path()).await?;
+fn remove_entries(path: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
         } else {
-            tokio::fs::remove_file(entry.path()).await?;
+            std::fs::remove_file(entry.path())?;
         }
     }
     Ok(())
@@ -265,6 +288,7 @@ async fn write(
     dir: &Path,
     mode: BackupMode,
     started: Instant,
+    cancel: CopyCancel,
 ) -> Result<BackupReport, BackupError> {
     state.storage.flush_now(FLUSH_TIMEOUT).await?;
     let created = Utc::now();
@@ -279,7 +303,7 @@ async fn write(
         BackupMode::Full => {
             state
                 .storage
-                .copy_objects(&snapshot, &dir.join("objects"))
+                .copy_objects(&snapshot, &dir.join("objects"), cancel)
                 .await?
         }
         BackupMode::MetaOnly => CopyReport {
@@ -750,6 +774,81 @@ mod tests {
         assert!(!target.exists());
         // The storage is already shut down, so this call's error is only logged.
         let _ = running.shutdown().await;
+    }
+
+    #[test]
+    fn a_dropped_partial_backup_removes_its_directory_and_stops_the_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("backup");
+        std::fs::create_dir_all(path.join("objects")).unwrap();
+        std::fs::write(path.join("meta.db"), b"partial").unwrap();
+        let cancel: CopyCancel = Arc::new(Mutex::new(false));
+
+        drop(Partial {
+            target: Target {
+                path: path.clone(),
+                created: true,
+            },
+            cancel: cancel.clone(),
+            armed: true,
+        });
+        assert!(!path.exists(), "the cancelled backup left its directory");
+        assert!(*cancel.lock().unwrap(), "the copy was not told to stop");
+    }
+
+    #[test]
+    fn a_disarmed_partial_backup_keeps_its_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("backup");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("manifest.json"), b"{}").unwrap();
+        let cancel: CopyCancel = Arc::new(Mutex::new(false));
+
+        drop(Partial {
+            target: Target {
+                path: path.clone(),
+                created: true,
+            },
+            cancel: cancel.clone(),
+            armed: false,
+        });
+        assert!(path.join("manifest.json").is_file());
+        assert!(!*cancel.lock().unwrap());
+    }
+
+    /// Aborting a running backup leaves no target content, and a retry to the same
+    /// target succeeds. The abort waits, bounded, until `objects/` exists: the copy
+    /// creates it after both `VACUUM INTO` copies have finished, so the abort lands
+    /// in the object copy or after it. If the backup finishes before the abort, the
+    /// test fails rather than passing without exercising the cancel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cancelled_backup_leaves_no_target_and_a_retry_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let project = ProjectId::new_v7();
+        append(&running, project, 3).await;
+        let state = running.state().clone();
+        let target = root.path().join("backup");
+
+        let task = tokio::spawn({
+            let (state, target) = (state.clone(), target.clone());
+            async move { run(&state, &target, false).await.map(|_| ()) }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !target.join("objects").exists() && !task.is_finished() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        task.abort();
+        let Err(aborted) = task.await else {
+            panic!("the backup finished before the abort");
+        };
+        assert!(aborted.is_cancelled());
+        assert!(!target.exists(), "the cancelled backup left its directory");
+
+        let report = run(&state, &target, false).await.unwrap();
+        assert_eq!(report.mode, BackupMode::Full);
+        assert!(target.join("manifest.json").is_file());
+        running.shutdown().await.unwrap();
     }
 
     #[tokio::test]

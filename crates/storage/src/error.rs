@@ -496,6 +496,19 @@ pub enum ObjectError {
 }
 
 impl ObjectError {
+    /// The variant name in snake case. Logs and [`OrphanError::Delete`] use it
+    /// instead of the error text, which names the object key.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "io",
+            Self::AlreadyExists { .. } => "already_exists",
+            Self::Upload { .. } => "upload",
+            Self::Store { .. } => "store",
+            Self::InvalidPath => "invalid_path",
+            Self::Client { .. } => "client",
+        }
+    }
+
     pub(crate) fn io(action: &'static str, path: &Path, source: io::Error) -> Self {
         Self::Io {
             action,
@@ -723,6 +736,9 @@ pub enum CopyObjectsError {
     /// The blocking copy task panicked.
     #[error("copy task panicked")]
     Task,
+    /// The copy was cancelled before it finished: its caller gave up on it.
+    #[error("copy cancelled")]
+    Cancelled,
 }
 
 /// Why [`crate::Storage::collect_orphans`] failed.
@@ -731,15 +747,45 @@ pub enum OrphanError {
     /// Listing the object store failed.
     #[error("listing the object store: {0}")]
     List(object_store::Error),
-    /// Deleting an orphan failed.
+    /// Deleting an orphan failed. Holds the [`ObjectError::label`] only: the error
+    /// text names the object key, which holds the blob's hash (spec 03 §9).
     #[error("deleting an orphan: {0}")]
-    Delete(#[from] ObjectError),
+    Delete(&'static str),
     /// Reading the catalog failed.
     #[error("reading the catalog: {0}")]
     Db(#[from] sqlx::Error),
     /// A `media` row names a project id that does not parse.
     #[error("reading the catalog: invalid project id")]
     BadProjectId,
+}
+
+impl OrphanError {
+    /// The delete failure of one orphan, keeping only the object error's label.
+    pub(crate) fn delete(error: &ObjectError) -> Self {
+        Self::Delete(error.label())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ObjectError, OrphanError};
+
+    #[test]
+    fn an_orphan_delete_error_does_not_show_the_object_key() {
+        let key = "media/0190f2a4-7c3d-7e21-9b8a-1234567890ab/9f86d081884c7d659a2feaa0c55ad015";
+        let error = ObjectError::store(
+            "deleting object",
+            key,
+            object_store::Error::Generic {
+                store: "test",
+                source: "refused".into(),
+            },
+        );
+        let text = OrphanError::delete(&error).to_string();
+        assert!(!text.contains(key), "{text}");
+        assert!(!text.contains("9f86d081"), "{text}");
+        assert_eq!(text, "deleting an orphan: store");
+    }
 }
 
 /// A batch could not be deduplicated. `reason` is a static description, never row content.

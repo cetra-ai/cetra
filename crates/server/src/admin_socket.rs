@@ -4,7 +4,7 @@
 //! one JSON line and reads one JSON line back, then the server closes the
 //! connection. `llmobs admin backup` is the only client in M2.
 //!
-//! The socket is bound as `admin.sock.tmp`, made `0600`, then renamed, so it never
+//! The socket is bound as `admin.tmp`, made `0600`, then renamed, so it never
 //! exists under its real name with a wider mode. A connecting process is accepted
 //! only when its uid is the data directory's owner or root (`SO_PEERCRED`): macOS
 //! ignores socket file permissions on `connect`, so this check is the authentication.
@@ -24,8 +24,10 @@ use crate::http::AppState;
 
 /// The socket's file name in the data directory.
 pub const ADMIN_SOCKET: &str = "admin.sock";
-/// Where the socket is bound before it is renamed to [`ADMIN_SOCKET`].
-const ADMIN_SOCKET_TMP: &str = "admin.sock.tmp";
+/// Where the socket is bound before it is renamed to [`ADMIN_SOCKET`]. It is as long
+/// as `admin.sock`, so a data directory whose path fits the Unix socket path limit
+/// for `admin.sock` also fits here. No other file of the data directory has this name.
+const ADMIN_SOCKET_TMP: &str = "admin.tmp";
 /// Mode of the socket file.
 const SOCKET_MODE: u32 = 0o600;
 /// The largest request, including its newline.
@@ -92,16 +94,17 @@ pub(crate) fn spawn(state: AppState, data_dir: &Path) -> Option<JoinHandle<()>> 
     )))
 }
 
-/// Removes `<data_dir>/admin.sock`. A missing file is not an error.
+/// Removes `<data_dir>/admin.sock` and a leftover `<data_dir>/admin.tmp`. A missing
+/// file is not an error.
 pub(crate) fn remove_socket_file(data_dir: &Path) -> io::Result<()> {
-    remove_file_if_exists(&data_dir.join(ADMIN_SOCKET))
+    remove_file_if_exists(&data_dir.join(ADMIN_SOCKET))?;
+    remove_file_if_exists(&data_dir.join(ADMIN_SOCKET_TMP))
 }
 
 fn bind_socket(data_dir: &Path) -> io::Result<UnixListener> {
     let socket = data_dir.join(ADMIN_SOCKET);
     let temporary = data_dir.join(ADMIN_SOCKET_TMP);
     remove_socket_file(data_dir)?;
-    remove_file_if_exists(&temporary)?;
     let listener = UnixListener::bind(&temporary)?;
     let secured =
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(SOCKET_MODE))
@@ -284,6 +287,48 @@ mod tests {
         assert!(!dir.path().join(ADMIN_SOCKET_TMP).exists());
         running.shutdown().await.unwrap();
         assert!(!socket.exists());
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_that_fits_the_socket_path_for_admin_sock_gets_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        // The socket path is 106 bytes: under the 108-byte limit with `admin.sock`
+        // (9 bytes), but over it with the 13 bytes of the old `admin.sock.tmp`.
+        let base = dir.path().as_os_str().len();
+        assert!(
+            base < 90,
+            "the temporary directory path is too long for this test"
+        );
+        let data = dir.path().join("d".repeat(96 - base - 1));
+        assert_eq!(data.as_os_str().len(), 96);
+        let running = bind(config(&data), None).await.unwrap();
+        let response = ask(&data.join(ADMIN_SOCKET), "not json\n").await;
+        assert_eq!(refusal_code(&response), "bad_request");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_oversized_request_is_refused_and_the_next_client_is_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let socket = dir.path().join(ADMIN_SOCKET);
+        // One byte past the cap, with no newline. The server reads exactly the cap and
+        // refuses, so it leaves no unread input that would reset the connection.
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        stream
+            .write_all(&vec![b'a'; MAX_REQUEST + 1])
+            .await
+            .unwrap();
+        let mut response = String::new();
+        BufReader::new(stream)
+            .read_line(&mut response)
+            .await
+            .unwrap();
+        assert_eq!(refusal_code(&response), "bad_request");
+
+        let next = ask(&socket, "{\"command\":\"restore\"}\n").await;
+        assert_eq!(refusal_code(&next), "unknown_command");
+        running.shutdown().await.unwrap();
     }
 
     #[tokio::test]
