@@ -288,6 +288,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List org usage by day
+         * @description Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.
+         */
+        get: operations["list_internal_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/public/feedback": {
         parameters: {
             query?: never;
@@ -2715,6 +2735,37 @@ export interface components {
             email: string;
             /** @description Display name for a new user. Ignored when the user exists. */
             name?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalUsagePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalUsageRow"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One org's usage on one UTC day, summed over its projects (D-P-24). */
+        InternalUsageRow: {
+            /** Format: int64 */
+            bytes: number;
+            /** @description `YYYY-MM-DD`, UTC. */
+            day: string;
+            /** Format: double */
+            judge_cost_usd: number;
+            /** Format: int64 */
+            judge_input_tokens: number;
+            /** Format: int64 */
+            judge_output_tokens: number;
+            /** Format: uuid */
+            org_id: string;
+            /** Format: int64 */
+            scores: number;
+            /** Format: int64 */
+            spans: number;
+            /**
+             * Format: int64
+             * @description `spans + scores`.
+             */
+            units: number;
         };
         /**
          * @description One pending invitation.
@@ -5597,6 +5648,71 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_usage: {
+        parameters: {
+            query: {
+                /** @description First day, inclusive, `YYYY-MM-DD`. Required. */
+                from: string;
+                /** @description Last day, inclusive, `YYYY-MM-DD`. Required. `to - from` is at most 92 days. */
+                to: string;
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of org usage by day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalUsagePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

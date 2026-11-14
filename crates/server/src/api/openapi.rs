@@ -57,7 +57,9 @@ use super::evaluators::{
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
-use super::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
+use super::internal::{
+    CreateInternalOrgRequest, InternalOrg, InternalOwner, InternalUsageQuery, InternalUsageRow,
+};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -169,6 +171,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateInternalOrgRequest>();
     set.insert::<InternalOwner>();
     set.insert::<InternalOrg>();
+    set.insert_page::<InternalUsageRow>("InternalUsagePage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -1237,6 +1240,21 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 422, 429],
         ))
         .build();
+    let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(with_query::<InternalUsageQuery>(Vec::new())))
+        .responses(responses(
+            "200",
+            json_named("InternalUsagePage", "One page of org usage by day."),
+            &[400, 401, 403, 429],
+        ))
+        .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     org.delete = Some(delete_org);
@@ -1278,6 +1296,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/internal/v1/orgs",
             PathItem::new(HttpMethod::Post, post_internal_org),
+        )
+        .path(
+            "/api/internal/v1/usage",
+            PathItem::new(HttpMethod::Get, list_internal_usage),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)
