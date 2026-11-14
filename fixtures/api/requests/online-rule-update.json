@@ -1,0 +1,12 @@
+{
+  "name": "Relevance on answers v2",
+  "filter": "",
+  "variable_mapping": {
+    "input": "trace.input",
+    "output": "trace.output"
+  },
+  "sample_rate": 0.5,
+  "budget_usd": 2.5,
+  "budget_period": "month",
+  "enabled": true
+}

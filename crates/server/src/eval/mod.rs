@@ -8,6 +8,7 @@ pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
 pub(crate) mod retry;
+pub(crate) mod rule_check;
 pub(crate) mod rule_limit;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
@@ -19,7 +20,6 @@ pub(crate) struct EvalQueue {
     wake: tokio::sync::Notify,
     pub(crate) budgets: budget::Budgets,
     pub(crate) breakers: breaker::Breakers,
-    #[allow(dead_code)] // I3.8 reads it.
     pub(crate) hourly: hourly::HourlyCaps,
 }
 
@@ -28,5 +28,12 @@ impl EvalQueue {
     #[allow(dead_code)] // I3.7 calls it.
     pub(crate) fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Drops every in-memory state of a rule that was deleted (I3.8).
+    pub(crate) fn forget_rule(&self, rule: uuid::Uuid) {
+        self.budgets.forget(rule);
+        self.breakers.reset(rule);
+        self.hourly.forget(rule);
     }
 }

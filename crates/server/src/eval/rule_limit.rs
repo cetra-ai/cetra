@@ -14,7 +14,6 @@ pub(crate) struct RuleLimitError {
 
 /// `Ok` when `active_after` (the enabled rules of the org, counted with the one being written)
 /// fits `limit`.
-#[allow(dead_code)] // I3.8 calls it.
 pub(crate) fn check(active_after: u64, limit: Option<u64>) -> Result<(), RuleLimitError> {
     match limit {
         Some(limit) if active_after > limit => Err(RuleLimitError { limit }),
@@ -22,12 +21,11 @@ pub(crate) fn check(active_after: u64, limit: Option<u64>) -> Result<(), RuleLim
     }
 }
 
-/// The org's active-rule limit. Track P's M4 returns
-/// `entitlements::of(state, org).limits.max_active_online_rules`. Until then every org is
-/// unlimited (D-I-32), like `alerts::quota::rule_limit`.
-#[allow(dead_code)] // I3.8 calls it.
-pub(crate) fn limit(_state: &AppState, _org: OrgId) -> Option<u64> {
-    None
+/// The org's active-rule limit from its entitlements (D-I-32, D-P-10). `None` is unlimited.
+pub(crate) fn limit(state: &AppState, org: OrgId) -> Option<u64> {
+    crate::entitlements::of(state, org)
+        .limits
+        .max_active_online_rules
 }
 
 impl From<RuleLimitError> for ApiError {

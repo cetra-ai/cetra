@@ -1952,12 +1952,14 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete = operation("delete_evaluator", "evaluation", "Delete an evaluator")
-        .description(Some("Project members and above. API keys cannot call it."))
+        .description(Some(
+            "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
+        ))
         .parameters(Some(vec![project_param(), id]))
         .responses(responses(
             "204",
             ResponseBuilder::new().description("Deleted.").build(),
-            &[400, 401, 403, 404, 429],
+            &[400, 401, 403, 404, 409, 429],
         ))
         .build();
     let templates = operation(

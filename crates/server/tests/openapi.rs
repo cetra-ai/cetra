@@ -693,14 +693,12 @@ fn document_lint() {
             || *id == "delete_org"
             || *id == "post_evaluator"
             || *id == "patch_evaluator"
+            || *id == "delete_evaluator"
             || *id == "post_score_definition"
             || *id == "patch_score_definition"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator"
-            || *id == "delete_evaluator"
-            || *id == "delete_score_definition"
-        {
+        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
