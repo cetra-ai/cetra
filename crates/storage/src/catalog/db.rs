@@ -101,7 +101,8 @@ async fn pre_migration_copy(
     let staging = dir.join(format!("{name}.pre-{}.tmp", env!("CARGO_PKG_VERSION")));
     // An existing copy is kept: a failed upgrade must not replace the good
     // pre-upgrade copy with a half-migrated database.
-    if !target.exists() {
+    let copied = !target.exists();
+    if copied {
         let staging_text = staging
             .to_str()
             .ok_or_else(|| CatalogError::PreMigrationCopy {
@@ -118,7 +119,13 @@ async fn pre_migration_copy(
             .execute(&mut *connection)
             .await
             .map_err(|source| CatalogError::PreMigrationCopy { source })?;
+        std::fs::File::open(&staging)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?;
         std::fs::rename(&staging, &target).map_err(io)?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?;
     }
     let prefix = format!("{name}.pre-");
     for entry in std::fs::read_dir(dir).map_err(io)? {
@@ -132,12 +139,21 @@ async fn pre_migration_copy(
             std::fs::remove_file(&path).map_err(io)?;
         }
     }
-    tracing::info!(
-        database = name,
-        applied,
-        expected,
-        "copied the database before migrating"
-    );
+    if copied {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "copied the database before migrating"
+        );
+    } else {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "kept the existing pre-migration copy"
+        );
+    }
     Ok(())
 }
 

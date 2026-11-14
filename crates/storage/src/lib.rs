@@ -922,9 +922,10 @@ impl Storage {
     /// Writes a consistent copy of `catalog.db` to `path` and pins every object it
     /// lists until the returned [`CatalogSnapshot`] is dropped (N M2, D-N-18).
     ///
-    /// The gate is taken before the committer lock, and held while the copy is
-    /// written and read. Media deletions wait for it; appends, flushes and
-    /// compaction commits do not.
+    /// The gate is taken before the committer lock and held until the snapshot
+    /// is dropped, so every object deletion waits for the backup. Commits wait
+    /// only for the `VACUUM INTO` itself, which runs under the committer lock;
+    /// appends never wait. A failed call removes the partial copy at `path`.
     ///
     /// # Errors
     ///
@@ -939,8 +940,19 @@ impl Storage {
         let gate = Arc::clone(&self.committer.object_gc_gate)
             .write_owned()
             .await;
-        let catalog = self.committer.snapshot_into(target).await?;
-        let (objects, flushed_seq) = snapshot::read_copy(path).await?;
+        let copied = match self.committer.snapshot_into(target).await {
+            Ok(catalog) => snapshot::read_copy(path)
+                .await
+                .map(|(objects, flushed_seq)| (catalog, objects, flushed_seq)),
+            Err(error) => Err(error.into()),
+        };
+        let (catalog, objects, flushed_seq) = match copied {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(error);
+            }
+        };
         Ok(CatalogSnapshot::new(
             path.to_path_buf(),
             objects,

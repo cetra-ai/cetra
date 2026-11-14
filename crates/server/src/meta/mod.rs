@@ -316,7 +316,8 @@ async fn pre_migration_copy(
     let staging = dir.join(format!("{name}.pre-{}.tmp", env!("CARGO_PKG_VERSION")));
     // An existing copy is kept: a failed upgrade must not replace the good
     // pre-upgrade copy with a half-migrated database.
-    if !target.exists() {
+    let copied = !target.exists();
+    if copied {
         let staging_text = staging.to_str().ok_or_else(|| {
             MetaError::PreMigrationIo(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -331,7 +332,13 @@ async fn pre_migration_copy(
             .execute(&mut *connection)
             .await
             .map_err(MetaError::PreMigrationDb)?;
+        std::fs::File::open(&staging)
+            .and_then(|file| file.sync_all())
+            .map_err(MetaError::PreMigrationIo)?;
         std::fs::rename(&staging, &target).map_err(MetaError::PreMigrationIo)?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(MetaError::PreMigrationIo)?;
     }
     let prefix = format!("{name}.pre-");
     for entry in std::fs::read_dir(dir).map_err(MetaError::PreMigrationIo)? {
@@ -345,12 +352,21 @@ async fn pre_migration_copy(
             std::fs::remove_file(&path).map_err(MetaError::PreMigrationIo)?;
         }
     }
-    tracing::info!(
-        database = name,
-        applied,
-        expected,
-        "copied the database before migrating"
-    );
+    if copied {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "copied the database before migrating"
+        );
+    } else {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "kept the existing pre-migration copy"
+        );
+    }
     Ok(())
 }
 

@@ -30,9 +30,11 @@ pub struct CatalogSnapshot {
     /// `table_state.flushed_seq` of the copy: `[spans, scores]`.
     pub flushed_seq: [u64; 2],
     /// Keeps the in-memory catalog of the copy alive, so its data files stay
-    /// referenced and GC keeps them.
+    /// referenced through `retired`. Defence in depth: the gate below already
+    /// blocks every deletion while the snapshot lives.
     _catalog: Arc<Catalog>,
-    /// Blocks media deletion and dropped-project media deletion while held.
+    /// Blocks every object deletion (obsolete files, media, dropped-project
+    /// media) while held.
     _gate: OwnedRwLockWriteGuard<()>,
 }
 
