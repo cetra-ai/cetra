@@ -107,7 +107,7 @@ These were made while writing the spec and approved afterwards; S3, S4 and S7 we
 | S10 | MCP tools are read-only in MVP; MCP auth via PAT bearer (OAuth for MCP later) | 09 |
 | S11 | Ports: 8080 (HTTP: UI, API, OTLP/HTTP, MCP), 4317 (OTLP/gRPC), 4318 (OTLP/HTTP only, standard port) | 09, 12 |
 | S12 | Static assets embedded with `memory-serve` | 11 |
-| S13 | `llmobs admin backup` command implements the documented snapshot procedure | 12 |
+| S13 | MVP backups are a documented cold snapshot (stop, copy, start); the online `llmobs admin backup` command is track N's M2 (D-N-11) | 12 |
 | S14 | SSRF guard on all outbound calls, with an opt-in for private networks (local Ollama/vLLM) | 12 |
 | S15 | Saved views (list pages) and saved SQL queries in MVP, private or shared, with per-page defaults | 04, 05, 09, 11 |
 

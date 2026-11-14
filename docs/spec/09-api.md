@@ -185,5 +185,6 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `llmobs projects list [--format table\|json]` | projects the token can read |
 | `llmobs bench ingest --rate 50000 --duration 60s --target …` | load generator (synthetic OTLP) |
 | `llmobs version` | |
+| `llmobs health [--url http://127.0.0.1:8080]` | exits 0 when `GET <url>/readyz` answers 200 within 5 s, else 1; the container healthcheck (D-N-4) |
 
 The remote commands (`query`, `traces`, `projects`) take the server and token from `--url`/`--token`, then `LLMOBS_URL`/`LLMOBS_TOKEN`, then the `llmobs login` credentials file; `--project` or `LLMOBS_PROJECT` names the project (D-H-12).

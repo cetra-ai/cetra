@@ -1,0 +1,80 @@
+# Values of the llmobs chart (D-N-10). Reference: deploy/helm/llmobs/README.md.
+# llmobs runs as exactly one pod: its data directory is a single volume that one process locks
+# (spec 12 § Packaging). There is no replica count.
+
+image:
+  repository: ghcr.io/sebastiencs/llmobs
+  # Empty: the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The URL users open (LLMOBS_PUBLIC_URL): links in emails and OAuth redirects use it.
+publicUrl: http://localhost:8080
+
+# Settings written to llmobs.toml (spec 12 § Configuration), as nested keys. Empty: no file.
+# Example:
+#   config:
+#     storage:
+#       flush:
+#         max_age: 60s
+#     auth:
+#       signup: invite_only
+config: {}
+
+# Extra environment variables of the llmobs container (Kubernetes EnvVar list).
+env: []
+
+secret:
+  # Name of an existing Secret in the release namespace. Each of its keys becomes an
+  # environment variable (envFrom), e.g. LLMOBS_ENCRYPTION_KEY, LLMOBS_SMTP_URL,
+  # LLMOBS_LICENSE_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
+  existingSecret: ""
+  # Variables for a Secret this chart creates, as NAME: value. Prefer existingSecret: values
+  # given here are stored in the Helm release.
+  values: {}
+
+# S3-compatible object storage for Parquet files and media. Off: they stay on the volume.
+# Credentials: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in secret.existingSecret or
+# secret.values.
+s3:
+  enabled: false
+  bucket: ""
+  # Optional key prefix inside the bucket.
+  prefix: ""
+  # AWS_REGION; required by most providers.
+  region: ""
+  # Custom endpoint (Garage, R2, Hetzner, ...). Empty: AWS.
+  endpoint: ""
+  forcePathStyle: false
+  allowHttp: false
+
+persistence:
+  # The volume holding /data: WAL, catalog.db, meta.db, secret.key and, without S3, the
+  # Parquet files and media.
+  size: 20Gi
+  # Empty: the cluster's default StorageClass.
+  storageClassName: ""
+
+resources: {}
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+# Routes the HTTP port (UI, API, OTLP/HTTP at /v1/traces, MCP). OTLP/gRPC (4317) is not
+# routed by the Ingress; use the Service.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  # Example: [{secretName: llmobs-tls, hosts: [llmobs.example.com]}]
+  tls: []
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,8 @@
+# The image is built from staged release binaries only (deploy/docker/Dockerfile, D-N-3).
+# Each level is re-included explicitly, which works whichever way the builder walks the tree.
+*
+!target
+target/*
+!target/dist
+target/dist/*
+!target/dist/image
