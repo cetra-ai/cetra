@@ -19,7 +19,7 @@ pub(crate) enum SlugError {
     Reserved,
 }
 
-/// An `orgs` row. `limits` is not read in D.
+/// An `orgs` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrgRow {
     /// UUIDv7.

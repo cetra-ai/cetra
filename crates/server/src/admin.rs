@@ -526,8 +526,9 @@ mod tests {
                 sqlx::query(
                     "INSERT INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (5, 'future', 1, ?, 0)",
+                     VALUES (?, 'future', 1, ?, 0)",
                 )
+                .bind(crate::meta::expected_version() + 1)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -538,7 +539,14 @@ mod tests {
         .unwrap();
         db.close().await;
         let error = list_users(&config).await.unwrap_err();
-        assert_eq!(error.to_string(), "this binary expects schema 4, found 5");
+        let expected = crate::meta::expected_version();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "this binary expects schema {expected}, found {}",
+                expected + 1
+            )
+        );
     }
 
     #[tokio::test]

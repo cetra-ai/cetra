@@ -90,6 +90,15 @@ CREATE TABLE llm_connections (
   UNIQUE(org_id, name)
 )
 
+table org_entitlements
+CREATE TABLE org_entitlements (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    token TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+)
+
 table org_members
 CREATE TABLE org_members (
     org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -102,12 +111,19 @@ CREATE TABLE org_members (
 index org_members_user
 CREATE INDEX org_members_user ON org_members(user_id)
 
+table org_window_ends
+CREATE TABLE org_window_ends (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ended_at INTEGER NOT NULL,
+    data_access_days INTEGER,
+    PRIMARY KEY (org_id, ended_at)
+)
+
 table orgs
 CREATE TABLE orgs (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     slug TEXT NOT NULL UNIQUE,
-    limits TEXT NOT NULL DEFAULT '{}',
     state TEXT NOT NULL DEFAULT 'active',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -212,7 +228,11 @@ index sqlite_autoindex_llm_connections_1
 
 index sqlite_autoindex_llm_connections_2
 
+index sqlite_autoindex_org_entitlements_1
+
 index sqlite_autoindex_org_members_1
+
+index sqlite_autoindex_org_window_ends_1
 
 index sqlite_autoindex_orgs_1
 
