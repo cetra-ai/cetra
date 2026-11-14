@@ -84,10 +84,11 @@ pub use reads::{
     MAX_USER_SESSIONS, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow, Page, Point,
     SPAN_LIST_COLUMNS, ScoreListRequest, ScoreTargets, Series, SeriesName, SessionDetailData,
     SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort, TraceDetailData,
-    TraceListRequest, TraceRefreshRequest, TraceSort, USER_COLUMNS, UserDetailData,
-    UserListRequest, UserSort, alert_value, check_alert_filter, latest_scores, metrics::metrics,
-    score_list, scores_by_id, session_detail, session_list, span_detail, span_list, trace_detail,
-    trace_list, trace_list_plan, trace_refresh, user_detail, user_list,
+    TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest,
+    USER_COLUMNS, UserDetailData, UserListRequest, UserSort, alert_value, check_alert_filter,
+    latest_scores, metrics::metrics, score_list, scores_by_id, session_detail, session_list,
+    span_detail, span_list, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
+    user_detail, user_list,
 };
 pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
 pub use views::{

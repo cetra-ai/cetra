@@ -59,6 +59,11 @@ export function canManageConnections(role: OrgRole | undefined): boolean {
   return atLeast(role, "admin");
 }
 
+/** Mirrors `ProjectPerm::ManageEvaluation`: project members and above (D-I-24). */
+export function canManageEvaluation(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Members and above manage alert rules and channels (D-K-9). */
 export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");

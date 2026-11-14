@@ -68,6 +68,8 @@ it("lists every account and admin write of the contract", () => {
         path === "/api/v1/projects/{project}" ||
         path.startsWith("/api/v1/projects/{project}/api-keys") ||
         path.startsWith("/api/v1/projects/{project}/members") ||
+        path.startsWith("/api/v1/projects/{project}/evaluators") ||
+        path.startsWith("/api/v1/projects/{project}/score-definitions") ||
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules");
       if (covered && !LATER_TRACKS.includes(operationId)) {

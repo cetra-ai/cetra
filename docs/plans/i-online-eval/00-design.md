@@ -48,7 +48,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 | D-I-16 | **Judge trace per attempt.** Each attempt gets its own judge trace id: the first 16 bytes of SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ `attempts` after the worker's increment, as `u32` BE).<br>The job's `judge_trace_id` and the score link the last attempt.<br>Spec 06 said a retry reuses the job's id. Trace detail keeps the first row of a span id, so the retry would have been hidden.<br>Failures before the evaluator runs (the trace not loading, the recursion guard, a mapping error) write no judge trace. Spec 06's "every execution is traced" holds from `EvalRunner::run` on. |
 | D-I-17 | **Recursion isolation.** Three guards:<br>1. `commit` never tracks evaluation or experiment spans (D-I-8);<br>2. every matching read (live, preview, backfill) uses strict exclusions (D-I-9);<br>3. the executor fails a job whose loaded target trace has a span in `llmobs-eval` (permanent, `target is an evaluation trace`).<br>Recursion through an instrumented webhook or proxy is bounded by D-I-11's per-rule hourly cap. |
 | D-I-18 | **Evaluator scores.** `crate::scores::write` gains `Writer::Evaluator { kind, evaluator_id, rule_id: Option<Uuid>, job_id }`:<br>- source `llm_judge`, `check` or `webhook` by kind;<br>- the derived id's author is the rule id, or the evaluator id for a manual run;<br>- `evaluator_id` and `rule_id` are set on the row;<br>- `session_id` and `user_id` are copied from the target trace's root span;<br>- metadata is the outcome's `judge.*` keys plus `<prefix>.eval.job_id` and `<prefix>.eval.evaluator_version`, whose names are built in the server with `llmobs_name!` (not added to core).<br>Tokens and cost for `eval_jobs`, `rule_spend` and `Usage::add_judge` are read from the judge trace's `llm` span (`input_tokens`, `output_tokens`, `cost_total`), for a failed parse as well as a success. |
-| D-I-19 | **Evaluator storage.**<br>- `evaluators` gains `connection_id`, derived from a judge's `config.connection_id` on every write (FK, `ON DELETE NO ACTION`, so an org or project cascade still deletes).<br>- It also gains `secret_enc`: for a webhook, the sealed JSON `{signing_secret, url, headers}`. `config` then keeps only `{url_host, timeout_ms, header_names}`.<br>- `WebhookConfig.secret_enc` is removed from `llmobs-eval`.<br>- The webhook secret is required on create; on PATCH, absent keeps it and an empty string is a 400. The URL and header values are write-only like the secret. Responses show `url_host`, `header_names` and `has_signing_secret`.<br>- `version` increases on every change to `config`, `output_score` or the sealed webhook values.<br>- `kind` is immutable after create. A PATCH that would break a rule using the evaluator is a 409 that lists the rule ids: every D-I-30 check is re-run for each rule, and a budgeted rule still needs a judge with a priced model.<br>- Queued jobs run the evaluator and the rule's mapping as they are at execution time; `eval_jobs.evaluator_version` records which version ran.<br>- For a run, the server assembles a `WebhookConfig` from the sealed JSON (`url`, `headers`) and the stored `timeout_ms`, then calls `Evaluator::validate`. The signing secret is chosen by the user, 16 to 256 characters.<br>- Deleting an evaluator that rules use is a 409. Deleting a connection that evaluators use is a 409. Both are application checks. Creating or editing a webhook evaluator is an audit event with its `url_host`. |
+| D-I-19 | **Evaluator storage.**<br>- `evaluators` gains `connection_id`, derived from a judge's `config.connection_id` on every write (FK, `ON DELETE NO ACTION`, so an org or project cascade still deletes).<br>- It also gains `secret_enc`: for a webhook, the sealed JSON `{signing_secret, url, headers}`. `config` then keeps only `{url_host, timeout_ms, header_names}`.<br>- `WebhookConfig.secret_enc` is removed from `llmobs-eval`.<br>- The webhook secret is required on create; on PATCH, absent keeps it and an empty string is a 400. A PATCH that replaces a webhook's `config` must also send `webhook_secret`, so a saved secret never signs requests to a new URL. The URL and header values are write-only like the secret. Responses show `url_host`, `header_names` and `has_signing_secret`.<br>- `version` increases on every change to `config`, `output_score` or the sealed webhook values.<br>- `kind` is immutable after create. A PATCH that would break a rule using the evaluator is a 409 that lists the rule ids: every D-I-30 check is re-run for each rule, and a budgeted rule still needs a judge with a priced model.<br>- Queued jobs run the evaluator and the rule's mapping as they are at execution time; `eval_jobs.evaluator_version` records which version ran.<br>- For a run, the server assembles a `WebhookConfig` from the sealed JSON (`url`, `headers`) and the stored `timeout_ms`, then calls `Evaluator::validate`. The signing secret is chosen by the user, 16 to 256 characters.<br>- Deleting an evaluator that rules use is a 409. Deleting a connection that evaluators use is a 409. Both are application checks. Creating or editing a webhook evaluator is an audit event with its `url_host`. |
 | D-I-20 | **Templates in the UI.** `GET /evaluator-templates` lists E's built-in templates with their default mapping. "Create from template" pre-fills the editor. The server has no create-from-template call. |
 | D-I-21 | **Test runs.** `POST /evaluators/test` runs once, synchronously, with `{evaluator_id}` (saved), `{evaluator}` (unsaved, its `webhook_secret` required for a webhook), or both. With both, fields the body leaves out (`name`, `config`, `webhook_secret`) come from the saved evaluator, including its sealed webhook values, which the UI never sees; `kind` must match.<br>The target is `{trace_id, span_id?, variable_mapping}` or literal `{variables}`.<br>It writes no score. It commits the judge trace (origin `Test`, `environment = 'llmobs-eval'`) so the panel can link it, and counts usage.<br>The answer: the outcome or the error; the resolved variables (each value cut to 2 000 characters in the response only, read with a new public `Variables::iter`); the rendered prompt for judges; usage; the judge trace id.<br>An unsaved evaluator runs with the nil UUID as its id. A test run's judge trace id is 16 random bytes.<br>Each user may run 10 tests per minute (connection tests included).<br>- A body that sends a new webhook `config` must also send `webhook_secret`: the saved signing secret never signs requests to a URL the member just typed. |
 | D-I-22 | **Manual runs.** `POST /evaluators/{id}/run` with `{trace_id, span_id?, variable_mapping}` enqueues a job at the highest priority (origin `Test` in the judge trace, so no `rule_id`) and answers `202` with the job. The UI polls `GET /eval-jobs/{id}`. Manual runs have no budget and count in usage. |
@@ -77,7 +77,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 
 ## Scope
 
-**In I:** everything in the decisions above. That means migrations `0004`–`0008` in `meta.db`, the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
+**In I:** everything in the decisions above. That means migrations `0004`–`0009` in `meta.db`, the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
 
 **Not in I:**
 - datasets, experiments and their server evaluators [J] (J calls the executor, § Interfaces);
@@ -102,7 +102,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 
 **Edits to other tracks' code inside `crates/server`:** G's `Ingest::commit` (`ingest/mod.rs`) counts only spans outside `llmobs-eval` (D-I-31, M2), with a test in that module.
 
-**Files other tracks, or several I milestones, also edit:** `scores.rs` (M2, M3, M5), the route list in `http/access.rs`, `api/openapi.rs`, `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `api_examples.rs`, `serve.rs` and `ingest/mod.rs`. G's fix plan (branch `claude/g-fixes-plan`, `F4`) moves `commit` into its own task, so the M4 plan is written after that lands. Migration numbers are the next free ones when a milestone starts (track H took `0003`, so M1's is `0004`). If another track took a number first, renumber yours on rebase; a migration that already merged is never renumbered.
+**Files other tracks, or several I milestones, also edit:** `scores.rs` (M2, M3, M5), the route list in `http/access.rs`, `api/openapi.rs`, `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `api_examples.rs`, `serve.rs` and `ingest/mod.rs`. G's fix plan (branch `claude/g-fixes-plan`, `F4`) moves `commit` into its own task, so the M4 plan is written after that lands. Migration numbers are the next free ones when a milestone starts (track H took `0003`, so M1's is `0004`; track K took `0005`, so M2's is `0006`). If another track took a number first, renumber yours on rebase; a migration that already merged is never renumbered.
 
 ## Architecture
 
@@ -143,7 +143,7 @@ crates/server/src/
   routes/ same split
 crates/server/src/admin.rs  rotate_encryption_key (M1)
 crates/server/migrations/meta/
-  0004_connections.sql (M1)  0005_evaluators.sql (M2)  0006_eval_queue.sql (M3)  0007_pending_traces.sql (M4)  0008_backfills.sql (M6)
+  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0007_eval_queue.sql (M3)  0008_pending_traces.sql (M4)  0009_backfills.sql (M6)
 ```
 
 Every background loop exposes a `*_once(&AppState)` function that tests call directly, with `Clock::Manual`. The loops themselves only call `*_once` on a tokio interval from `EvalTiming`. The end-to-end test in M6 uses `EvalTiming::TEST` and real time.
@@ -169,7 +169,7 @@ CREATE TABLE llm_connections (
   UNIQUE(org_id, name)
 );
 
--- 0005_evaluators.sql (M2)
+-- 0006_evaluators.sql (M2)
 CREATE TABLE evaluators (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -193,7 +193,7 @@ CREATE TABLE score_definitions (
 );
 CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL;
 
--- 0006_eval_queue.sql (M3)
+-- 0007_eval_queue.sql (M3)
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -236,7 +236,7 @@ CREATE TABLE rule_spend (
   PRIMARY KEY (rule_id, day)
 );
 
--- 0007_pending_traces.sql (M4)
+-- 0008_pending_traces.sql (M4)
 CREATE TABLE pending_traces (
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   trace_id BLOB NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
@@ -244,7 +244,7 @@ CREATE TABLE pending_traces (
   PRIMARY KEY (project_id, trace_id)
 );
 
--- 0008_backfills.sql (M6)
+-- 0009_backfills.sql (M6)
 CREATE TABLE backfills (
   id TEXT PRIMARY KEY,
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
