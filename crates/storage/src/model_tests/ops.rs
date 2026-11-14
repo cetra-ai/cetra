@@ -10,9 +10,11 @@ use proptest::prelude::*;
 
 use super::harness::Harness;
 use super::model::{Model, ProjectModel, SpanCopy};
-use super::shape::{HOUR_NS, P, day, midnight, span};
+use super::shape::{HOUR_NS, P, ScoreKey, Target, day, midnight, score, span};
 use crate::deletion::DeletionStatus;
+use crate::error::AppendError;
 use crate::test_support::span_rows;
+use llmobs_core::batch::scores_to_record_batch;
 use llmobs_core::span::Span;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
@@ -21,6 +23,12 @@ const MILLI_NS: i64 = 1_000_000;
 /// Trace numbers are `0..TRACES`, span numbers `0..SPANS`.
 pub(super) const TRACES: u8 = 12;
 pub(super) const SPANS: u8 = 12;
+/// Session numbers are `0..SESSIONS`. A score target `t` is `Trace(t)` below `TRACES`, else
+/// `Session(t - TRACES)`, so targets are `0..TRACES + SESSIONS`.
+pub(super) const SESSIONS: u8 = 4;
+const SCORE_TARGETS: u8 = TRACES + SESSIONS;
+/// Score names are `0..SCORE_NAMES`.
+const SCORE_NAMES: u8 = 3;
 /// Passes a settle step makes before the case fails.
 const SETTLE_PASSES: usize = 10;
 
@@ -56,13 +64,29 @@ pub(super) enum Op {
     /// Everything flushed, every deletion applied, every partition compacted,
     /// nothing obsolete (below).
     Settle,
+    /// Writes the next version of the score `(project, target, name)`: version 1
+    /// when it doesn't exist yet. `target` < 12 is Trace(target), else Session(target - 12).
+    Score {
+        project: P,
+        target: u8,
+        name: u8,
+    },
+    /// Writes version `last + 1` with `deleted = true` of one score the model has
+    /// written (`pick % len`, in key order). A no-op when the project has none.
+    DeleteScore {
+        project: P,
+        pick: u8,
+    },
 }
 
 impl Op {
     /// The project an op works on; `None` for ops that touch both.
     pub(super) fn project(&self) -> Option<P> {
         match *self {
-            Self::Append { project, .. } | Self::Resend { project, .. } => Some(project),
+            Self::Append { project, .. }
+            | Self::Resend { project, .. }
+            | Self::Score { project, .. }
+            | Self::DeleteScore { project, .. } => Some(project),
             Self::Restart | Self::Crash | Self::Compact { .. } | Self::Gc | Self::Settle => None,
         }
     }
@@ -86,6 +110,12 @@ fn op() -> impl Strategy<Value = Op> {
         3 => (0..72_u8).prop_map(|hours| Op::Compact { hours }),
         1 => Just(Op::Gc),
         1 => Just(Op::Settle),
+        8 => (project(), 0..SCORE_TARGETS, 0..SCORE_NAMES).prop_map(
+            |(project, target, name)| Op::Score { project, target, name }
+        ),
+        2 => (project(), any::<u8>()).prop_map(
+            |(project, pick)| Op::DeleteScore { project, pick }
+        ),
     ]
 }
 
@@ -127,6 +157,12 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
         }
         Op::Gc => collect_obsolete(harness),
         Op::Settle => settle(harness, model, clock),
+        Op::Score {
+            project,
+            target,
+            name,
+        } => put_score(harness, model, project, target, name, *clock),
+        Op::DeleteScore { project, pick } => delete_score(harness, model, project, pick, *clock),
     }
 }
 
@@ -191,6 +227,79 @@ fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8,
     let span_no = pick % next;
     send(harness, project, &[span(project, trace, span_no, clock)]);
     model.project_mut(project).write_span(trace, span_no, clock);
+}
+
+/// The key a score target number names (see `Op::Score`).
+fn target_of(target: u8) -> Target {
+    if target < TRACES {
+        Target::Trace(target)
+    } else {
+        Target::Session(target - TRACES)
+    }
+}
+
+/// Writes the next version of `(project, target, name)`: version 1 when the key has none.
+fn put_score(harness: &Harness, model: &mut Model, project: P, target: u8, name: u8, clock: i64) {
+    let key = ScoreKey {
+        project,
+        target: target_of(target),
+        name,
+    };
+    let last = model
+        .project(project)
+        .scores
+        .get(&key)
+        .and_then(|versions| versions.iter().map(|version| version.version).max());
+    send_score(
+        harness,
+        model,
+        key,
+        last.map_or(1, |last| last + 1),
+        false,
+        clock,
+    );
+}
+
+/// Writes `last + 1` of a score the model has written, as a deletion. `pick % len` in key order.
+fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
+    let keys: Vec<ScoreKey> = model.project(project).scores.keys().copied().collect();
+    if keys.is_empty() {
+        return;
+    }
+    let key = keys[usize::from(pick) % keys.len()];
+    let last = model.project(project).scores[&key]
+        .iter()
+        .map(|version| version.version)
+        .max()
+        .expect("a key in the model has a version");
+    send_score(harness, model, key, last + 1, true, clock);
+}
+
+/// Sends one score version (a one-row batch). A dropped project refuses it, and the model
+/// keeps no version.
+fn send_score(
+    harness: &Harness,
+    model: &mut Model,
+    key: ScoreKey,
+    version: u32,
+    deleted: bool,
+    clock: i64,
+) {
+    let project = key.project;
+    let batch = scores_to_record_batch(&[score(&key, version, deleted, clock)])
+        .expect("a score batch of one score");
+    let result = harness.block_on(harness.storage().append_scores(project.id(), batch));
+    if model.project(project).dropped {
+        assert!(
+            matches!(result, Err(AppendError::ProjectDropped)),
+            "append_scores on a dropped project is refused as ProjectDropped"
+        );
+        return;
+    }
+    result.expect("append_scores of one score");
+    model
+        .project_mut(project)
+        .write_score(key, version, deleted, clock);
 }
 
 fn compact(harness: &Harness, clock: i64) {

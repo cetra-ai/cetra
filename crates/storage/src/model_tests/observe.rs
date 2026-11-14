@@ -7,17 +7,29 @@ use arrow::array::{Array, AsArray, Float64Array, Int64Array, RecordBatch, String
 use arrow::datatypes::{Float64Type, Int64Type, TimestampNanosecondType};
 
 use super::harness::Harness;
-use super::model::ExpectedTrace;
+use super::model::{ExpectedScore, ExpectedTrace};
+use super::ops::{SESSIONS, TRACES};
 use super::shape::{P, hex, span_id, trace_id};
 use crate::reads::{
-    ListScope, SortOrder, SpanListRequest, SpanSort, TraceListRequest, TraceSort, span_detail,
-    span_list, trace_detail, trace_list,
+    ListScope, ScoreListRequest, ScoreTargets, SortOrder, SpanListRequest, SpanSort,
+    TraceListRequest, TraceSort, latest_scores, score_list, scores_by_id, span_detail, span_list,
+    trace_detail, trace_list,
 };
 use crate::views::QueryContext;
-use llmobs_core::schema::{spans, traces};
+use llmobs_core::schema::{scores, spans, traces};
 
 /// Time allowed for each read request.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One row of `latest_scores`: the live score of one `(target_key, name)`.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LatestScore {
+    /// The trace id (hex) of a trace score, the session id of a session score.
+    pub(super) target_key: String,
+    pub(super) name: String,
+    pub(super) score_id: String,
+    pub(super) value_num: f64,
+}
 
 /// Every row: no window, no default exclusions.
 pub(super) const ALL_ROWS: ListScope = ListScope {
@@ -36,9 +48,13 @@ async fn context(harness: &Harness, project: P) -> QueryContext {
     QueryContext::new(query, None).expect("query context on a project")
 }
 
-/// `(trace_id hex, span_id hex)` of every `span_list` row, duplicates kept.
-/// Pages of `limit` rows each.
-pub(super) fn observe_spans(harness: &Harness, project: P, limit: usize) -> Vec<(String, String)> {
+/// `(start_time, trace_id hex, span_id hex)` of every `span_list` row, duplicates kept, in list
+/// order. Pages of `limit` rows each.
+pub(super) fn observe_spans(
+    harness: &Harness,
+    project: P,
+    limit: usize,
+) -> Vec<(i64, String, String)> {
     harness.block_on(async {
         let ctx = context(harness, project).await;
         let mut keys = Vec::new();
@@ -64,6 +80,7 @@ pub(super) fn observe_spans(harness: &Harness, project: P, limit: usize) -> Vec<
                 let span_ids = utf8(batch, spans::SPAN_ID);
                 for row in 0..batch.num_rows() {
                     keys.push((
+                        timestamp(batch, spans::START_TIME, row),
                         trace_ids.value(row).to_owned(),
                         span_ids.value(row).to_owned(),
                     ));
@@ -172,6 +189,133 @@ pub(super) fn observe_span_detail(
         assert_eq!(batch.num_rows(), 1, "one spans row per span key");
         Some(timestamp(&batch, spans::INGEST_TIME, 0))
     })
+}
+
+/// Every live `scores` row of `project`, in list order, read in pages of `limit` rows.
+pub(super) fn observe_scores(harness: &Harness, project: P, limit: usize) -> Vec<ExpectedScore> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = score_list(
+                &ctx,
+                ScoreListRequest {
+                    target: None,
+                    trace_id: None,
+                    span_id: None,
+                    session_id: None,
+                    name: None,
+                    source: None,
+                    window: None,
+                    limit,
+                    cursor: cursor.as_deref(),
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("score_list on a project");
+            for batch in &page.batches {
+                for row in 0..batch.num_rows() {
+                    rows.push(score_from_batch(batch, row));
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        rows
+    })
+}
+
+/// The live rows of `score_id`s (UUID strings) that `project` has. Unknown and other-project
+/// ids return nothing.
+pub(super) fn observe_scores_by_id(
+    harness: &Harness,
+    project: P,
+    ids: &[String],
+) -> Vec<ExpectedScore> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let batches = scores_by_id(&ctx, &refs, TIMEOUT)
+            .await
+            .expect("scores_by_id on a project");
+        let mut rows = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                rows.push(score_from_batch(batch, row));
+            }
+        }
+        rows
+    })
+}
+
+/// `latest_scores` for every trace number and every session (`s0`..), both target kinds.
+pub(super) fn observe_latest(harness: &Harness, project: P) -> Vec<LatestScore> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let trace_keys: Vec<String> = (0..TRACES)
+            .map(|trace| hex(trace_id(trace).as_bytes()))
+            .collect();
+        let trace_refs: Vec<&str> = trace_keys.iter().map(String::as_str).collect();
+        let session_keys: Vec<String> =
+            (0..SESSIONS).map(|session| format!("s{session}")).collect();
+        let session_refs: Vec<&str> = session_keys.iter().map(String::as_str).collect();
+        let mut rows = Vec::new();
+        for targets in [
+            ScoreTargets::Traces(&trace_refs),
+            ScoreTargets::Sessions(&session_refs),
+        ] {
+            let batches = latest_scores(&ctx, targets, TIMEOUT)
+                .await
+                .expect("latest_scores on a project");
+            for batch in &batches {
+                for row in 0..batch.num_rows() {
+                    rows.push(latest_from_batch(batch, row));
+                }
+            }
+        }
+        rows
+    })
+}
+
+/// One row of the `scores` view, read by column name.
+fn score_from_batch(batch: &RecordBatch, row: usize) -> ExpectedScore {
+    let target_kind = match utf8(batch, scores::TARGET).value(row) {
+        "trace" => "trace",
+        "session" => "session",
+        other => panic!("the scores view has no target {other:?}"),
+    };
+    ExpectedScore {
+        score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
+        name: utf8(batch, scores::NAME).value(row).to_owned(),
+        target_kind,
+        trace_id: opt_string(utf8(batch, scores::TRACE_ID), row),
+        session_id: opt_string(utf8(batch, scores::SESSION_ID), row),
+        value_num: opt_f64(
+            column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
+            row,
+        )
+        .expect("a generated score is numeric"),
+        created_at: timestamp(batch, scores::CREATED_AT, row),
+    }
+}
+
+/// One row of `latest_scores`. Its key column is `target_key`
+/// (`reads/scores.rs`, `LATEST_SCORE_COLUMNS`).
+fn latest_from_batch(batch: &RecordBatch, row: usize) -> LatestScore {
+    LatestScore {
+        target_key: utf8(batch, "target_key").value(row).to_owned(),
+        name: utf8(batch, scores::NAME).value(row).to_owned(),
+        score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
+        value_num: opt_f64(
+            column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
+            row,
+        )
+        .expect("a generated score is numeric"),
+    }
 }
 
 /// A column of `batch` by name. The view names are the constants of `llmobs_core::schema`.

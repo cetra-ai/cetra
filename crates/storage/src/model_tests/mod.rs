@@ -55,3 +55,65 @@ fn run_case(ops: &[Op]) {
     settle(&mut harness, &mut model, &mut clock);
     check_full(&harness, &model, ops.len());
 }
+
+/// The shrunk case of finding M1-1: a re-sent span of trace 7 is kept twice, and paging the span
+/// list at 7 rows used to drop one copy at a page boundary (spec 01: list views de-duplicate).
+#[test]
+fn regression_m1_1_span_paging_with_duplicates() {
+    run_case(&[
+        Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 3,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 4,
+            count: 5,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 5,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 1,
+            count: 1,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 4,
+            count: 1,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 3,
+            count: 1,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 7,
+            count: 1,
+            split: true,
+        },
+        Op::Resend {
+            project: P::A,
+            trace: 7,
+            pick: 218,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 4,
+            split: true,
+        },
+        Op::Crash,
+    ]);
+}
