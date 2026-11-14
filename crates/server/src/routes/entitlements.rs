@@ -48,8 +48,12 @@ async fn get_entitlements(
     Extension(access): Extension<OrgAccess>,
 ) -> Result<error::Json<OrgEntitlements>, ApiError> {
     let org = access.org.id;
+    let now = state.clock.now_ns();
+    let resolved = state.entitlements.resolve(org, now);
     Ok(error::Json(OrgEntitlements {
-        features: entitlements::of(&state, org).features(),
+        features: resolved.features(),
+        plan: state.entitlements.plan_at(org, now).into(),
+        limits: resolved.limits.into(),
         upgrade_url: entitlements::upgrade_url(&state, org),
     }))
 }
@@ -314,8 +318,8 @@ mod tests {
         let (status, body) = get_json(&app, &cookie, "/api/v1/orgs/acme/entitlements").await;
         assert_eq!(status, 200);
         assert_eq!(
-            body,
-            json!({ "features": ["retention_management", "project_roles"] })
+            body["features"],
+            json!(["retention_management", "project_roles"])
         );
     }
 
@@ -325,7 +329,55 @@ mod tests {
         let seeded = app.seed().await;
         let (status, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
         assert_eq!(status, 200);
-        assert_eq!(body, json!({ "features": ["retention_management"] }));
+        assert_eq!(body["features"], json!(["retention_management"]));
+    }
+
+    #[tokio::test]
+    async fn defaults_are_the_plan_without_limits() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (status, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body["plan"],
+            json!({"name": "Self-hosted", "add_ons": [], "source": "defaults"})
+        );
+        assert_eq!(body["limits"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_stored_token_sets_the_plan_and_limits() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        let token = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({"units_included": 200000, "data_access_days": 1825}),
+        );
+        assert_eq!(put(&app, org, &token).await.status, StatusCode::NO_CONTENT);
+
+        let (status, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
+        assert_eq!(status, 200);
+        assert_eq!(body["plan"]["source"], json!("token"));
+        assert_eq!(body["plan"]["id"], json!("pro"));
+        assert_eq!(body["plan"]["name"], json!("Pro"));
+        assert_eq!(body["plan"]["add_ons"], json!(["teams"]));
+        assert_eq!(body["plan"]["status"], json!("active"));
+        assert!(
+            body["plan"]["expires_at"]
+                .as_str()
+                .is_some_and(|at| at.starts_with("2099-01-01T00:00:00")),
+            "{body}"
+        );
+        assert!(body["plan"]["grace_ends_at"].is_string(), "{body}");
+        assert_eq!(
+            body["limits"],
+            json!({"units_included": 200000, "data_access_days": 1825})
+        );
     }
 
     #[tokio::test]

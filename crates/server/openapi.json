@@ -9245,9 +9245,11 @@
       },
       "OrgEntitlements": {
         "type": "object",
-        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage.",
+        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.",
         "required": [
-          "features"
+          "features",
+          "plan",
+          "limits"
         ],
         "properties": {
           "features": {
@@ -9256,6 +9258,14 @@
               "$ref": "#/components/schemas/Feature"
             },
             "description": "Features the org may use now, in a fixed order."
+          },
+          "limits": {
+            "$ref": "#/components/schemas/OrgLimits",
+            "description": "The org's limits (D-P-13)."
+          },
+          "plan": {
+            "$ref": "#/components/schemas/OrgPlan",
+            "description": "The org's plan (D-P-32)."
           },
           "upgrade_url": {
             "type": "string",
@@ -9267,6 +9277,66 @@
         "type": "string",
         "format": "uuid",
         "description": "Organization id. A UUID, created as UUIDv7 and parsed from any version.\n\nSpec README § Cross-cutting conventions and decision D61."
+      },
+      "OrgLimits": {
+        "type": "object",
+        "description": "The org's limits (D-P-13). An omitted limit is unlimited.",
+        "properties": {
+          "data_access_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many days of data the org may read.",
+            "minimum": 0
+          },
+          "ingest_burst": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ingest burst, spans.",
+            "minimum": 0
+          },
+          "ingest_spans_per_sec": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sustained ingest rate, spans per second.",
+            "minimum": 0
+          },
+          "max_active_online_rules": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active online evaluation rules.",
+            "minimum": 0
+          },
+          "max_alert_rules": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Alert rules.",
+            "minimum": 0
+          },
+          "max_projects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Projects.",
+            "minimum": 0
+          },
+          "max_seats": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seats.",
+            "minimum": 0
+          },
+          "units_cap": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Hard cap on units.",
+            "minimum": 0
+          },
+          "units_included": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units included in the plan.",
+            "minimum": 0
+          }
+        }
       },
       "OrgMember": {
         "type": "object",
@@ -9365,6 +9435,49 @@
               "null"
             ],
             "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "OrgPlan": {
+        "type": "object",
+        "description": "The org's plan.",
+        "required": [
+          "name",
+          "add_ons",
+          "source"
+        ],
+        "properties": {
+          "add_ons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Add-ons, e.g. `teams`."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Omitted with the defaults."
+          },
+          "grace_ends_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Omitted with the defaults."
+          },
+          "id": {
+            "type": "string",
+            "description": "Plan id from the token. Omitted with the defaults."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name."
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlanSource"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PlanStatus",
+            "description": "Omitted with the defaults."
           }
         }
       },
@@ -9551,6 +9664,22 @@
         "enum": [
           "read",
           "write"
+        ]
+      },
+      "PlanSource": {
+        "type": "string",
+        "description": "Where the org's plan comes from.",
+        "enum": [
+          "defaults",
+          "token"
+        ]
+      },
+      "PlanStatus": {
+        "type": "string",
+        "description": "An org token's state.",
+        "enum": [
+          "active",
+          "grace"
         ]
       },
       "Problem": {

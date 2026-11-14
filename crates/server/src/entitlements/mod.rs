@@ -3,9 +3,6 @@
 //! M1 has one layer: the instance licence's features, while it is active or in grace.
 //! M2 adds the instance defaults and the org's token.
 
-// Track P M2: P9 uses these outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 

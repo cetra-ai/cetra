@@ -39,7 +39,9 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
-use super::entitlements::{Feature, OrgEntitlements, PutOrgTokenRequest};
+use super::entitlements::{
+    Feature, OrgEntitlements, OrgLimits, OrgPlan, PlanSource, PlanStatus, PutOrgTokenRequest,
+};
 use super::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
@@ -130,6 +132,10 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<OrgPlan>();
+    set.insert::<PlanSource>();
+    set.insert::<PlanStatus>();
+    set.insert::<OrgLimits>();
     set.insert::<PutOrgTokenRequest>();
     set.insert::<CreateInternalOrgRequest>();
     set.insert::<InternalOwner>();

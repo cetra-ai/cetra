@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use llmobs_server::admin::{self, UserSummary};
+use llmobs_server::admin::{self, EntitlementsReport, UserSummary};
+use llmobs_server::api::entitlements::OrgLimits;
 use llmobs_server::config::{LogConfig, LogFormat, ServerConfig};
 use llmobs_server::serve::{self, ServeError};
 use tracing_subscriber::EnvFilter;
@@ -116,6 +117,26 @@ enum AdminCommand {
         /// generate one, unless the current key comes from `LLMOBS_ENCRYPTION_KEY`.
         #[arg(long)]
         new_from_stdin: bool,
+        /// Config file. Overrides `LLMOBS_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    /// Org entitlements.
+    Entitlements {
+        #[command(subcommand)]
+        command: EntitlementsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EntitlementsCommand {
+    /// Print an org's resolved entitlements.
+    Show {
+        /// Org id or slug.
+        org: String,
+        /// `table` or `json`.
+        #[arg(long, value_enum, default_value = "table")]
+        format: output::ListFormat,
         /// Config file. Overrides `LLMOBS_CONFIG`.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -360,6 +381,26 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
                 }
             }
         }
+        AdminCommand::Entitlements {
+            command:
+                EntitlementsCommand::Show {
+                    org,
+                    format,
+                    config,
+                },
+        } => {
+            let loaded = load_config(config.as_deref())?;
+            let report = admin::entitlements(&loaded, &org)
+                .await
+                .context("reading the entitlements")?;
+            let mut stdout = io::stdout().lock();
+            match format {
+                output::ListFormat::Table => write_entitlements(&mut stdout, &report)?,
+                output::ListFormat::Json => {
+                    writeln!(stdout, "{}", serde_json::to_string_pretty(&report)?)?;
+                }
+            }
+        }
         AdminCommand::RotateEncryptionKey {
             new_from_stdin,
             config,
@@ -444,6 +485,76 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+/// `key: value` lines. Enum values print as their JSON names, instants as RFC 3339, and
+/// an absent value as `-` (or `unlimited` for a limit and the retention window).
+fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::Result<()> {
+    let plan = &report.plan;
+    let none = || "-".to_owned();
+    writeln!(out, "org: {} ({})", report.org_slug, report.org_id)?;
+    match &plan.id {
+        Some(id) => writeln!(out, "plan: {} ({id})", plan.name)?,
+        None => writeln!(out, "plan: {}", plan.name)?,
+    }
+    writeln!(out, "source: {}", wire_name(&plan.source))?;
+    writeln!(
+        out,
+        "status: {}",
+        plan.status.as_ref().map_or_else(none, wire_name)
+    )?;
+    writeln!(
+        out,
+        "expires: {}",
+        plan.expires_at.map_or_else(none, output::format_time)
+    )?;
+    writeln!(
+        out,
+        "grace ends: {}",
+        plan.grace_ends_at.map_or_else(none, output::format_time)
+    )?;
+    let add_ons = if plan.add_ons.is_empty() {
+        "-".to_owned()
+    } else {
+        plan.add_ons.join(", ")
+    };
+    writeln!(out, "add-ons: {add_ons}")?;
+    let features = report.features.iter().map(wire_name).collect::<Vec<_>>();
+    writeln!(out, "features: {}", features.join(", "))?;
+    for (name, limit) in limit_rows(&report.limits) {
+        writeln!(out, "{name}: {}", limit_text(limit))?;
+    }
+    let window = report
+        .retention_window_days
+        .map_or_else(|| "unlimited".to_owned(), |days| format!("{days} days"));
+    writeln!(out, "retention window: {window}")
+}
+
+/// The nine limits in D-P-13 order.
+fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 9] {
+    [
+        ("units_included", limits.units_included),
+        ("units_cap", limits.units_cap),
+        ("ingest_spans_per_sec", limits.ingest_spans_per_sec),
+        ("ingest_burst", limits.ingest_burst),
+        ("data_access_days", limits.data_access_days),
+        ("max_seats", limits.max_seats),
+        ("max_projects", limits.max_projects),
+        ("max_alert_rules", limits.max_alert_rules),
+        ("max_active_online_rules", limits.max_active_online_rules),
+    ]
+}
+
+fn limit_text(limit: Option<u64>) -> String {
+    limit.map_or_else(|| "unlimited".to_owned(), |value| value.to_string())
+}
+
+/// The serde name of a unit enum value, e.g. `token` for `PlanSource::Token`.
+fn wire_name(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 #[derive(serde::Serialize)]
 struct ListedUser {
     id: String,
@@ -514,12 +625,15 @@ impl Signals {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
     use clap::Parser;
 
-    use super::{AdminCommand, Cli, Command, log_filter, run_cli};
+    use super::{AdminCommand, Cli, Command, EntitlementsCommand, log_filter, run_cli};
     use crate::output;
+    use llmobs_server::admin::EntitlementsReport;
+    use llmobs_server::api::entitlements::{Feature, OrgLimits};
 
     #[test]
     fn log_filter_caps_rmcp() {
@@ -622,6 +736,91 @@ mod tests {
         let error =
             Cli::try_parse_from(["llmobs", "admin", "list-users", "--format", "xml"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn admin_entitlements_show_parses_its_flags() {
+        type Show = (String, output::ListFormat, Option<PathBuf>);
+        let show_of = |argv: &[&str]| -> Show {
+            match Cli::try_parse_from(argv).unwrap().command {
+                Command::Admin {
+                    command:
+                        AdminCommand::Entitlements {
+                            command:
+                                EntitlementsCommand::Show {
+                                    org,
+                                    format,
+                                    config,
+                                },
+                        },
+                } => (org, format, config),
+                other => panic!("unexpected command {other:?}"),
+            }
+        };
+        assert_eq!(
+            show_of(&["llmobs", "admin", "entitlements", "show", "acme"]),
+            ("acme".to_owned(), output::ListFormat::Table, None)
+        );
+        assert_eq!(
+            show_of(&[
+                "llmobs",
+                "admin",
+                "entitlements",
+                "show",
+                "acme",
+                "--format",
+                "json",
+                "--config",
+                "/etc/llmobs.toml",
+            ]),
+            (
+                "acme".to_owned(),
+                output::ListFormat::Json,
+                Some(PathBuf::from("/etc/llmobs.toml"))
+            )
+        );
+        assert!(Cli::try_parse_from(["llmobs", "admin", "entitlements", "show"]).is_err());
+    }
+
+    #[test]
+    fn entitlements_table_names_the_plan_and_limits() {
+        use llmobs_core::ids::OrgId;
+        use llmobs_server::api::entitlements::{OrgPlan, PlanSource, PlanStatus};
+
+        let report = EntitlementsReport {
+            org_id: OrgId::new_v7().as_uuid(),
+            org_slug: "acme".to_owned(),
+            plan: OrgPlan {
+                id: Some("pro".to_owned()),
+                name: "Pro".to_owned(),
+                add_ons: vec!["teams".to_owned()],
+                source: PlanSource::Token,
+                status: Some(PlanStatus::Grace),
+                expires_at: Some(1_767_225_600_000_000_000),
+                grace_ends_at: None,
+            },
+            features: vec![Feature::RetentionManagement, Feature::ProjectRoles],
+            limits: OrgLimits {
+                units_included: Some(200_000),
+                ..OrgLimits::default()
+            },
+            retention_window_days: None,
+        };
+        let mut out = Vec::new();
+        super::write_entitlements(&mut out, &report).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("plan: Pro (pro)\n"), "{text}");
+        assert!(text.contains("source: token\n"), "{text}");
+        assert!(text.contains("status: grace\n"), "{text}");
+        assert!(text.contains("grace ends: -\n"), "{text}");
+        assert!(text.contains("add-ons: teams\n"), "{text}");
+        assert!(
+            text.contains("features: retention_management, project_roles\n"),
+            "{text}"
+        );
+        assert!(text.contains("units_included: 200000\n"), "{text}");
+        assert!(text.contains("units_cap: unlimited\n"), "{text}");
+        assert!(text.contains("retention window: unlimited\n"), "{text}");
     }
 
     #[test]

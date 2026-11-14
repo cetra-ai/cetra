@@ -2083,10 +2083,14 @@ export interface components {
              */
             total_tokens?: number;
         };
-        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage. */
+        /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage. */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
             features: components["schemas"]["Feature"][];
+            /** @description The org's limits (D-P-13). */
+            limits: components["schemas"]["OrgLimits"];
+            /** @description The org's plan (D-P-32). */
+            plan: components["schemas"]["OrgPlan"];
             /** @description Where an Upgrade button goes. Omitted when the instance sets none. */
             upgrade_url?: string;
         };
@@ -2097,6 +2101,54 @@ export interface components {
          *     Spec README § Cross-cutting conventions and decision D61.
          */
         OrgId: string;
+        /** @description The org's limits (D-P-13). An omitted limit is unlimited. */
+        OrgLimits: {
+            /**
+             * Format: int64
+             * @description How many days of data the org may read.
+             */
+            data_access_days?: number;
+            /**
+             * Format: int64
+             * @description Ingest burst, spans.
+             */
+            ingest_burst?: number;
+            /**
+             * Format: int64
+             * @description Sustained ingest rate, spans per second.
+             */
+            ingest_spans_per_sec?: number;
+            /**
+             * Format: int64
+             * @description Active online evaluation rules.
+             */
+            max_active_online_rules?: number;
+            /**
+             * Format: int64
+             * @description Alert rules.
+             */
+            max_alert_rules?: number;
+            /**
+             * Format: int64
+             * @description Projects.
+             */
+            max_projects?: number;
+            /**
+             * Format: int64
+             * @description Seats.
+             */
+            max_seats?: number;
+            /**
+             * Format: int64
+             * @description Hard cap on units.
+             */
+            units_cap?: number;
+            /**
+             * Format: int64
+             * @description Units included in the plan.
+             */
+            units_included?: number;
+        };
         /**
          * @description One org membership.
          *
@@ -2141,6 +2193,28 @@ export interface components {
             data: components["schemas"]["OrgMembership"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The org's plan. */
+        OrgPlan: {
+            /** @description Add-ons, e.g. `teams`. */
+            add_ons: string[];
+            /**
+             * Format: date-time
+             * @description Omitted with the defaults.
+             */
+            expires_at?: string;
+            /**
+             * Format: date-time
+             * @description Omitted with the defaults.
+             */
+            grace_ends_at?: string;
+            /** @description Plan id from the token. Omitted with the defaults. */
+            id?: string;
+            /** @description Display name. */
+            name: string;
+            source: components["schemas"]["PlanSource"];
+            /** @description Omitted with the defaults. */
+            status?: components["schemas"]["PlanStatus"];
         };
         /**
          * @description Role on an org, and the caller's effective role on a project.
@@ -2218,6 +2292,16 @@ export interface components {
          * @enum {string}
          */
         PersonalTokenScope: "read" | "write";
+        /**
+         * @description Where the org's plan comes from.
+         * @enum {string}
+         */
+        PlanSource: "defaults" | "token";
+        /**
+         * @description An org token's state.
+         * @enum {string}
+         */
+        PlanStatus: "active" | "grace";
         /**
          * @description RFC 7807 problem document.
          *

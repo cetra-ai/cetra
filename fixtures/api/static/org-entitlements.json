@@ -1,8 +1,24 @@
 {
   "features": [
     "retention_management",
-    "project_roles",
-    "sso_enforcement"
+    "project_roles"
   ],
+  "plan": {
+    "id": "pro",
+    "name": "Pro",
+    "add_ons": [
+      "teams"
+    ],
+    "source": "token",
+    "status": "active",
+    "expires_at": "2026-02-05T00:00:00.000000000Z",
+    "grace_ends_at": "2026-02-12T00:00:00.000000000Z"
+  },
+  "limits": {
+    "units_included": 200000,
+    "ingest_spans_per_sec": 20000,
+    "ingest_burst": 100000,
+    "data_access_days": 1825
+  },
   "upgrade_url": "https://app.example.com/orgs/01900000-0000-7000-8000-000000000010/billing"
 }

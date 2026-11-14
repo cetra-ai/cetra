@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::entitlements::{Limits, PlanView, Source, TokenStatus};
+
 /// A feature an org may be entitled to. Names are append-only (D-P-12).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
@@ -56,11 +58,147 @@ impl Feature {
     }
 }
 
-/// `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M2 adds the plan and limits; M3 the usage.
+/// Where the org's plan comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSource {
+    /// The instance defaults: no valid org token.
+    Defaults,
+    /// The org's token from the control plane.
+    Token,
+}
+
+/// An org token's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    /// Before `expires_at`.
+    Active,
+    /// After `expires_at`, before `grace_ends_at`: the plan still applies.
+    Grace,
+}
+
+/// The org's plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OrgPlan {
+    /// Plan id from the token. Omitted with the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Display name.
+    pub name: String,
+    /// Add-ons, e.g. `teams`.
+    pub add_ons: Vec<String>,
+    pub source: PlanSource,
+    /// Omitted with the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<PlanStatus>,
+    /// Omitted with the defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub expires_at: Option<i64>,
+    /// Omitted with the defaults.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub grace_ends_at: Option<i64>,
+}
+
+/// The org's limits (D-P-13). An omitted limit is unlimited.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OrgLimits {
+    /// Units included in the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_included: Option<u64>,
+    /// Hard cap on units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub units_cap: Option<u64>,
+    /// Sustained ingest rate, spans per second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_spans_per_sec: Option<u64>,
+    /// Ingest burst, spans.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_burst: Option<u64>,
+    /// How many days of data the org may read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_access_days: Option<u64>,
+    /// Seats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seats: Option<u64>,
+    /// Projects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_projects: Option<u64>,
+    /// Alert rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_alert_rules: Option<u64>,
+    /// Active online evaluation rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_active_online_rules: Option<u64>,
+}
+
+impl From<Source> for PlanSource {
+    fn from(source: Source) -> Self {
+        match source {
+            Source::Defaults => Self::Defaults,
+            Source::OrgToken => Self::Token,
+        }
+    }
+}
+
+impl From<TokenStatus> for PlanStatus {
+    fn from(status: TokenStatus) -> Self {
+        match status {
+            TokenStatus::Active => Self::Active,
+            TokenStatus::Grace => Self::Grace,
+        }
+    }
+}
+
+impl From<PlanView> for OrgPlan {
+    fn from(plan: PlanView) -> Self {
+        Self {
+            id: plan.id,
+            name: plan.name,
+            add_ons: plan.add_ons,
+            source: plan.source.into(),
+            status: plan.status.map(PlanStatus::from),
+            expires_at: plan.expires_at,
+            grace_ends_at: plan.grace_ends_at,
+        }
+    }
+}
+
+impl From<Limits> for OrgLimits {
+    fn from(limits: Limits) -> Self {
+        Self {
+            units_included: limits.units_included,
+            units_cap: limits.units_cap,
+            ingest_spans_per_sec: limits.ingest_spans_per_sec,
+            ingest_burst: limits.ingest_burst,
+            data_access_days: limits.data_access_days,
+            max_seats: limits.max_seats,
+            max_projects: limits.max_projects,
+            max_alert_rules: limits.max_alert_rules,
+            max_active_online_rules: limits.max_active_online_rules,
+        }
+    }
+}
+
+/// `GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OrgEntitlements {
     /// Features the org may use now, in a fixed order.
     pub features: Vec<Feature>,
+    /// The org's plan (D-P-32).
+    pub plan: OrgPlan,
+    /// The org's limits (D-P-13).
+    pub limits: OrgLimits,
     /// Where an Upgrade button goes. Omitted when the instance sets none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade_url: Option<String>,
