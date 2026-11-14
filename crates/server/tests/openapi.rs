@@ -284,6 +284,29 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/deletions",
+        "list_deletions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/deletions",
+        "create_deletion",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/deletions/preview",
+        "preview_deletion",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/deletions/{id}",
+        "get_deletion",
+    ),
+    ("delete", "/api/v1/projects/{project}", "delete_project"),
+    ("delete", "/api/v1/orgs/{org}", "delete_org"),
+    ("get", "/api/v1/orgs/{org}/deletions", "list_org_deletions"),
+    (
+        "get",
         "/api/v1/projects/{project}/evaluators",
         "list_evaluators",
     ),
@@ -359,6 +382,9 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_scores",
     "list_saved_views",
     "get_metrics",
+    "list_deletions",
+    "get_deletion",
+    "list_org_deletions",
     "list_evaluators",
     "list_score_definitions",
 ];
@@ -396,6 +422,7 @@ const TAGS: &[&str] = &[
     "sql",
     "metrics",
     "media",
+    "deletions",
     "alerts",
 ];
 
@@ -598,7 +625,11 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
-        } else if *id == "post_evaluator"
+        } else if *id == "create_deletion" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
+        } else if *id == "delete_project"
+            || *id == "delete_org"
+            || *id == "post_evaluator"
             || *id == "patch_evaluator"
             || *id == "post_score_definition"
             || *id == "patch_score_definition"
@@ -612,7 +643,7 @@ fn document_lint() {
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if READ_OPERATIONS.contains(id) {
+        } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -694,6 +725,7 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("LlmConnectionPage", "LlmConnection"),
+        ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
         ("ChannelPage", "NotificationChannel"),
@@ -949,6 +981,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "LlmConnectionPage",
+        "DeletionPage",
         "EvaluatorPage",
         "ScoreDefinitionPage",
         "ChannelPage",

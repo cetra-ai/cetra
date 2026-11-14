@@ -16,3 +16,6 @@ web/src/routeTree.gen.ts
 deploy/compose/llmobs.env
 .DS_Store
 *.swp
+
+# Core dumps from the storage crash-harness tests
+core.[0-9]*

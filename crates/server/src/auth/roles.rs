@@ -83,6 +83,10 @@ pub(crate) enum OrgPerm {
     ManageMembers,
     /// Create, edit, delete and test LLM connections (D-I-24).
     ManageConnections,
+    /// Delete the org (owner only, spec 08).
+    Delete,
+    /// The org's deletion history (D-M-8).
+    ViewDeletions,
 }
 
 /// What a project route requires.
@@ -103,6 +107,10 @@ pub(crate) enum ProjectPerm {
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
+    /// GDPR deletions of traces and end users, and their history (D-M-4).
+    Delete,
+    /// Delete the project. The handler also requires org admin (spec 08, D-M-4).
+    Drop,
 }
 
 /// Scope on a project API key. Track D enforces [`Self::Read`] (D140).
@@ -186,9 +194,12 @@ impl OrgPerm {
     pub(crate) fn min_role(self) -> OrgRole {
         match self {
             Self::View => OrgRole::Viewer,
-            Self::Rename | Self::CreateProject | Self::ManageMembers | Self::ManageConnections => {
-                OrgRole::Admin
-            }
+            Self::Rename
+            | Self::CreateProject
+            | Self::ManageMembers
+            | Self::ManageConnections
+            | Self::ViewDeletions => OrgRole::Admin,
+            Self::Delete => OrgRole::Owner,
         }
     }
 }
@@ -199,7 +210,7 @@ impl ProjectPerm {
         match self {
             Self::View | Self::Query => Role::Viewer,
             Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts => Role::Member,
-            Self::ManageSettings | Self::ManageMembers => Role::Admin,
+            Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
 
@@ -207,11 +218,12 @@ impl ProjectPerm {
     pub(crate) fn key_scope(self) -> Option<KeyScope> {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
-            Self::Annotate => Some(KeyScope::Write),
+            Self::Annotate | Self::Delete => Some(KeyScope::Write),
             Self::ManageEvaluation
             | Self::ManageSettings
             | Self::ManageMembers
-            | Self::ManageAlerts => None,
+            | Self::ManageAlerts
+            | Self::Drop => None,
         }
     }
 }
@@ -260,18 +272,24 @@ mod tests {
     #[test]
     fn permissions_follow_the_spec_table() {
         // Spec 08 table: viewing is viewer; project settings and member management are admin.
-        // Owner-only rows (delete org, transfer ownership) are not permissions yet.
+        // Only transfer ownership is not a permission yet.
         assert_eq!(OrgPerm::View.min_role(), OrgRole::Viewer);
         assert_eq!(OrgPerm::Rename.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::CreateProject.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageMembers.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::ManageConnections.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::Delete.min_role(), OrgRole::Owner);
+        assert_eq!(OrgPerm::ViewDeletions.min_role(), OrgRole::Admin);
         assert_eq!(ProjectPerm::View.min_role(), Role::Viewer);
         assert_eq!(ProjectPerm::ManageSettings.min_role(), Role::Admin);
         assert_eq!(ProjectPerm::ManageMembers.min_role(), Role::Admin);
         assert_eq!(ProjectPerm::View.key_scope(), Some(KeyScope::Read));
         assert_eq!(ProjectPerm::Query.min_role(), Role::Viewer);
         assert_eq!(ProjectPerm::Query.key_scope(), Some(KeyScope::Read));
+        assert_eq!(ProjectPerm::Delete.min_role(), Role::Admin);
+        assert_eq!(ProjectPerm::Delete.key_scope(), Some(KeyScope::Write));
+        assert_eq!(ProjectPerm::Drop.min_role(), Role::Admin);
+        assert!(ProjectPerm::Drop.key_scope().is_none());
         assert!(ProjectPerm::ManageSettings.key_scope().is_none());
         assert!(ProjectPerm::ManageMembers.key_scope().is_none());
         // Score writes: viewer no; member, admin and owner yes.

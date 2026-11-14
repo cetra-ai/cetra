@@ -9,6 +9,7 @@
 pub(crate) mod alerts;
 pub(crate) mod api_keys;
 pub(crate) mod connections;
+pub(crate) mod deletions;
 pub(crate) mod email_verifications;
 pub(crate) mod evaluators;
 pub(crate) mod identities;
@@ -220,7 +221,7 @@ fn migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("./migrations/meta")
 }
 
-fn expected_version() -> i64 {
+pub(crate) fn expected_version() -> i64 {
     migrator()
         .migrations
         .iter()
@@ -303,7 +304,7 @@ mod tests {
 
     use sqlx::SqliteConnection;
 
-    use super::MetaDb;
+    use super::{MetaDb, expected_version};
     use crate::meta::MetaError;
 
     async fn pragmas(connection: &mut SqliteConnection) -> (String, i64, i64, i64) {
@@ -390,7 +391,7 @@ mod tests {
             .fetch_one(db.reader())
             .await
             .unwrap();
-        assert_eq!(count, 6);
+        assert_eq!(count, expected_version());
         let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
             .fetch_one(db.reader())
             .await
@@ -409,13 +410,15 @@ mod tests {
         MetaDb::open_existing(dir.path()).await.unwrap();
 
         let db = MetaDb::open(dir.path()).await.unwrap();
-        db.write(|connection| {
+        let future = expected_version() + 1;
+        db.write(move |connection| {
             Box::pin(async move {
                 sqlx::query(
                     "INSERT INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (7, 'future', 1, ?, 0)",
+                     VALUES (?, 'future', 1, ?, 0)",
                 )
+                .bind(future)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -429,8 +432,8 @@ mod tests {
         let error = MetaDb::open_existing(dir.path()).await.unwrap_err();
         match error {
             MetaError::SchemaMismatch { found, expected } => {
-                assert_eq!(found, 7);
-                assert_eq!(expected, 6);
+                assert_eq!(found, future);
+                assert_eq!(expected, expected_version());
             }
             other => panic!("{other}"),
         }

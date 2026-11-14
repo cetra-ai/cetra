@@ -9,6 +9,7 @@ pub mod alerts;
 pub mod common;
 pub mod connections;
 pub(crate) mod convert;
+pub mod deletions;
 pub mod entitlements;
 pub mod evaluators;
 pub mod invites;

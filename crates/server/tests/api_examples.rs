@@ -20,6 +20,7 @@ use llmobs_server::api::common::Page;
 use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
+use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
 use llmobs_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
@@ -393,6 +394,13 @@ fn static_files_match_their_types() {
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
     roundtrip::<SqlQueryResult>("static/sql-result.json");
+    roundtrip::<Page<Deletion>>("static/deletions.json");
+    roundtrip::<Deletion>("static/deletion.json");
+    roundtrip::<Deletion>("static/deletion-resolving.json");
+    roundtrip::<DeletionPreview>("static/deletion-preview.json");
+    roundtrip::<Page<Deletion>>("static/org-deletions.json");
+    roundtrip::<Deletion>("static/deletion-project.json");
+    roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");
     roundtrip::<Evaluator>("static/evaluator.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
@@ -496,6 +504,12 @@ fn generated_files_roundtrip() {
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
             "get_metrics" => roundtrip::<MetricsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
+            "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
+                roundtrip::<Deletion>(&example.file);
+            }
+            "preview_deletion" => roundtrip::<DeletionPreview>(&example.file),
             "get_auth_config"
             | "get_me"
             | "list_orgs"
