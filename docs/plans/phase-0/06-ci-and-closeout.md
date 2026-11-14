@@ -69,6 +69,7 @@ User answers behind D81: Linux runners only, no release artifacts yet, Dependabo
   - Use the latest release that is at least 7 days old.
   - The cargo-deny version must accept the existing `deny.toml` (`version = 2` sections).
   - If you have the tools installed locally, the local `just` and `cargo-deny` versions are the ones to match, unless they are older than the latest by a major version.
+  - A tool that `taiki-e/install-action` does not install is downloaded from its release and checked against a pinned sha256 (`sha256sum -c`, as kubeconform is in `actions/packaging`). Current cases: actionlint 1.7.12 (no manifest in v2.90.0). mold 3.0.0 (`actions/rust`, Linux x86_64 only) is also downloaded this way, although v2.90.0 has a manifest for it, so it follows the kubeconform pattern. zizmor 1.32.0 is installed by install-action, which has its manifest.
 - **Runtimes come from the repo,** never duplicated in workflow files:
   - Rust from `rust-toolchain.toml`;
   - Node from `.node-version` (`node-version-file`);

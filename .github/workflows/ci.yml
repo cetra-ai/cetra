@@ -46,6 +46,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
+          mold: "true"
           cache: ${{ env.CI_CACHE_ALLOWED }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
@@ -64,6 +65,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
+          mold: "true"
           cache: ${{ env.CI_CACHE_ALLOWED }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
@@ -79,6 +81,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
+          mold: "true"
           cache: "false"
       - run: just deny check-ee
       - run: just assert-clean
@@ -168,24 +171,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with:
-          version: "0.13.7"
       - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
-          tool: just@1.59.0
-      - name: Install actionlint
+          tool: just@1.59.0,zizmor@1.32.0
+      - name: Install actionlint 1.7.12
         shell: bash
-        # taiki-e/install-action v2.89.1 has no actionlint manifest.
+        # taiki-e/install-action v2.90.0 has no actionlint manifest, so the release tarball is checked against its pinned sha256.
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL -o /tmp/actionlint.tar.gz https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
-          tar -xzf /tmp/actionlint.tar.gz -C "$HOME/.local/bin" actionlint
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$HOME/.local/bin" actionlint
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Install zizmor
-        # v2.89.1's manifest stops at zizmor 1.31.1; 1.32.0 is the latest release older than 7 days.
-        run: uv tool install zizmor==1.32.0
       - run: just check-workflows
       - run: just assert-clean
 
@@ -201,6 +199,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
+          mold: "true"
           cache: ${{ env.CI_CACHE_ALLOWED }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
