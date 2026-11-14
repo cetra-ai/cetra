@@ -243,7 +243,6 @@ pub(crate) enum ExecuteError {
 
 /// A job the dispatcher claimed. `claims` is the value after the claim; `finish` is fenced by it.
 #[derive(Debug)]
-#[allow(dead_code)] // I3.7 calls it (through run_job).
 pub(crate) struct ClaimedJob {
     pub(crate) row: JobRow,
     pub(crate) claims: u32,
@@ -253,7 +252,6 @@ pub(crate) struct ClaimedJob {
 
 /// Runs one claimed job and records its outcome (§ Job execution). Every step's failure is a job
 /// outcome; `Err` is only a `meta.db` failure, which leaves the job `running` for the janitor.
-#[allow(dead_code)] // I3.7 calls it.
 pub(crate) async fn run_job(state: &AppState, job: ClaimedJob) -> Result<(), MetaError> {
     let ready = match prepare(state, &job).await {
         Ok(ready) => ready,

@@ -317,6 +317,7 @@ impl TestApp {
         )
         .await
         .expect("stored org tokens load");
+        let eval = crate::eval::EvalQueue::new(config.eval.workers);
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -345,7 +346,7 @@ impl TestApp {
                 permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
             ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
-            eval: crate::eval::EvalQueue::default(),
+            eval,
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)

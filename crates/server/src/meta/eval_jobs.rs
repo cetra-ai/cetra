@@ -374,7 +374,8 @@ pub(crate) async fn list_jobs(
 }
 
 /// The dispatcher's candidates (§ The candidate query): at most 20 per `(priority, project)`,
-/// in `(priority, not_before, id)` order, skipping jobs whose rule is disabled or paused, whose
+/// in `(priority, rank in its project, not_before, id)` order so a small
+/// LIMIT still reaches every project (D-I-6 round-robin), skipping jobs whose rule is disabled or paused, whose
 /// project or org is not active, and whose connection (or webhook evaluator) is in `saturated`.
 ///
 /// # Errors
@@ -406,7 +407,7 @@ pub(crate) async fn candidates(
              AND COALESCE(e.connection_id, e.id) NOT IN (SELECT value FROM json_each(?2))
          )
          WHERE rn <= 20
-         ORDER BY priority, not_before, id
+         ORDER BY priority, rn, not_before, id
          LIMIT ?3",
     )
     .bind(now)

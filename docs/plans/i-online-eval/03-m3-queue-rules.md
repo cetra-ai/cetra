@@ -728,9 +728,11 @@ SELECT * FROM (
     AND COALESCE(e.connection_id, e.id) NOT IN (SELECT value FROM json_each(?2))
 )
 WHERE rn <= 20
-ORDER BY priority, not_before, id
+ORDER BY priority, rn, not_before, id
 LIMIT ?3
 ```
+
+The order is priority, then the job's rank within its project (`rn`), then `not_before` and `id`. The rank makes every project's first candidates come before any project's second ones, so a small `LIMIT` reaches every project and the round-robin in `pick` (D-I-6) sees each project.
 
 `orgs.state` and `projects.state` are both `'active'` or `'deleting'` (`0001_identity.sql`).
 
@@ -776,7 +778,7 @@ With `crate::meta::test_db()`, an org, a project, a connection, an evaluator (`m
 - `insert_job` twice with the same rule and target inserts once (dedup); manual jobs never collide;
 - `claim` → `Some(1)`, a second `claim` → `None`; `start_attempt` with a stale `claims` → `None`;
 - `finish` with a stale `claims` is false and changes nothing; each `Finish` variant sets exactly its columns (one assertion block per variant);
-- `candidates`: priority order; at most 20 per (priority, project): 25 jobs of project A and 1 of project B at the same priority give 21 rows including B's; `saturated` excludes a connection's jobs and a webhook evaluator's jobs (by evaluator id); a paused or disabled rule's jobs are excluded, manual jobs are not; `not_before` in the future is excluded; a `deleting` project's jobs are excluded;
+- `candidates`: priority order, then rank within the project, then `not_before`, `id`; at most 20 per (priority, project): 25 jobs of project A and 1 of project B at the same priority give 21 rows including B's; `saturated` excludes a connection's jobs and a webhook evaluator's jobs (by evaluator id); a paused or disabled rule's jobs are excluded, manual jobs are not; `not_before` in the future is excluded; a `deleting` project's jobs are excluded;
 - `recover`: `interruptions` 3 → failed `interrupted too often`; `interruptions` 2 with `claims` 6 → queued with `interruptions` 3 (claims do not count);
 - `requeue_stale` only touches `running` rows older than the cut-off, and applies the same `interruptions` rule;
 - `finish` with `PauseRequeue` after `start_attempt` leaves `attempts` where it was before the attempt, and never below 0;

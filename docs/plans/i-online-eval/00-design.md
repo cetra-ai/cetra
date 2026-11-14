@@ -288,7 +288,7 @@ startup: config.encryption_key ─┐
         AND COALESCE(e.connection_id, e.id) NOT IN (:saturated)   -- connections without slot or token, webhook evaluators at 4
       -- fairness: at most 20 candidates per (priority, project), via
       -- ROW_NUMBER() OVER (PARTITION BY j.priority, j.project_id ORDER BY j.not_before) <= 20
-      ORDER BY j.priority, j.not_before LIMIT min(400, 4 × free worker slots)
+      ORDER BY j.priority, rn, j.not_before, j.id LIMIT min(400, 4 × free worker slots)
    2. pick in Rust, no I/O: strict priority, then one job per project per round; within a priority the
       rotation starts after the project served last (kept across passes); try_acquire permits
    3. one short MetaDb::write that only claims:
