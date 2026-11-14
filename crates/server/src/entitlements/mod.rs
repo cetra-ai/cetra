@@ -3,8 +3,12 @@
 //! M1 has one layer: the instance licence's features, while it is active or in grace.
 //! M2 adds the instance defaults and the org's token.
 
+// Track P M2: P9 uses these outside tests.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use llmobs_core::ids::OrgId;
 
+use crate::config::EntitlementDefaults;
 use crate::ee::license::{LicenseState, LicenseStatus};
 use crate::http::AppState;
 use crate::http::error::ApiError;
@@ -42,6 +46,11 @@ impl FeatureSet {
         set
     }
 
+    /// The features in either set.
+    pub(crate) fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     /// The features in the set, in [`Feature::ALL`] order.
     pub(crate) fn to_vec(self) -> Vec<Feature> {
         Feature::ALL
@@ -51,16 +60,70 @@ impl FeatureSet {
     }
 }
 
+/// The nine limits of D-P-13 for one org. `None` is unlimited.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) units_included: Option<u64>,
+    pub(crate) units_cap: Option<u64>,
+    pub(crate) ingest_spans_per_sec: Option<u64>,
+    pub(crate) ingest_burst: Option<u64>,
+    pub(crate) data_access_days: Option<u64>,
+    pub(crate) max_seats: Option<u64>,
+    pub(crate) max_projects: Option<u64>,
+    pub(crate) max_alert_rules: Option<u64>,
+    pub(crate) max_active_online_rules: Option<u64>,
+}
+
+/// The instance defaults, resolved from config once (`[entitlements.defaults]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Defaults {
+    pub(crate) plan_name: String,
+    pub(crate) features: FeatureSet,
+    pub(crate) limits: Limits,
+}
+
+impl Defaults {
+    /// From config. `features: None` is every core feature.
+    pub(crate) fn from_config(config: &EntitlementDefaults) -> Self {
+        let features = match &config.features {
+            Some(names) => FeatureSet::from_names(names.iter().map(String::as_str)),
+            None => Feature::ALL
+                .into_iter()
+                .filter(|feature| !feature.is_ee())
+                .fold(FeatureSet::EMPTY, |mut set, feature| {
+                    set.insert(feature);
+                    set
+                }),
+        };
+        Self {
+            plan_name: config.plan_name.clone(),
+            features,
+            limits: Limits {
+                units_included: config.units_included,
+                units_cap: config.units_cap,
+                ingest_spans_per_sec: config.ingest_spans_per_sec,
+                ingest_burst: config.ingest_burst,
+                data_access_days: config.data_access_days,
+                max_seats: config.max_seats,
+                max_projects: config.max_projects,
+                max_alert_rules: config.max_alert_rules,
+                max_active_online_rules: config.max_active_online_rules,
+            },
+        }
+    }
+}
+
 /// What one org may do now (D179).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entitlements {
     features: FeatureSet,
+    pub(crate) limits: Limits,
 }
 
 impl Entitlements {
-    /// Entitlements with exactly `features`.
-    pub(crate) fn with_features(features: FeatureSet) -> Self {
-        Self { features }
+    /// Entitlements with exactly `features` and `limits`.
+    pub(crate) fn new(features: FeatureSet, limits: Limits) -> Self {
+        Self { features, limits }
     }
 
     /// Whether the org may use `feature`.
@@ -78,31 +141,38 @@ impl Entitlements {
 #[derive(Debug)]
 pub(crate) struct EntitlementsState {
     license: LicenseState,
+    defaults: Defaults,
 }
 
 impl EntitlementsState {
-    /// From the licence read at startup.
-    pub(crate) fn new(license: LicenseState) -> Self {
-        Self { license }
+    /// From the licence and the instance defaults read at startup.
+    pub(crate) fn new(license: LicenseState, defaults: Defaults) -> Self {
+        Self { license, defaults }
     }
 
     /// The instance licence.
     pub(crate) fn license(&self) -> &LicenseState {
         &self.license
     }
+
+    /// The instance defaults.
+    pub(crate) fn defaults(&self) -> &Defaults {
+        &self.defaults
+    }
 }
 
 /// What `org` may do now. Synchronous and in memory; call it at every check (D-P-10).
 ///
-/// M1: the licence's features while it is active or in grace, for every org. `_org`
-/// is used from M2 on, when the org's own token joins the resolution.
+/// The instance defaults plus the licence's features while it is active or in grace,
+/// for every org. `_org` is used from P4 on, when the org's own token joins the
+/// resolution.
 pub(crate) fn of(state: &AppState, _org: OrgId) -> Entitlements {
-    Entitlements::with_features(
-        state
-            .entitlements
-            .license()
-            .active_features(state.clock.now_ns()),
-    )
+    let defaults = state.entitlements.defaults();
+    let licensed = state
+        .entitlements
+        .license()
+        .active_features(state.clock.now_ns());
+    Entitlements::new(defaults.features.union(licensed), defaults.limits)
 }
 
 /// Ok when `org` may use `feature`; otherwise the `plan_required` error that names it (D-P-14).
@@ -157,7 +227,7 @@ pub(crate) fn log_license(license: &LicenseState, now_ns: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Secret;
+    use crate::config::{EntitlementDefaults, Secret};
     use crate::ee::license::InvalidLicense;
     use crate::test_support::{TestApp, capture_logs, license_key, license_key_until};
     use llmobs_token::TokenError;
@@ -183,23 +253,68 @@ mod tests {
 
     #[test]
     fn entitlements_allow_listed_features() {
-        let entitlements = Entitlements::with_features(FeatureSet::from_names([
-            "sso_enforcement",
-            "project_roles",
-        ]));
+        let entitlements = Entitlements::new(
+            FeatureSet::from_names(["sso_enforcement", "project_roles"]),
+            Limits::default(),
+        );
         assert!(entitlements.allows(Feature::ProjectRoles));
         assert!(entitlements.allows(Feature::SsoEnforcement));
         assert_eq!(
             entitlements.features(),
             vec![Feature::ProjectRoles, Feature::SsoEnforcement]
         );
-        assert!(!Entitlements::with_features(FeatureSet::EMPTY).allows(Feature::ProjectRoles));
+        assert!(
+            !Entitlements::new(FeatureSet::EMPTY, Limits::default()).allows(Feature::ProjectRoles)
+        );
+    }
+
+    #[tokio::test]
+    async fn defaults_grant_every_core_feature() {
+        let app = TestApp::new().await;
+        let entitlements = of(&app.state, OrgId::new_v7());
+        assert!(entitlements.allows(Feature::RetentionManagement));
+        assert!(!entitlements.allows(Feature::ProjectRoles));
+        assert!(!entitlements.allows(Feature::SsoEnforcement));
+        assert_eq!(entitlements.limits, Limits::default());
+    }
+
+    #[tokio::test]
+    async fn configured_defaults_apply() {
+        let app = TestApp::with_config(|config| {
+            config.entitlements.defaults = EntitlementDefaults {
+                features: Some(Vec::new()),
+                units_cap: Some(100_000),
+                max_seats: Some(1),
+                ..EntitlementDefaults::default()
+            };
+        })
+        .await;
+        let entitlements = of(&app.state, OrgId::new_v7());
+        assert!(!entitlements.allows(Feature::RetentionManagement));
+        assert_eq!(entitlements.limits.units_cap, Some(100_000));
+        assert_eq!(entitlements.limits.max_seats, Some(1));
+        assert_eq!(entitlements.limits.units_included, None);
+    }
+
+    #[tokio::test]
+    async fn licence_adds_ee_features_to_defaults() {
+        let key = license_key(&["project_roles"]);
+        let app = TestApp::with_config(move |config| {
+            config.license_key = Some(Secret::new(key));
+            config.entitlements.defaults.features = Some(Vec::new());
+        })
+        .await;
+        let entitlements = of(&app.state, OrgId::new_v7());
+        assert!(entitlements.allows(Feature::ProjectRoles));
+        assert!(!entitlements.allows(Feature::RetentionManagement));
     }
 
     #[tokio::test]
     async fn no_license_allows_nothing() {
         let app = TestApp::new().await;
-        assert!(of(&app.state, OrgId::new_v7()).features().is_empty());
+        let entitlements = of(&app.state, OrgId::new_v7());
+        assert_eq!(entitlements.features(), vec![Feature::RetentionManagement]);
+        assert!(!entitlements.allows(Feature::ProjectRoles));
     }
 
     #[tokio::test]
@@ -223,7 +338,8 @@ mod tests {
             config.license_key = Some(Secret::new(key));
         })
         .await;
-        assert!(of(&app.state, OrgId::new_v7()).features().is_empty());
+        let entitlements = of(&app.state, OrgId::new_v7());
+        assert_eq!(entitlements.features(), vec![Feature::RetentionManagement]);
         assert!(
             app.state
                 .entitlements
@@ -243,7 +359,10 @@ mod tests {
             app.state.entitlements.license(),
             LicenseState::Invalid(InvalidLicense::Token(TokenError::Malformed))
         ));
-        assert!(of(&app.state, OrgId::new_v7()).features().is_empty());
+        assert_eq!(
+            of(&app.state, OrgId::new_v7()).features(),
+            vec![Feature::RetentionManagement]
+        );
     }
 
     #[tokio::test]

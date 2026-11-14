@@ -122,16 +122,19 @@ mod tests {
 
         let (status, body) = get_json(&app, &cookie, "/api/v1/orgs/acme/entitlements").await;
         assert_eq!(status, 200);
-        assert_eq!(body, json!({ "features": ["project_roles"] }));
+        assert_eq!(
+            body,
+            json!({ "features": ["retention_management", "project_roles"] })
+        );
     }
 
     #[tokio::test]
-    async fn no_license_no_features() {
+    async fn no_license_only_core_features() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let (status, body) = get_json(&app, &seeded.cookie, "/api/v1/orgs/acme/entitlements").await;
         assert_eq!(status, 200);
-        assert_eq!(body, json!({ "features": [] }));
+        assert_eq!(body, json!({ "features": ["retention_management"] }));
     }
 
     #[tokio::test]

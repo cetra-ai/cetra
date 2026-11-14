@@ -27,6 +27,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 
 use crate::api::account::SignupPolicy;
+use crate::api::entitlements::Feature;
 
 /// `admin_email`, `admin_password`, `org`, and `project` are one group.
 const INIT_GROUP: &str =
@@ -497,12 +498,52 @@ pub struct SecurityConfig {
     pub allow_private_network_egress: bool,
 }
 
-/// `[entitlements]` (D-P-15). M2 adds `defaults`.
+/// `[entitlements]` (D-P-15).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EntitlementsConfig {
     /// Where Upgrade buttons go. `{org}` is replaced by the org id. Unset: no button.
     pub upgrade_url: Option<String>,
+    /// What an org without a valid token gets (D-P-10, D-P-13).
+    pub defaults: EntitlementDefaults,
+}
+
+/// `[entitlements.defaults]`: what an org without a valid token gets (D-P-10, D-P-13).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EntitlementDefaults {
+    /// Shown as the org's plan. Default `"Self-hosted"`.
+    pub plan_name: String,
+    /// Core features granted. `None` (the key absent): every core feature.
+    pub features: Option<Vec<String>>,
+    /// Limits; unset means unlimited. Same names as D-P-13.
+    pub units_included: Option<u64>,
+    pub units_cap: Option<u64>,
+    pub ingest_spans_per_sec: Option<u64>,
+    pub ingest_burst: Option<u64>,
+    pub data_access_days: Option<u64>,
+    pub max_seats: Option<u64>,
+    pub max_projects: Option<u64>,
+    pub max_alert_rules: Option<u64>,
+    pub max_active_online_rules: Option<u64>,
+}
+
+impl Default for EntitlementDefaults {
+    fn default() -> Self {
+        Self {
+            plan_name: "Self-hosted".to_owned(),
+            features: None,
+            units_included: None,
+            units_cap: None,
+            ingest_spans_per_sec: None,
+            ingest_burst: None,
+            data_access_days: None,
+            max_seats: None,
+            max_projects: None,
+            max_alert_rules: None,
+            max_active_online_rules: None,
+        }
+    }
 }
 
 /// Everything `llmobs serve` reads from the environment and `llmobs.toml`.
@@ -793,7 +834,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
         &mut config.auth.enforce_sso_domains,
     )?;
     validate_email(config)?;
-    validate_entitlements(&config.entitlements)?;
+    validate_entitlements(&mut config.entitlements)?;
     if config
         .license_key
         .as_ref()
@@ -1265,10 +1306,38 @@ fn hex_digit(byte: u8) -> Result<u8, ()> {
     }
 }
 
-fn validate_entitlements(entitlements: &EntitlementsConfig) -> Result<(), ConfigError> {
-    let Some(template) = entitlements.upgrade_url.as_deref() else {
-        return Ok(());
-    };
+fn validate_entitlements(entitlements: &mut EntitlementsConfig) -> Result<(), ConfigError> {
+    if let Some(template) = entitlements.upgrade_url.as_deref() {
+        validate_upgrade_url(template)?;
+    }
+    validate_entitlement_defaults(&mut entitlements.defaults)
+}
+
+fn validate_entitlement_defaults(defaults: &mut EntitlementDefaults) -> Result<(), ConfigError> {
+    let plan_name = defaults.plan_name.trim().to_owned();
+    if !(1..=64).contains(&plan_name.chars().count()) {
+        return Err(ConfigError::Invalid {
+            key: "entitlements.defaults.plan_name",
+            reason: "must be 1 to 64 characters",
+        });
+    }
+    defaults.plan_name = plan_name;
+    let core_only =
+        |name: &String| Feature::from_name(name).is_some_and(|feature| !feature.is_ee());
+    if defaults
+        .features
+        .as_ref()
+        .is_some_and(|names| !names.iter().all(core_only))
+    {
+        return Err(ConfigError::Invalid {
+            key: "entitlements.defaults.features",
+            reason: "must list core features only: retention_management",
+        });
+    }
+    Ok(())
+}
+
+fn validate_upgrade_url(template: &str) -> Result<(), ConfigError> {
     let invalid = ConfigError::Invalid {
         key: "entitlements.upgrade_url",
         reason: "must be an http or https URL; {org} is the only placeholder",
@@ -2071,6 +2140,88 @@ mod tests {
             config.entitlements.upgrade_url.as_deref(),
             Some("https://example.com/up")
         );
+    }
+
+    #[test]
+    fn defaults_are_self_hosted_and_unlimited() {
+        let config = load_from(None, &[]).unwrap();
+        let defaults = &config.entitlements.defaults;
+        assert_eq!(defaults.plan_name, "Self-hosted");
+        assert_eq!(defaults.features, None);
+        assert_eq!(defaults.units_included, None);
+        assert_eq!(defaults.units_cap, None);
+        assert_eq!(defaults.ingest_spans_per_sec, None);
+        assert_eq!(defaults.ingest_burst, None);
+        assert_eq!(defaults.data_access_days, None);
+        assert_eq!(defaults.max_seats, None);
+        assert_eq!(defaults.max_projects, None);
+        assert_eq!(defaults.max_alert_rules, None);
+        assert_eq!(defaults.max_active_online_rules, None);
+    }
+
+    #[test]
+    fn cloud_defaults_load() {
+        let config = load_from(
+            Some(
+                "[entitlements.defaults]\n\
+                 plan_name = \" Free \"\n\
+                 features = []\n\
+                 units_included = 100000\n\
+                 units_cap = 100000\n\
+                 max_seats = 1\n\
+                 max_projects = 1\n",
+            ),
+            &[],
+        )
+        .unwrap();
+        let defaults = &config.entitlements.defaults;
+        assert_eq!(defaults.plan_name, "Free");
+        assert_eq!(defaults.features, Some(Vec::new()));
+        assert_eq!(defaults.units_included, Some(100_000));
+        assert_eq!(defaults.units_cap, Some(100_000));
+        assert_eq!(defaults.max_seats, Some(1));
+        assert_eq!(defaults.max_projects, Some(1));
+        assert_eq!(defaults.max_alert_rules, None);
+    }
+
+    #[test]
+    fn defaults_refuse_ee_and_unknown_features() {
+        for features in ["[\"project_roles\"]", "[\"nope\"]"] {
+            let toml = format!("[entitlements.defaults]\nfeatures = {features}\n");
+            let error = load_from(Some(&toml), &[]).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Invalid {
+                        key: "entitlements.defaults.features",
+                        reason: "must list core features only: retention_management",
+                    }
+                ),
+                "{features}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_refuse_an_empty_plan_name() {
+        let error =
+            load_from(Some("[entitlements.defaults]\nplan_name = \"  \"\n"), &[]).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "entitlements.defaults.plan_name",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn defaults_refuse_unknown_keys() {
+        let error = load_from(Some("[entitlements.defaults]\nmax_users = 1\n"), &[]).unwrap_err();
+        assert!(matches!(error, ConfigError::Figment(_)), "{error}");
     }
 
     #[test]

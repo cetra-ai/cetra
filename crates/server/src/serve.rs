@@ -283,6 +283,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         config.license_key.as_ref().map(|key| key.expose().as_str()),
     );
     crate::entitlements::log_license(&license, Clock::System.now_ns());
+    let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
     let storage = Arc::new(storage);
     let state = AppState::new(AppInner {
         config,
@@ -306,7 +307,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         secrets,
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
-        entitlements: crate::entitlements::EntitlementsState::new(license),
+        entitlements: crate::entitlements::EntitlementsState::new(license, defaults),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {

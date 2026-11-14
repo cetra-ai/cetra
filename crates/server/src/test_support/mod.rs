@@ -261,6 +261,7 @@ impl TestApp {
         let license = crate::ee::license::LicenseState::from_key(
             config.license_key.as_ref().map(|key| key.expose().as_str()),
         );
+        let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -283,7 +284,7 @@ impl TestApp {
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
-            entitlements: crate::entitlements::EntitlementsState::new(license),
+            entitlements: crate::entitlements::EntitlementsState::new(license, defaults),
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)

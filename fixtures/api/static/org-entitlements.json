@@ -1,5 +1,6 @@
 {
   "features": [
+    "retention_management",
     "project_roles",
     "sso_enforcement"
   ],

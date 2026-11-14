@@ -1600,7 +1600,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "project_roles" | "sso_enforcement";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
