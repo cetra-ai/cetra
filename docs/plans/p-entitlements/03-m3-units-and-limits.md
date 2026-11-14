@@ -23,6 +23,10 @@ When M3 is done:
 
 The same as M2 (`02-m2-org-entitlements.md` § Conventions), including "Dead code between phases" (here P13 removes every attribute M3 added) and "Generated files". Server code returns `ApiError`; never log or return payload, tokens, emails or names; time from `state.clock.now_ns()`; months and days are UTC; tests on `TestApp` (manual clock `2026-01-01T00:00:00Z`); web tests on MSW with `server.use`.
 
+### Module wiring
+
+Every new route module (`routes/usage.rs`, `routes/internal_usage.rs`, `routes/internal_users.rs`, `routes/internal_members.rs`) gets `pub(crate) mod …;` in `routes/mod.rs` and `routes.extend(crate::routes::<module>::routes());` in `http/access.rs`'s route table; every new `meta` module (`meta/usage.rs`) gets `pub(crate) mod usage;` in `meta/mod.rs`; every new `entitlements` module (`units`, `rate`, `notices`) its line in `entitlements/mod.rs`; every new `api` module (`api/usage.rs`) `pub mod usage;` in `api/mod.rs`.
+
 ### Every new or changed API operation
 
 For each operation a sub-phase adds or changes, do all of these (the OpenAPI lint and the API-examples tests check them):
@@ -84,7 +88,7 @@ just check
 
 P1–P10 run in order (they edit the same server files and the generated contract). P11 and P12 touch only their SDK and depend only on the HTTP contract (402 with `Retry-After`), so each can run in parallel with P1–P10 in its own worktree. P13 runs last.
 
-**SDK warning text** (both SDKs, exactly): `llmobs: the organization reached its monthly units cap; telemetry is dropped until <reset> (retrying every hour)`, where `<reset>` is the UTC instant `now + Retry-After` formatted `YYYY-MM-DDTHH:MM:SSZ`.
+**SDK warning text** (both SDKs, exactly): `llmobs: the organization reached its monthly units cap; telemetry is dropped until <reset> (retrying at most every hour)`, where `<reset>` is the UTC instant `now + Retry-After` formatted `YYYY-MM-DDTHH:MM:SSZ`.
 
 ---
 
@@ -126,15 +130,13 @@ pub(crate) struct Usage {
 /// [`MetaError`] when the load query fails.
 pub(crate) async fn month_units(&self, meta: &MetaDb, org_id: OrgId, now_ns: i64) -> Result<u64, MetaError>
 
-/// Orgs with a loaded counter (any month).
-pub(crate) fn loaded_orgs(&self) -> Vec<OrgId>
 ```
 
 `month_units`:
 1. Fast path: lock `months`; a counter with this month → return its `units`.
 2. Slow path: `let _guard = self.flush_lock.lock().await;` then check the fast path again; run `SELECT COALESCE(SUM(spans + scores), 0) FROM usage_daily WHERE org_id = ? AND day >= ? AND day < ?` with the month's first day and the next month's first day (`YYYY-MM-DD`); then **while holding the `counts` lock**, add the unflushed counts of this org whose `day` is in the month, and insert the `MonthUnits` into `months` (locked inside `counts`, the same order as `add`). Return the units. `SUM` is `i64`: convert with `u64::try_from(..).unwrap_or(0)`.
 
-`month_units` and `loaded_orgs` have no non-test caller until P2/P6: give each `#[cfg_attr(not(test), allow(dead_code))]` (item level), removed in P13.
+`month_units` has no non-test caller until P2: give it `#[cfg_attr(not(test), allow(dead_code))]` (item level), removed in P13.
 
 ### Tests (`usage::tests`)
 
@@ -190,7 +192,7 @@ fn decide(units: u64, cap: u64, now_ns: i64) -> Option<CapExceeded>
 ### Tests
 
 - `test_support::set_limits` (§ Conventions).
-- `entitlements::units::tests`: `decide` at 2026-01-15T12:00:00.5Z with cap 10 and units 10 → retry `1_423_800` seconds (ceil), detail names `10 units` and `2026-02-01`; at 2026-12-31 → `2027-01-01`; units 9 → `None`. `check_cap` with no cap → `Ok`; a load error (rename the table as `usage.rs`'s test at line ~221 does: `ALTER TABLE usage_daily RENAME TO usage_daily_gone`) with a cap → `Ok`, and a `warn` in `capture_logs`.
+- `entitlements::units::tests`: `decide` at 2026-01-15T12:00:00.5Z with cap 10 and units 10 → retry `1_425_600` seconds (ceil of 1 425 599.5), detail names `10 units` and `2026-02-01`; at 2026-12-31 → `2027-01-01`; units 9 → `None`. `check_cap` with no cap → `Ok`; a load error (rename the table, as a test in `usage.rs` does with another name: `ALTER TABLE usage_daily RENAME TO usage_daily_gone`) with a cap → `Ok`, and a `warn` in `capture_logs`.
 - `routes::otlp::tests::capped_org_gets_402`: `set_limits(units_cap 10)`; `state.usage.add` 10 spans for the org → POST `/v1/traces` → 402, code `quota_exceeded`, `Retry-After` header present, nothing appended; with 9 counted, a request of 5 spans is accepted whole (D-P-17).
 - `ingest::grpc::tests::capped_org_gets_resource_exhausted`: same → `Code::ResourceExhausted`.
 - `scores::tests::capped_org_cannot_write_scores`: score write → 402; feedback → 402; score deletion → allowed.
@@ -224,7 +226,7 @@ Rules: `spans == 0` → `Ok` without touching the bucket. A new org starts full 
 
 ### Error
 
-`ingest/mod.rs` `IngestError::RateLimited { retry_after_s: u64 }` (`#[error("ingest rate limit")]`). Every exhaustive match gains its arm: `From<IngestError> for ApiError` → `ApiError::RateLimited { retry_after_s }`; `From<IngestError> for tonic::Status` in `ingest/grpc.rs` → `Status::unavailable("rate limited")`; `log_refusal` in `routes/otlp.rs` → `reason = "rate"` at `debug`; the table test `error_mapping_matches_the_design_table` gains the row.
+`ingest/mod.rs` `IngestError::RateLimited { retry_after_s: u64 }` (`#[error("ingest rate limit")]`). Every exhaustive match gains its arm: `From<IngestError> for ApiError` → `ApiError::RateLimited { retry_after_s }`; `From<IngestError> for tonic::Status` in `ingest/grpc.rs` → `Status::unavailable("rate limited")`; `log_refusal` in `routes/otlp.rs` logs every refusal at `warn` today: make it return early with a `tracing::debug!(target: "ingest", project_id, reason = "rate", "request refused")` for `RateLimited`; the gRPC wrapper in `ingest/grpc.rs` (which logs every refusal at `warn`) gets the same early `debug` for rate and cap refusals; the table test `error_mapping_matches_the_design_table` gains the row.
 
 ### Where it runs
 
@@ -272,7 +274,7 @@ pub(crate) async fn active_projects_tx(conn: &mut SqliteConnection, org_id: OrgI
 
 ### Where the checks run
 
-Each site reads `let limits = state.entitlements.resolve(org, now).limits;` before its `meta.write`, checks inside the transaction (the single writer makes counts exact), and its outcome enum gains a variant `OverLimit(u64)` (the limit) that the handler turns into `plan_limit(limit, noun)`:
+Each site reads `let limits = state.entitlements.resolve(org, now).limits;` before its `meta.write` and checks inside the transaction **before any write in the closure** (an outcome returned with `Ok` commits whatever was written before it; the single writer makes counts exact). The closure returns an outcome variant `OverLimit(u64)` (the limit) that the handler turns into `plan_limit(limit, noun)`. Where to add it: `create_invite`'s outcome enum (check before `replace_invite`); `accept_invite`'s outcome enum (check before `add_org_member`); `signup`'s closure (check before `insert_user`; add an outcome enum if it returns `Option<User>` today); `update_org_member`: give it its own outcome enum `RoleChange { Done, Missing, Forbidden, OverLimit(u64) }` (do not extend `MemberChange`, which `remove_org_member` and `ee/project_roles.rs` match exhaustively), checked before `set_org_role`; `create_project`: an outcome enum (check before the insert); `provision_org`: check before `add_org_member` and return `Ok(())` without adding:
 
 | Site | Condition checked (only when the new role is not viewer) | Noun |
 |---|---|---|
@@ -509,7 +511,7 @@ pub struct InternalUsageQuery {
 
 ### Route (`crates/server/src/routes/internal_usage.rs`, new)
 
-`GET /api/internal/v1/usage`, `Access::ControlPlane { scope: "usage" }`. Rows summed per org and day over projects, ordered by `(day, org_id)`, keyset-paged: the cursor is base64url (no padding) of `{"day": "…", "org_id": "…"}` (`deny_unknown_fields`; new private helpers `encode_cursor` / `decode_cursor`; bad cursor → `field_error("cursor", "invalid cursor")`). SQL: `… WHERE day >= ? AND day <= ? AND (day, org_id) > (?, ?) GROUP BY day, org_id ORDER BY day, org_id LIMIT ?` (fetch `limit + 1` to know whether a next page exists). Response `Page<InternalUsageRow>`. Rows of dropped orgs stay (`usage_daily` has no foreign key).
+`GET /api/internal/v1/usage`, `Access::ControlPlane { scope: "usage" }`. Rows summed per org and day over projects, ordered by `(day, org_id)`, keyset-paged: the cursor is base64url (no padding) of `{"day": "…", "org_id": "…"}` (`deny_unknown_fields`; new private helpers `encode_cursor` / `decode_cursor`; bad cursor → `field_error("cursor", "invalid cursor")`). SQL: `… WHERE day >= ? AND day <= ? AND (day, org_id) > (?, ?) GROUP BY day, org_id ORDER BY day, org_id LIMIT ?` (fetch `limit + 1` to know whether a next page exists). Response `Page<InternalUsageRow>`, registered in `collect_schemas` as a named page: `set.insert_page::<InternalUsageRow>("InternalUsagePage")` (as `InvitePage` is). Rows of dropped orgs stay (`usage_daily` has no foreign key).
 
 OpenAPI per § Conventions: `list_internal_usage`, tag `internal`, bearer-only, errors `400, 401, 403, 429`, `QUERY_OR_BODY`; in `tests/api_examples.rs` `manifest_covers_the_read_operations`, skip operations whose first tag is `internal`.
 
@@ -528,7 +530,7 @@ Tests: two orgs, three days → order; `limit 2` pages through all rows; `to −
 Body for all three: `InternalUserRef { subject: String }` (`api/internal.rs`, `deny_unknown_fields`). The user is `meta::identities::identity_user(pool, &config.entitlements.control_plane_provider, &subject)`. All three refuse an instance admin with `403 forbidden` (the control plane never manages operators). Scope `users`, tag `internal`, bearer-only.
 
 - `POST /api/internal/v1/users/revoke` → in one transaction `web_sessions::delete_user_sessions(conn, user, None)` and `personal_tokens::revoke_user_tokens(conn, user, now)`; after the commit evict each returned token hash from `state.pat_cache` (`evict(hash)`, as `routes/me.rs` does). Unknown subject → 404. 204.
-- `POST /api/internal/v1/users/disable` → revoke as above plus `users::set_disabled(conn, user, Some(now))` in the same transaction. Unlike the instance admin's disable, it does **not** refuse the last active owner of an org (the control plane closes accounts; the org stays). Unknown subject → 404. 204.
+- `POST /api/internal/v1/users/disable` → revoke as above plus `users::set_disabled(conn, user, Some(now), now)` (signature `set_disabled(conn, id, disabled_at, now)`) in the same transaction. Unlike the instance admin's disable, it does **not** refuse the last active owner of an org (the control plane closes accounts; the org stays). Unknown subject → 404. 204.
 - `POST /api/internal/v1/users/delete` → in one transaction: collect `sole_owner_of` (orgs where the user is an owner and `count_owners == 1`); collect the user's personal-token hashes (`SELECT token_hash FROM personal_tokens WHERE user_id = ?`); `UPDATE invites SET invited_by = NULL WHERE invited_by = ?`; `UPDATE api_keys SET created_by = NULL WHERE created_by = ?`; `DELETE FROM users WHERE id = ?` (the other references cascade or set NULL). After the commit evict the hashes. Audit `tracing::info!(target: "audit", user_id = %id, actor = "control_plane", "user deleted")`. Response 200 `InternalUserDeleted { sole_owner_of: Vec<Uuid> }` (those orgs are kept, without an owner, for the control plane to resolve). An unknown subject answers 200 `{"sole_owner_of": []}` (idempotent: a retry after a lost response must not fail; the control plane keeps its own record of the orgs).
 
 OpenAPI per § Conventions: `post_internal_user_revoke`, `post_internal_user_disable` (errors `400, 401, 403, 404, 429`), `post_internal_user_delete` (errors `400, 401, 403, 429`), `QUERY_OR_BODY`, register `InternalUserRef`, `InternalUserDeleted`.
@@ -555,7 +557,7 @@ pub struct InternalMember { pub user_id: Uuid, pub email: String, #[serde(skip_s
 pub struct InternalMembers { pub data: Vec<InternalMember> }
 ```
 
-- `POST /api/internal/v1/memberships/lookup` (`routes/internal_members.rs`): the user of `(control_plane_provider, subject)`, else the user with `normalize_email(email)` (an invalid email → 400 `field_error("email", "invalid email")`), else `{"orgs": []}`. Otherwise the user's memberships in active orgs, ordered by slug (`meta::orgs::orgs_of_user` gives orgs and roles). 200.
+- `POST /api/internal/v1/memberships/lookup` (`routes/internal_members.rs`): the user of `(control_plane_provider, subject)`, else the user with `normalize_email(email)` (an invalid email → 400 `field_error("email", "invalid email")`), else `{"orgs": []}`. Otherwise the user's memberships: `meta::orgs::orgs_of_user` (it returns orgs in every state, ordered by name), keep `state == "active"`, sort by slug in Rust. 200.
 - `GET /api/internal/v1/orgs/{org_id}/members?role=owner,admin`: `{org_id}` is a UUID path parameter (`OrgIdPath` from M2); unknown or inactive org → 404; `role` optional, comma-separated `owner`, `admin`, `member`, `viewer`; any other value → 400 `field_error("role", "unknown role")`. Members ordered by email. The email goes only to the control plane (the account system); never log it.
 
 OpenAPI per § Conventions: `post_internal_membership_lookup` (errors `400, 401, 403, 429`), `list_internal_org_members` (errors `400, 401, 403, 404, 429`, `QUERY_OR_BODY`).
@@ -590,8 +592,10 @@ class QuotaState:
   `on_402`: `seconds = int(retry_after)` if it parses and is > 0, else 3600; `self.until = clock() + min(seconds, 3600)`; when not already paused, log the SDK warning (§ Sub-phases, `<reset>` = `wall() + seconds`, UTC) through the SDK's logger (`llmobs._log`).
   `class QuotaPauseExporter(SpanExporter)`: wraps an exporter; `export` returns `SpanExportResult.SUCCESS` without calling it while `state.paused()`; else delegates. `shutdown` and `force_flush` delegate.
 - `_runtime.py` `create`: build one `QuotaState`; a `requests.Session()` whose `hooks["response"]` gets a function calling `state.on_402(response.headers.get("Retry-After"))` when `response.status_code == 402`; pass `session=` to `OTLPSpanExporter` (supported by `opentelemetry-exporter-otlp-proto-http`); wrap the masking exporter in `QuotaPauseExporter(state, …)`. Pass the same `state` to the score queue.
-- `_scores.py` `ScoreQueue`: when `state.paused()`, drop the batch without sending; a 402 response calls `state.on_402(...)` and drops the batch (no retry, no per-batch warning).
+- `_scores.py` `ScoreQueue.__init__` gains a keyword `quota: QuotaState | None = None` (None → its own `QuotaState()`); `_runtime.py` passes the shared one; existing constructors in `tests/test_scores.py` keep working. In `_send`: when `quota.paused()`, drop the batch without sending; a 402 response is handled **before** the existing non-retryable-status warning: `quota.on_402(...)`, drop the batch, no other warning. The pause warning is logged with `logger.warning` (not `warn_once`, which is once per process).
 - Tests (`sdks/python/tests/test_quota.py`, with the existing `http_recorder` fixture and its `queue_response` from `tests/conftest.py`): a 402 with `Retry-After: 60` → the next span export sends nothing (`clock` injected: a list-backed fake); after advancing the fake clock 60 s it sends; `Retry-After: 86400` pauses one hour, not a day; one warning per pause; a score 402 pauses the trace exporter too.
+
+Spec 10 (`docs/spec/10-sdk.md`, the exporter section): add "After a `402`, the exporter and score writes drop data for `Retry-After` seconds, at most one hour at a time, then send again; one warning per pause (D-P-34)."
 
 `just check-py`.
 
@@ -599,7 +603,7 @@ class QuotaState:
 
 ## P12 — TypeScript SDK pauses on 402 (D-P-34)
 
-- `sdks/typescript/src/quota.ts` (new): `class QuotaState { constructor(now: () => number = Date.now) ; paused(): boolean; on402(retryAfter: string | null): void }` with the same rules as Python (milliseconds; at most one hour; one warning per pause start through the SDK's `warn` helper from `log.ts`, the exact text of § Sub-phases).
+- `sdks/typescript/src/quota.ts` (new): `class QuotaState { constructor(now: () => number = Date.now) ; paused(): boolean; on402(retryAfter: string | null): void }` with the same rules as Python (milliseconds; at most one hour; one warning per pause start; `log.ts` gains `export function warn(message: string): void` (through `runtimeGlobals().console?.warn`, like `warnOnce` but without the once-per-process key) with a test in `log.test.ts`; the exact text of § Sub-phases).
 - `exporter.ts` `FetchTraceExporter`: takes a `QuotaState` (constructor option, default a new one using the exporter's injected `this.now`); before fetching, `paused()` → resolve `SUCCESS` without fetching; on a 402 response → `on402(response.headers.get("Retry-After"))`, `SUCCESS` (spans dropped). 402 stays out of `RETRYABLE_STATUSES`.
 - `scores.ts`: shares the same `QuotaState` (wire it where the runtime builds both); paused → drop; a 402 → `on402`, drop, resolve without throwing.
 - Tests (`quota.test.ts`, `exporter.test.ts`, `scores.test.ts` with the existing fake fetch and an injected `now`): pause and resume, one-hour ceiling, one warning per pause, a score 402 pauses exports.
@@ -611,7 +615,7 @@ class QuotaState:
 ## P13 — Close out
 
 - Remove every `allow(dead_code)` attribute M3 added; `just lint` clean.
-- Spec 09: the response bodies of the internal endpoints (`InternalUsageRow` page, `InternalUserDeleted`, `MembershipLookup`, `InternalMembers`) in one line each on the internal-endpoints row; spec 11: the Plan page's usage section and the banner (one sentence each). Specs 02, 04 (`usage_notices`, P6) and 12 (`control_plane_provider`, P8) were updated in their phases; check.
+- Spec 09: the response bodies of the internal endpoints (`InternalUsageRow` page, `InternalUserDeleted`, `MembershipLookup`, `InternalMembers`) in one line each on the internal-endpoints row; spec 11: the Plan page's usage section and the banner (one sentence each). Specs 02, 04 (`usage_notices`, P6), 10 (P11) and 12 (`control_plane_provider`, P8) were updated in their phases; check.
 - `docs/roadmap.md` row **P** Status: `**In progress.** M1 and M2 merged. M3 implemented: monthly units and the 402 cap, per-org ingest rate, seats and projects, usage notices, the usage API and export, users and memberships for the control plane, SDK pause on 402. M4 and M5 plans to follow.`
 - `just check`, `just e2e`.
 
