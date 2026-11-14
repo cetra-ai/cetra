@@ -1,4 +1,5 @@
 import {
+  BellRing,
   Database,
   Gauge,
   LayoutDashboard,
@@ -15,6 +16,7 @@ export const projectNav = [
   { to: "/$org/$project/spans", label: "Spans", icon: Rows3 },
   { to: "/$org/$project/sessions", label: "Sessions", icon: MessagesSquare },
   { to: "/$org/$project/users", label: "Users", icon: Users },
+  { to: "/$org/$project/alerts", label: "Alerts", icon: BellRing },
   { to: "/$org/$project/sql", label: "SQL", icon: Database },
   { to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
 ] as const;
