@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::admin_socket;
 use crate::auth::Limits;
 use crate::clock::Clock;
 use crate::config::{ConfigError, ServerConfig};
@@ -135,6 +136,9 @@ pub struct Running {
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
     state: Option<AppState>,
+    /// The control socket's accept task, when it bound (D-N-17). Shutdown stops it
+    /// first, before the HTTP drain.
+    admin_socket: Option<JoinHandle<()>>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
 }
@@ -158,6 +162,9 @@ impl Drop for Running {
         }
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
         }
         for task in &self.tasks {
             task.abort();
@@ -383,6 +390,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
     tasks.push(spawn_usage(state.clone()));
+    let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -439,6 +447,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         grpc_serve,
         grpc_shutdown_tx,
         state: Some(state),
+        admin_socket,
         tasks,
     })
 }
@@ -589,11 +598,13 @@ impl Running {
             .expect("state is present until shutdown")
     }
 
-    /// Stop accepting, drain HTTP, stop background tasks, flush storage, close `meta.db`.
+    /// Stop the control socket, stop accepting, drain HTTP, stop background tasks,
+    /// flush storage, close `meta.db`.
     ///
-    /// A storage flush error is logged. The lock is released inside
-    /// `Storage::shutdown` before that error, and this method still closes
-    /// `meta.db`.
+    /// The control socket goes first: a backup in progress is cancelled, and no
+    /// new one starts during the drain. A storage flush error is logged. The lock
+    /// is released inside `Storage::shutdown` before that error, and this method
+    /// still closes `meta.db`.
     ///
     /// # Errors
     ///
@@ -601,6 +612,15 @@ impl Running {
     pub async fn shutdown(mut self) -> Result<(), ServeError> {
         if let Some(state) = &self.state {
             state.live.close();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+            let _ = socket.await;
+        }
+        if let Some(state) = &self.state
+            && let Err(error) = admin_socket::remove_socket_file(&state.config.data_dir)
+        {
+            tracing::warn!(error = %error, "could not remove the admin socket");
         }
         if let Some(sender) = self.shutdown_tx.take() {
             let _ = sender.send(());

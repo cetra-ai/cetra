@@ -7,6 +7,7 @@
 //! `http` is the axum router. [`serve`] binds it for `llmobs serve`.
 
 pub mod admin;
+pub mod admin_socket;
 pub(crate) mod alerts;
 pub mod api;
 pub(crate) mod auth;

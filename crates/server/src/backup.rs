@@ -3,7 +3,6 @@
 //! [`run`] follows § Consistency of the N M2 design: flush both tables, copy
 //! `meta.db`, pin and copy the catalog, link or list the objects, copy the key,
 //! and write `manifest.json` last. B7 exposes it on the control socket.
-#![cfg_attr(not(test), allow(dead_code))] // B7 calls `run`; remove this line then
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
