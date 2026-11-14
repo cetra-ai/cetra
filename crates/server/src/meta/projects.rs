@@ -8,7 +8,12 @@ use uuid::Uuid;
 use super::orgs::{project_slug_from_name, slug_candidates};
 use super::{MetaError, unique_or};
 
-/// A `projects` row. `settings` is not read in D.
+/// Default seconds without a new span before a trace counts as complete (D-I-7).
+pub(crate) const COMPLETION_TIMEOUT_DEFAULT_S: u32 = 60;
+pub(crate) const COMPLETION_TIMEOUT_MIN_S: u32 = 10;
+pub(crate) const COMPLETION_TIMEOUT_MAX_S: u32 = 3600;
+
+/// A `projects` row. Of `settings`, only `trace_completion_timeout_s` is read (D-I-7).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProjectRow {
     /// UUIDv7.
@@ -21,12 +26,22 @@ pub(crate) struct ProjectRow {
     pub(crate) slug: String,
     /// Days to keep data. Absent means no expiry.
     pub(crate) retention_days: Option<u32>,
+    /// `settings.trace_completion_timeout_s`; `None` means the default (D-I-7).
+    pub(crate) trace_completion_timeout_s: Option<u32>,
     /// `active` or `deleting`.
     pub(crate) state: String,
     /// Creation time, nanoseconds.
     pub(crate) created_at: i64,
     /// Last change to this row, nanoseconds.
     pub(crate) updated_at: i64,
+}
+
+impl ProjectRow {
+    /// Seconds without a new span after which a trace counts as complete (D-I-7).
+    pub(crate) fn completion_timeout_s(&self) -> u32 {
+        self.trace_completion_timeout_s
+            .unwrap_or(COMPLETION_TIMEOUT_DEFAULT_S)
+    }
 }
 
 /// Fields [`update_project`] writes. An outer `None` leaves the column alone.
@@ -37,6 +52,8 @@ pub(crate) struct ProjectPatch {
     pub(crate) name: Option<String>,
     /// New retention, or clear it.
     pub(crate) retention_days: Option<Option<u32>>,
+    /// New completion timeout, already range-checked.
+    pub(crate) trace_completion_timeout_s: Option<u32>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -46,11 +63,11 @@ struct ProjectRecord {
     name: String,
     slug: String,
     retention_days: Option<i64>,
+    trace_completion_timeout_s: Option<i64>,
     state: String,
     created_at: i64,
     updated_at: i64,
 }
-
 /// Inserts a project. A duplicate `(org_id, slug)` is [`MetaError::Conflict`] `"slug taken"`.
 ///
 /// # Errors
@@ -69,7 +86,9 @@ pub(crate) async fn insert_project(
     let record: ProjectRecord = sqlx::query_as(
         "INSERT INTO projects (id, org_id, name, slug, retention_days, created_at, updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
-         RETURNING id, org_id, name, slug, retention_days, state, created_at, updated_at",
+         RETURNING id, org_id, name, slug, retention_days, \
+         CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+         state, created_at, updated_at",
     )
     .bind(id.to_string())
     .bind(org_id.to_string())
@@ -117,7 +136,9 @@ pub(crate) async fn project_by_id(
 ) -> Result<Option<ProjectRow>, MetaError> {
     fetch_project(
         sqlx::query_as(
-            "SELECT id, org_id, name, slug, retention_days, state, created_at, updated_at \
+            "SELECT id, org_id, name, slug, retention_days, \
+             CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+             state, created_at, updated_at \
              FROM projects WHERE id = ?",
         )
         .bind(id.to_string())
@@ -205,7 +226,9 @@ pub(crate) async fn project_by_slugs(
     fetch_project(
         sqlx::query_as(
             "SELECT projects.id, projects.org_id, projects.name, projects.slug, \
-             projects.retention_days, projects.state, projects.created_at, projects.updated_at \
+             projects.retention_days, \
+             CAST(CASE WHEN json_valid(projects.settings) THEN json_extract(projects.settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+             projects.state, projects.created_at, projects.updated_at \
              FROM projects JOIN orgs ON orgs.id = projects.org_id \
              WHERE orgs.slug = ? AND projects.slug = ?",
         )
@@ -226,7 +249,9 @@ pub(crate) async fn projects_of_org(
     org_id: OrgId,
 ) -> Result<Vec<ProjectRow>, MetaError> {
     let records: Vec<ProjectRecord> = sqlx::query_as(
-        "SELECT id, org_id, name, slug, retention_days, state, created_at, updated_at \
+        "SELECT id, org_id, name, slug, retention_days, \
+         CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+         state, created_at, updated_at \
          FROM projects WHERE org_id = ? ORDER BY name, id",
     )
     .bind(org_id.to_string())
@@ -279,45 +304,28 @@ pub(crate) async fn update_project(
     patch: ProjectPatch,
     now: i64,
 ) -> Result<(), MetaError> {
-    let id_text = id.to_string();
-    match (&patch.name, patch.retention_days) {
-        (Some(name), Some(days)) => {
-            let days = encode_retention(days)?;
-            sqlx::query(
-                "UPDATE projects SET name = ?, retention_days = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(name)
-            .bind(days)
-            .bind(now)
-            .bind(id_text)
-            .execute(&mut *conn)
-            .await?;
-        }
-        (Some(name), None) => {
-            sqlx::query("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?")
-                .bind(name)
-                .bind(now)
-                .bind(id_text)
-                .execute(&mut *conn)
-                .await?;
-        }
-        (None, Some(days)) => {
-            let days = encode_retention(days)?;
-            sqlx::query("UPDATE projects SET retention_days = ?, updated_at = ? WHERE id = ?")
-                .bind(days)
-                .bind(now)
-                .bind(id_text)
-                .execute(&mut *conn)
-                .await?;
-        }
-        (None, None) => {
-            sqlx::query("UPDATE projects SET updated_at = ? WHERE id = ?")
-                .bind(now)
-                .bind(id_text)
-                .execute(&mut *conn)
-                .await?;
-        }
-    }
+    let retention = match patch.retention_days {
+        Some(days) => encode_retention(days)?,
+        None => None,
+    };
+    sqlx::query(
+        "UPDATE projects SET
+           name = COALESCE(?1, name),
+           retention_days = CASE WHEN ?2 THEN ?3 ELSE retention_days END,
+           settings = CASE WHEN ?4 IS NULL THEN settings
+                           ELSE json_set(CASE WHEN json_valid(settings) THEN settings ELSE '{}' END,
+                                         '$.trace_completion_timeout_s', ?4) END,
+           updated_at = ?5
+         WHERE id = ?6",
+    )
+    .bind(patch.name.as_deref())
+    .bind(patch.retention_days.is_some())
+    .bind(retention)
+    .bind(patch.trace_completion_timeout_s.map(i64::from))
+    .bind(now)
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -347,6 +355,15 @@ fn decode_retention(value: Option<i64>) -> Result<Option<u32>, MetaError> {
     }
 }
 
+/// Keeps a stored timeout inside `COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S`. Anything
+/// else (including a hand-edited value) reads as the default: the setting is advisory.
+fn decode_timeout(value: Option<i64>) -> Option<u32> {
+    let seconds = u32::try_from(value?).ok()?;
+    (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S)
+        .contains(&seconds)
+        .then_some(seconds)
+}
+
 fn fetch_project(record: Option<ProjectRecord>) -> Result<Option<ProjectRow>, MetaError> {
     record.map(project_row).transpose()
 }
@@ -367,6 +384,7 @@ fn project_row(record: ProjectRecord) -> Result<ProjectRow, MetaError> {
         name: record.name,
         slug: record.slug,
         retention_days,
+        trace_completion_timeout_s: decode_timeout(record.trace_completion_timeout_s),
         state: record.state,
         created_at: record.created_at,
         updated_at: record.updated_at,
@@ -400,6 +418,7 @@ mod tests {
                         ProjectPatch {
                             name: Some("Logs".to_owned()),
                             retention_days: Some(Some(7)),
+                            trace_completion_timeout_s: None,
                         },
                         2,
                     )
@@ -410,6 +429,7 @@ mod tests {
                         ProjectPatch {
                             name: None,
                             retention_days: Some(None),
+                            trace_completion_timeout_s: None,
                         },
                         3,
                     )
@@ -472,6 +492,80 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn update_project_sets_each_field_alone() {
+        let (_dir, db) = test_db().await;
+        let id = db
+            .write(|conn| {
+                Box::pin(async move {
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
+                    let project = insert_project(conn, org.id, "API", "api", Some(7), 1).await?;
+                    Ok(project.id)
+                })
+            })
+            .await
+            .unwrap();
+        // (now, patch, name, retention_days, timeout) after each patch.
+        let steps = [
+            (
+                2,
+                ProjectPatch {
+                    name: None,
+                    retention_days: None,
+                    trace_completion_timeout_s: Some(120),
+                },
+                "API",
+                Some(7),
+                Some(120),
+            ),
+            (
+                3,
+                ProjectPatch {
+                    name: Some("Logs".to_owned()),
+                    retention_days: None,
+                    trace_completion_timeout_s: None,
+                },
+                "Logs",
+                Some(7),
+                Some(120),
+            ),
+            (
+                4,
+                ProjectPatch {
+                    name: None,
+                    retention_days: Some(Some(30)),
+                    trace_completion_timeout_s: None,
+                },
+                "Logs",
+                Some(30),
+                Some(120),
+            ),
+            (
+                5,
+                ProjectPatch {
+                    name: None,
+                    retention_days: Some(None),
+                    trace_completion_timeout_s: None,
+                },
+                "Logs",
+                None,
+                Some(120),
+            ),
+        ];
+        for (now, patch, name, retention, timeout) in steps {
+            db.write(move |conn| {
+                Box::pin(async move { update_project(conn, id, patch, now).await })
+            })
+            .await
+            .unwrap();
+            let row = project_by_id(db.reader(), id).await.unwrap().unwrap();
+            assert_eq!(row.name, name);
+            assert_eq!(row.retention_days, retention);
+            assert_eq!(row.trace_completion_timeout_s, timeout);
+            assert_eq!(row.updated_at, now);
+        }
     }
 
     #[tokio::test]

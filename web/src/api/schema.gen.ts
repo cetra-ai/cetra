@@ -3748,6 +3748,12 @@ export interface components {
             role?: components["schemas"]["OrgRole"];
             /** @description URL slug, unique within the org. */
             slug: string;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules (D-I-7).
+             *     10 to 3600; 60 unless set.
+             */
+            trace_completion_timeout_s: number;
         };
         /**
          * Format: uuid
@@ -5162,6 +5168,12 @@ export interface components {
              * @description Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
              */
             retention_days?: number;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.
+             *     Absent leaves it unchanged.
+             */
+            trace_completion_timeout_s?: number;
         };
         /**
          * @description Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.
