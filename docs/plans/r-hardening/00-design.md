@@ -16,7 +16,7 @@ The results are written up so they can back a "fast and solid" claim.
 
 | Area | What A1/A2/M left | Gap |
 |---|---|---|
-| Crash recovery | `crash_tests.rs` re-executes the test binary and aborts it at hook points (`hooks.rs`, 24 points) in flush, compaction, deletion, media and drop. The parent reopens the directory and checks the result. | An abort keeps the OS page cache, so data that was never `fsync`ed survives. **No test loses an unsynced write.** |
+| Crash recovery | `crash_tests.rs` re-executes the test binary and aborts it at hook points (`hooks.rs`, 24 points) in flush, compaction, deletion, media and drop. The parent reopens the directory and checks row ids, file counts and deletion coverage. `tests/crash.rs` is a kill -9 harness: random kills during ingest with background flush and compaction on, checking acknowledged rows, catalog files and source pairs. | An abort keeps the OS page cache, so data that was never `fsync`ed survives. **No test loses an unsynced write.** No crash in the middle of an operation is followed by a check of the full read model (traces-view values, scores, sessions, metrics): M1 crashes only between completed ops (full-plan review R-1, closed by M2). |
 | Model test | `compaction/model.rs`: proptest, 16 cases of up to 40 ops (append one span, restart, compact, GC, delete a trace, apply deletions, retention). It checks the `(trace_id, span_id, ingest_time)` multiset of the raw `spans` provider, and `span_count` per trace once everything is settled. | One table, one column family, raw providers. No scores, no `traces` view values, no read API (lists, lookups, metrics, sessions, users), no late spans, no crash without a clean shutdown, no second project. |
 | Corruption | Quarantine and verify (D-A1-10), CRC-32C on WAL records and read-cache blocks, `quarantine_tests.rs`. | No fuzzing of any decoder, ours or `parquet`'s. |
 | S3 | `test_support::FaultStore` fails puts or reads on demand; `tests/s3.rs` runs against Versity Gateway; the multipart bug of M6.6 was found by a benchmark. | No latency, 503, connection resets, partial multipart or listing faults. Never run against a remote endpoint. |
@@ -99,7 +99,9 @@ Plan: `01-m1-model.md`.
   - tear the last write.
 
   SQLite (`catalog.db`, `meta.db`) does its own I/O, so the shim cannot see it. Its durability is SQLite's job (`synchronous=FULL`, D83), and LazyFS covers it.
-- **Lossy crashes in the M1 model**, as a new operation (only acknowledged data must survive), and in the hook-abort children: abort at the hook, then reopen after a lossy crash.
+- **Lossy crashes in the M1 model**, as a new operation (only acknowledged data must survive), and in the hook-abort children. The lossy state lives in the process that wrote, so **the child applies the seeded lossy crash to the directory before it calls `process::abort`**; the parent has no record of what was unsynced.
+- **Crash at a hook in the model test** (full-plan review R-1). The child re-executes a case's op list, arms `abort_at(point)` on the last op (a compaction, a deletion pass, a flush through restart, GC, retention or drop), optionally applies a lossy crash, and aborts. The parent applies the same ops to the oracle, reopens the directory and runs `check_full`. For this, op results must be reproducible: deletion ids are derived from (case, op index) instead of `Uuid::now_v7`.
+- **The lossy shim serves only in-crate tests.** It exists under `cfg(test)`, and `tests/crash.rs` is an integration test linked without it. The real-binary path, `tests/crash.rs` included, is covered by LazyFS.
 - **Confirm and fix** the audit findings above. **Every fsync error is fatal** (D-R-6):
   - the WAL as today;
   - a local object publish fails the job and marks the store unhealthy, with no retry on the same file;
@@ -151,7 +153,7 @@ Plan: `01-m1-model.md`.
 
 - **Full disk.** Ignored tests run on a small dedicated filesystem: a size-limited tmpfs mounted inside an unprivileged user and mount namespace (`unshare -rm`), or a loop device the operator provides through `LLMOBS_TEST_SMALL_FS`. The disk fills during WAL writes, flush, compaction, query spill and read-cache fill. Each case checks a clean refusal (`DiskFull`, `WalFailed`, deferred compaction, a query failing as too large), recovery once space is freed, and the M1 model's reads afterwards.
 - **Spill capped.** Query spill is checked against `storage.min_free_bytes`, through DataFusion's disk manager limit (`benchmarks.md` § Findings (a)). This is a fix with a spec 03 §6 update.
-- **Memory limit.** Runs under a cgroup (`systemd-run --user --scope -p MemoryMax=…`) at the documented minimum. They must end in `503`/`422` refusals, never an OOM kill, and that minimum gets documented.
+- **Memory limit.** Runs under a cgroup (`systemd-run --user --scope -p MemoryMax=…`) at the documented minimum. They are storage-level tests: the expected outcomes are `AppendError::Backpressure`/`DiskFull`, `QueryError::Busy` and `RunError::TooLarge` (which the server maps to 503 and 422), never an OOM kill, and that minimum gets documented (full-plan review R-5).
 - **File descriptors.** Runs under a low `RLIMIT_NOFILE`, set in a re-executed child as the crash tests do: many partitions, compaction and queries at once. The result must be errors, never a panic or a wedged writer. The descriptors the engine needs at a given scale get documented.
 
 ### M6 — Concurrency
@@ -166,7 +168,7 @@ Every concurrent read must equal the model **before or after** each op in flight
 
 - **Realistic payloads.** A payload generator built from the structure of the captured `fixtures/otlp/` cases (messages, tool calls, JSON arguments), with text from a permissively licensed corpus chosen in M7's plan. Compression ratios then match production. The generator is used by the benchmarks and the soak.
 - **The pending 5M-trace `trace_bench` run,** locally and against the Hetzner bucket.
-- **Soak** (D-R-11): `crates/storage/tests/soak.rs` (ignored, release mode, a D-A1-12 style benchmark) drives the storage directly at a steady ingest rate, with score writes, deletions, retention and queries. Background compaction stays on. Every minute it samples RSS, open file descriptors, file count per level, compaction lag (age of the oldest L0 file), WAL bytes, memtable bytes, the read cache, and query latency percentiles. It fails on monotonic growth past set bounds. The M1 model's checks run on a sample of traces at the end.
+- **Soak** (D-R-11): `crates/storage/tests/soak.rs` (ignored, release mode, a D-A1-12 style benchmark) drives the storage directly at a steady ingest rate, with score writes, deletions, retention and queries. Background compaction stays on. Every minute it samples RSS, open file descriptors, file count per level, compaction lag (age of the oldest L0 file), WAL bytes, memtable bytes, the read cache, and query latency percentiles. It fails on monotonic growth past set bounds. It is an integration test, so it sees only the public API (D-A1-12): its correctness check is its own registry of sampled traces read back through `trace_detail`, not the `cfg(test)` M1 oracle, and file counts, compaction lag and WAL bytes come from reading `catalog.db` and the WAL directory directly, as `tests/crash.rs` does, plus the public `health()` and `read_cache_stats()` (full-plan review R-5). A new public stats API would be a coordinator request.
   - A 24 h dry run on the workstation comes first.
   - Then 72 h on a Hetzner server with NVMe, in the bucket's region (user).
   - The write-up, `docs/research/storage/soak.md`, has commands, machine, plots and raw samples.
@@ -194,7 +196,10 @@ The rule, written into spec 03 (new § Format versions), D-R-12:
 - **Scope of edits.**
   - `crates/storage/`, `crates/otel/` (fuzz entry points and fixes only), `fuzz/`, `tools/lazyfs/`, `justfile`, `docs/`;
   - `AGENTS.md`, for its Commands, Tests, Layout and CI sections, whenever R adds a recipe, an environment variable, a directory or a workflow;
-  - `.github/workflows/nightly.yml`, `.github/dependabot.yml` and the `just deny` recipe (M3, for `fuzz/`).
+  - `.github/workflows/nightly.yml`, `.github/dependabot.yml`, `deny.toml` and the `just deny` recipe (M3, for `fuzz/`);
+  - the root `Cargo.toml`'s `[workspace.lints.rust]` table, for the `unexpected_cfgs` check-cfg entry `cfg(fuzzing)` (M3, full-plan review R-4), and `[workspace.dependencies]` for new dependencies;
+  - `CHANGELOG.md`, for every user-visible fix (AGENTS.md § Commits);
+  - `tools/soak/` (M7).
 
   Changes to `llmobs-core`, to the server or to N's release scripts (M8's golden-directory step) are requested from the coordinating session.
 - **Fixes** (D-R-2). A bug found by an R test is fixed in R, in a sub-phase of its own, with the shrunk case as a named regression test. The fix and the test share a commit. A fix that needs a format, public API or spec semantic change stops and is raised first.
