@@ -74,6 +74,7 @@ mod views;
 pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
+pub use crate::error::CopyObjectsError;
 pub use crate::error::{CompactionError, FlushNowError, SnapshotError};
 pub use crate::gc::ObsoleteReport;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
@@ -92,6 +93,7 @@ pub use reads::{
     session_detail, session_list, span_detail, span_list, trace_detail, trace_list,
     trace_list_plan, trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list,
 };
+pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
 pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
 pub use views::{
@@ -926,6 +928,30 @@ impl Storage {
             catalog,
             gate,
         ))
+    }
+
+    /// Puts every object of `snapshot` under `dest` at its store-relative key: a
+    /// hard link, or a copy when `dest` is on another filesystem (N M2, D-N-18).
+    /// Local mode only.
+    ///
+    /// # Errors
+    ///
+    /// [`CopyObjectsError::RemoteStore`] in S3 mode; [`CopyObjectsError::Io`]
+    /// when an object is missing or cannot be linked or copied.
+    pub async fn copy_objects(
+        &self,
+        snapshot: &CatalogSnapshot,
+        dest: &Path,
+    ) -> Result<CopyReport, CopyObjectsError> {
+        let Some(root) = self.objects.local_root() else {
+            return Err(CopyObjectsError::RemoteStore);
+        };
+        let root = root.to_path_buf();
+        let dest = dest.to_path_buf();
+        let objects = snapshot.objects.clone();
+        tokio::task::spawn_blocking(move || snapshot::copy_all(&root, &dest, &objects))
+            .await
+            .map_err(|_| CopyObjectsError::Task)?
     }
 
     /// One compaction pass at `now` (ns), run to completion. The background

@@ -700,6 +700,31 @@ pub enum SnapshotError {
     BadProjectId,
 }
 
+/// Why [`crate::Storage::copy_objects`] failed.
+#[derive(Debug, thiserror::Error)]
+pub enum CopyObjectsError {
+    /// The objects are in a remote store, not on this machine.
+    #[error("objects are in a remote store; back up the bucket instead")]
+    RemoteStore,
+    /// Object `key_index` of the snapshot is missing, or could not be linked or copied.
+    #[error("object {key_index} of the snapshot: {source}")]
+    Io {
+        /// Position of the object in the snapshot's list. Never the path.
+        key_index: usize,
+        /// The filesystem error.
+        source: io::Error,
+    },
+    /// Creating or syncing the destination directory failed.
+    #[error("backup directory: {source}")]
+    Dir {
+        /// The filesystem error.
+        source: io::Error,
+    },
+    /// The blocking copy task panicked.
+    #[error("copy task panicked")]
+    Task,
+}
+
 /// A batch could not be deduplicated. `reason` is a static description, never row content.
 #[derive(Debug, thiserror::Error)]
 #[error("dedup failed: {reason}")]
