@@ -47,7 +47,7 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 | `storage.compaction.interval` / `storage.compaction.close_delay` | | `"30s"` / `"2h"` |
 | `storage.compaction.size_ratio` / `storage.compaction.max_memory` | | `4` / `"1GiB"` |
 | `storage.compaction.l0_files` / `storage.compaction.l0_bytes` / `storage.compaction.l0_age` | | `8` / `"512MiB"` / `"10m"` |
-| `storage.gc.grace` | | `"5m"` |
+| `storage.gc.grace` | | `"5m"` (at most `"30d"`; the window a meta-only S3 backup stays restorable, D-N-20) |
 | `storage.query.max_memory` | | `"2GiB"` |
 | `storage.query.metadata_cache_bytes` | | `"512MiB"` |
 | `storage.deletion.max_delay` | | `"24h"` |

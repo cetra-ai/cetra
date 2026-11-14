@@ -180,12 +180,10 @@ impl StorageConfig {
                 "must be greater than 0 and at most 24h",
             ));
         }
-        if self.gc.grace < Duration::from_secs(1)
-            || self.gc.grace > Duration::from_secs(24 * 60 * 60)
-        {
+        if self.gc.grace < Duration::from_secs(1) || self.gc.grace > MAX_GC_GRACE {
             return Err(ConfigError::invalid(
                 "storage.gc.grace",
-                "must be between 1s and 24h",
+                "must be between 1s and 30d",
             ));
         }
         let compaction = &self.compaction;
@@ -475,13 +473,19 @@ fn default_gc_grace() -> Duration {
     Duration::from_secs(5 * 60)
 }
 
+/// Longest `gc.grace`: it is also the window a metadata-only S3 backup stays
+/// restorable for (D-N-20).
+const MAX_GC_GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// `[storage.gc]`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcConfig {
     /// How long an obsolete file stays after `obsoleted_at` before GC may
     /// delete it (spec 03 §5). At least the longest query timeout, so a reader
-    /// that never pinned a `ReadState` still finishes.
+    /// that never pinned a `ReadState` still finishes. In S3 mode it is also
+    /// how long a metadata-only backup can be restored against the live bucket
+    /// (D-N-20); at most 30 days.
     #[serde(default = "default_gc_grace", with = "humantime_serde")]
     pub grace: Duration,
 }
@@ -897,11 +901,11 @@ mod tests {
             ),
             (
                 r#"{"data_dir":"/data","gc":{"grace":"0s"}}"#,
-                "storage.gc.grace: must be between 1s and 24h",
+                "storage.gc.grace: must be between 1s and 30d",
             ),
             (
-                r#"{"data_dir":"/data","gc":{"grace":"25h"}}"#,
-                "storage.gc.grace: must be between 1s and 24h",
+                r#"{"data_dir":"/data","gc":{"grace":"31d"}}"#,
+                "storage.gc.grace: must be between 1s and 30d",
             ),
             (
                 r#"{"data_dir":"/data","compaction":{"interval":"10ms"}}"#,
@@ -1131,6 +1135,13 @@ mod tests {
         let parsed = parse(r#"{"data_dir":"/data","gc":{"grace":"90s"}}"#).unwrap();
         assert_eq!(parsed.gc.grace, Duration::from_secs(90));
         parsed.validate().unwrap();
+    }
+
+    #[test]
+    fn gc_grace_accepts_thirty_days() {
+        let parsed = parse(r#"{"data_dir":"/data","gc":{"grace":"30d"}}"#).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.gc.grace, Duration::from_secs(30 * 24 * 60 * 60));
     }
 
     #[test]
