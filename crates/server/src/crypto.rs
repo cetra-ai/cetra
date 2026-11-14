@@ -110,6 +110,7 @@ pub(crate) const ENCRYPTED_COLUMNS: &[(&str, &str)] = &[
     ("llm_connections", "secret_enc"),
     ("llm_connections", "extra_headers_enc"),
     ("evaluators", "secret_enc"),
+    ("notification_channels", "config_enc"),
 ];
 
 /// `<data_dir>/secret.key`.
