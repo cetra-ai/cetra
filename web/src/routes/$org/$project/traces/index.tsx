@@ -199,14 +199,15 @@ function TracesPage() {
   const reason = traceLiveReason(search);
   const liveOn = search.live === 1 && reason === undefined && !hold;
   const live = useLiveTraces({
-    url: liveOn
-      ? traceStreamUrl(projectRef(org, project), {
-          filter: search.filter,
-          search: search.search,
-          includeEval: search.eval === 1,
-          includeExperiments: search.exp === 1,
-        })
-      : undefined,
+    url:
+      liveOn && list.isSuccess
+        ? traceStreamUrl(projectRef(org, project), {
+            filter: search.filter,
+            search: search.search,
+            includeEval: search.eval === 1,
+            includeExperiments: search.exp === 1,
+          })
+        : undefined,
     queryKey: listOptions.queryKey,
     selectedId: search.trace,
     ready: !hold && list.data !== undefined && !filterError && !onboarding,

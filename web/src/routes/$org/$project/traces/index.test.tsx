@@ -14,6 +14,7 @@ import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 import { savedViewHandlers } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
+import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
@@ -612,6 +613,32 @@ it("opens the trace stream with the list filter and search", async () => {
     expect(streams[0]?.searchParams.get("include_experiments")).toBe("true");
     expect(screen.getByRole("switch", { name: "Live" })).toBeEnabled();
     expect(screen.getByRole("switch", { name: "Live" })).toBeChecked();
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("opens no trace stream while the list answers an invalid filter", async () => {
+  savedViewHandlers([]);
+  const streams: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces/stream")) {
+      streams.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", () =>
+      problemResponse(400, "invalid_filter", { detail: "unknown column" }),
+    ),
+    traceStreamHandler(() => undefined),
+  );
+  try {
+    await renderApp(`/acme/support-bot/traces?live=1&filter=${encodeURIComponent("nope =")}`);
+    expect((await screen.findAllByText("unknown column")).length).toBeGreaterThan(0);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(streams).toEqual([]);
   } finally {
     server.events.removeListener("request:start", onStart);
   }
