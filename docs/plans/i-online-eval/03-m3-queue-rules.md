@@ -265,6 +265,7 @@ The limits (checks 1, 4, 5, 13, 16 and the 500 rules of a project) are D-I-30's.
 | `VariableMapping::from_json` fails | `variable_mapping` | the `MappingError` display |
 | `needs_item()` | `variable_mapping` | `expected and item.* are for experiments only` |
 | `needs_target_span()` without `span_id` | `variable_mapping` | `span.* needs span_id` |
+| judge evaluator: a prompt variable that is not a mapping key (rule check 9, through `rule_check::unmapped_variables`, I3.8) | `variable_mapping.<name>` | `variable <name> is used by the prompt but not mapped` |
 | unknown evaluator in the project | — | 404 |
 | more than 10 runs and tests a minute by this user (the shared `limits.connection_tests` limiter, D-I-21) | — | 429 |
 
@@ -274,10 +275,10 @@ The limits (checks 1, 4, 5, 13, 16 and the 500 rules of a project) are D-I-30's.
 
 | Step | Work | On failure |
 |---|---|---|
-| 1 | `meta::projects::project_by_id(reader, project_id)` and `meta::orgs::org_by_id(reader, project.org_id)`; both must exist with `state == "active"` (read both rows' types first) | `Skipped { error: "project unavailable" }` |
+| 1 | fetch the project row (`meta::projects::project_by_id(reader, project_id)`) and its org row (`meta::orgs::org_by_id(reader, project.org_id)`); both must exist and have `state == "active"` (read the two functions' return types for the field names) | `Skipped { error: "project unavailable" }` |
 | 2 | `evaluators::get_evaluator(project, evaluator_id)`; missing → return `Ok(())` (the row cascades with it) | — |
 | 3 | rule jobs: `online_rules::get_rule(project, rule_id)`; missing → return. Disabled or paused → `Requeue { not_before: now }` and return (the dispatcher will not claim it while the rule is paused) | — |
-| 4 | `evaluator::load` (opens a webhook's sealed values); a judge's connection row from `connections::get_connection` and its key from `state.connections.get`. When the row's `updated_at` differs from `job.connection_updated_at`, the connection changed since the claim: `Requeue { not_before: now }` and return | `Failed { class: Permanent, error: "evaluator could not be loaded" }` or `"connection not found"` |
+| 4 | `evaluator::load` (opens a webhook's sealed values); a judge's connection row from `connections::get_connection`, its adapter from `Adapter::from_name(&row.adapter)` (it returns `Result<Adapter, UnknownName>`), and its key from `state.connections.get`. When the row's `updated_at` differs from `job.connection_updated_at`, the connection changed since the claim: `Requeue { not_before: now }` and return | `Failed { class: Permanent, error: "evaluator could not be loaded" }`, `"connection not found"`, or `"unknown adapter"` when `from_name` fails |
 | 5 | the mapping: the rule's `variable_mapping`, or the job's for a manual run; `VariableMapping::from_json` | `Failed { Permanent, <MappingError display> }` |
 | 6 | `trace_load::load_trace(state, project, trace_id, span_id, Some(trace_start_ns))` | `Saturated` (no load permit within 30 s) → `Requeue { not_before: now + retry::SATURATED_REQUEUE_NS }`, no load retry spent; `NotFound`/`NoTargetSpan` → load retry, final error `trace not found`; `Busy` → load retry, final error `storage unavailable`; `TooLarge` → `Failed { Permanent, "trace too large" }`; `EvaluationTrace` → `Failed { Permanent, "target is an evaluation trace" }`; `Failed`/`Convert` → `Failed { Permanent, "storage read failed" }`. A load retry is `LoadRetry { not_before: now + 30 s }` while `load_retries < 3`, else `Failed { Permanent, <final error> }` |
 | 7 | `llmobs_eval::resolve(&mapping, Some(&TraceData::new(&spans, span_id)), None)` | `Failed { Permanent, <MappingError display> }` |
@@ -311,7 +312,13 @@ The judge's `cost` for the budget and `rule_spend` is the `llm` span's `cost_tot
 
 Every pause is an audit event: `tracing::info!(target: "audit", rule_id, project_id, reason, "online rule paused")`. Logs never carry the detail text.
 
-**Accepted by design** (not bugs to fix): the janitor can re-queue a job that is still running, so a slow judge may be called twice (the fence drops the first result); the hourly cap and the breaker windows reset on restart; manual runs take priority 0, so one org's manual runs can delay every rule job, bounded only by the per-user limit of 10 a minute (D-I-21).
+**Accepted by design** (not bugs to fix):
+- The janitor can re-queue a job that is still running, so a slow judge may be called twice (the fence drops the first result).
+- The hourly cap and the breaker windows reset on restart.
+- Manual runs take priority 0, so one org's manual runs can delay every rule job, bounded only by the per-user limit of 10 a minute (D-I-21).
+- The in-memory budget can count one job's spend twice until the period turns or the server restarts: job A's `finish` commits its `rule_spend`, job B then gets `NotLoaded` and `load`s the period (A's spend included), and A's `settle` adds it again. The error only over-counts, so a rule can pause early but never overspend.
+- A rule can pause on `budget` while its actual spend is below the budget: `Over` counts the other running jobs' reservations, which are estimates at `max_output_tokens`. The pause skips the rule's queued jobs; the user resumes it or raises the budget.
+- The dispatcher takes a connection's rate-limit token at claim. A job that then requeues (steps 3, 4 or 6) or loses its claim has used that token. Tokens are never refunded.
 
 ---
 
@@ -340,7 +347,7 @@ Add `strict_exclusions` to the `pub(crate) use scope::{exclusions, search, time_
 - `Spans`: `trace_id NOT IN (SELECT trace_id FROM traces WHERE [trace_id IN (<ids>) AND] <bad>)`, where `<bad>` is `environment = 'llmobs-eval' OR metadata['<experiment key>'] IS NOT NULL` on the `traces` view. Build `<bad>` as `NOT (<traces conjunction above>)`, the subquery with `ctx.session().table("traces")` → `.filter(bad)` (and, when `trace_ids` is `Some`, a first `.filter(col(traces::TRACE_ID).in_list(<lowercased ids as lit>, false))`, so DataFusion pushes the id test below the view's aggregation instead of aggregating every trace) → `.select(vec![col(traces::TRACE_ID)])`, and the expression with `datafusion::logical_expr::not_in_subquery(col(spans::TRACE_ID), Arc::new(plan.into_unoptimized_plan()))` (the `search` function above builds an `in_subquery` the same way).
 - Any other view: `RunError::InvalidRequest("strict exclusions apply to traces and spans".to_owned())`.
 
-Remove the module's `#![allow(dead_code)]` only if nothing in it is unused afterwards.
+`filter/scope.rs` starts with `#![allow(dead_code)]` (line 4). Remove it only if nothing in the module is unused afterwards.
 
 ### The strict flag (`reads/traces.rs`)
 
@@ -394,7 +401,7 @@ M3 has no production caller of `span_refresh` (M4's sweeper is the first). It is
 /// [`RunError::InvalidRequest`] for a view other than traces or spans.
 pub fn validate_filter(ctx: &QueryContext, view: ViewName, text: &str) -> Result<(), RunError>
 ```
-`ViewName::Traces` → `FilterView::Traces`, `ViewName::Spans` → `FilterView::Spans`, others → `InvalidRequest("filters are checked for traces and spans only")`. The body is `check_alert_filter`'s, with that view.
+`ViewName::Traces` → `FilterView::Traces`, `ViewName::Spans` → `FilterView::Spans`, others → `InvalidRequest("filters are checked for traces and spans only")`. The body is `check_alert_filter`'s, with that view. Its blank test, `present(Some(text))`, is already in `reads/mod.rs` (`pub(crate) fn present`, which `reads/alerts.rs` imports), so `validate_filter` calls it in place and nothing moves.
 
 Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its test to `reads/mod.rs` as `validate_filter_accepts_blank_and_rejects_bad_text` (same cases, `ViewName::Traces`), plus a spans case (`validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'")` is `Ok`, and `ViewName::Sessions` is `InvalidRequest`). The one caller, `routes/alert_rules.rs` `checked_condition`, calls `llmobs_storage::validate_filter(&ctx, ViewName::Traces, text)`.
 
@@ -737,11 +744,19 @@ LIMIT ?3
 
 | Function | What |
 |---|---|
-| `add_spend(conn, rule_id, day, usd) ` | `INSERT … ON CONFLICT(rule_id, day) DO UPDATE SET spent_usd = spent_usd + excluded.spent_usd`; a non-finite or negative `usd` adds 0 |
+| `add_spend(conn, rule_id, day, usd)` | `INSERT INTO rule_spend (rule_id, day, spent_usd) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM online_rules WHERE id = ?) ON CONFLICT(rule_id, day) DO UPDATE SET spent_usd = spent_usd + excluded.spent_usd`; a non-finite or negative `usd` adds 0. A rule deleted during a run inserts nothing, instead of failing the foreign key and with it the whole `finish` write (§ I3.6). SQLite needs a `WHERE` clause on an `INSERT … SELECT` before `ON CONFLICT` to parse it; the `WHERE EXISTS` is that clause |
 | `spent_between(pool, rule_id, from_day, to_day) -> f64` | `SELECT COALESCE(SUM(spent_usd), 0) … WHERE rule_id = ? AND day >= ? AND day < ?` |
 | `prune_spend(conn, before_day) -> u64` | deletes rows with `day < before_day`; 62 days keep two whole months for the month view |
 
 There is no batch read: the rules list calls `spent_between` once per budgeted rule of the page it answers.
+
+### Dead code
+
+Nothing outside the tests calls the three modules before I3.6–I3.9. Start each of `meta/online_rules.rs`, `meta/eval_jobs.rs` and `meta/rule_spend.rs` with the repo's pattern for meta modules (`meta/api_keys.rs` line 2):
+```rust
+#![cfg_attr(not(test), allow(dead_code))] // I3.6 to I3.9 call these.
+```
+I3.6, I3.7, I3.8 and I3.9 each try to remove these attributes (§ Conventions › Dead code): a sub-phase removes a module's attribute when `just check-rust` passes without it, and reports what it removed. After I3.9, an item that is still unused gets an item-level `#[allow(dead_code)]` naming its M4 caller, and the module attribute goes.
 
 ### Spec
 
@@ -774,11 +789,11 @@ With `crate::meta::test_db()`, an org, a project, a connection, an evaluator (`m
 - `counts_since` groups by rule and status and ignores manual jobs;
 - deleting the rule cascades its jobs; deleting the evaluator cascades its jobs.
 
-`meta/rule_spend.rs`: `add_spend` accumulates per day; `spent_between` sums a range; `prune_spend` deletes before the day; a NaN adds 0.
+`meta/rule_spend.rs`: `add_spend` accumulates per day; `add_spend` for a rule id that does not exist is `Ok` and inserts nothing; `spent_between` sums a range; `prune_spend` deletes before the day; a NaN adds 0.
 
 ### Done when
 
-`just check` passes.
+`just check` passes at this commit, with the three modules' `cfg_attr(not(test), allow(dead_code))` in place (§ Dead code above).
 
 ---
 
@@ -871,10 +886,6 @@ pub(crate) struct Reservation<'a> {
 impl Reservation<'_> {
     /// After a call: the reservation becomes `actual` spend.
     pub(crate) fn settle(mut self, actual: f64);
-    /// The reserved amount (the estimate).
-    pub(crate) fn amount(&self) -> f64;
-    /// The period the reservation counts in.
-    pub(crate) fn period_start(&self) -> i64;
 }
 
 impl Drop for Reservation<'_> {
@@ -939,6 +950,7 @@ pub(crate) const HOURLY_CAP: u32 = 10_000;
 
 #[derive(Debug, Default)]
 pub(crate) struct HourlyCaps { rules: Mutex<HashMap<Uuid, HourCount>> }
+#[derive(Debug, Clone, Copy)]
 struct HourCount { hour: i64, admitted: u32, dropped: u64 }
 
 impl HourlyCaps {
@@ -1181,7 +1193,7 @@ Run `just openapi` after the Rust types, then the web checks.
 
 **Goal:** `execute::run_job` runs one claimed job end to end (§ Job execution) and `finish` writes its outcome, with retries, load retries, write retries, pauses, the breaker and budgets. `AppInner` gains `eval: EvalQueue`. The dispatcher (I3.7) is the only production caller; the tests call `run_job` on jobs they insert and claim.
 
-**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/execute.rs`, `crates/server/src/eval/trace_load.rs` (the `Saturated` error only), `crates/server/src/eval/test_run.rs` (its mapping of `Saturated` only), `crates/server/src/eval/{budget,breaker,retry}.rs` (remove `dead_code` attributes only), `crates/server/src/scores.rs` (remove the variant's `dead_code` attribute only), `crates/server/src/http/mod.rs` (`AppInner.eval`), `crates/server/src/serve.rs` (construct it only), `crates/server/src/test_support/mod.rs` (construct it only), `docs/spec/06-evaluation.md`.
+**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/execute.rs`, `crates/server/src/eval/trace_load.rs` (the `Saturated` error only), `crates/server/src/eval/test_run.rs` (its mapping of `Saturated` only), `crates/server/src/eval/{budget,breaker,retry}.rs` (remove `dead_code` attributes only), `crates/server/src/scores.rs` (remove the variant's `dead_code` attribute only), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (remove the module `dead_code` attribute only, § I3.2 › Dead code), `crates/server/src/http/mod.rs` (`AppInner.eval`), `crates/server/src/serve.rs` (construct it only), `crates/server/src/test_support/mod.rs` (construct it only), `docs/spec/06-evaluation.md`.
 
 **Commit:** `Run queued evaluator jobs`
 
@@ -1231,7 +1243,7 @@ Follow § Job execution step by step; write each step as a small private `async 
 - **Target.** `EvalTarget { trace_id: Some(row.trace_id), span_id: row.span_id }`.
 - **Budget (step 10).** Only when the job has a rule, the rule has `budget_usd` and `budget_period`, and the evaluator is a judge:
   1. `prompt = PromptTemplate::compile(&judge.prompt).and_then(|t| t.render(&variables))`; a template error is `Failed { Permanent, <TemplateError display> }` (it cannot happen for a saved evaluator, but do not unwrap).
-  2. `adapter = Adapter::from_name(&connection_row.adapter)`; `price = budget::model_price(&state.ingest.prices(), &judge.model, adapter, now)`. `None` → `Failed { Permanent, "model has no price" }` and `pause_rule(rule, PAUSE_ERRORS, Some("model has no price"))`.
+  2. `adapter` is the one step 4 parsed (`Adapter::from_name` failing there already ended the job as `"unknown adapter"`); `price = budget::model_price(&state.ingest.prices(), &judge.model, adapter, now)`. `None` → `Failed { Permanent, "model has no price" }` and `pause_rule(rule, PAUSE_ERRORS, Some("model has no price"))`.
   3. `estimate = budget::estimate_usd(prompt.chars().count(), judge.max_output_tokens, price)`; `period_start = budget::period_start(period, now)`.
   4. `state.eval.budgets.try_reserve(rule, period_start, budget, estimate)`; on `NotLoaded`, read `rule_spend::spent_between(reader, rule, period_start, now_day_end)` (`now_day_end = budget::day_start(now) + DAY_NS`), `load`, and try once more. A second `NotLoaded` can only follow a `forget` between the two calls (the rule was edited or deleted); treat it as `Requeue { not_before: now }` and log a `debug` with the rule id.
   5. `Over` → one write: `pause_rule(rule, PAUSE_BUDGET, Some("budget reached"))`, `skip_queued_of_rule(rule, "budget")`, and this job `Finish::Skipped { error: "budget" }`.
@@ -1248,7 +1260,7 @@ Follow § Job execution step by step; write each step as a small private `async 
 - **Cost (D-I-15, D-I-18).** `actual = usage.cost_usd`, else the estimate when `usage` has tokens, else 0. `count_judge_usage` runs right after the call (step 13), before any write, as test runs do.
 - **The exit after the call.** Steps 12–15 end in one private `struct Ended { finish: Finish, reached_evaluator: bool, pause: Pause, actual: f64 }`, where `Pause` is `None`, `Connection { connection_id, error_text }`, `Evaluator { error_text }` or `MarkConnection { connection_id, error_text }` (a manual judge job). `reached_evaluator` follows § Job execution › The breaker.
 - **`finish` (step 16)** is one `MetaDb::write` that, in order:
-  1. adds `actual` to `rule_spend` for `day_start(now)` when the job has a budgeted rule and `actual > 0`. This runs even when step 2 finds the job re-claimed: the provider was paid, and the in-memory settle below counts it too, so memory and `rule_spend` agree;
+  1. adds `actual` to `rule_spend` for `day_start(now)` when the job has a budgeted rule and `actual > 0`. This runs even when step 3 finds the job re-claimed: the provider was paid, and the in-memory settle below counts it too, so memory and `rule_spend` agree. When the rule was deleted during the run, `add_spend` inserts nothing (§ I3.2) and the write goes on;
   2. for `Pause::Connection` and `Pause::MarkConnection`: reads the connection row (`connections::get_connection_tx`); when it is missing or its `updated_at` is not `job.connection_updated_at`, the connection changed during the call, so the pause becomes `Pause::None` (and a rule job's `finish` stays `PauseRequeue`);
   3. calls `eval_jobs::finish(conn, id, claims, variant, now)`; when it returns false, it stops there and commits step 1 only (the job was re-claimed or deleted; D-I-12 drops the result silently);
   4. applies the pause that is left: `pause_rules_of_connection` + `connections::set_connection_status(conn, connection_id, "failing", Some(&error_text), now)`, or `pause_rules_of_evaluator(…, PAUSE_ERRORS, Some(&error_text))`, or (`MarkConnection`) only the connection status;
@@ -1270,6 +1282,7 @@ Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time
 - `a_retryable_error_backs_off_then_fails_after_six_attempts`: mock 503 forever; run, re-claim (set `not_before` past with the manual clock: `app.state.clock.set(row.not_before)`), run again… after the 6th attempt the job is `failed`, `retryable`; each retry's `not_before` equals `now + backoff_ns(id, attempts)`.
 - `a_pause_error_pauses_the_connection_rules_and_requeues`: mock 401; two rules in two projects on the same connection; the job is `queued` with `attempts` 0 (the run's attempt was given back), both rules `paused_reason = 'connection'`, the connection `failing` with `provider status 401`.
 - `a_key_change_during_the_call_requeues_without_pausing`: call the step-16 function (`finish_job(state, &job, ended, reservation)`; write step 16 as this standalone `async fn` so tests can drive it) on a claimed and started rule job, with `Ended { finish: PauseRequeue { … }, pause: Pause::Connection { … }, … }` and a `connection_updated_at` older than the row's (a key PATCH in between): the job is `queued`, `attempts` back to 0, no rule paused, the connection status unchanged.
+- `an_unknown_adapter_fails`: set the connection row's `adapter` to `nope` with SQL in the test → `failed`, `permanent`, `unknown adapter`, the mock got no request.
 - `a_changed_connection_before_the_call_requeues`: `connection_updated_at` one less than the row's → `queued`, `attempts` 0, the mock got no request.
 - `a_webhook_pause_pauses_the_evaluator_rules`: webhook 401.
 - `a_manual_pause_fails_and_marks_the_connection`: no rule paused.
@@ -1290,7 +1303,7 @@ Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time
 - `the_breaker_pauses_after_twenty_failures`: 20 jobs answering `"not json"` (permanent judge errors) → the rule is paused `errors` after the 20th.
 - `a_paused_rule_requeues_its_claimed_job`.
 - `a_deleted_evaluator_ends_quietly`: delete the evaluator (cascades the job), run → `Ok(())`.
-- `a_rule_deleted_during_the_run_ends_quietly`: delete the rule before step 16 (run the steps directly): the job row cascades, `finish` matches nothing, `run_job` is `Ok(())`.
+- `a_rule_deleted_during_the_run_ends_quietly`: a **budgeted** rule, so `finish` reaches `add_spend` with `actual > 0`; delete the rule before step 16 (run the steps directly, then `finish_job`): the job row cascades, `finish` matches nothing, the result is `Ok(())`, and `rule_spend` has no row for the rule.
 - `a_check_job_runs_to_done` (a `contains` check, the `spawn_blocking` path) and `a_webhook_job_runs_to_done` (`MockWebhook`): each `done` with its source.
 - `a_truncated_trace_marks_the_score`: test the metadata helper directly: `truncated: true` adds `llmobs.eval.truncated = "true"`, `false` adds nothing (a real trace over `MAX_SPANS` is too slow to commit).
 - `a_large_levenshtein_input_fails`: `output` over 64 KiB → `failed`, `levenshtein inputs must be at most 64 KiB each`, no judge trace.
@@ -1309,7 +1322,7 @@ The write-retry path (steps 14–15) is hard to trigger with real storage; test 
 
 **Goal:** the dispatcher claims jobs within the worker, connection, rate and webhook limits (D-I-6), runs each in its own task, and the janitor, pruner and budget ticker run as loops. Startup recovers interrupted jobs; shutdown stops the loops, gives workers 3 s, then aborts them.
 
-**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/dispatch.rs` (new), `crates/server/src/eval/execute.rs` (remove the I3.6 `dead_code` attributes only), `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs` (the constructor only), `crates/server/src/test_support/mock_llm.rs` (`start_with_delay` only), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`.
+**Edit only:** `crates/server/src/eval/mod.rs`, `crates/server/src/eval/dispatch.rs` (new), `crates/server/src/eval/execute.rs` (remove the I3.6 `dead_code` attributes only), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (remove the module `dead_code` attribute only, § I3.2 › Dead code), `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs` (the constructor only), `crates/server/src/test_support/mock_llm.rs` (`start_with_delay` only), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`.
 
 **Commit:** `Dispatch eval jobs and run the queue loops`
 
@@ -1468,7 +1481,7 @@ impl EvalTasks {
 - after `bootstrap::prepare` succeeds: `if let Err(error) = crate::eval::recover(&state).await { release_state(state).await; return Err(error.into()); }`;
 - next to `alerts::spawn_loops`: `let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);` stored in a new `Running` field `eval_tasks: Option<crate::eval::EvalTasks>`;
 - `Running::shutdown`: right after `let serve_error = …` (the HTTP drain) and before `for task in self.tasks.drain(..)`: `if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) { eval.shutdown(state).await; }`. Update the method's doc to list the step.
-- `impl Drop for Running` (`serve.rs`, after the `tasks` loop): `if let Some(eval) = &self.eval_tasks { eval.abort(); }`. Without it a `Running` dropped without `shutdown` leaves the loops holding `AppState`, and `<data_dir>/LOCK` is never released. Judge-trace commits that workers started are covered by the existing `wait_for_commits` step after it (D-G-38).
+- `impl Drop for Running` already exists (`serve.rs`, it aborts `serve`, `otlp_serve`, `grpc_serve` and `tasks`). Extend it, do not add a second `impl`: after its `for task in &self.tasks` loop, add `if let Some(eval) = &self.eval_tasks { eval.abort(); }`. `shutdown(mut self)` already `take()`s and `drain`s what it awaits, so after a clean shutdown `Drop` finds `eval_tasks` empty. Without it a `Running` dropped without `shutdown` leaves the loops holding `AppState`, and `<data_dir>/LOCK` is never released. Judge-trace commits that workers started are covered by the existing `wait_for_commits` step after it (D-G-38).
 
 ### Spec
 
@@ -1492,7 +1505,7 @@ impl EvalTasks {
 - `dispatch_respects_the_bucket`: connection `requests_per_minute` 6 (capacity 1); three jobs; the first pass starts one, a pass at the same `now` starts none, a pass 10 s later starts one more.
 - `dispatch_holds_a_webhook_at_four`: six webhook jobs on one evaluator with a delayed `MockWebhook` (or a webhook URL that never answers before the test ends) → one pass starts 4.
 - `the_rotation_serves_every_project`: 25 manual jobs of project A then 1 of project B, `eval.workers = 1`, jobs on a delayed mock; two passes (each after the previous job finished) start one job of A and then B's job.
-- `the_dispatcher_wakes_on_notify`: spawn the loops with `dispatch_every` of 1 hour (a custom `EvalTiming`), wait until the first pass ran (every loop runs once at start), insert a manual check job on a committed trace and call `state.eval.wake()` → the job is `done` within 5 s.
+- `the_dispatcher_wakes_on_notify`: insert a manual check job (the probe) on a committed trace **before** `spawn`; spawn the loops with `dispatch_every` of 1 hour (a custom `EvalTiming`); poll the probe's row every 50 ms until it is `done` (at most 5 s): the start pass ran and the dispatcher is now waiting. Then insert a second manual check job and call `state.eval.wake()` → poll the same way: the second job is `done` within 5 s. Without the wake, the next pass would be an hour away.
 - `dispatch_skips_paused_rules_and_inactive_projects`.
 - `a_changed_connection_gets_new_limits`: PATCH the connection's `max_concurrency`, and the next pass builds a new `ConnectionLimit` with it; a PATCH of the key alone keeps the old `ConnectionLimit` (same `Arc`).
 - `a_panicked_job_fails_with_internal_error`: no real job can be made to panic, so write the panic arm as its own `async fn finish_panicked(state, id, claims)` and test it: a claimed job becomes `failed`, `permanent`, `internal error`; with a stale `claims` nothing changes.
@@ -1513,7 +1526,7 @@ impl EvalTasks {
 
 **Goal:** the online rule routes, with D-I-30's validation and D-I-32's check; the evaluator delete and PATCH 409s (D-I-19); connection tests and key changes resume `'connection'` pauses (D-I-5, D-I-14).
 
-**Edit only:** `crates/server/src/routes/online_rules.rs` (new), `crates/server/src/routes/mod.rs` (module line), `crates/server/src/http/access.rs` (one `routes.extend` line), `crates/server/src/eval/rule_check.rs` (new), `crates/server/src/eval/mod.rs` (module line, and an `impl EvalQueue` block with `forget_rule`), `crates/server/src/eval/{budget,rule_limit}.rs` (remove `dead_code` attributes only), `crates/server/src/meta/online_rules.rs` (one new function), `crates/server/src/routes/evaluators.rs`, `crates/server/src/routes/connections.rs`, `crates/server/src/http/error.rs`, `crates/server/src/api/openapi.rs` (409 on `delete_evaluator`), `crates/server/tests/openapi.rs` (move `delete_evaluator` from the `{400, 401, 403, 404, 429}` branch to the branch with 409: `post_evaluator || patch_evaluator || …`), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
+**Edit only:** `crates/server/src/routes/online_rules.rs` (new), `crates/server/src/routes/mod.rs` (module line), `crates/server/src/http/access.rs` (one `routes.extend` line), `crates/server/src/eval/rule_check.rs` (new), `crates/server/src/eval/mod.rs` (module line, and an `impl EvalQueue` block with `forget_rule`), `crates/server/src/eval/{budget,rule_limit}.rs` (remove `dead_code` attributes only), `crates/server/src/meta/online_rules.rs` (one new function, and its module `dead_code` attribute), `crates/server/src/meta/{eval_jobs,rule_spend}.rs` (remove the module `dead_code` attribute only, § I3.2 › Dead code), `crates/server/src/routes/evaluators.rs`, `crates/server/src/routes/connections.rs`, `crates/server/src/http/error.rs`, `crates/server/src/api/openapi.rs` (409 on `delete_evaluator`), `crates/server/tests/openapi.rs` (move `delete_evaluator` from the `{400, 401, 403, 404, 429}` branch to the branch with 409: `post_evaluator || patch_evaluator || …`), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
 
 **Commit:** `Add the online rules API`
 
@@ -1563,8 +1576,14 @@ pub(crate) struct RuleShape<'a> {
 /// `adapter` is the judge's connection adapter (`None` for other kinds, or when the connection is gone,
 /// which fails check 15). `prices` and `now` price the judge's model.
 pub(crate) fn check_rule(shape: &RuleShape<'_>, subject: &Subject, adapter: Option<Adapter>, prices: &PriceTable, now: i64) -> Vec<FieldError>;
+
+/// Check 9 alone: one error per variable of the judge's prompt that `variables` lacks, in the
+/// prompt's order. `check_rule` calls it for judges; the manual-run route (I3.9) calls it too.
+/// A prompt that no longer compiles gives one error on `variable_mapping` with the `TemplateError`
+/// display (a saved evaluator always compiles, but do not unwrap).
+pub(crate) fn unmapped_variables(judge: &JudgeConfig, variables: &BTreeSet<String>) -> Vec<FieldError>;
 ```
-Read `crates/eval/src/config.rs` for the exact names of `JudgeConfig` and `Check` and their re-exports. Unit tests: one per check (8, 9, 10 with each check kind, 14, 15), a clean case, and `Subject::from_row` of a webhook row whose `secret_enc` is garbage (it is never opened, so the result is `Webhook`).
+Read `crates/eval/src/config.rs` for the exact names of `JudgeConfig` and `Check` and their re-exports. Unit tests: one per check (8, 9, 10 with each check kind, 14, 15), `unmapped_variables` alone (two of three prompt variables mapped → one error on the third), a clean case, and `Subject::from_row` of a webhook row whose `secret_enc` is garbage (it is never opened, so the result is `Webhook`).
 
 ### `routes/online_rules.rs`
 
@@ -1585,7 +1604,7 @@ Routes (all `Access::Project`, `session_only: false`, `documented: true`):
 
 **Create:**
 1. `principal::session_user` (as the evaluator routes); trim `name`.
-2. Load the evaluator row (`get_evaluator`; missing → check 2) and its `rule_check::Subject::from_row`, and for a judge read its connection row for the adapter.
+2. Load the evaluator row (`get_evaluator`; missing → check 2) and its `rule_check::Subject::from_row`, and for a judge read its connection row for the adapter: `Adapter::from_name(&row.adapter)` returns `Result<Adapter, UnknownName>`; an `Err` means a stored value that does not decode, so map it to `MetaError::Corrupt { table: "llm_connections", column: "adapter" }` (a 500 `corrupt`, as for any undecodable row). A missing connection row gives `adapter = None`.
 3. Run § Rule validation checks 1, 2, 4–7, 11–13, 16 here and checks 8–10, 14–15 with `rule_check::check_rule`; collect every error; a non-empty list is `400`.
 4. Check 3: when the filter is not blank, `open_query(state, project, None)` then `llmobs_storage::validate_filter(&ctx, view, text)?` (`view` is `ViewName::Traces` or `ViewName::Spans`; the `?` turns `RunError::Invalid` into the `invalid_filter` problem on field `filter`, as K's route does).
 5. One `MetaDb::write`, whose closure owns the evaluator row read in step 2: `get_evaluator_tx` again; missing → the outcome `EvaluatorGone` → 400 on `evaluator_id` with check 2's message; its `version` or `updated_at` differs from the row of step 2 → `Conflict("evaluator changed, retry")` (409), because the checks of step 3 ran against the old one; when `enabled`, `rule_limit::check(count_enabled_rules(conn, org)? + 1, limit)`, where `limit = rule_limit::limit(&state, org)` is read before the write (an `Outcome::OverLimit(RuleLimitError)` result, not an `Err`, so nothing is written); then `insert_rule`.
@@ -1602,7 +1621,7 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 ### Evaluator routes (`routes/evaluators.rs`)
 
 - **Delete:** inside the write, `rules_of_evaluator(conn, id)`; when not empty, nothing is deleted and the answer is `409 ConflictWith { detail: "online rules use this evaluator", errors: one per rule (field `rules.<rule id>`, message "<rule name>: uses this evaluator") }`. Change the write's result from `bool` to a small enum. Rule names are configuration, not payload, so they may appear in the message.
-- **PATCH:** the rule checks run inside `write_update` (the write that already re-reads the evaluator and the judge's connection), so a rule saved between a read and the write cannot slip past. Pass `write_update` the new `Subject::from_config(&prepared.evaluator.config)` and `state.ingest.prices()` (an `Arc`, owned by the closure). After the connection check: `rules_of_evaluator(conn, id)`; for each rule, `check_rule` with its mapping (from its JSON; a stored mapping that no longer parses is a `MetaError::Corrupt`), its target, `budgeted = budget_usd.is_some()`, and the adapter of the connection row read in that transaction (`Adapter::from_name(&row.adapter)`). Any error → a new `Outcome::BreaksRules(Vec<FieldError>)`, nothing written → `409 ConflictWith { detail: "the change would break online rules that use this evaluator", errors: one per broken rule (field `rules.<rule id>`), message = "<rule name>: <that rule's first error message>" }`.
+- **PATCH:** the rule checks run inside `write_update` (the write that already re-reads the evaluator and the judge's connection), so a rule saved between a read and the write cannot slip past. Pass `write_update` the new `Subject::from_config(&prepared.evaluator.config)` and `state.ingest.prices()` (an `Arc`, owned by the closure). After the connection check: `rules_of_evaluator(conn, id)`; for each rule, `check_rule` with its mapping (from its JSON; a stored mapping that no longer parses is a `MetaError::Corrupt`), its target, `budgeted = budget_usd.is_some()`, and the adapter of the connection row read in that transaction (`Adapter::from_name(&row.adapter)`; an `Err` is `MetaError::Corrupt { table: "llm_connections", column: "adapter" }`, as on create). Any error → a new `Outcome::BreaksRules(Vec<FieldError>)`, nothing written → `409 ConflictWith { detail: "the change would break online rules that use this evaluator", errors: one per broken rule (field `rules.<rule id>`), message = "<rule name>: <that rule's first error message>" }`.
 
 ### Connection routes (`routes/connections.rs`, D-I-5, D-I-14)
 
@@ -1646,7 +1665,7 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 **Goal:** `POST …/evaluators/{id}/run` queues a manual run; `GET …/eval-jobs` and `GET …/eval-jobs/{id}` read jobs. An end-to-end test runs a manual job through the real loops.
 
-**Edit only:** `crates/server/src/routes/eval_jobs.rs` (new), `crates/server/src/routes/mod.rs`, `crates/server/src/http/access.rs` (one line), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
+**Edit only:** `crates/server/src/routes/eval_jobs.rs` (new), `crates/server/src/routes/mod.rs`, `crates/server/src/http/access.rs` (one line), `crates/server/src/meta/{online_rules,eval_jobs,rule_spend}.rs` (the module `dead_code` attributes, and item-level allows for what M4 calls; § I3.2 › Dead code), `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`.
 
 **Commit:** `Add manual evaluator runs and the eval jobs API`
 
@@ -1663,26 +1682,26 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 - **Run:**
   1. `session_user`; the shared limiter `state.limits.connection_tests.check(&user.id, now)` → 429 like `test_run.rs`;
   2. the evaluator of the project (404);
-  3. § Eval job contract's body rules (collect errors; 400);
+  3. § Eval job contract's body rules (collect errors; 400). For a judge, `rule_check::Subject::from_row(&row)` (a `Corrupt` error is a 500) gives the `JudgeConfig`, and `rule_check::unmapped_variables(&judge, &keys)` runs with the body mapping's keys;
   4. `insert_job(conn, NewJob { id: Uuid::now_v7(), kind: KIND_MANUAL, rule_id: None, variable_mapping: Some(json text), trace_start_ns: body.trace_start.ns(), … }, now)` in one write, then `get_job` (it was just inserted; a `None` is `ApiError::Internal`);
   5. `state.eval.wake()`; audit `tracing::info!(target: "audit", job_id, evaluator_id, project_id, user_id, "evaluator run queued")`;
   6. `202` with `job_json`.
 
 ### Spec
 
-- `docs/spec/06-evaluation.md` § Online rules › Execution, a new bullet: "**Manual runs:** `POST /evaluators/{id}/run` queues one job at the highest priority, with the caller's mapping, and answers `202` with it; the UI polls `GET /eval-jobs/{id}`. Manual runs have no budget, count usage, and share the test runs' limit of 10 a minute per user (D-I-22)."
+- `docs/spec/06-evaluation.md` § Online rules › Execution, a new bullet: "**Manual runs:** `POST /evaluators/{id}/run` queues one job at the highest priority, with the caller's mapping, and answers `202` with it; the UI polls `GET /eval-jobs/{id}`. Every variable of a judge's prompt must be mapped (`400` otherwise). Manual runs have no budget, count usage, and share the test runs' limit of 10 a minute per user (D-I-22)."
 - `docs/spec/09-api.md` § Evaluation & alerts: replace `GET /online-rules/{id}/jobs` with `GET /eval-jobs?rule_id=&evaluator_id=&status=&kind=` (newest first, kept 7 days after they finish) and `GET /eval-jobs/{id}`, and add `POST /evaluators/{id}/run` `{trace_id, span_id?, trace_start, variable_mapping}` → `202` with the job (D-I-22).
 
 ### Tests
 
 - `run_queues_a_manual_job`: `202`, `kind: manual`, `status: queued`, `attempts: 0`; the row's `priority` is 0 and its `dedup_key` `manual:<id>`.
-- `run_validates_its_body` (one case per row of the table), `run_of_an_unknown_evaluator_is_404`, `run_is_rate_limited_with_tests` (10 test runs then a run → 429), `viewer_and_api_key_cannot_run`.
+- `run_validates_its_body` (one case per row of the table), including `run_with_an_unmapped_prompt_variable_is_400`: a judge whose prompt uses `{{ input }}` and `{{ output }}`, a body mapping only `output` → 400 on `variable_mapping.input` with `variable input is used by the prompt but not mapped`, and no job row is inserted; `run_of_an_unknown_evaluator_is_404`, `run_is_rate_limited_with_tests` (10 test runs then a run → 429), `viewer_and_api_key_cannot_run`.
 - `jobs_list_filters_and_pages`: 3 jobs of two rules and one manual; each filter (`rule_id`, `evaluator_id`, `status`, `kind`); `limit=1` pages through with the cursor, newest first; a malformed cursor is 400; another project's job is not listed and its `GET` is 404.
 - `a_manual_run_completes_through_the_loops` (end to end, real time; clock set to real time first): `crate::eval::spawn(&app.state, EvalTiming::TEST)`, `POST …/run` against a `MockLlm` judge, poll `GET /eval-jobs/{id}` every 50 ms for at most 10 s until `done`; then `GET /scores?evaluator_id=…` has one `llm_judge` score without `rule_id`, and `GET /traces/{judge_trace_id}` finds the judge trace (the trace detail takes only `around`, `TraceDetailParams` in `api/traces.rs`; without it storage reads around the current time, which is when the judge trace was written; if the read misses it, pass `?around=<the job's finished_at>`); finally `EvalTasks::shutdown`.
 
 ### Done when
 
-`just check` passes. Every documented M3 operation has a route.
+`just check` passes. Every documented M3 operation has a route. None of `meta/{online_rules,eval_jobs,rule_spend}.rs` keeps its module-level `dead_code` attribute; any item still unused has an item-level allow naming its M4 caller.
 
 ---
 
