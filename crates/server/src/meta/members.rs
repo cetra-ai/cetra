@@ -346,8 +346,8 @@ mod tests {
                 Box::pin(async move {
                     let ada = insert_user(conn, user("ada@example.com"), 1).await?;
                     let bob = insert_user(conn, user("bob@example.com"), 1).await?;
-                    let org_a = insert_org(conn, "Alpha", "alpha", 1).await?;
-                    let org_b = insert_org(conn, "Beta", "beta", 1).await?;
+                    let org_a = insert_org(conn, OrgId::new_v7(), "Alpha", "alpha", 1).await?;
+                    let org_b = insert_org(conn, OrgId::new_v7(), "Beta", "beta", 1).await?;
                     add_org_member(conn, org_a.id, ada.id, OrgRole::Owner, 1).await?;
                     add_org_member(conn, org_a.id, bob.id, OrgRole::Member, 2).await?;
                     add_org_member(conn, org_b.id, ada.id, OrgRole::Viewer, 1).await?;
@@ -442,7 +442,7 @@ mod tests {
             .write(|conn| {
                 Box::pin(async move {
                     let bob = insert_user(conn, user("bob@example.com"), 1).await?;
-                    let org = insert_org(conn, "Alpha", "alpha", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Alpha", "alpha", 1).await?;
                     add_org_member(conn, org.id, bob.id, OrgRole::Member, 1).await?;
                     sqlx::query("UPDATE org_members SET role = 'superuser' WHERE user_id = ?")
                         .bind(bob.id.to_string())

@@ -116,6 +116,11 @@ async fn create_scores(
         Principal::Session { user, .. } => (Writer::Human { user_id: user.id }, "human"),
         Principal::Pat { token_id, .. } => (Writer::Api { author: token_id }, "api"),
         Principal::ApiKey { key_id, .. } => (Writer::Api { author: key_id }, "api"),
+        Principal::ControlPlane { .. } => {
+            return Err(ApiError::Forbidden {
+                code: ProblemCode::Forbidden,
+            });
+        }
     };
     write_batch(&state, &access, writer, kind, batch).await
 }

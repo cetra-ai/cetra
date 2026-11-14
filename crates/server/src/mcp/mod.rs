@@ -344,6 +344,7 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::users::{self, NewUser, insert_user};
     use crate::test_support::TestApp;
+    use llmobs_core::ids::OrgId;
 
     const TOOLS: [&str; 7] = [
         "list_projects",
@@ -1073,7 +1074,7 @@ mod tests {
                         .bind(gone_id.to_string())
                         .execute(&mut *conn)
                         .await?;
-                    let org = insert_org(conn, "Beta", "beta", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Beta", "beta", now).await?;
                     add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
                     insert_project(conn, org.id, "Beta app", "beta-app", None, now).await?;
                     sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
@@ -1204,7 +1205,7 @@ mod tests {
                         .bind(gone_id.to_string())
                         .execute(&mut *conn)
                         .await?;
-                    let org = insert_org(conn, "Beta", "beta", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Beta", "beta", now).await?;
                     add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
                     insert_project(conn, org.id, "Beta app", "beta-app", None, now).await?;
                     sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")

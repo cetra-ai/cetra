@@ -119,6 +119,8 @@ async fn config(State(state): State<AppState>) -> Result<error::Json<AuthConfig>
         providers: state.providers.list(),
         smtp_enabled: state.mailer.is_some(),
         email_verification_required: state.config.auth.require_email_verification,
+        org_create_allowed: state.config.orgs.user_create,
+        org_create_url: state.config.orgs.create_url.clone(),
     }))
 }
 
@@ -1001,6 +1003,7 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::orgs::insert_org_with_derived_slug;
     use crate::meta::users::{NewUser, insert_user, set_disabled};
+    use llmobs_core::ids::OrgId;
 
     fn login_body(email: &str, password: &str) -> LoginRequest {
         LoginRequest {
@@ -1089,7 +1092,8 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let org = insert_org_with_derived_slug(conn, "Acme", now).await?;
+                    let org =
+                        insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme", now).await?;
                     add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
                     Ok(org)
                 })
@@ -1935,7 +1939,8 @@ mod tests {
                         now,
                     )
                     .await?;
-                    let org = insert_org_with_derived_slug(conn, "Acme", now).await?;
+                    let org =
+                        insert_org_with_derived_slug(conn, OrgId::new_v7(), "Acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     Ok((user.id, org.slug))
                 })
@@ -2216,6 +2221,28 @@ mod tests {
             tokio::task::yield_now().await;
         }
         app.sent().len()
+    }
+
+    #[tokio::test]
+    async fn config_says_whether_users_may_create_orgs() {
+        let app = TestApp::new().await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(config.org_create_allowed);
+        assert_eq!(config.org_create_url, None);
+
+        let app = TestApp::with_config(|config| {
+            config.orgs.user_create = false;
+            config.orgs.create_url = Some("https://cloud.example.com/new".to_owned());
+        })
+        .await;
+        let response = app.request(Method::GET, "/api/auth/config").send().await;
+        let json: serde_json::Value = response.json();
+        assert_eq!(json["org_create_allowed"], false);
+        assert_eq!(json["org_create_url"], "https://cloud.example.com/new");
     }
 
     #[tokio::test]

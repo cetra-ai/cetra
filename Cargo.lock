@@ -3319,6 +3319,7 @@ dependencies = [
  "base64 0.23.1",
  "clap",
  "ed25519-dalek",
+ "llmobs-token",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -3368,6 +3369,7 @@ dependencies = [
  "llmobs-eval",
  "llmobs-otel",
  "llmobs-storage",
+ "llmobs-token",
  "minijinja",
  "oauth2",
  "openidconnect",
@@ -3429,6 +3431,19 @@ dependencies = [
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "llmobs-token"
+version = "0.0.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
  "uuid",
 ]
 

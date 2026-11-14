@@ -104,7 +104,7 @@ async fn list_views(
     let page = store::list_visible(
         state.meta.reader(),
         access.project.id,
-        viewer(&principal),
+        viewer(&principal)?,
         params.kind,
         page_limit(params.limit),
         cursor.as_deref(),
@@ -265,10 +265,16 @@ async fn delete_view(
 }
 
 /// A user sees their own and shared views; a key sees shared views.
-fn viewer(principal: &Principal) -> Viewer {
+///
+/// # Errors
+///
+/// Returns [`ApiError::NotFound`] for the control plane. The access layer already refuses that
+/// principal before a handler runs, so this arm is a guard, not a reachable path.
+fn viewer(principal: &Principal) -> Result<Viewer, ApiError> {
     match principal {
-        Principal::Session { user, .. } | Principal::Pat { user, .. } => Viewer::User(user.id),
-        Principal::ApiKey { .. } => Viewer::Key,
+        Principal::Session { user, .. } | Principal::Pat { user, .. } => Ok(Viewer::User(user.id)),
+        Principal::ApiKey { .. } => Ok(Viewer::Key),
+        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
     }
 }
 

@@ -12,6 +12,7 @@ pub(crate) mod convert;
 pub mod deletions;
 pub mod entitlements;
 pub mod evaluators;
+pub mod internal;
 pub mod invites;
 pub mod keys;
 pub mod members;

@@ -385,8 +385,8 @@ mod tests {
         let (left, right, project) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let left = insert_org(conn, "Left", "left", 1).await?;
-                    let right = insert_org(conn, "Right", "right", 1).await?;
+                    let left = insert_org(conn, OrgId::new_v7(), "Left", "left", 1).await?;
+                    let right = insert_org(conn, OrgId::new_v7(), "Right", "right", 1).await?;
                     let project = insert_project(conn, left.id, "API", "login", None, 1).await?;
                     let other = insert_project(conn, right.id, "API", "login", Some(30), 1).await?;
                     assert_eq!(project.slug, "login");
@@ -480,7 +480,7 @@ mod tests {
         let (project, changed) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let org = insert_org(conn, "Acme", "acme", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
                     let project = insert_project(conn, org.id, "p", "p", None, 1).await?;
                     let first = mark_project_deleting(conn, project.id, 2).await?;
                     let second = mark_project_deleting(conn, project.id, 3).await?;
@@ -503,7 +503,7 @@ mod tests {
         let (org, ids, deleting) = db
             .write(|conn| {
                 Box::pin(async move {
-                    let org = insert_org(conn, "Acme", "acme", 1).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
                     let mut ids = Vec::new();
                     for (slug, days) in [("none", None), ("week", Some(7)), ("month", Some(30))] {
                         let project = insert_project(conn, org.id, slug, slug, days, 1).await?;

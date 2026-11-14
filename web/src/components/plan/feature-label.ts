@@ -5,6 +5,8 @@ export type Feature = Schema<"Feature">;
 /** What unlocks a feature, as shown next to a lock (D-P-15). */
 export function featureOffer(feature: Feature): string {
   switch (feature) {
+    case "retention_management":
+      return "Available on the Pro plan";
     case "project_roles":
       return "Available with the Teams add-on or an enterprise licence";
     case "sso_enforcement":

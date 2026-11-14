@@ -512,6 +512,7 @@ mod tests {
 
     use super::*;
     use crate::meta::{MetaDb, orgs, projects, users};
+    use llmobs_core::ids::OrgId;
 
     const NOW: i64 = 1_767_225_600_000_000_000;
 
@@ -547,7 +548,7 @@ mod tests {
                 let third = users::insert_user(conn, new_user("third@example.com"), NOW)
                     .await?
                     .id;
-                let org = orgs::insert_org(conn, "Acme", "acme", NOW).await?;
+                let org = orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", NOW).await?;
                 let project =
                     projects::insert_project(conn, org.id, "Support", "support-bot", None, NOW)
                         .await?

@@ -34,7 +34,7 @@ use tokio::net::TcpStream;
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    PublicUrl, SecurityConfig, ServerConfig,
+    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
 use crate::meta::MetaDb;
@@ -457,6 +457,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),

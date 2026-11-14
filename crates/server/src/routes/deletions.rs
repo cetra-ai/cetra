@@ -299,7 +299,7 @@ async fn create_deletion(
             code: ProblemCode::Forbidden,
         });
     }
-    let (actor_kind, actor_id) = actor(&principal);
+    let (actor_kind, actor_id) = actor(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
@@ -509,12 +509,17 @@ fn parse_trace_ids(raw: &[String]) -> Result<Vec<TraceId>, ApiError> {
     Ok(ids.into_iter().collect())
 }
 
-fn actor(principal: &Principal) -> (store::ActorKind, Uuid) {
+/// The actor recorded on a deletion.
+///
+/// Returns [`ApiError::NotFound`] for the control plane: the access layer already refuses it
+/// before a handler runs, so this arm is a guard, not a reachable path.
+fn actor(principal: &Principal) -> Result<(store::ActorKind, Uuid), ApiError> {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => {
-            (store::ActorKind::User, user.id)
+            Ok((store::ActorKind::User, user.id))
         }
-        Principal::ApiKey { key_id, .. } => (store::ActorKind::ApiKey, *key_id),
+        Principal::ApiKey { key_id, .. } => Ok((store::ActorKind::ApiKey, *key_id)),
+        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
     }
 }
 
@@ -1470,7 +1475,9 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let beta = insert_org(conn, "Beta", "beta", now).await?;
+                    let beta =
+                        insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Beta", "beta", now)
+                            .await?;
                     add_org_member(conn, beta.id, user_id, OrgRole::Owner, now).await?;
                     let b1 = insert_project(conn, beta.id, "b1", "b1", None, now).await?;
                     let b2 = insert_project(conn, beta.id, "b2", "b2", None, now).await?;
@@ -1542,7 +1549,14 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let gamma = insert_org(conn, "Gamma", "gamma", now).await?;
+                    let gamma = insert_org(
+                        conn,
+                        llmobs_core::ids::OrgId::new_v7(),
+                        "Gamma",
+                        "gamma",
+                        now,
+                    )
+                    .await?;
                     add_org_member(conn, gamma.id, user_id, OrgRole::Owner, now).await?;
                     insert_project(conn, gamma.id, "g1", "g1", None, now).await
                 })

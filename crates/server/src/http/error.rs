@@ -80,6 +80,9 @@ pub(crate) enum ApiError {
         /// Static text shown as the problem `detail`.
         detail: &'static str,
     },
+    /// The org's owner cannot be that user (disabled or instance admin). Problem `owner_not_allowed`.
+    #[error("owner not allowed")]
+    OwnerNotAllowed,
     /// The resource does not exist.
     #[error("not found")]
     NotFound,
@@ -160,6 +163,7 @@ impl ApiError {
             Self::PlanRequired { detail } => {
                 Problem::new(ProblemCode::PlanRequired, Some((*detail).to_owned()))
             }
+            Self::OwnerNotAllowed => Problem::new(ProblemCode::OwnerNotAllowed, None),
             Self::NotFound => not_found_problem(),
             Self::Conflict { detail } => {
                 Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()))
@@ -562,6 +566,15 @@ mod tests {
             problem.detail.as_deref(),
             Some("the query took longer than its time limit")
         );
+    }
+
+    #[test]
+    fn owner_not_allowed_is_422_without_detail() {
+        let problem = ApiError::OwnerNotAllowed.problem();
+        assert_eq!(problem.status, 422);
+        assert_eq!(problem.code, ProblemCode::OwnerNotAllowed);
+        assert!(problem.detail.is_none());
+        assert!(problem.errors.is_empty());
     }
 
     #[test]

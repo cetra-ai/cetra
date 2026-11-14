@@ -1,6 +1,7 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
+import { authConfigQuery } from "@/api/auth";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -12,6 +13,7 @@ import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import { FirstTraceScreen } from "@/components/onboarding/first-trace";
+import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/setup/workspace")({
   component: WorkspacePage,
@@ -59,6 +61,9 @@ function WorkspacePage() {
   const [created, setCreated] = useState<
     { org: string; project: string; projectName: string; secret: string } | undefined
   >();
+  const { data: config } = useQuery(authConfigQuery);
+  // While the config loads, the form is shown. Off on a cloud cell (D-P-31).
+  const createAllowed = config?.org_create_allowed ?? true;
   const createOrg = $api.useMutation("post", "/api/v1/orgs");
   const createProject = $api.useMutation("post", "/api/v1/orgs/{org}/projects");
   // gcTime 0: the response holds the secret key, shown once (D-L-5).
@@ -144,6 +149,26 @@ function WorkspacePage() {
         projectName={created.projectName}
         secret={created.secret}
       />
+    );
+  }
+
+  if (!createAllowed) {
+    return (
+      <AuthLayout
+        title="Create your workspace"
+        description="An organization holds your projects and members. You can add more of both later."
+      >
+        <p className="text-sm text-muted-foreground">
+          Organizations are created from your account.
+        </p>
+        {config?.org_create_url ? (
+          <Button asChild variant="outline">
+            <a href={config.org_create_url} target="_blank" rel="noopener noreferrer">
+              Create an organization
+            </a>
+          </Button>
+        ) : null}
+      </AuthLayout>
     );
   }
 

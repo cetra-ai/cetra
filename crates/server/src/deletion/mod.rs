@@ -1262,7 +1262,7 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let org = insert_org(conn, "Globex", "globex", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Globex", "globex", now).await?;
                     let p1 = insert_project(conn, org.id, "One", "one", None, now).await?;
                     let p2 = insert_project(conn, org.id, "Two", "two", None, now).await?;
                     Ok((org.id, p1, p2))

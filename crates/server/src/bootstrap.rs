@@ -23,6 +23,7 @@ use crate::meta::projects::{ProjectRow, insert_project_with_derived_slug};
 use crate::meta::users::{
     NewUser, UserRow, count_users, count_users_tx, insert_user, normalize_email,
 };
+use llmobs_core::ids::OrgId;
 
 const FULL_SCOPES: [KeyScope; 3] = [KeyScope::Ingest, KeyScope::Read, KeyScope::Write];
 
@@ -240,7 +241,7 @@ async fn insert_first(
         now,
     )
     .await?;
-    let org = insert_org_with_derived_slug(conn, &input.org_name, now).await?;
+    let org = insert_org_with_derived_slug(conn, OrgId::new_v7(), &input.org_name, now).await?;
     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
     let project =
         insert_project_with_derived_slug(conn, org.id, &input.project_name, None, now).await?;

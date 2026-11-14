@@ -48,12 +48,15 @@ use super::connections::{
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
-use super::entitlements::{Feature, OrgEntitlements};
+use super::entitlements::{
+    Feature, OrgEntitlements, OrgLimits, OrgPlan, PlanSource, PlanStatus, PutOrgTokenRequest,
+};
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
+use super::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -152,6 +155,14 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
     set.insert::<OrgEntitlements>();
+    set.insert::<OrgPlan>();
+    set.insert::<PlanSource>();
+    set.insert::<PlanStatus>();
+    set.insert::<OrgLimits>();
+    set.insert::<PutOrgTokenRequest>();
+    set.insert::<CreateInternalOrgRequest>();
+    set.insert::<InternalOwner>();
+    set.insert::<InternalOrg>();
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -355,6 +366,10 @@ pub fn openapi() -> OpenApi {
             tag(
                 "alerts",
                 "Alert rules, alert events and notification channels.",
+            ),
+            tag(
+                "internal",
+                "Endpoints the cloud control plane calls on a cell.",
             ),
         ]))
         .components(Some(components(&schemas)))
@@ -1075,7 +1090,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "201",
             json_of::<OrgMembership>("The new organization. The caller is its owner."),
-            &[400, 401, 409, 429],
+            &[400, 401, 403, 409, 429],
         ))
         .build();
     let get_org = operation("get_org", "orgs", "Get an organization")
@@ -1163,6 +1178,45 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let put_entitlements = operation(
+        "put_org_entitlements_token",
+        "internal",
+        "Store the org's entitlement token",
+    )
+    .description(Some(
+        "The control plane sends a signed `kind: org` token for the org (D-P-11). The signature is the credential, so the route takes no session or bearer. A verified token is stored and applied; a failed one counts against the IP limit.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+    .request_body(Some(json_body("PutOrgTokenRequest")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The token is stored, or it was already stored.")
+            .build(),
+        &[400, 404, 409, 429],
+    ))
+    .build();
+    let post_internal_org = operation("post_internal_org", "internal", "Create an org")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .request_body(Some(json_body("CreateInternalOrgRequest")))
+        .responses(responses_with(
+            [
+                ("201", json_of::<InternalOrg>("The org was created.")),
+                (
+                    "200",
+                    json_of::<InternalOrg>("The org with this id already exists."),
+                ),
+            ],
+            &[400, 401, 403, 422, 429],
+        ))
+        .build();
     let mut org = PathItem::new(HttpMethod::Get, get_org);
     org.patch = Some(patch_org);
     org.delete = Some(delete_org);
@@ -1192,6 +1246,14 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/entitlements",
             PathItem::new(HttpMethod::Get, get_entitlements),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}/entitlements",
+            PathItem::new(HttpMethod::Put, put_entitlements),
+        )
+        .path(
+            "/api/internal/v1/orgs",
+            PathItem::new(HttpMethod::Post, post_internal_org),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)
@@ -2561,7 +2623,7 @@ fn problem(code: u16) -> Response {
         416 => "The Range header does not overlap the blob.",
         415 => "The request body is not JSON.",
         422 => {
-            "The query took longer than its time limit, needed more memory than allowed, or a filter deletion matched more than 100,000 traces."
+            "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
         }
         429 => "Too many requests.",
         503 => "The server is busy or a dependency is unavailable. Retry later.",

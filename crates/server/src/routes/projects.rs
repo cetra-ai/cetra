@@ -221,11 +221,10 @@ fn api_role(role: Role) -> OrgRole {
     }
 }
 
-/// Whether the org may set project retention (D177, D-M-16). Free when self-hosted, a Pro
-/// feature on the cloud. Track P replaces the body with
-/// `state.entitlements.of(org).allows(Feature::RetentionManagement)`; until then it allows.
-fn may_manage_retention(_state: &AppState, _org: OrgId) -> bool {
-    true
+/// Whether the org may set project retention (D177, D-P-12). Free when self-hosted; on a
+/// cloud org it follows the `retention_management` feature of its plan.
+fn may_manage_retention(state: &AppState, org: OrgId) -> bool {
+    crate::entitlements::of(state, org).allows(crate::entitlements::Feature::RetentionManagement)
 }
 
 const RETENTION_PLAN: &str = "data retention management is part of the Pro plan";
@@ -681,5 +680,67 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert!(!logs.contains("retention changed"), "{logs}");
+    }
+
+    /// Sends `PATCH retention_days: 30` to a project of org `acme`, after the org holds a
+    /// token with `features` (`None`: no token, so the instance defaults apply).
+    async fn patch_retention_with(features: Option<&[&str]>) -> crate::test_support::TestResponse {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        assert_eq!(org.status, 201);
+        let created = app
+            .request(Method::POST, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Support bot", "slug": "support-bot" }))
+            .send()
+            .await;
+        let created: Project = created.json();
+        if let Some(features) = features {
+            let org_id = orgs::org_by_slug(app.state.meta.reader(), "acme")
+                .await
+                .unwrap()
+                .expect("org")
+                .id;
+            let token = crate::test_support::org_token(
+                org_id,
+                "2025-12-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+                "2099-02-01T00:00:00Z",
+                features,
+                &serde_json::json!({}),
+            );
+            let defaults = app.state.entitlements.defaults().limits;
+            let (_, grant) = crate::entitlements::tokens::grant_from_token(
+                &token,
+                app.state.config.public_url.origin(),
+                &defaults,
+            )
+            .expect("valid token");
+            app.state.entitlements.put_grant(org_id, grant);
+        }
+        app.request(Method::PATCH, &format!("/api/v1/projects/{}", created.id))
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "retention_days": 30 }))
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn retention_management_follows_the_plan_features() {
+        let locked = patch_retention_with(Some(&[])).await;
+        assert_eq!(locked.status, 403);
+        assert_eq!(locked.problem().code, ProblemCode::PlanRequired);
+
+        let allowed = patch_retention_with(Some(&["retention_management"])).await;
+        assert_eq!(allowed.status, 200);
+
+        let defaults = patch_retention_with(None).await;
+        assert_eq!(defaults.status, 200);
     }
 }

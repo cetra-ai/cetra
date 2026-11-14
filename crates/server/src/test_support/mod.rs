@@ -45,7 +45,7 @@ use crate::auth::session::start_session;
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
-    PublicUrl, SecurityConfig, ServerConfig,
+    OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -66,6 +66,19 @@ pub(crate) const TEST_KEY: [u8; 32] = [7; 32];
 /// The development signing seed (`fixtures/license/dev-1.key`, D-P-6).
 const DEV_SEED: &str = include_str!("../../../../fixtures/license/dev-1.key");
 
+/// The `dev-1` signing key. Debug builds trust its public half.
+pub(crate) fn dev_signing_key() -> ed25519_dalek::SigningKey {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let seed: [u8; 32] = STANDARD
+        .decode(DEV_SEED.trim())
+        .expect("dev seed is base64")
+        .try_into()
+        .expect("dev seed is 32 bytes");
+    ed25519_dalek::SigningKey::from_bytes(&seed)
+}
+
 /// Signs `payload` as a `dev-1` token (D-P-5). Debug builds trust it.
 pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
     sign_raw(&serde_json::to_vec(payload).expect("payload serializes"))
@@ -73,20 +86,7 @@ pub(crate) fn sign_token(payload: &serde_json::Value) -> String {
 
 /// Signs the bytes `payload` as a `dev-1` token, whatever they are (not necessarily JSON).
 pub(crate) fn sign_raw(payload: &[u8]) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-    use ed25519_dalek::Signer;
-
-    let seed: [u8; 32] = STANDARD
-        .decode(DEV_SEED.trim())
-        .expect("dev seed is base64")
-        .try_into()
-        .expect("dev seed is 32 bytes");
-    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-    let body = URL_SAFE_NO_PAD.encode(payload);
-    let signed = format!("{}.dev-1.{body}", crate::ee::token::TOKEN_TAG);
-    let signature = URL_SAFE_NO_PAD.encode(key.sign(signed.as_bytes()).to_bytes());
-    format!("{signed}.{signature}")
+    llmobs_token::sign_raw(&dev_signing_key(), "dev-1", payload).expect("dev key signs")
 }
 
 /// A `dev-1` licence listing `features`, issued 2025-01-01, active until 2099-01-01.
@@ -109,6 +109,44 @@ pub(crate) fn license_key_until(
         "features": features,
         "expires_at": expires_at,
         "grace_ends_at": grace_ends_at,
+    }))
+}
+
+/// A `dev-1` org token for `org_id`, audience the default test `public_url`'s origin, plan
+/// `pro` with add-on `teams`. Times are RFC 3339; `limits` is the JSON object of the
+/// `limits` claim.
+pub(crate) fn org_token(
+    org_id: OrgId,
+    issued_at: &str,
+    expires_at: &str,
+    grace_ends_at: &str,
+    features: &[&str],
+    limits: &serde_json::Value,
+) -> String {
+    sign_token(&serde_json::json!({
+        "kind": "org",
+        "id": Uuid::now_v7().to_string(),
+        "issued_at": issued_at,
+        "expires_at": expires_at,
+        "grace_ends_at": grace_ends_at,
+        "audience": PublicUrl::default().origin(),
+        "org_id": org_id.to_string(),
+        "plan": {"id": "pro", "name": "Pro", "add_ons": ["teams"]},
+        "features": features,
+        "limits": limits,
+    }))
+}
+
+/// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
+/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
+pub(crate) fn control_plane_token(scope: &str) -> String {
+    sign_token(&serde_json::json!({
+        "kind": "control_plane",
+        "id": Uuid::now_v7().to_string(),
+        "issued_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-01-01T00:05:00Z",
+        "audience": PublicUrl::default().origin(),
+        "scope": scope,
     }))
 }
 
@@ -263,6 +301,15 @@ impl TestApp {
         let license = crate::ee::license::LicenseState::from_key(
             config.license_key.as_ref().map(|key| key.expose().as_str()),
         );
+        let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
+        let entitlements = crate::entitlements::EntitlementsState::load(
+            &meta,
+            license,
+            defaults,
+            config.public_url.origin(),
+        )
+        .await
+        .expect("stored org tokens load");
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -286,9 +333,9 @@ impl TestApp {
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
+            entitlements,
             trace_loads: crate::eval::trace_load::TraceLoads::default(),
             definitions: crate::eval::definitions::DefinitionCache::default(),
-            entitlements: crate::entitlements::EntitlementsState::new(license),
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
@@ -361,7 +408,7 @@ impl TestApp {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support", "support-bot", None, now).await?;
@@ -540,7 +587,7 @@ impl TestApp {
                         now,
                     )
                     .await?;
-                    let org = insert_org(conn, "Acme", "acme", now).await?;
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", now).await?;
                     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
                     let project =
                         insert_project(conn, org.id, "Support bot", "support-bot", Some(30), now)
@@ -722,6 +769,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,
         auth: AuthSettings::default(),
