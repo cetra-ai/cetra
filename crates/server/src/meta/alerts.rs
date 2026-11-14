@@ -326,13 +326,27 @@ pub(crate) async fn channel_by_id(
     project_id: ProjectId,
     id: Uuid,
 ) -> Result<Option<ChannelRow>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    channel_by_id_on(&mut conn, project_id, id).await
+}
+
+/// The channel `id` of the project on `conn`, so a read can share a write transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn channel_by_id_on(
+    conn: &mut SqliteConnection,
+    project_id: ProjectId,
+    id: Uuid,
+) -> Result<Option<ChannelRow>, MetaError> {
     let record: Option<ChannelRecord> = sqlx::query_as(
         "SELECT id, project_id, kind, name, config_enc, target_hint, created_at, updated_at \
          FROM notification_channels WHERE project_id = ? AND id = ?",
     )
     .bind(project_id.to_string())
     .bind(id.to_string())
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
     record.map(channel_from).transpose()
 }
