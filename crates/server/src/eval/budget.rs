@@ -183,7 +183,6 @@ impl Budgets {
     }
 
     /// The view of the rule: `(spent, reserved)` for `period_start`, or `None`.
-    #[allow(dead_code)] // I3.8 uses it.
     pub(crate) fn view(&self, rule: Uuid, period_start: i64) -> Option<(f64, f64)> {
         self.lock()
             .get(&rule)
@@ -192,7 +191,6 @@ impl Budgets {
     }
 
     /// Drops the rule (deleted, or its budget changed).
-    #[allow(dead_code)] // I3.8 uses it.
     pub(crate) fn forget(&self, rule: Uuid) {
         self.lock().remove(&rule);
     }

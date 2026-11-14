@@ -9,6 +9,7 @@ pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
 pub(crate) mod retry;
+pub(crate) mod rule_check;
 pub(crate) mod rule_limit;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
@@ -46,7 +47,6 @@ pub(crate) struct EvalQueue {
     last_project: Mutex<HashMap<u8, ProjectId>>,
     pub(crate) budgets: budget::Budgets,
     pub(crate) breakers: breaker::Breakers,
-    #[allow(dead_code)] // I3.8 reads it.
     pub(crate) hourly: hourly::HourlyCaps,
 }
 
@@ -91,6 +91,13 @@ impl EvalQueue {
     /// also returns at once when `stop` was called before the receiver was made.
     pub(crate) fn stopped(&self) -> watch::Receiver<bool> {
         self.stop.subscribe()
+    }
+
+    /// Drops every in-memory state of a rule that was deleted (I3.8).
+    pub(crate) fn forget_rule(&self, rule: Uuid) {
+        self.budgets.forget(rule);
+        self.breakers.reset(rule);
+        self.hourly.forget(rule);
     }
 }
 

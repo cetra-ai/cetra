@@ -6731,7 +6731,7 @@
           "evaluation"
         ],
         "summary": "Delete an evaluator",
-        "description": "Project members and above. API keys cannot call it.",
+        "description": "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
         "operationId": "delete_evaluator",
         "parameters": [
           {
@@ -6790,6 +6790,16 @@
           },
           "404": {
             "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
             "content": {
               "application/problem+json": {
                 "schema": {

@@ -1085,7 +1085,7 @@ export interface paths {
         post?: never;
         /**
          * Delete an evaluator
-         * @description Project members and above. API keys cannot call it.
+         * @description Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.
          */
         delete: operations["delete_evaluator"];
         options?: never;
@@ -10545,6 +10545,15 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

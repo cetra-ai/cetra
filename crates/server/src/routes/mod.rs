@@ -18,6 +18,7 @@ pub(crate) mod media;
 pub(crate) mod members;
 pub(crate) mod metrics;
 pub(crate) mod oauth;
+pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod otlp;
 pub(crate) mod projects;

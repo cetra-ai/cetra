@@ -154,6 +154,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::deletions::routes());
     routes.extend(crate::routes::score_definitions::routes());
     routes.extend(crate::routes::evaluators::routes());
+    routes.extend(crate::routes::online_rules::routes());
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());
     routes.extend(crate::routes::sql::routes());

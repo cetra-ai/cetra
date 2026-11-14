@@ -56,7 +56,6 @@ impl HourlyCaps {
     }
 
     /// Matches dropped in `now`'s UTC hour.
-    #[allow(dead_code)] // I3.8 uses it.
     pub(crate) fn dropped(&self, rule: Uuid, now: i64) -> u64 {
         let hour = now.div_euclid(HOUR_NS);
         self.lock()
@@ -66,7 +65,6 @@ impl HourlyCaps {
     }
 
     /// Drops the rule's count (deleted).
-    #[allow(dead_code)] // I3.8 uses it.
     pub(crate) fn forget(&self, rule: Uuid) {
         self.lock().remove(&rule);
     }

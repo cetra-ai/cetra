@@ -39,7 +39,6 @@ impl Breakers {
     }
 
     /// Clears the rule's window (resume, a connection key change, delete).
-    #[allow(dead_code)] // I3.8 uses it.
     pub(crate) fn reset(&self, rule: Uuid) {
         self.lock().remove(&rule);
     }

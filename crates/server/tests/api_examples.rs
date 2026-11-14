@@ -31,7 +31,9 @@ use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use llmobs_server::api::members::{OrgMember, ProjectMember};
 use llmobs_server::api::metrics::MetricsResponse;
-use llmobs_server::api::online_rules::{CreateOnlineRuleRequest, OnlineRule, OnlineRulePage};
+use llmobs_server::api::online_rules::{
+    CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, UpdateOnlineRuleRequest,
+};
 use llmobs_server::api::openapi::openapi;
 use llmobs_server::api::payload::Payload;
 use llmobs_server::api::saved_views::SavedView;
@@ -426,6 +428,11 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
+    let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateOnlineRuleRequest>(&update_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-update.json: {error}"));
     let test_text = fs::read_to_string(api_dir().join("requests/evaluator-test.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<EvaluatorTestRequest>(&test_text)
@@ -450,6 +457,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator_test", "requests/evaluator-test.json"),
         ("post_evaluator_run", "requests/evaluator-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
+        ("patch_online_rule", "requests/online-rule-update.json"),
         (
             "post_score_definition",
             "requests/score-definition-create.json",

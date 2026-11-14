@@ -474,6 +474,25 @@ pub(crate) async fn clear_budget_pauses(
     parse_ids(ids)
 }
 
+/// The ids of every rule whose evaluator uses `connection_id`, in any project.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn rule_ids_of_connection(
+    conn: &mut SqliteConnection,
+    connection_id: Uuid,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM online_rules \
+         WHERE evaluator_id IN (SELECT id FROM evaluators WHERE connection_id = ?)",
+    )
+    .bind(connection_id.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    parse_ids(ids)
+}
+
 #[derive(sqlx::FromRow)]
 struct RuleRecord {
     id: String,

@@ -29,6 +29,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::connections::{self, ConnectionFields, ConnectionRow};
 use crate::meta::evaluators;
+use crate::meta::online_rules as rules;
 
 use super::orgs::page_named;
 
@@ -270,6 +271,7 @@ async fn update_llm_connection(
     let org_id = access.org.id;
     let user_id = user.id;
     let now = state.clock.now_ns();
+    let key_sent = key.is_some();
     let updated = state
         .meta
         .write(move |conn| {
@@ -314,14 +316,27 @@ async fn update_llm_connection(
                     max_concurrency: max_concurrency.unwrap_or(row.max_concurrency),
                     requests_per_minute: requests_per_minute.unwrap_or(row.requests_per_minute),
                 };
-                connections::update_connection(conn, org_id, id, fields, now).await
+                let Some(row) =
+                    connections::update_connection(conn, org_id, id, fields, now).await?
+                else {
+                    return Ok(None);
+                };
+                if !key_sent {
+                    return Ok(Some((row, Vec::new(), Vec::new())));
+                }
+                // A new key clears the status and the connection's pauses (D-I-5, D-I-14).
+                connections::set_connection_status(conn, id, "ok", None, now).await?;
+                let resumed = rules::resume_connection_pauses(conn, id, now).await?;
+                let using = rules::rule_ids_of_connection(conn, id).await?;
+                Ok(Some((row, resumed, using)))
             })
         })
         .await?;
-    let Some(row) = updated else {
+    let Some((row, resumed, using)) = updated else {
         return Err(ApiError::NotFound);
     };
     state.connections.forget(id);
+    after_connection_write(&state, id, &using, &resumed, "connection key changed");
     tracing::info!(
         target: "audit",
         connection_id = %id,
@@ -483,10 +498,13 @@ async fn test_connection(
     // Best effort: the provider was called, so a failed status write must not
     // lose the test result.
     let status_write = if result.ok {
-        if row.status != "ok" {
-            set_status(&state, id, "ok", None, now).await
-        } else {
-            Ok(())
+        // One write sets `ok` and resumes the `'connection'` pauses (D-I-5, D-I-14).
+        match recover_connection(&state, id, row.status != "ok", now).await {
+            Ok(resumed) => {
+                after_connection_write(&state, id, &resumed, &resumed, "connection test");
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
     } else if pause_class && explicit.is_none() {
         // Only a pause on the connection's own default model marks it failing:
@@ -519,6 +537,57 @@ async fn test_connection(
         "llm connection tested"
     );
     Ok(error::Json(result))
+}
+
+/// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
+/// write. Returns the resumed rules.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the write fails.
+async fn recover_connection(
+    state: &AppState,
+    id: Uuid,
+    set_ok: bool,
+    now: i64,
+) -> Result<Vec<Uuid>, MetaError> {
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if set_ok {
+                    connections::set_connection_status(conn, id, "ok", None, now).await?;
+                }
+                rules::resume_connection_pauses(conn, id, now).await
+            })
+        })
+        .await
+}
+
+/// After a connection write: the breakers of `reset` start over, each resumed rule is audited,
+/// and the dispatcher wakes when there is something to run (D-I-14).
+fn after_connection_write(
+    state: &AppState,
+    connection: Uuid,
+    reset: &[Uuid],
+    resumed: &[Uuid],
+    reason: &'static str,
+) {
+    for rule in reset {
+        state.eval.breakers.reset(*rule);
+    }
+    for rule in resumed {
+        tracing::info!(
+            target: "audit",
+            rule_id = %rule,
+            connection_id = %connection,
+            reason,
+            "online rule resumed"
+        );
+    }
+    if !reset.is_empty() {
+        state.eval.wake();
+    }
 }
 
 /// Stores a connection's new `status` without touching `updated_at` (D-I-5).
@@ -824,7 +893,9 @@ mod tests {
     use super::*;
     use crate::api::account::OrgRole;
     use crate::auth::session::start_session;
+    use crate::meta::evaluators::EvaluatorFields;
     use crate::meta::members::add_org_member;
+    use crate::meta::online_rules::{PAUSE_CONNECTION, PAUSE_ERRORS};
     use crate::meta::users::{NewUser, insert_user};
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
     use crate::test_support::{TestApp, TestResponse, capture_logs};
@@ -1007,6 +1078,158 @@ mod tests {
 
     fn text(response: &TestResponse) -> String {
         String::from_utf8_lossy(&response.body).into_owned()
+    }
+
+    /// Two rules of one judge on `connection`: one paused `'connection'`, one paused `'errors'`.
+    /// Returns their ids in that order.
+    async fn paused_rules(
+        app: &TestApp,
+        seeded: &crate::test_support::Seeded,
+        connection: Uuid,
+    ) -> (Uuid, Uuid) {
+        let (project, now) = (seeded.project.id, app.state.clock.now_ns());
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let judge = Uuid::now_v7();
+                    evaluators::insert_evaluator(
+                        conn,
+                        judge,
+                        project,
+                        "llm_judge",
+                        EvaluatorFields {
+                            name: "relevance".to_owned(),
+                            config: json!({
+                                "connection_id": connection,
+                                "model": "gpt-test",
+                                "prompt": "Q {{ input }}",
+                                "output": {"type": "boolean"},
+                                "include_reason": false,
+                                "temperature": null,
+                                "max_output_tokens": 1024,
+                                "timeout_ms": 60000
+                            })
+                            .to_string(),
+                            output_score: json!({"name": "relevance", "data_type": "boolean"})
+                                .to_string(),
+                            connection_id: Some(connection),
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    let mut ids = Vec::new();
+                    for (name, reason) in
+                        [("connection", PAUSE_CONNECTION), ("errors", PAUSE_ERRORS)]
+                    {
+                        let id = Uuid::now_v7();
+                        rules::insert_rule(
+                            conn,
+                            rules::NewRule {
+                                id,
+                                project_id: project,
+                                evaluator_id: judge,
+                                target: "trace".to_owned(),
+                                created_by: None,
+                            },
+                            rules::RuleFields {
+                                name: name.to_owned(),
+                                filter: None,
+                                variable_mapping: r#"{"input":"trace.input"}"#.to_owned(),
+                                sample_rate: 1.0,
+                                budget_usd: None,
+                                budget_period: None,
+                                enabled: true,
+                            },
+                            now,
+                        )
+                        .await?;
+                        rules::pause_rule(conn, id, reason, None, now).await?;
+                        ids.push(id);
+                    }
+                    Ok((ids[0], ids[1]))
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn paused_reason_of(app: &TestApp, id: Uuid) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT paused_reason FROM online_rules WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_test_resumes_connection_pauses() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &mock).await;
+        let (by_connection, by_errors) = paused_rules(&app, &seeded, id).await;
+
+        let response = test(&app, &seeded.cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(paused_reason_of(&app, by_connection).await, None);
+        assert_eq!(
+            paused_reason_of(&app, by_errors).await.as_deref(),
+            Some(PAUSE_ERRORS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_change_resumes_and_sets_ok() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Keyed", "adapter": "openai", "api_key": "sk-test-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    connections::set_connection_status(conn, id, "failing", Some("401"), 1).await
+                })
+            })
+            .await
+            .unwrap();
+        let (by_connection, by_errors) = paused_rules(&app, &seeded, id).await;
+
+        let patched = patch(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"api_key": "sk-new-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+        let status: String = sqlx::query_scalar("SELECT status FROM llm_connections WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(status, "ok");
+        assert_eq!(paused_reason_of(&app, by_connection).await, None);
+        assert_eq!(
+            paused_reason_of(&app, by_errors).await.as_deref(),
+            Some(PAUSE_ERRORS)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
