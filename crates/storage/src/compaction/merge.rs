@@ -454,6 +454,7 @@ mod tests {
 
     async fn objects(dir: &tempfile::TempDir) -> Arc<Objects> {
         let config = StorageConfig {
+            delete_objects: true,
             data_dir: dir.path().to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: Some(ObjectStoreUrl::Local(dir.path().join("objects"))),

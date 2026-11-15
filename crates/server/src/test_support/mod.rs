@@ -889,6 +889,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         metrics_addr: None,
         restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -1439,6 +1440,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         metrics_addr: None,
         restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,

@@ -182,6 +182,8 @@ impl MediaGc {
             if self.hooks.fail(HookPoint::MediaBeforeDelete).is_some() {
                 return Err(MediaError::Fault);
             }
+            // With deletion off (D-N-34) this returns before `finish_drop`, so the drop stays
+            // `dropping` and its blobs are deleted by a later server.
             self.objects.delete(&path).await?;
             self.committer.delete_media_row(project, &sha).await?;
         }

@@ -518,6 +518,10 @@ pub enum ObjectError {
         #[source]
         source: Box<object_store::Error>,
     },
+    /// Object deletion is off (restore mode, D-N-34). Every deletion is refused, and
+    /// the caller keeps its catalog row for a later server to retry.
+    #[error("object deletion is off (restore mode)")]
+    DeletionOff,
 }
 
 impl ObjectError {
@@ -532,6 +536,7 @@ impl ObjectError {
             Self::InvalidPath => "invalid_path",
             Self::Client { .. } => "client",
             Self::SyncFailed => "sync_failed",
+            Self::DeletionOff => "deletion_off",
         }
     }
 
@@ -563,6 +568,14 @@ impl ObjectError {
             source: Box::new(source),
         }
     }
+}
+
+/// The object store did not answer a probe (`Storage::probe_objects`).
+#[derive(Debug, thiserror::Error)]
+pub enum ProbeError {
+    /// Neither the HEAD nor the PUT of the marker succeeded. The text names no key and no host.
+    #[error("the object store is unreachable")]
+    Unreachable,
 }
 
 /// Encoding a partition as one Parquet file failed.

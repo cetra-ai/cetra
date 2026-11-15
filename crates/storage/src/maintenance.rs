@@ -52,6 +52,12 @@ impl Maintenance {
         config: StorageConfig,
         remote: Option<(Arc<dyn ObjectStore>, PutSizes)>,
     ) -> Result<Self, OpenError> {
+        // `gc-orphans` must delete even when the server's config is in restore mode
+        // (D-N-34): the drill runs it with the same `llmobs.toml`.
+        let config = StorageConfig {
+            delete_objects: true,
+            ..config
+        };
         #[allow(clippy::default_constructed_unit_structs)]
         let hooks = Hooks::default();
         let (lock, committer, objects) = crate::open_shared(&config, &hooks, remote).await?;
@@ -123,6 +129,7 @@ mod tests {
 
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: bytesize::ByteSize::b(0),
             object_store: None,

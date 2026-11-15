@@ -101,6 +101,11 @@ impl Disk {
         self.free.load(Ordering::Acquire)
     }
 
+    /// `storage.min_free_bytes`: the floor [`Self::low`] compares with.
+    pub(crate) fn min_free(&self) -> u64 {
+        self.min_free
+    }
+
     /// Bytes held by running compaction jobs.
     #[cfg(test)]
     pub(crate) fn reserved(&self) -> u64 {

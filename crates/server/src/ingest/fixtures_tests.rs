@@ -440,6 +440,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         metrics_addr: None,
         restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             object_store: None,
             s3: S3Config::default(),

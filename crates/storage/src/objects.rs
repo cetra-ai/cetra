@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::catalog::{FileId, FileTable};
 use crate::config::{ObjectStoreUrl, S3Config, StorageConfig};
-use crate::error::ObjectError;
+use crate::error::{ObjectError, ProbeError};
 use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::read_cache::{CacheStore, ReadCache, cached_name};
@@ -44,6 +44,19 @@ use tokio::io::AsyncReadExt;
 ///
 /// File URLs used by the providers are `llmobs://objects/tables/...`.
 pub(crate) const OBJECT_STORE_URL: &str = "llmobs://objects";
+
+/// The marker [`Objects::probe`] HEADs and, if that fails, writes (D-N-36). Outside
+/// `tables/` and `media/`, so GC, orphan collection and backups never see it.
+const PROBE_KEY: &str = "_probe/readyz";
+
+/// The kind of a probe's store error, without its text (which holds the URL).
+fn probe_kind(error: &object_store::Error) -> &'static str {
+    match error {
+        object_store::Error::NotFound { .. } => "not_found",
+        object_store::Error::PermissionDenied { .. } => "permission_denied",
+        _ => "other",
+    }
+}
 
 /// When an upload switches to multipart, and the part size (spec 03 §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +95,9 @@ pub(crate) struct Objects {
     sync_failed: Arc<AtomicBool>,
     /// The multipart thresholds of remote uploads. [`PutSizes::S3`] outside tests.
     put_sizes: PutSizes,
+    /// `false` in restore mode (D-N-34): every deletion is refused with
+    /// [`ObjectError::DeletionOff`]. Writes are not affected.
+    delete_objects: bool,
 }
 
 #[derive(Debug)]
@@ -125,6 +141,7 @@ impl Objects {
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
                     put_sizes: PutSizes::S3,
+                    delete_objects: config.delete_objects,
                 })
             }
             ObjectStoreUrl::S3 { bucket, prefix } => {
@@ -139,6 +156,7 @@ impl Objects {
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
                     put_sizes: PutSizes::S3,
+                    delete_objects: config.delete_objects,
                 })
             }
         }
@@ -186,6 +204,7 @@ impl Objects {
             hooks,
             sync_failed: Arc::new(AtomicBool::new(false)),
             put_sizes,
+            delete_objects: true,
         })
     }
 
@@ -209,6 +228,30 @@ impl Objects {
     /// corrupt cached block cannot make a healthy file look corrupt (spec 03 §10).
     pub(crate) fn raw_store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.raw)
+    }
+
+    /// HEADs [`PROBE_KEY`] and, when that fails for any reason, writes it (D-N-36). The
+    /// store answered when either call succeeds. A missing marker is a 404 from S3, but a
+    /// 403 when the credentials lack `s3:ListBucket`, so any HEAD error leads to the PUT.
+    /// Only the kinds of the two errors are logged: their text holds the URL.
+    pub(crate) async fn probe(&self) -> Result<(), ProbeError> {
+        let key = ObjectPath::from(PROBE_KEY);
+        let raw = self.raw_store();
+        let head = match raw.head(&key).await {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        match raw.put(&key, PutPayload::from_static(b"")).await {
+            Ok(_) => Ok(()),
+            Err(put) => {
+                tracing::debug!(
+                    head = probe_kind(&head),
+                    put = probe_kind(&put),
+                    "object store probe failed"
+                );
+                Err(ProbeError::Unreachable)
+            }
+        }
     }
 
     /// Registers `store` under [`OBJECT_STORE_URL`].
@@ -296,6 +339,9 @@ impl Objects {
 
     /// Deletes one object. A missing object is success. Used by GC.
     pub(crate) async fn delete(&self, path: &str) -> Result<(), ObjectError> {
+        if !self.delete_objects {
+            return Err(ObjectError::DeletionOff);
+        }
         self.refuse_after_sync_failure()?;
         validate_key(path)?;
         match &self.kind {
@@ -366,6 +412,9 @@ impl Objects {
 
     /// Size of `path`, then [`Self::delete`]. A missing object is `0`.
     pub(crate) async fn delete_len(&self, path: &str) -> Result<u64, ObjectError> {
+        if !self.delete_objects {
+            return Err(ObjectError::DeletionOff);
+        }
         self.refuse_after_sync_failure()?;
         validate_key(path)?;
         match &self.kind {
@@ -1290,6 +1339,7 @@ mod tests {
 
     fn local_config(dir: &std::path::Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: Some(ObjectStoreUrl::Local(dir.join("objects"))),
