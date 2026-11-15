@@ -503,7 +503,7 @@ mod tests {
     use llmobs_core::batch::spans_to_record_batch;
     use llmobs_core::ids::ProjectId;
     use llmobs_core::span::Span;
-    use llmobs_storage::{QueryOptions, Storage};
+    use llmobs_storage::Storage;
 
     use super::*;
     use crate::config::Secret;
@@ -532,7 +532,13 @@ mod tests {
     /// How many span rows `project` reads back.
     async fn stored_rows(storage: &Storage, project: ProjectId) -> usize {
         let query = storage
-            .query(project, QueryOptions::default())
+            .query(
+                project,
+                crate::entitlements::query_options(
+                    crate::entitlements::Visibility::unlimited(),
+                    None,
+                ),
+            )
             .await
             .unwrap();
         let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
