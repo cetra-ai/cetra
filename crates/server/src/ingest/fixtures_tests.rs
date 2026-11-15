@@ -319,7 +319,7 @@ async fn check_case(app: &TestApp, seeded: &Seeded, case: &Case, prices: &PriceT
         let read = app
             .state
             .storage
-            .get_media(project.id, &sha, None)
+            .get_media(project.id, &sha, None, None)
             .await
             .unwrap_or_else(|error| panic!("{label}: media {hash} is not stored: {error}"));
         assert_eq!(

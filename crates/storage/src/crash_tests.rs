@@ -657,7 +657,7 @@ async fn every_media_hook_aborts_safely() {
             "{name}: media rows and objects disagree after the put"
         );
         let read = storage
-            .get_media(project(), &media_blob().sha256, None)
+            .get_media(project(), &media_blob().sha256, None, None)
             .await
             .unwrap();
         assert_eq!(read.bytes, media_blob().bytes, "{name}: the blob's bytes");
@@ -876,6 +876,7 @@ fn media_blob() -> MediaBlob {
         sha256: Sha256::digest(bytes.as_ref()).into(),
         mime_type: "image/png".to_owned(),
         bytes,
+        newest_span_start: 0,
     }
 }
 

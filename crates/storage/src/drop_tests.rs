@@ -41,6 +41,7 @@ fn blob_of(bytes: &[u8], mime_type: &str) -> MediaBlob {
         sha256: sha256_of(&bytes),
         mime_type: mime_type.to_owned(),
         bytes,
+        newest_span_start: 0,
     }
 }
 
@@ -296,13 +297,13 @@ async fn a_drop_hides_the_project_and_deletes_its_data() {
     );
     assert!(
         matches!(
-            storage.get_media(project(), &p_sha, None).await,
+            storage.get_media(project(), &p_sha, None, None).await,
             Err(MediaError::NotFound)
         ),
         "a dropped project's blob was found"
     );
     let read = storage
-        .get_media(kept_project(), &q_sha, None)
+        .get_media(kept_project(), &q_sha, None, None)
         .await
         .unwrap();
     assert_eq!(read.bytes, Bytes::from_static(b"media-of-q"));

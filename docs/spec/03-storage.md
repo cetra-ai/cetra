@@ -197,6 +197,7 @@ CREATE TABLE media (                   -- §9
   project_id TEXT NOT NULL, sha256 TEXT NOT NULL,   -- 64 lowercase hex
   mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
   first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+  newest_span_start INTEGER NOT NULL DEFAULT 0,   -- ns, newest span that referenced it (D-P-21)
   PRIMARY KEY (project_id, sha256)
 );
 
@@ -437,7 +438,7 @@ From then on, a flush drops rows of that project older than the watermark, queri
 
 Media blobs live under `media/<project_id>/<sha256>` (64 lowercase hex) in the object store; their index is the `media` table of `catalog.db`.
 
-`put_media` checks that the SHA-256 of the bytes matches the given hash, and fails otherwise (D-A1-6). For a hash already stored it only refreshes `last_seen_at`. Otherwise it records the path in `staged_objects`, writes the blob durably (local: temp file, `sync_all`, rename, directory fsync; S3: a plain `PutObject`, since the name is the content's hash and an overwrite writes the same bytes), then inserts the `media` row and removes the staged row in one transaction. Staged-object GC deletes an object left without a row, and leaves alone a staged path whose `media` row exists. `get_media` reads a blob, whole or a byte range.
+`put_media` checks that the SHA-256 of the bytes matches the given hash, and fails otherwise (D-A1-6). For a hash already stored it only refreshes `last_seen_at`. Otherwise it records the path in `staged_objects`, writes the blob durably (local: temp file, `sync_all`, rename, directory fsync; S3: a plain `PutObject`, since the name is the content's hash and an overwrite writes the same bytes), then inserts the `media` row and removes the staged row in one transaction. Staged-object GC deletes an object left without a row, and leaves alone a staged path whose `media` row exists. `get_media` reads a blob, whole or a byte range. Each row keeps `newest_span_start`, the newest `start_time` of the spans that referenced the blob (raised by every `put_media`); `get_media` with an org's `visible_from` answers not found when it is older (D-P-21).
 
 **GC** runs daily, and for one project right after one of its deletions is applied (§7). For each project, it reads only the `media_refs` column of `spans` (a cheap projection, through the same read path as queries, so rows hidden by tombstones don't count) to build the set of live hashes. It then deletes the objects and `media` rows that are absent from the set and whose `last_seen_at` is more than 1 h old. The age guard covers a span appended just after its blob; since every `put_media` refreshes `last_seen_at`, a blob reused by new spans is never collected under them (D-A1-6).
 

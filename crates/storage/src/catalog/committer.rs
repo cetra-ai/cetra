@@ -418,20 +418,24 @@ impl Committer {
         }
     }
 
-    /// Refreshes the blob's `last_seen_at` to `max(last_seen_at, now)` (spec 03
-    /// §9). `true` when the row exists.
+    /// Refreshes the blob's `last_seen_at` to `max(last_seen_at, now)` and its
+    /// `newest_span_start` to the larger of the two (spec 03 §9, D-P-21). `true`
+    /// when the row exists.
     pub(crate) async fn touch_media(
         &self,
         project: ProjectId,
         sha: &str,
         now: i64,
+        newest_span_start: i64,
     ) -> Result<bool, CatalogError> {
         let mut inner = self.inner.lock().await;
         let updated = sqlx::query(
-            "UPDATE media SET last_seen_at = MAX(last_seen_at, ?)
+            "UPDATE media SET last_seen_at = MAX(last_seen_at, ?),
+                 newest_span_start = MAX(newest_span_start, ?)
              WHERE project_id = ? AND sha256 = ?",
         )
         .bind(now)
+        .bind(newest_span_start)
         .bind(project.to_string())
         .bind(sha)
         .execute(&mut inner.connection)
@@ -453,11 +457,13 @@ impl Committer {
         Ok(())
     }
 
-    /// In one transaction: `INSERT OR IGNORE` the `media` row (`first_seen_at =
-    /// last_seen_at = now`), then delete the `staged_objects` row of `path`
+    /// In one transaction: insert the `media` row (`first_seen_at = last_seen_at =
+    /// now`), or on a conflict raise its `last_seen_at` and `newest_span_start` to
+    /// the larger value, then delete the `staged_objects` row of `path`
     /// (spec 03 §9). A dropped project is refused with `Ok(false)`: the
     /// transaction rolls back and the staged row stays, so staged-object GC
     /// deletes the object later.
+    #[allow(clippy::too_many_arguments)] // the columns of one media row, and its object path
     pub(crate) async fn insert_media(
         &self,
         project: ProjectId,
@@ -466,6 +472,7 @@ impl Committer {
         size: u64,
         path: &str,
         now: i64,
+        newest_span_start: i64,
     ) -> Result<bool, CatalogError> {
         let stored_size = i64::try_from(size)
             .map_err(|_| CatalogError::corrupt("integer does not fit the catalog"))?;
@@ -484,10 +491,16 @@ impl Committer {
             let _ = transaction.rollback().await;
             return Ok(false);
         }
+        // Two puts of one new blob may both get past `touch_media`: the conflict
+        // keeps the newer span start of the two.
         if let Err(error) = sqlx::query(
-            "INSERT OR IGNORE INTO media (
-                project_id, sha256, mime_type, size_bytes, first_seen_at, last_seen_at
-             ) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO media (
+                project_id, sha256, mime_type, size_bytes, first_seen_at, last_seen_at,
+                newest_span_start
+             ) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (project_id, sha256) DO UPDATE SET
+                last_seen_at = MAX(media.last_seen_at, excluded.last_seen_at),
+                newest_span_start = MAX(media.newest_span_start, excluded.newest_span_start)",
         )
         .bind(project.to_string())
         .bind(sha)
@@ -495,6 +508,7 @@ impl Committer {
         .bind(stored_size)
         .bind(now)
         .bind(now)
+        .bind(newest_span_start)
         .execute(transaction.as_mut())
         .await
         .map_err(CatalogError::db)
@@ -515,24 +529,25 @@ impl Committer {
         Ok(true)
     }
 
-    /// `(mime_type, size)` of the blob's row, or `None`.
+    /// `(mime_type, size, newest_span_start)` of the blob's row, or `None`.
     pub(crate) async fn media_row(
         &self,
         project: ProjectId,
         sha: &str,
-    ) -> Result<Option<(String, u64)>, CatalogError> {
+    ) -> Result<Option<(String, u64, i64)>, CatalogError> {
         let mut inner = self.inner.lock().await;
-        let row: Option<(String, i64)> = sqlx::query_as(
-            "SELECT mime_type, size_bytes FROM media WHERE project_id = ? AND sha256 = ?",
+        let row: Option<(String, i64, i64)> = sqlx::query_as(
+            "SELECT mime_type, size_bytes, newest_span_start FROM media
+             WHERE project_id = ? AND sha256 = ?",
         )
         .bind(project.to_string())
         .bind(sha)
         .fetch_optional(&mut inner.connection)
         .await
         .map_err(CatalogError::db)?;
-        row.map(|(mime_type, size)| {
+        row.map(|(mime_type, size, newest)| {
             let size = u64::try_from(size).map_err(|_| CatalogError::corrupt("invalid size"))?;
-            Ok((mime_type, size))
+            Ok((mime_type, size, newest))
         })
         .transpose()
     }
@@ -1836,7 +1851,7 @@ mod tests {
             .fetch_one(&mut again)
             .await
             .unwrap();
-        assert_eq!(migrations, 6);
+        assert_eq!(migrations, 7);
         let indexes: Vec<String> = sqlx::query_scalar(
             "SELECT name FROM sqlite_master
              WHERE type = 'index' AND name LIKE 'data_files_%'

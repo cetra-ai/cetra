@@ -764,6 +764,7 @@ impl TestApp {
             .await
             .unwrap();
 
+        let starts = crate::ingest::newest_span_starts(&spans);
         let media_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/media");
         for entry in std::fs::read_dir(media_dir).unwrap() {
             let path = entry.unwrap().path();
@@ -773,10 +774,12 @@ impl TestApp {
             let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
             let sha256: [u8; 32] = hex::decode(stem).unwrap().try_into().unwrap();
             let bytes = std::fs::read(&path).unwrap();
+            let newest_span_start = starts.get(stem).copied().unwrap_or(i64::MIN);
             let blob = MediaBlob {
                 sha256,
                 mime_type: "image/png".to_owned(),
                 bytes: Bytes::from(bytes),
+                newest_span_start,
             };
             self.state.storage.put_media(project, blob).await.unwrap();
         }

@@ -8,6 +8,7 @@ mod fixtures_tests;
 pub(crate) mod grpc;
 pub(crate) mod otlp;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -345,9 +346,13 @@ impl Ingest {
         normalized: Normalized,
     ) -> Result<CommitReceipt, IngestError> {
         let Normalized { spans, media, .. } = normalized;
+        let starts = newest_span_starts(&spans);
         let blobs = media
             .into_iter()
-            .map(store_blob)
+            .map(|blob| {
+                let newest = starts.get(&blob.sha256).copied().unwrap_or(i64::MIN);
+                store_blob(blob, newest)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut stored = 0_usize;
         let mut puts = stream::iter(blobs)
@@ -425,14 +430,31 @@ pub(crate) async fn commit_in_task(
     task.await.map_err(IngestError::Join)?
 }
 
+/// The newest `start_time` of the spans that reference each blob, keyed by the blob's hash
+/// (the spans' `media_refs`, hex). A blob no span references has no entry (D-P-21).
+pub(crate) fn newest_span_starts(spans: &[llmobs_core::span::Span]) -> HashMap<String, i64> {
+    let mut newest: HashMap<String, i64> = HashMap::new();
+    for span in spans {
+        for sha in &span.media_refs {
+            newest
+                .entry(sha.clone())
+                .and_modify(|start| *start = (*start).max(span.start_time))
+                .or_insert(span.start_time);
+        }
+    }
+    newest
+}
+
 /// Converts a normalized blob to the storage type, checking that its hash is 32 bytes.
-fn store_blob(blob: CoreBlob) -> Result<MediaBlob, IngestError> {
+/// `newest_span_start` is the newest `start_time` of the spans that reference it.
+fn store_blob(blob: CoreBlob, newest_span_start: i64) -> Result<MediaBlob, IngestError> {
     let digest = hex::decode(&blob.sha256).map_err(|_| IngestError::MediaHash)?;
     let sha256 = <[u8; 32]>::try_from(digest.as_slice()).map_err(|_| IngestError::MediaHash)?;
     Ok(MediaBlob {
         sha256,
         mime_type: blob.mime_type,
         bytes: Bytes::from(blob.bytes),
+        newest_span_start,
     })
 }
 
@@ -541,7 +563,7 @@ mod tests {
 
     use super::*;
     use crate::meta::projects::ProjectRow;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, dataset_span};
 
     fn fixture(relative: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -916,7 +938,7 @@ mod tests {
         let read = app
             .state
             .storage
-            .get_media(seeded.project.id, &sha, None)
+            .get_media(seeded.project.id, &sha, None, None)
             .await
             .expect("the blob is stored");
         assert_eq!(read.bytes.as_ref(), blob.bytes.as_slice());
@@ -1446,5 +1468,23 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         handle.abort();
         handle.await.expect_err("an aborted task does not finish")
+    }
+
+    /// D-P-21: a blob's newest span start is the latest `start_time` of the spans that reference it.
+    #[test]
+    fn newest_span_starts_takes_the_latest_start_per_hash() {
+        const A: &str = "aa00000000000000000000000000000000000000000000000000000000000000";
+        const B: &str = "bb00000000000000000000000000000000000000000000000000000000000000";
+        let span = |start: i64, refs: &[&str]| {
+            let mut span = dataset_span(0);
+            span.start_time = start;
+            span.media_refs = refs.iter().map(|sha| (*sha).to_owned()).collect();
+            span
+        };
+        let spans = [span(5, &[A]), span(9, &[A]), span(3, &[B])];
+        let starts = newest_span_starts(&spans);
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[A], 9);
+        assert_eq!(starts[B], 3);
     }
 }

@@ -738,7 +738,11 @@ impl Storage {
             return Err(MediaError::HashMismatch);
         }
         let sha = hex::encode(blob.sha256);
-        if self.committer.touch_media(project, &sha, now).await? {
+        if self
+            .committer
+            .touch_media(project, &sha, now, blob.newest_span_start)
+            .await?
+        {
             return Ok(());
         }
         let path = Objects::media_path(project, &sha);
@@ -753,7 +757,15 @@ impl Storage {
         // caught here (spec 03 §7); the staged row stays for GC.
         if !self
             .committer
-            .insert_media(project, &sha, &blob.mime_type, size, &path, now)
+            .insert_media(
+                project,
+                &sha,
+                &blob.mime_type,
+                size,
+                &path,
+                now,
+                blob.newest_span_start,
+            )
             .await?
         {
             return Err(MediaError::ProjectDropped);
@@ -763,20 +775,27 @@ impl Storage {
 
     /// The blob of `sha256`, whole or `range` of it (end exclusive), with its
     /// MIME type and the whole blob's size (spec 03 §9). A dropped project has
-    /// nothing to read (spec 03 §7).
+    /// nothing to read (spec 03 §7). `visible_from` hides a blob whose newest
+    /// span is older (D-P-21).
     pub async fn get_media(
         &self,
         project: ProjectId,
         sha256: &[u8; 32],
         range: Option<Range<u64>>,
+        visible_from: Option<i64>,
     ) -> Result<MediaRead, MediaError> {
         if self.published.load().projects.is_dropped(project) {
             return Err(MediaError::NotFound);
         }
         let sha = hex::encode(sha256);
-        let Some((mime_type, size)) = self.committer.media_row(project, &sha).await? else {
+        let Some((mime_type, size, newest_span_start)) =
+            self.committer.media_row(project, &sha).await?
+        else {
             return Err(MediaError::NotFound);
         };
+        if visible_from.is_some_and(|from| newest_span_start < from) {
+            return Err(MediaError::NotFound);
+        }
         if let Some(range) = &range
             && (range.start >= range.end || range.end > size)
         {
@@ -2116,6 +2135,7 @@ mod tests {
             sha256: Sha256::digest(&bytes).into(),
             mime_type: "text/plain".to_owned(),
             bytes,
+            newest_span_start: 0,
         };
 
         storage.disk().set_free_for_test(Some(10));

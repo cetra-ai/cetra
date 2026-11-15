@@ -494,7 +494,7 @@ mod tests {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-        assert_eq!(versions, 6);
+        assert_eq!(versions, 7);
     }
 
     #[tokio::test]
