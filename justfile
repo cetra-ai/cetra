@@ -37,6 +37,11 @@ test:
 model cases="500":
     LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 
+# Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
+# Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
+resources:
+    cargo test --workspace --all-features -- --ignored --test-threads=1 model_tests::resources::small_fs:: model_tests::resources::disk_full:: model_tests::resources::descriptors::
+
 # The storage model test on a remote store with injected S3 faults, in release mode (R4.5).
 model-s3 cases="200":
     LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3

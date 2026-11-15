@@ -10,6 +10,8 @@ use datafusion::execution::context::{SessionConfig, SessionContext};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 
+use llmobs_core::ids::ProjectId;
+
 use super::shape::{HOUR_NS, P, day, midnight};
 use crate::Storage;
 use crate::catalog::FileMeta;
@@ -61,19 +63,33 @@ pub(super) const REMOTE_PUT_SIZES: PutSizes = PutSizes {
     part: 5 * 1024 * 1024,
 };
 
-/// `model_config` for S3 mode (R4.4): the read cache is on, so every data-file read goes through
-/// it, and uploads and compaction run one at a time, so most calls are sequential and a seed
-/// usually replays. The data directory keeps the WAL and the catalog.
-pub(super) fn model_config_s3(dir: &std::path::Path) -> StorageConfig {
-    let mut config = model_config(dir);
+/// What S3 mode changes in `model_config` (R4.4): the read cache is on, so every data-file read
+/// goes through it, and uploads and compaction run one at a time, so most calls are sequential and
+/// a seed usually replays. The data directory keeps the WAL and the catalog.
+pub(super) fn s3_tweaks(config: &mut StorageConfig) {
     config.query.read_cache_bytes = Some(ByteSize::mib(64));
     config.query.target_partitions = 1;
     config.flush.upload_concurrency = 1;
     config.compaction.threads = 1;
-    config
 }
 
-/// The remote store of an S3-mode harness.
+/// Tokio worker threads of a life when [`HarnessOptions::workers`] is 0.
+const WORKERS: usize = 2;
+
+/// How a harness opens its lives (R5.1). `Default`: the system temp dir, local objects, 2 workers.
+#[derive(Default)]
+pub(super) struct HarnessOptions {
+    /// Parent of the data directory; `None` is the system temp dir.
+    pub(super) root: Option<std::path::PathBuf>,
+    /// The object store every life opens with, and the sizes its uploads switch to multipart at
+    /// (`Storage::open_with_store`). `None` opens local objects. The store is wrapped in a
+    /// [`ChaosStore`] with no schedule, so faults can be injected into it.
+    pub(super) store: Option<(Arc<dyn ObjectStore>, PutSizes)>,
+    /// Tokio worker threads per life; 0 means [`WORKERS`].
+    pub(super) workers: usize,
+}
+
+/// The remote store of a harness with an object store.
 pub(super) struct Remote {
     /// What storage writes to: faults are injected here.
     pub(super) chaos: ChaosStore,
@@ -89,7 +105,7 @@ pub(super) struct Life {
 }
 
 pub(super) struct Harness {
-    /// Kept so a harness made by `with_config` owns its directory. The data
+    /// Kept so a harness made by `with_options` owns its directory. The data
     /// directory is `data` below it, and the lossy shadow is `shadow`. An
     /// `attach`ed harness borrows its directory from the caller.
     _dir: Option<tempfile::TempDir>,
@@ -102,6 +118,8 @@ pub(super) struct Harness {
     crashes: Vec<CrashReport>,
     /// `None` in local mode.
     remote: Option<Remote>,
+    /// Tokio worker threads per life.
+    workers: usize,
     /// The `list` calls the orphan audits made (S3 mode). `check_full` expects exactly these
     /// and no others: storage never lists the bucket (spec 03 §5).
     pub(super) audit_lists: u64,
@@ -113,12 +131,12 @@ pub(super) struct Harness {
 /// flush off after 30 s, and the window must already be open by then.
 const SHUTDOWN_WINDOW: Duration = Duration::from_secs(29);
 
-/// Opens storage on `config`. In S3 mode the store is `remote`'s chaos store. Opening runs calm:
+/// Opens storage on `config`. With a store, it is `remote`'s chaos store. Opening runs calm:
 /// the schedule is off while the open runs, and the previous setting is restored after it (a
 /// store error during the open fails it by design, R4.6).
-fn open_life(config: &StorageConfig, remote: Option<&Remote>) -> Life {
+fn open_life(config: &StorageConfig, remote: Option<&Remote>, workers: usize) -> Life {
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(workers)
         .enable_all()
         .build()
         .expect("tokio runtime for a new life");
@@ -141,42 +159,36 @@ fn open_life(config: &StorageConfig, remote: Option<&Remote>) -> Life {
 }
 
 impl Harness {
-    /// A fresh temp dir, its data directory in lossy mode, and `model_config(data)` with `change`
-    /// applied, opened.
-    pub(super) fn with_config(change: impl FnOnce(&mut StorageConfig)) -> Self {
-        let dir = tempfile::TempDir::new().expect("temp dir for a model case");
-        let mut harness = Self::open_in(
-            &dir.path().join("data"),
-            &dir.path().join("shadow"),
-            None,
-            change,
-        );
-        harness._dir = Some(dir);
-        harness
-    }
-
-    /// S3 mode (R4.4): a fresh temp dir and `model_config_s3`, with `inner` behind a
-    /// [`ChaosStore`] as the object store. The read cache is on. `put_sizes` decides which
-    /// uploads are multipart.
-    pub(super) fn new_s3(inner: Arc<dyn ObjectStore>, put_sizes: PutSizes) -> Self {
-        let dir = tempfile::TempDir::new().expect("temp dir for a model case");
-        let remote = Remote {
-            chaos: ChaosStore::new(inner),
-            put_sizes,
+    /// A fresh temp dir (under `options.root` when set), its data directory in lossy mode, and
+    /// `model_config(data)` with `adjust` applied, opened. `adjust` runs after the store is chosen,
+    /// so it can make S3 mode's changes (`s3_tweaks`).
+    pub(super) fn with_options(
+        options: HarnessOptions,
+        adjust: impl FnOnce(&mut StorageConfig),
+    ) -> Self {
+        let dir = match &options.root {
+            Some(root) => tempfile::TempDir::new_in(root).expect("temp dir under the test root"),
+            None => tempfile::TempDir::new().expect("temp dir for a model case"),
+        };
+        let workers = if options.workers == 0 {
+            WORKERS
+        } else {
+            options.workers
         };
         let mut harness = Self::open_in(
             &dir.path().join("data"),
             &dir.path().join("shadow"),
-            Some(remote),
-            |_| {},
+            options.store,
+            workers,
+            adjust,
         );
         harness._dir = Some(dir);
         harness
     }
 
-    /// `with_config` with no change: `wal.sync = "always"`.
+    /// `with_options` with the defaults and `change` applied: `wal.sync = "always"`.
     pub(super) fn new() -> Self {
-        Self::with_config(|_| {})
+        Self::with_options(HarnessOptions::default(), |_| {})
     }
 
     /// Opens the existing directory `data` (created when missing) in lossy mode, with the shadow
@@ -187,7 +199,7 @@ impl Harness {
         shadow: &std::path::Path,
         seed: Option<u64>,
     ) -> Self {
-        let harness = Self::open_in(data, shadow, None, |_| {});
+        let harness = Self::open_in(data, shadow, None, WORKERS, |_| {});
         if let Some(seed) = seed {
             harness.lossy.crash_on_abort(seed);
         }
@@ -195,22 +207,23 @@ impl Harness {
     }
 
     /// Registers `data` as a lossy root with the shadow at `shadow`, and opens it under
-    /// `model_config(data)` (`model_config_s3(data)` with a `remote`) with `change` applied. The
-    /// caller sets `_dir` when it owns the paths.
+    /// `model_config(data)` with `change` applied. A `store` is wrapped in a chaos store and
+    /// opened with its put sizes. The caller sets `_dir` when it owns the paths.
     fn open_in(
         data: &std::path::Path,
         shadow: &std::path::Path,
-        remote: Option<Remote>,
+        store: Option<(Arc<dyn ObjectStore>, PutSizes)>,
+        workers: usize,
         change: impl FnOnce(&mut StorageConfig),
     ) -> Self {
         let lossy = Lossy::enable(data, shadow);
-        let mut config = if remote.is_some() {
-            model_config_s3(data)
-        } else {
-            model_config(data)
-        };
+        let remote = store.map(|(inner, put_sizes)| Remote {
+            chaos: ChaosStore::new(inner),
+            put_sizes,
+        });
+        let mut config = model_config(data);
         change(&mut config);
-        let life = Some(open_life(&config, remote.as_ref()));
+        let life = Some(open_life(&config, remote.as_ref(), workers));
         Self {
             _dir: None,
             data: data.to_path_buf(),
@@ -219,6 +232,7 @@ impl Harness {
             life,
             crashes: Vec::new(),
             remote,
+            workers,
             audit_lists: 0,
             faulty_read_errors: 0,
         }
@@ -275,7 +289,7 @@ impl Harness {
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.set_ending(false);
-        self.life = Some(open_life(&self.config, self.remote.as_ref()));
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
     /// Drop without shutdown, then a new life.
@@ -285,7 +299,7 @@ impl Harness {
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.set_ending(false);
-        self.life = Some(open_life(&self.config, self.remote.as_ref()));
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
     /// Drop without shutdown, apply a lossy crash with `seed` to the data directory, then a new
@@ -295,13 +309,13 @@ impl Harness {
     pub(super) fn lossy_crash(&mut self, seed: u64) {
         assert!(
             self.remote.is_none(),
-            "a lossy crash covers local files only, not an S3-mode harness"
+            "a lossy crash covers local files only, not a harness with an object store"
         );
         let Life { storage, runtime } = self.life.take().expect("a life");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.crashes.push(self.lossy.crash(seed));
-        self.life = Some(open_life(&self.config, self.remote.as_ref()));
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
     /// The reports of this case's lossy crashes, oldest first.
@@ -372,25 +386,25 @@ fn append_spans_of_trace_one(harness: &Harness, first_span: u8, count: u8) {
         .expect("append_spans on project A");
 }
 
-/// Rows of the spans table that a read of `PROJECT_A` sees.
-fn visible_span_rows(harness: &Harness) -> usize {
+/// Rows of the spans table that a read of `project` sees.
+pub(super) fn visible_span_rows(harness: &Harness, project: ProjectId) -> usize {
     harness.block_on(async {
         let storage = harness.storage();
         let query = storage
-            .query(P::A.id(), Default::default())
+            .query(project, Default::default())
             .await
-            .expect("query on project A");
+            .expect("query on the project");
         let ctx =
             SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
         ctx.register_table("spans_t", Arc::clone(&query.spans))
-            .expect("register spans on project A");
+            .expect("register spans of the project");
         let batches = ctx
             .sql("SELECT trace_id FROM spans_t")
             .await
-            .expect("plan spans read on project A")
+            .expect("plan spans read of the project")
             .collect()
             .await
-            .expect("run spans read on project A");
+            .expect("run spans read of the project");
         batches.iter().map(|batch| batch.num_rows()).sum()
     })
 }
@@ -404,7 +418,7 @@ fn crash_keeps_acknowledged_appends() {
         "nothing flushed before the crash"
     );
     harness.crash();
-    assert_eq!(visible_span_rows(&harness), 3);
+    assert_eq!(visible_span_rows(&harness, P::A.id()), 3);
 }
 
 #[test]
@@ -433,5 +447,5 @@ fn restart_after_crash_twice() {
     harness.crash();
     append_spans_of_trace_one(&harness, 3, 2);
     harness.restart();
-    assert_eq!(visible_span_rows(&harness), 5);
+    assert_eq!(visible_span_rows(&harness, P::A.id()), 5);
 }

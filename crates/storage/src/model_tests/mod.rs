@@ -7,6 +7,7 @@ mod hook_crash;
 mod model;
 mod observe;
 mod ops;
+mod resources;
 mod shape;
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -16,7 +17,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 
 use check::{check_deletions, check_dropped, check_full, check_no_leaked_uploads, check_quick};
-use harness::{Harness, MODEL_PUT_SIZES, REMOTE_PUT_SIZES};
+use harness::{Harness, HarnessOptions, MODEL_PUT_SIZES, REMOTE_PUT_SIZES, s3_tweaks};
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
@@ -119,7 +120,11 @@ fn run_case(ops: &[Op]) {
 /// Runs `ops` and checks every read. Returns the harness, so a test can read what its lossy
 /// crashes did.
 fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness {
-    run_with(Harness::with_config(change), ops, None)
+    run_with(
+        Harness::with_options(HarnessOptions::default(), change),
+        ops,
+        None,
+    )
 }
 
 /// `LLMOBS_MODEL_S3_REMOTE=1` (R4.8): the S3-mode case runs against the bucket of the
@@ -216,7 +221,13 @@ fn run_case_s3(
     inner: Arc<dyn ObjectStore>,
     put_sizes: PutSizes,
 ) -> Harness {
-    let harness = Harness::new_s3(inner, put_sizes);
+    let harness = Harness::with_options(
+        HarnessOptions {
+            store: Some((inner, put_sizes)),
+            ..HarnessOptions::default()
+        },
+        s3_tweaks,
+    );
     let seed = faults.map(|(seed, _)| seed);
     if let Some((seed, rates)) = faults {
         harness
@@ -858,7 +869,13 @@ fn a_high_rate_run_injects_faults() {
 /// held call fails with its fault counted, so its failure is allowed.
 #[test]
 fn allow_failure_needs_an_injected_fault() {
-    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let harness = Harness::with_options(
+        HarnessOptions {
+            store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+            ..HarnessOptions::default()
+        },
+        s3_tweaks,
+    );
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store")
@@ -886,7 +903,13 @@ fn allow_failure_needs_an_injected_fault() {
 #[test]
 #[should_panic(expected = "multipart uploads storage left open")]
 fn check_no_leaked_uploads_fires_on_a_leak() {
-    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let harness = Harness::with_options(
+        HarnessOptions {
+            store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+            ..HarnessOptions::default()
+        },
+        s3_tweaks,
+    );
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store")
