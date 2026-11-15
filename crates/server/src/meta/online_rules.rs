@@ -530,7 +530,7 @@ pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>,
     );
     let records: Vec<TriggerRecord> = sqlx::query_as(
         "SELECT r.id, r.project_id, r.evaluator_id, r.target, r.filter, r.sample_rate, \
-         CAST(CASE WHEN json_valid(p.settings) \
+         CAST(CASE WHEN json_valid(p.settings) AND json_type(p.settings) = 'object' \
               THEN json_extract(p.settings, '$.trace_completion_timeout_s') END AS INTEGER) \
            AS completion_timeout_s \
          FROM online_rules r \
