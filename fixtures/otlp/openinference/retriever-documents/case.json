@@ -6,5 +6,5 @@
     "02 § Normalization rules",
     "02 § Mapping tables / Span kind"
   ],
-  "notes": "hand-written from openinference-instrumentation-llama-index; re-check against a B2 capture"
+  "notes": "hand-written from openinference-instrumentation-llama-index. No captured case has retrieval.documents attributes, so no capture covers it."
 }

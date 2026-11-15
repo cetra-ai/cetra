@@ -278,6 +278,10 @@ const { ok } = await feedback({
   server reads both. `bigint` becomes a decimal string in payloads.
 - **Resource attributes**: only `OTEL_SERVICE_NAME` is read (from the
   config's env source); `OTEL_RESOURCE_ATTRIBUTES` is not (Python reads it).
+- **Usage counts**: `setUsage` records only safe integers
+  (`Number.isSafeInteger`); a larger value, a non-integer or a negative one is
+  skipped with a debug line. Python's `set_usage` records any non-negative
+  `int`, including values beyond 2^53.
 - **Abandoned generators**: a half-consumed generator is left unexported
   (TypeScript has no finalizer); Python's garbage collector ends it with
   status ok.

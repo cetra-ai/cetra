@@ -400,6 +400,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "post",
+        "/api/v1/projects/{project}/online-rules/preview",
+        "post_online_rule_preview",
+    ),
+    (
+        "post",
         "/api/v1/projects/{project}/online-rules/{id}/resume",
         "post_online_rule_resume",
     ),
@@ -472,6 +477,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_evaluators",
     "list_score_definitions",
     "list_online_rules",
+    "post_online_rule_preview",
     "list_eval_jobs",
 ];
 
@@ -760,7 +766,10 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
+        } else if READ_OPERATIONS.contains(id)
+            || *id == "preview_deletion"
+            || *id == "post_online_rule_preview"
+        {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "429"]);

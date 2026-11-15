@@ -9,6 +9,8 @@ use utoipa::openapi::{Ref, RefOr};
 use utoipa::{PartialSchema, ToSchema};
 use uuid::Uuid;
 
+use super::common::TimeParam;
+
 /// The period of a rule budget, in UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -323,6 +325,44 @@ pub struct UpdateOnlineRuleRequest {
     /// Turns the rule on or off.
     #[serde(default, deserialize_with = "present")]
     pub enabled: Option<bool>,
+}
+
+/// `POST /api/v1/projects/{project}/online-rules/preview` body (D-I-9). Absent fields take their
+/// defaults.
+///
+/// Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the filter
+/// is a query over stored data, and nothing logs it.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OnlineRulePreviewRequest {
+    /// The rule's target: the view the filter is read on.
+    pub target: RuleTarget,
+    /// Filter DSL over the target's view. Absent or blank matches everything.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Window start. Default: `to` minus 24 hours.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// Window end. Default: now.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+}
+
+/// The preview's count (D-I-9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct OnlineRulePreview {
+    /// Matching traces or spans, at most 10 000.
+    pub matched: u64,
+    /// More than 10 000 matched.
+    pub capped: bool,
+    /// The window that was counted. RFC 3339.
+    #[serde(with = "llmobs_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub from: i64,
+    /// The end of the window that was counted. RFC 3339.
+    #[serde(with = "llmobs_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub to: i64,
 }
 
 /// Deserializes a field that is present, and refuses `null` through `T`'s own deserializer.

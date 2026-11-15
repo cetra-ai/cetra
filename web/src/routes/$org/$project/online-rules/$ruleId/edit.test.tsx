@@ -92,6 +92,18 @@ it("shows a viewer a read-only form", async () => {
   expect(save.parentElement).toHaveAccessibleDescription("Only members can edit online rules");
 });
 
+it("shows a viewer no match counter", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectFixture, role: "viewer" }),
+    ),
+  );
+  await renderApp(EDIT_URL);
+
+  expect(await screen.findByLabelText("Name")).toBeDisabled();
+  expect(screen.queryByText(/matched in the last 24 hours/)).toBeNull();
+});
+
 it("cancels back to the rule page without saving", async () => {
   const patched = capturePatch();
   const { user, router } = await renderApp(EDIT_URL);

@@ -11,7 +11,7 @@
       "opentelemetry-sdk": "1.45.2",
       "opentelemetry-util-genai": "1.1b0"
     },
-    "captured_at": "2026-11-11T11:05:51Z"
+    "captured_at": "2026-11-15T01:03:02Z"
   },
   "spec_refs": [
     "02 § Convention detection",
@@ -23,5 +23,5 @@
   "settings": {
     "media_min_bytes": 64
   },
-  "notes": "Content is requested on spans: OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only. GoogleGenAiSdkInstrumentor sets OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT=true while instrumenting generate_content; this span has no events, and the message content is on gen_ai.input.messages and gen_ai.output.messages. The image is a 64x64 PNG generated in the program, stored as a blob part. Usage copies promptTokenCount 90 and cachedContentTokenCount 40 as they are. prices.json has no Gemini model row."
+  "notes": "Content is requested on spans: OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=span_only. GoogleGenAiSdkInstrumentor sets OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT=true while instrumenting generate_content; this span has no events, and the message content is on gen_ai.input.messages and gen_ai.output.messages. The image is a 64x64 PNG generated in the program, stored as a blob part. Usage copies promptTokenCount 90 and cachedContentTokenCount 40 as they are. prices.json has a gemini-2.5-flash row (provider gcp.gemini)."
 }

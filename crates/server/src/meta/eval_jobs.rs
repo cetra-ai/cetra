@@ -314,6 +314,56 @@ pub(crate) async fn insert_job(
     Ok(result.rows_affected() > 0)
 }
 
+/// Enqueues a rule job (`kind = 'rule'`, D-I-11) only while its rule exists and is enabled.
+/// `ON CONFLICT(dedup_key) DO NOTHING`. True when a row was inserted.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the insert fails. A missing or disabled rule is `Ok(false)`, not an error.
+pub(crate) async fn insert_rule_job(
+    conn: &mut SqliteConnection,
+    job: NewJob,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let corrupt = MetaError::Corrupt {
+        table: "eval_jobs",
+        column: "kind",
+    };
+    if job.kind != KIND_RULE {
+        return Err(corrupt);
+    }
+    let Some(rule_id) = job.rule_id else {
+        return Err(corrupt);
+    };
+    let dedup = dedup_key(&job);
+    let result = sqlx::query(
+        "INSERT INTO eval_jobs \
+         (id, project_id, kind, priority, rule_id, evaluator_id, variable_mapping, trace_id, \
+         span_id, trace_start_ns, dedup_key, status, attempts, claims, load_retries, \
+         interruptions, not_before, created_at, updated_at) \
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'queued', 0, 0, 0, 0, ?12, ?13, ?14 \
+         WHERE EXISTS (SELECT 1 FROM online_rules WHERE id = ?5 AND enabled = 1) \
+         ON CONFLICT(dedup_key) DO NOTHING",
+    )
+    .bind(job.id.to_string())
+    .bind(job.project_id.to_string())
+    .bind(job.kind)
+    .bind(i64::from(priority_of(job.kind)))
+    .bind(rule_id.to_string())
+    .bind(job.evaluator_id.to_string())
+    .bind(job.variable_mapping)
+    .bind(job.trace_id.as_bytes().to_vec())
+    .bind(job.span_id.map(|span| span.as_bytes().to_vec()))
+    .bind(job.trace_start_ns)
+    .bind(dedup)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// The job `id` in `project`.
 ///
 /// # Errors
@@ -991,8 +1041,9 @@ mod tests {
 
     use super::{
         Candidate, Finish, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL, KIND_RULE,
-        NewJob, candidates, claim, counts_since, dedup_key, finish, get_job, insert_job, list_jobs,
-        prune, recover, requeue_stale, skip_queued_of_rule, start_attempt,
+        NewJob, candidates, claim, counts_since, dedup_key, finish, get_job, insert_job,
+        insert_rule_job, list_jobs, prune, recover, requeue_stale, skip_queued_of_rule,
+        start_attempt,
     };
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -1150,6 +1201,102 @@ mod tests {
 
     async fn read(db: &MetaDb, project: ProjectId, id: Uuid) -> JobRow {
         get_job(db.reader(), project, id).await.unwrap().unwrap()
+    }
+
+    async fn enqueue_rule(db: &MetaDb, job: NewJob) -> Result<bool, MetaError> {
+        db.write(move |conn| Box::pin(async move { insert_rule_job(conn, job, NOW).await }))
+            .await
+    }
+
+    async fn job_count(db: &MetaDb) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM eval_jobs")
+            .fetch_one(db.reader())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn insert_rule_job_inserts_once() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+        let first = rule_job(&seeded, trace_id, None);
+        let id = first.id;
+        assert!(enqueue_rule(&db, first).await.unwrap());
+        // Same dedup key (rule, trace, no span), new job id.
+        assert!(
+            !enqueue_rule(&db, rule_job(&seeded, trace_id, None))
+                .await
+                .unwrap()
+        );
+        assert_eq!(job_count(&db).await, 1);
+        let row = read(&db, seeded.project, id).await;
+        assert_eq!(row.kind, KIND_RULE);
+        assert_eq!(row.priority, 1);
+        assert_eq!(row.status, "queued");
+    }
+
+    #[tokio::test]
+    async fn insert_rule_job_needs_an_enabled_rule() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let rule = seeded.rule;
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE online_rules SET enabled = 0 WHERE id = ?")
+                    .bind(rule.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+        assert!(
+            !enqueue_rule(&db, rule_job(&seeded, trace_id, None))
+                .await
+                .unwrap()
+        );
+        assert_eq!(job_count(&db).await, 0);
+
+        let mut gone = rule_job(&seeded, trace_id, None);
+        gone.rule_id = Some(Uuid::now_v7());
+        assert!(!enqueue_rule(&db, gone).await.unwrap());
+        assert_eq!(job_count(&db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn insert_rule_job_still_enqueues_for_a_paused_rule() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let rule = seeded.rule;
+        db.write(move |conn| {
+            Box::pin(async move {
+                pause_rule(conn, rule, PAUSE_ERRORS, None, NOW).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+        assert!(
+            enqueue_rule(&db, rule_job(&seeded, trace_id, None))
+                .await
+                .unwrap()
+        );
+        assert_eq!(job_count(&db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn insert_rule_job_refuses_other_kinds() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+        let job = manual_job(&seeded, trace_id, seeded.judge);
+        let error = enqueue_rule(&db, job).await.unwrap_err();
+        assert!(matches!(error, MetaError::Corrupt { .. }), "{error}");
+        assert_eq!(job_count(&db).await, 0);
     }
 
     async fn claim_job(db: &MetaDb, id: Uuid, now: i64) -> Option<u32> {

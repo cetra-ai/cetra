@@ -21,6 +21,7 @@ pub(crate) mod members;
 pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod password_resets;
+pub(crate) mod pending_traces;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
 pub(crate) mod rule_spend;
