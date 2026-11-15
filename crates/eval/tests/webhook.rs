@@ -114,7 +114,11 @@ async fn signs_the_exact_body_and_sends_the_headers() {
     let http = client(true);
     let config = config(
         webhook_url(&mock),
-        vec![("X-Extra", "keep"), ("x-llmobs-signature", "forged")],
+        vec![
+            ("X-Extra", "keep"),
+            ("x-llmobs-signature", "forged"),
+            ("Content-Type", "text/plain"),
+        ],
     );
     let secret = Secret::new(VECTOR_SECRET.to_owned());
     let variables = variables();

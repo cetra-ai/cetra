@@ -204,7 +204,7 @@ export function TraceHeader({
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Delete this trace?"
-        description="Its spans, scores and evaluation traces are hidden within seconds and erased within 24 hours. This cannot be undone."
+        description="Its spans, scores and evaluation traces are hidden within seconds and removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
         confirmLabel="Delete trace"
         destructive
         pending={deletion.isPending}

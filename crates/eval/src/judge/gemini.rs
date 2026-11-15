@@ -65,6 +65,12 @@ fn generate_content_url(base: Option<&Url>, model: &str) -> Result<Url, JudgeErr
 
 fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, JudgeError> {
     let mut map = HeaderMap::new();
+    // Extra headers go first: the adapter's own headers are inserted after them and win (D-I-46).
+    for (name, value) in &conn.extra_headers {
+        let name = HeaderName::try_from(name.as_str()).map_err(|_| JudgeError::InvalidHeader)?;
+        let value = header_value(value)?;
+        map.insert(name, value);
+    }
     map.insert(
         HeaderName::from_static("x-goog-api-key"),
         header_value(&conn.api_key)?,
@@ -73,11 +79,6 @@ fn headers(conn: &JudgeConnection) -> Result<Vec<(HeaderName, HeaderValue)>, Jud
         HeaderName::from_static("content-type"),
         HeaderValue::from_static("application/json"),
     );
-    for (name, value) in &conn.extra_headers {
-        let name = HeaderName::try_from(name.as_str()).map_err(|_| JudgeError::InvalidHeader)?;
-        let value = header_value(value)?;
-        map.insert(name, value);
-    }
     Ok(map
         .into_iter()
         .filter_map(|(name, value)| name.map(|name| (name, value)))

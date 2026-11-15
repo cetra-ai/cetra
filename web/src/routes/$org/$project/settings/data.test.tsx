@@ -82,7 +82,7 @@ it("requests a user deletion after type-to-confirm", async () => {
   await waitFor(() => expect(body).toEqual({ kind: "user", user_id: "user-7" }));
   expect(
     await screen.findByText(
-      "Deletion requested. The data is hidden within seconds and erased within 24 hours.",
+      "Deletion requested. The data is hidden within seconds and removed within 24 hours.",
     ),
   ).toBeInTheDocument();
   await waitFor(() => expect(gets).toBe(2));
