@@ -144,11 +144,19 @@ spec:
               mountPath: /etc/llmobs
               readOnly: true
             {{- end }}
-      {{- if .Values.config }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      {{- if or .Values.config .Values.extraVolumes }}
       volumes:
+        {{- if .Values.config }}
         - name: config
           configMap:
             name: {{ include "llmobs.fullname" . }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

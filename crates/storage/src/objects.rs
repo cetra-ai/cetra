@@ -795,7 +795,7 @@ fn temp_name(file_name: &OsStr) -> OsString {
     name
 }
 
-fn is_temp_name(name: &OsStr) -> bool {
+pub(crate) fn is_temp_name(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
     };

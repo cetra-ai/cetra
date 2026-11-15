@@ -183,7 +183,10 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `llmobs admin entitlements show <org> [--format table\|json]` | an org's resolved plan, features, limits and retention window, read offline from the data dir (D-P-32) |
 | `llmobs admin create-user / reset-password / list-users / rotate-encryption-key / check` | local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3) |
 | `llmobs admin reapply-deletions --from <data_dir>` | after a backup restore: copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`; the server redoes them (D-M-9, 12 § Backups) |
-| `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` · `llmobs admin gc-orphans` | maintenance; `gc-orphans` lists the object store and deletes objects the catalog doesn't know (after a restore, 12 § Backups) |
+| `llmobs admin backup --to <dir> [--meta-only]` | online backup of the running server through `<data_dir>/admin.sock`; the server writes `<dir>` (N M2, D-N-17–D-N-19) |
+| `llmobs admin gc-orphans [--min-age 1h] [--dry-run] [--rollback-bucket]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`); in S3 mode a real run needs `--rollback-bucket`, since it rolls the bucket back and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
+| `llmobs admin migrate` | with the server stopped: run the migrations of `meta.db` and `catalog.db`, then exit (restores of older backups, D-N-22) |
+| `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` | maintenance |
 | `llmobs login --url …` · `llmobs logout` | PAT login |
 | `llmobs query "<sql>" \| --file <path> --project … [--param k=v]… [--from … --to … \| --since 24h] [--limit n] [--timeout-ms n] [--format table\|csv\|json\|ndjson\|parquet] [-o <path>]` | SQL console from the terminal; CSV, NDJSON and Parquet stream through the export path (D-H-12) |
 | `llmobs traces list [--filter …] [--search …] [--from …] [--to …] [--since 24h] [--sort …] [--order …] [--limit n] [--cursor …] [--include-eval] [--include-experiments] [--format table\|json]` · `llmobs traces get <id> [--around <time>] [--format tree\|json]` | inspect traces |

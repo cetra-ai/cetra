@@ -33,6 +33,7 @@ The chart version is the llmobs version.
 | `persistence.size` | `20Gi` | size of the data volume |
 | `persistence.storageClassName` | `""` | empty: the default StorageClass |
 | `resources` | `{}` | container resources |
+| `extraVolumes`, `extraVolumeMounts` | `[]`, `[]` | more pod volumes and llmobs container mounts, e.g. a backup volume |
 | `service.type` | `ClusterIP` | Service type (ports 8080, 4317, 4318) |
 | `service.annotations` | `{}` | |
 | `ingress.enabled` | `false` | Ingress for port 8080 (UI, API, OTLP/HTTP, MCP) |
