@@ -1313,6 +1313,23 @@ mod tests {
         assert_eq!(parse_size(&flipped), None, "a flipped bit in the CRC");
     }
 
+    #[test]
+    fn the_cache_layout_is_pinned() {
+        assert_eq!(
+            BLOCK,
+            1 << 20,
+            "BLOCK is part of the cache layout: blocks are addressed as offset / BLOCK. Changing it makes every stored block serve wrong bytes with a valid CRC. If it must change, the cache must be wiped at open first (spec 03 § 12)."
+        );
+        assert_eq!(
+            SIZE_FILE, "size",
+            "the size file's name is part of the cache layout (spec 03 § 12)"
+        );
+        assert_eq!(
+            SIZE_FILE_LEN, 12,
+            "the size file's length is part of the cache layout (spec 03 § 12)"
+        );
+    }
+
     #[tokio::test]
     async fn a_delete_evicts_the_file() {
         let dir = tempfile::tempdir().unwrap();

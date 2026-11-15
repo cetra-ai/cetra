@@ -1,6 +1,8 @@
 //! `catalog.db`: one connection, the M2 schema, and the load into [`Catalog`].
 //!
 //! `Storage::open` opens it and loads the in-memory [`Catalog`].
+//!
+//! A migration that has been in a release is never edited; a change is a new migration (spec 03 § 12).
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -987,19 +989,24 @@ mod tests {
         version
     }
 
-    /// Creates `<dir>/catalog.db` with only migration 0001 applied, as an M2
-    /// binary left it, and closes it.
-    async fn first_migration_only(dir: &Path) {
-        let mut first_only = sqlx::migrate!("./migrations/catalog");
-        let first = first_only.migrations[..1].to_vec();
-        first_only.migrations = std::borrow::Cow::Owned(first);
+    /// Creates `<dir>/catalog.db` with the migrations up to and including
+    /// `last` applied, as an older binary left it, and closes it.
+    async fn migrated_through(dir: &Path, last: i64) {
+        let mut older_migrations = sqlx::migrate!("./migrations/catalog");
+        let kept: Vec<_> = older_migrations
+            .migrations
+            .iter()
+            .filter(|migration| migration.version <= last)
+            .cloned()
+            .collect();
+        older_migrations.migrations = std::borrow::Cow::Owned(kept);
         let mut older = SqliteConnectOptions::new()
             .filename(dir.join("catalog.db"))
             .create_if_missing(true)
             .connect()
             .await
             .unwrap();
-        first_only.run(&mut older).await.unwrap();
+        older_migrations.run(&mut older).await.unwrap();
         older.close().await.unwrap();
     }
 
@@ -1045,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn a_newer_marker_is_refused_before_pending_migrations() {
         let dir = tempfile::tempdir().unwrap();
-        first_migration_only(dir.path()).await;
+        migrated_through(dir.path(), 1).await;
         set_user_version(dir.path(), 2).await;
         let before = dir_digest(dir.path());
 
@@ -1086,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn a_pre_release_catalog_with_data_and_pending_migrations_is_refused_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        first_migration_only(dir.path()).await;
+        migrated_through(dir.path(), 1).await;
         let mut connection = SqliteConnectOptions::new()
             .filename(dir.path().join("catalog.db"))
             .connect()
@@ -1127,7 +1134,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_catalog_with_pending_migrations_migrates_then_is_stamped() {
         let dir = tempfile::tempdir().unwrap();
-        first_migration_only(dir.path()).await;
+        migrated_through(dir.path(), 1).await;
         assert_eq!(user_version(dir.path()).await, 0);
 
         let mut connection = open_catalog_db(dir.path()).await.unwrap();
@@ -1176,5 +1183,190 @@ mod tests {
             .unwrap();
         let version = read_user_version(&mut copied).await.unwrap();
         assert_eq!(version, i64::from(FORMAT_VERSION));
+    }
+
+    /// Migrations that change the format (spec 03 § 12). `migrations_only_add`
+    /// skips these. Add a migration's version here together with the
+    /// `FORMAT_VERSION` bump it needs.
+    const FORMAT_CHANGING_MIGRATIONS: &[i64] = &[];
+
+    /// A migration that alters an existing table, with a row it must keep.
+    struct AlteringCase {
+        /// The migration under test.
+        version: i64,
+        /// Inserts the row as the migration before `version` left the table.
+        seed: &'static str,
+        /// Reads the row back after the open, one text value per row.
+        read: &'static str,
+        /// The value `read` returns: the row is intact, and the new column has
+        /// its default.
+        expected: &'static str,
+    }
+
+    const ALTERING_CASES: &[AlteringCase] = &[
+        AlteringCase {
+            version: 3,
+            seed: "INSERT INTO data_files (id, table_name, project_id, day, level, path,
+                size_bytes, footer_size, row_count, min_time, max_time, min_ingest_time,
+                max_ingest_time, fully_merged, created_at)
+                VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000f1', 'spans',
+                '018f6b4e-7c1a-7c1a-8c1a-000000000001', '2024-06-01', 0, 'objects/kept',
+                42, 1, 1, 0, 0, 0, 0, 0, 1)",
+            read: "SELECT id || '|' || path || '|' || size_bytes || '|' || deletions_applied_seq
+                FROM data_files",
+            expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000f1|objects/kept|42|0",
+        },
+        AlteringCase {
+            version: 7,
+            seed: "INSERT INTO media (project_id, sha256, mime_type, size_bytes,
+                first_seen_at, last_seen_at)
+                VALUES ('018f6b4e-7c1a-7c1a-8c1a-000000000001',
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                'image/png', 42, 1, 2)",
+            read: "SELECT sha256 || '|' || size_bytes || '|' || newest_span_start FROM media",
+            expected: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef|42|0",
+        },
+    ];
+
+    /// The statements of a migration: `--` comments dropped, split on `;`,
+    /// whitespace collapsed, empty ones dropped. No migration has a `--` or a
+    /// `;` inside a string literal.
+    fn statements(sql: &str) -> Vec<String> {
+        let code: Vec<&str> = sql
+            .lines()
+            .map(|line| line.split("--").next().unwrap_or_default())
+            .collect();
+        code.join("\n")
+            .split(';')
+            .map(|statement| statement.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|statement| !statement.is_empty())
+            .collect()
+    }
+
+    /// Whether a statement only adds to the schema: it creates a table or an
+    /// index, or adds a column that has a default or is nullable.
+    fn is_additive(statement: &str) -> bool {
+        let upper = statement.to_ascii_uppercase();
+        if upper.starts_with("CREATE TABLE ")
+            || upper.starts_with("CREATE INDEX ")
+            || upper.starts_with("CREATE UNIQUE INDEX ")
+        {
+            return true;
+        }
+        let words: Vec<&str> = upper.split_whitespace().collect();
+        match words.as_slice() {
+            // ALTER TABLE <name> ADD COLUMN <column> <type> ...
+            ["ALTER", "TABLE", _, "ADD", "COLUMN", _, ..] => {
+                let definition = &words[6..];
+                let has_default = definition.contains(&"DEFAULT");
+                let not_null = definition
+                    .windows(2)
+                    .any(|pair| pair[0] == "NOT" && pair[1] == "NULL");
+                has_default || !not_null
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn migrations_only_add() {
+        for migration in sqlx::migrate!("./migrations/catalog").migrations.iter() {
+            if FORMAT_CHANGING_MIGRATIONS.contains(&migration.version) {
+                continue;
+            }
+            for statement in statements(migration.sql.as_str()) {
+                assert!(
+                    is_additive(&statement),
+                    "migration {:04} is not additive: a format change. Bump FORMAT_VERSION (spec 03 § 12), then list the migration in FORMAT_CHANGING_MIGRATIONS.",
+                    migration.version,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_altering_migration_has_a_case() {
+        for migration in sqlx::migrate!("./migrations/catalog").migrations.iter() {
+            let alters = statements(migration.sql.as_str())
+                .iter()
+                .any(|statement| statement.to_ascii_uppercase().starts_with("ALTER TABLE "));
+            if alters {
+                assert!(
+                    ALTERING_CASES
+                        .iter()
+                        .any(|case| case.version == migration.version),
+                    "migration {:04} alters a table: add a case to ALTERING_CASES",
+                    migration.version,
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn migrations_that_alter_a_table_keep_its_rows() {
+        for case in ALTERING_CASES {
+            let dir = tempfile::tempdir().unwrap();
+            // The release before the migration: the migrations below it are
+            // applied and the marker is set, as a released build leaves it.
+            migrated_through(dir.path(), case.version - 1).await;
+            set_user_version(dir.path(), FORMAT_VERSION).await;
+            let mut older = SqliteConnectOptions::new()
+                .filename(dir.path().join("catalog.db"))
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query(case.seed).execute(&mut older).await.unwrap();
+            older.close().await.unwrap();
+
+            let mut connection = open_catalog_db(dir.path()).await.unwrap();
+            let rows: Vec<String> = sqlx::query_scalar(case.read)
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows,
+                vec![case.expected.to_owned()],
+                "migration {:04} must keep the row",
+                case.version,
+            );
+        }
+    }
+
+    /// The committed dump of a fresh catalog's objects, one line each.
+    const SCHEMA_DUMP: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/catalog/schema.txt");
+
+    #[tokio::test]
+    async fn the_schema_matches_the_committed_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        let objects: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master
+             WHERE name NOT LIKE 'sqlite_%' AND name != '_sqlx_migrations' ORDER BY name",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let actual: String = objects
+            .iter()
+            .map(|(kind, name, table, sql)| {
+                let sql = sql
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{kind} | {name} | {table} | {sql}\n")
+            })
+            .collect();
+
+        if std::env::var("LLMOBS_BLESS_SCHEMA").as_deref() == Ok("1") {
+            std::fs::write(SCHEMA_DUMP, &actual).unwrap();
+            return;
+        }
+        let committed = std::fs::read_to_string(SCHEMA_DUMP).expect("read src/catalog/schema.txt");
+        assert!(
+            actual == committed,
+            "the schema of a fresh catalog differs from src/catalog/schema.txt. A migration changed the schema: update the SQL in docs/spec/03-storage.md § 4 by hand, then rewrite the file with LLMOBS_BLESS_SCHEMA=1 cargo test -p llmobs-storage the_schema_matches_the_committed_dump",
+        );
     }
 }

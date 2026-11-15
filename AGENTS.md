@@ -68,6 +68,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Every behaviour change comes with tests.
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
+- `LLMOBS_BLESS_SCHEMA=1` makes `catalog::db::tests::the_schema_matches_the_committed_dump` rewrite `crates/storage/src/catalog/schema.txt` instead of comparing it; then update spec 03 § 4 by hand (R M8).
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
 - `LLMOBS_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `LLMOBS_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings).
 - `LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1).

@@ -175,9 +175,9 @@ CREATE TABLE data_files (
   min_time INTEGER NOT NULL, max_time INTEGER NOT NULL,
   min_ingest_time INTEGER NOT NULL, max_ingest_time INTEGER NOT NULL,
   fully_merged INTEGER NOT NULL DEFAULT 0,
-  deletions_applied_seq INTEGER NOT NULL,  -- §7
   state TEXT NOT NULL DEFAULT 'active',    -- 'active' | 'obsolete' | 'quarantined'
-  created_at INTEGER NOT NULL, obsoleted_at INTEGER
+  created_at INTEGER NOT NULL, obsoleted_at INTEGER,
+  deletions_applied_seq INTEGER NOT NULL DEFAULT 0  -- §7 (added by migration 0003)
 );
 CREATE INDEX data_files_lookup ON data_files(table_name, project_id, day) WHERE state = 'active';
 CREATE INDEX data_files_gc ON data_files(obsoleted_at) WHERE state = 'obsolete';
@@ -219,6 +219,7 @@ CREATE TABLE deletions (               -- §7; the request itself is in meta.db 
   status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'applied'
   registered_at INTEGER NOT NULL, applied_at INTEGER
 );
+CREATE INDEX deletions_pending ON deletions (deletion_seq) WHERE status = 'pending';
 CREATE TABLE deletion_traces (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
                               trace_id BLOB NOT NULL, PRIMARY KEY (deletion_id, trace_id));
 CREATE TABLE deletion_users (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
@@ -351,6 +352,8 @@ With an S3 object store, every page read is a ranged GET. The S3 store is wrappe
 - verification of a suspect file (§10) reads the S3 store directly, never the cache, and a file found healthy has its cached blocks dropped, so a bad block cannot outlive the check.
 
 There is no custom `ParquetFileReaderFactory`; the metadata cache is DataFusion's built-in one (§4). With a local object store there is no cache.
+
+The cache is not a durable format (§ 12): a layout change must either make old entries fail their checks or wipe `cache/` at open. The block size is pinned by a test.
 
 ## 7. Deletion (GDPR)
 
@@ -557,6 +560,8 @@ From the first public release (D185), a data directory written by any release mu
 `llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
 
 **What is a format change.** Not one: a new nullable Parquet column (§3), a `catalog.db` migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default), a new config key. Every other change is one: a new or changed WAL `kind`, segment header, compression or payload schema; a changed Parquet column type, sort order or file layout; a renamed or re-typed catalog column, a dropped table, an `UPDATE` of existing rows, a new value in a TEXT enum column (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`); a changed object path layout; a changed checksum; a changed read-cache block size.
+
+A released migration file is never edited; the golden catalogs enforce it.
 
 **A release that changes a format** bumps `FORMAT_VERSION`, keeps a reader for what the previous release wrote (older WAL segments are replayed before the new format is written; older Parquet files are read, not rewritten at upgrade; a catalog migration runs at open), has tests that open the previous releases' golden directories, and adds a line under `### Upgrade notes` in `CHANGELOG.md`.
 
