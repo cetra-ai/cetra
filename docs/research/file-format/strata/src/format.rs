@@ -27,6 +27,14 @@ pub const PAGE_REF_LEN: usize = 16;
 /// Number of sections in the hot tail.
 pub const HOT_SECTIONS: usize = 7;
 
+/// The little-endian value of `bytes`, zero-extended to 64 bits. `None` when there are
+/// more than eight bytes.
+pub fn le_u64(bytes: &[u8]) -> Option<u64> {
+    let mut buf = [0u8; 8];
+    buf.get_mut(..bytes.len())?.copy_from_slice(bytes);
+    Some(u64::from_le_bytes(buf))
+}
+
 /// The low 32 bits of the XXH3 64-bit hash of the concatenation of `parts`.
 pub fn checksum32(parts: &[&[u8]]) -> u32 {
     let mut hasher = Xxh3::new();

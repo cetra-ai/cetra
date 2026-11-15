@@ -1,0 +1,531 @@
+//! Decoding one narrow chunk back to an Arrow array: the inverse of `encode.rs`.
+
+use arrow::array::{ArrayData, ArrayRef, make_array, new_null_array};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
+use arrow::datatypes::{DataType, Field};
+
+use super::bitpack::unpack;
+use super::{
+    BlockEntry, Class, Encoding, MAX_CHUNK_ROWS, Numeric, fits, flags, numeric_of, unsupported,
+};
+use crate::error::{Result, StrataError};
+use crate::format::{Cursor, le_u64};
+
+/// Decodes `entry` with its body (`None` for `Const` and `ConstNull`) into an array of
+/// `field`'s type. The entry's `segment_offset` is used only in error offsets.
+pub fn decode_chunk(entry: &BlockEntry, body: Option<&[u8]>, field: &Field) -> Result<ArrayRef> {
+    let at = entry.segment_offset;
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    if entry.n_rows > MAX_CHUNK_ROWS {
+        return Err(corrupt("chunk rows"));
+    }
+    let n = entry.n_rows as usize;
+    let dt = field.data_type();
+    match entry.encoding {
+        Encoding::ConstNull => return Ok(new_null_array(dt, n)),
+        Encoding::Const => return decode_const(entry, dt, n),
+        _ => {}
+    }
+
+    let body = body.ok_or_else(|| corrupt("chunk body"))?;
+    let mut c = Cursor::new(body, at);
+    let nulls = if entry.flags & flags::HAS_NULLS != 0 {
+        Some(read_validity(&mut c, n)?)
+    } else {
+        None
+    };
+    match dt {
+        DataType::Boolean => {
+            if entry.encoding != Encoding::Bool {
+                return Err(corrupt("encoding for type"));
+            }
+            let bytes = c.bytes(n.div_ceil(8), "bool values")?.to_vec();
+            expect_end(&c, at)?;
+            build_array(dt, n, nulls, bytes, at)
+        }
+        DataType::FixedSizeBinary(w) => {
+            let width = usize::try_from(*w).map_err(|_| unsupported(dt))?;
+            decode_fsb(entry, &mut c, n, width, nulls, dt, at)
+        }
+        _ => {
+            let num = numeric_of(dt).ok_or_else(|| unsupported(dt))?;
+            decode_numeric(entry, num, &mut c, n, nulls, dt, at)
+        }
+    }
+}
+
+/// Reads the validity bitmap of `n` rows.
+fn read_validity(c: &mut Cursor<'_>, n: usize) -> Result<NullBuffer> {
+    let bytes = c.bytes(n.div_ceil(8), "validity bitmap")?.to_vec();
+    Ok(NullBuffer::new(BooleanBuffer::new(
+        Buffer::from_vec(bytes),
+        0,
+        n,
+    )))
+}
+
+/// Checks that the body has no bytes left after the encoding's payload.
+fn expect_end(c: &Cursor<'_>, at: u64) -> Result<()> {
+    if c.remaining() == 0 {
+        Ok(())
+    } else {
+        Err(StrataError::Corrupt {
+            what: "chunk trailing bytes",
+            offset: at,
+        })
+    }
+}
+
+/// Builds the array from its value buffer, checking the buffer's length against the type.
+fn build_array(
+    dt: &DataType,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    values: Vec<u8>,
+    at: u64,
+) -> Result<ArrayRef> {
+    let data = ArrayData::builder(dt.clone())
+        .len(n)
+        .add_buffer(Buffer::from_vec(values))
+        .nulls(nulls)
+        .build()
+        .map_err(|_| StrataError::Corrupt {
+            what: "chunk values",
+            offset: at,
+        })?;
+    Ok(make_array(data))
+}
+
+/// Builds a numeric array from one physical value per row, checking that each value fits.
+fn build_numeric(
+    dt: &DataType,
+    num: Numeric,
+    bits: &[u64],
+    nulls: Option<NullBuffer>,
+    at: u64,
+) -> Result<ArrayRef> {
+    let mut values = Vec::with_capacity(bits.len() * num.width);
+    for v in bits {
+        if !fits(*v, num.width, num.signed) {
+            return Err(StrataError::Corrupt {
+                what: "value out of range",
+                offset: at,
+            });
+        }
+        let le = v.to_le_bytes();
+        values.extend_from_slice(le.get(..num.width).unwrap_or_default());
+    }
+    build_array(dt, bits.len(), nulls, values, at)
+}
+
+fn decode_numeric(
+    entry: &BlockEntry,
+    num: Numeric,
+    c: &mut Cursor<'_>,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    dt: &DataType,
+    at: u64,
+) -> Result<ArrayRef> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let bits: Vec<u64> = match (entry.encoding, num.class) {
+        (Encoding::ForBitpack, Class::Int) => {
+            if entry.flags & flags::HAS_ZONE == 0 {
+                return Err(corrupt("chunk zone"));
+            }
+            let base = entry
+                .min
+                .get(..8)
+                .and_then(le_u64)
+                .ok_or_else(|| corrupt("chunk zone"))?;
+            let width = c.u8("bitpack width")?;
+            let rest = c.remaining();
+            let packed = c.bytes(rest, "bitpack values")?;
+            let deltas = unpack(packed, n, width).map_err(|_| corrupt("bitpack values"))?;
+            deltas.iter().map(|d| base.wrapping_add(*d)).collect()
+        }
+        (Encoding::Plain, Class::Wide | Class::Float) => {
+            let len = n
+                .checked_mul(num.width)
+                .ok_or_else(|| corrupt("plain values"))?;
+            let raw = c.bytes(len, "plain values")?;
+            raw.chunks_exact(num.width)
+                .map(le_u64)
+                .collect::<Option<Vec<u64>>>()
+                .ok_or_else(|| corrupt("plain values"))?
+        }
+        _ => return Err(corrupt("encoding for type")),
+    };
+    expect_end(c, at)?;
+    build_numeric(dt, num, &bits, nulls, at)
+}
+
+fn decode_fsb(
+    entry: &BlockEntry,
+    c: &mut Cursor<'_>,
+    n: usize,
+    width: usize,
+    nulls: Option<NullBuffer>,
+    dt: &DataType,
+    at: u64,
+) -> Result<ArrayRef> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let values = match entry.encoding {
+        Encoding::FsbRaw => {
+            let len = n.checked_mul(width).ok_or_else(|| corrupt("fsb values"))?;
+            c.bytes(len, "fsb values")?.to_vec()
+        }
+        Encoding::FsbRle => {
+            let n_runs = usize::from(c.u16("rle runs")?);
+            if n_runs == 0 {
+                return Err(corrupt("rle runs"));
+            }
+            let mut lens = Vec::with_capacity(n_runs);
+            for _ in 0..n_runs {
+                lens.push(usize::from(c.u16("rle run length")?));
+            }
+            let value_len = n_runs
+                .checked_mul(width)
+                .ok_or_else(|| corrupt("rle values"))?;
+            let run_values = c.bytes(value_len, "rle values")?;
+            let total = lens
+                .iter()
+                .fold(0usize, |acc, len| acc.saturating_add(*len));
+            if total != n {
+                return Err(corrupt("rle length"));
+            }
+            let mut out = Vec::with_capacity(n * width);
+            for (k, len) in lens.iter().enumerate() {
+                let start = k * width;
+                let value = run_values
+                    .get(start..start + width)
+                    .ok_or_else(|| corrupt("rle values"))?;
+                for _ in 0..*len {
+                    out.extend_from_slice(value);
+                }
+            }
+            out
+        }
+        _ => return Err(corrupt("encoding for type")),
+    };
+    expect_end(c, at)?;
+    build_array(dt, n, nulls, values, at)
+}
+
+/// A `Const` chunk: its one value repeated `n` times.
+fn decode_const(entry: &BlockEntry, dt: &DataType, n: usize) -> Result<ArrayRef> {
+    let at = entry.segment_offset;
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let len = usize::from(entry.const_len);
+    match dt {
+        DataType::Boolean => {
+            if len != 1 {
+                return Err(corrupt("const length"));
+            }
+            let byte = match entry.min.first().copied() {
+                Some(0) => 0u8,
+                Some(1) => 0xFF,
+                _ => return Err(corrupt("const value")),
+            };
+            build_array(dt, n, None, vec![byte; n.div_ceil(8)], at)
+        }
+        DataType::FixedSizeBinary(w) => {
+            let width = usize::try_from(*w).map_err(|_| unsupported(dt))?;
+            if len != width {
+                return Err(corrupt("const length"));
+            }
+            let value = entry
+                .min
+                .get(..width)
+                .ok_or_else(|| corrupt("const value"))?;
+            build_array(dt, n, None, value.repeat(n), at)
+        }
+        _ => {
+            let num = numeric_of(dt).ok_or_else(|| unsupported(dt))?;
+            let expected = match num.class {
+                Class::Float => num.width,
+                Class::Int | Class::Wide => 8,
+            };
+            if len != expected {
+                return Err(corrupt("const length"));
+            }
+            let bits = entry
+                .min
+                .get(..len)
+                .and_then(le_u64)
+                .ok_or_else(|| corrupt("const value"))?;
+            build_numeric(dt, num, &vec![bits; n], None, at)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::narrow::{EncodedChunk, encode_chunk};
+    use crate::testgen::{assert_same, batch};
+    use arrow::array::{
+        Array, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
+        Int16Array, Int32Array, Int64Array, TimestampNanosecondArray, UInt8Array, UInt16Array,
+        UInt32Array, UInt64Array,
+    };
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    /// Encodes `array`, decodes it with the field of the same type and compares the result.
+    fn round_trip(array: ArrayRef) -> EncodedChunk {
+        let chunk = encode_chunk(&array, &Config::default()).unwrap();
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: array.len() as u32,
+            segment_offset: if chunk.body.is_some() { 8 } else { 0 },
+            segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = Field::new("c", array.data_type().clone(), true);
+        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+        assert_eq!(decoded.data_type(), array.data_type());
+        assert_same(decoded.as_ref(), array.as_ref());
+        chunk
+    }
+
+    macro_rules! int_round_trip {
+        ($name:ident, $ty:ty, $array:ty) => {
+            proptest! {
+                #[test]
+                fn $name(v in proptest::collection::vec(proptest::option::of(any::<$ty>()), 0..5_000)) {
+                    let array: ArrayRef = Arc::new(<$array>::from_iter(v));
+                    let chunk = encode_chunk(&array, &Config::default()).unwrap();
+                    let entry = BlockEntry {
+                        first_row: 0,
+                        n_rows: array.len() as u32,
+                        segment_offset: if chunk.body.is_some() { 8 } else { 0 },
+                        segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+                        encoding: chunk.encoding,
+                        flags: chunk.flags,
+                        const_len: chunk.const_len,
+                        min: chunk.min,
+                        max: chunk.max,
+                    };
+                    let field = Field::new("c", array.data_type().clone(), true);
+                    let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+                    assert_same(decoded.as_ref(), array.as_ref());
+                }
+            }
+        };
+    }
+
+    int_round_trip!(int8_round_trips, i8, Int8Array);
+    int_round_trip!(int16_round_trips, i16, Int16Array);
+    int_round_trip!(int32_round_trips, i32, Int32Array);
+    int_round_trip!(int64_round_trips, i64, Int64Array);
+    int_round_trip!(uint8_round_trips, u8, UInt8Array);
+    int_round_trip!(uint16_round_trips, u16, UInt16Array);
+    int_round_trip!(uint32_round_trips, u32, UInt32Array);
+    int_round_trip!(uint64_round_trips, u64, UInt64Array);
+
+    proptest! {
+        #[test]
+        fn float64_round_trips_bitwise(
+            v in proptest::collection::vec(proptest::option::of(any::<u64>().prop_map(f64::from_bits)), 0..5_000),
+        ) {
+            round_trip(Arc::new(Float64Array::from_iter(v)));
+        }
+
+        #[test]
+        fn float32_round_trips_bitwise(
+            v in proptest::collection::vec(proptest::option::of(any::<u32>().prop_map(f32::from_bits)), 0..5_000),
+        ) {
+            round_trip(Arc::new(Float32Array::from_iter(v)));
+        }
+
+        #[test]
+        fn booleans_round_trip(v in proptest::collection::vec(proptest::option::of(any::<bool>()), 0..5_000)) {
+            round_trip(Arc::new(BooleanArray::from_iter(v)));
+        }
+
+        #[test]
+        fn fixed_size_binary_16_round_trips(
+            v in proptest::collection::vec(proptest::option::of(any::<[u8; 16]>()), 0..5_000),
+        ) {
+            let array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(v.into_iter(), 16).unwrap();
+            round_trip(Arc::new(array));
+        }
+
+        #[test]
+        fn fixed_size_binary_runs_round_trip(
+            v in proptest::collection::vec(proptest::option::of(proptest::sample::select(vec![[0u8; 4], [1u8; 4], [2u8; 4]])), 0..5_000),
+        ) {
+            let array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(v.into_iter(), 4).unwrap();
+            round_trip(Arc::new(array));
+        }
+
+        #[test]
+        fn sliced_arrays_round_trip(
+            v in proptest::collection::vec(proptest::option::of(any::<i64>()), 2..500),
+            skip in 0usize..2,
+        ) {
+            let array = Int64Array::from_iter(v);
+            let sliced: ArrayRef = Array::slice(&array, skip, array.len() - 1 - skip);
+            round_trip(sliced);
+        }
+    }
+
+    #[test]
+    fn all_null_chunks_round_trip() {
+        for dt in [
+            DataType::Int64,
+            DataType::Float64,
+            DataType::Boolean,
+            DataType::FixedSizeBinary(3),
+        ] {
+            let array = arrow::array::new_null_array(&dt, 17);
+            assert_eq!(round_trip(array).encoding, Encoding::ConstNull);
+        }
+    }
+
+    #[test]
+    fn all_equal_chunks_are_const() {
+        let chunk = round_trip(Arc::new(Int64Array::from(vec![42; 9])));
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert!(chunk.body.is_none());
+    }
+
+    #[test]
+    fn single_row_round_trips() {
+        round_trip(Arc::new(Int32Array::from(vec![-3])));
+        round_trip(Arc::new(Int32Array::from(vec![None])));
+    }
+
+    #[test]
+    fn min_and_max_in_one_chunk_use_width_64() {
+        let array = Int64Array::from(vec![i64::MIN, 0, i64::MAX, 5]);
+        let chunk = round_trip(Arc::new(array));
+        assert_eq!(chunk.encoding, Encoding::ForBitpack);
+        assert_eq!(chunk.body.unwrap()[0], 64);
+    }
+
+    #[test]
+    fn nan_and_signed_zero_round_trip_bitwise() {
+        let values = vec![f64::NAN, -0.0, 0.0, 1.5, f64::NAN];
+        let chunk = round_trip(Arc::new(Float64Array::from(values)));
+        assert_eq!(chunk.encoding, Encoding::Plain);
+        assert_ne!(chunk.flags & flags::HAS_NAN, 0);
+    }
+
+    #[test]
+    fn timestamp_keeps_its_timezone() {
+        let array = TimestampNanosecondArray::from(vec![1_700_000_000_000_000_000i64, 3, 9])
+            .with_timezone("UTC");
+        let chunk = round_trip(Arc::new(array.clone()));
+        assert_eq!(chunk.encoding, Encoding::ForBitpack);
+        let field = Field::new("c", array.data_type().clone(), true);
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 3,
+            segment_offset: 8,
+            segment_len: 0,
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+        assert_eq!(decoded.data_type(), array.data_type());
+    }
+
+    #[test]
+    fn long_fixed_size_binary_runs_pick_rle() {
+        let rows = (0..1000).map(|i| if i < 900 { [1u8; 16] } else { [2u8; 16] });
+        let array =
+            FixedSizeBinaryArray::try_from_sparse_iter_with_size(rows.map(Some), 16).unwrap();
+        assert_eq!(round_trip(Arc::new(array)).encoding, Encoding::FsbRle);
+    }
+
+    #[test]
+    fn distinct_fixed_size_binary_values_pick_raw() {
+        let rows = (0..100u8).map(|i| Some([i; 16]));
+        let array = FixedSizeBinaryArray::try_from_sparse_iter_with_size(rows, 16).unwrap();
+        assert_eq!(round_trip(Arc::new(array)).encoding, Encoding::FsbRaw);
+    }
+
+    #[test]
+    fn constants_of_different_bytes_stay_distinct() {
+        let a = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            vec![Some([0x61u8, 0x00]); 3].into_iter(),
+            2,
+        )
+        .unwrap();
+        let b = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            vec![Some([0x61u8, 0x61]); 3].into_iter(),
+            2,
+        )
+        .unwrap();
+        let a = round_trip(Arc::new(a));
+        let b = round_trip(Arc::new(b));
+        assert_eq!(a.encoding, Encoding::Const);
+        assert_ne!(a.min, b.min);
+    }
+
+    #[test]
+    fn test_batch_columns_round_trip() {
+        let full = batch(2_000);
+        for column in full.columns() {
+            round_trip(Arc::clone(column));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn random_entries_and_bodies_never_panic(
+            encoding in 0u8..=10,
+            n_rows in 0u32..5_000,
+            const_len in 0u16..40,
+            entry_flags in any::<u8>(),
+            min in any::<[u8; 16]>(),
+            max in any::<[u8; 16]>(),
+            body in proptest::collection::vec(any::<u8>(), 0..512),
+            kind in 0usize..10,
+        ) {
+            if let Some(encoding) = Encoding::from_u8(encoding) {
+            let dt = match kind {
+                0 => DataType::Int8,
+                1 => DataType::Int64,
+                2 => DataType::UInt64,
+                3 => DataType::Float32,
+                4 => DataType::Float64,
+                5 => DataType::Boolean,
+                6 => DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                7 => DataType::FixedSizeBinary(4),
+                8 => DataType::FixedSizeBinary(16),
+                _ => DataType::UInt32,
+            };
+            let entry = BlockEntry {
+                first_row: 0,
+                n_rows,
+                segment_offset: 8,
+                segment_len: body.len() as u32 + 16,
+                encoding,
+                flags: entry_flags,
+                const_len,
+                min,
+                max,
+            };
+            let field = Field::new("c", dt, true);
+            let _ = decode_chunk(&entry, Some(&body), &field);
+            }
+        }
+    }
+}

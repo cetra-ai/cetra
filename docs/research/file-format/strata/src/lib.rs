@@ -26,17 +26,21 @@
     clippy::indexing_slicing
 )]
 
-#[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
 mod format;
-#[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
 mod hot;
-#[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
+mod narrow;
 mod segment;
 
 mod config;
 mod error;
 mod file;
+mod reader;
+#[cfg(test)]
+mod testgen;
+mod writer;
 
 pub use config::Config;
 pub use error::{Result, StrataError};
 pub use file::StrataFile;
+pub use reader::read_column;
+pub use writer::{ColumnSummary, FileSummary, StrataWriter};

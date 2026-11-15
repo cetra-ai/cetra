@@ -1,15 +1,18 @@
 //! Opening a Strata file from an object store with one suffix read (S1 open).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::datatypes::SchemaRef;
+use futures::future::try_join_all;
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{HEADER_LEN, POSTSCRIPT_LEN, checksum32};
+use crate::format::{Cursor, HEADER_LEN, POSTSCRIPT_LEN, checksum32};
 use crate::hot::{DirectoryRecord, HotTail, Postscript};
+use crate::narrow::BlockEntry;
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -23,7 +26,9 @@ pub struct StrataFile {
     path: Path,
     size: u64,
     postscript: Postscript,
-    hot: HotTail,
+    pub(crate) hot: HotTail,
+    /// Block-table entries of each column, read on first use.
+    blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
 }
 
 impl StrataFile {
@@ -127,6 +132,7 @@ impl StrataFile {
             size,
             postscript,
             hot,
+            blocks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -167,6 +173,73 @@ impl StrataFile {
         let bytes = self.store.get_range(&self.path, r.offset..end).await?;
         decode_segment(&bytes, r.offset, kind)
     }
+
+    /// The block-table entries of column `column`, in row order. They are read from the
+    /// column's pages on first use and cached.
+    pub async fn block_entries(&self, column: usize) -> Result<Arc<Vec<BlockEntry>>> {
+        let cached = self
+            .blocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&column)
+            .cloned();
+        if let Some(entries) = cached {
+            return Ok(entries);
+        }
+
+        let record = self
+            .hot
+            .directory
+            .get(column)
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("no column {column}"),
+            })?;
+        let pages = self.hot.pages_of(record)?;
+        let bodies = try_join_all(pages.iter().map(|page| async move {
+            let segment = SegmentRef {
+                offset: page.offset,
+                len: page.len,
+            };
+            self.read_segment(&segment, Kind::BlockTablePage).await
+        }))
+        .await?;
+
+        let mut entries = Vec::new();
+        let mut next_row = 0u64;
+        for (page, body) in pages.iter().zip(&bodies) {
+            let mut c = Cursor::new(body, page.offset);
+            while c.remaining() > 0 {
+                let entry = BlockEntry::decode(&mut c)?;
+                if u64::from(entry.first_row) != next_row || entry.n_rows == 0 {
+                    return Err(StrataError::Corrupt {
+                        what: "block row order",
+                        offset: page.offset,
+                    });
+                }
+                next_row += u64::from(entry.n_rows);
+                entries.push(entry);
+            }
+        }
+        if next_row != self.row_count() {
+            return Err(StrataError::Corrupt {
+                what: "block row count",
+                offset: self.postscript.hot_offset,
+            });
+        }
+        if entries.len() != record.n_chunks as usize {
+            return Err(StrataError::Corrupt {
+                what: "block chunk count",
+                offset: self.postscript.hot_offset,
+            });
+        }
+
+        let entries = Arc::new(entries);
+        self.blocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(column, Arc::clone(&entries));
+        Ok(entries)
+    }
 }
 
 #[cfg(test)]
@@ -178,7 +251,7 @@ impl StrataFile {
 )]
 mod tests {
     use super::*;
-    use crate::hot::write_empty_file;
+    use crate::writer::StrataWriter;
     use counting::Counting;
     use llmobs_core::schema::spans_schema;
     use object_store::PutPayload;
@@ -190,6 +263,15 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    /// A file of the spans schema with zero rows.
+    fn write_empty_file(schema: SchemaRef) -> Vec<u8> {
+        StrataWriter::new(schema, &["trace_id", "start_time"], Config::default())
+            .unwrap()
+            .finish()
+            .unwrap()
+            .0
     }
 
     fn path() -> Path {
@@ -214,7 +296,9 @@ mod tests {
                 .unwrap();
             assert_eq!(file.row_count(), 0);
             assert_eq!(file.schema().as_ref(), spans_schema().as_ref());
-            assert!(file.directory().is_empty());
+            // Every column has a directory record, even with no chunks.
+            assert_eq!(file.directory().len(), spans_schema().fields().len());
+            assert!(file.directory().iter().all(|r| r.n_chunks == 0));
         });
     }
 

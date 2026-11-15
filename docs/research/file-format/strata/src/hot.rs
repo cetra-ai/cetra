@@ -11,7 +11,8 @@ use arrow::ipc::writer::StreamWriter;
 
 use crate::error::{Result, StrataError};
 use crate::format::{
-    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, Out, PAGE_REF_LEN, VERSION,
+    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, Out, PAGE_REF_LEN,
+    VERSION,
 };
 
 /// Writes the 8-byte file header: magic, version and flags 0.
@@ -295,7 +296,6 @@ impl HotTail {
         let mut writer = StreamWriter::try_new(&mut schema_stream, &self.schema)?;
         writer.finish()?;
         drop(writer);
-        write_section(out, &schema_stream)?;
 
         let mut directory = Out(Vec::with_capacity(
             self.directory.len() * DIRECTORY_RECORD_LEN,
@@ -303,12 +303,19 @@ impl HotTail {
         for record in &self.directory {
             record.encode(&mut directory);
         }
-        write_section(out, &directory.0)?;
-        write_section(out, &self.sort_key_entries)?;
-        write_section(out, &self.sort_key_filter)?;
-        write_section(out, &self.map_keys)?;
-        write_section(out, &self.key_filter_index)?;
-        write_section(out, &self.pages)?;
+
+        let sections: [&[u8]; HOT_SECTIONS] = [
+            schema_stream.as_slice(),
+            directory.0.as_slice(),
+            self.sort_key_entries.as_slice(),
+            self.sort_key_filter.as_slice(),
+            self.map_keys.as_slice(),
+            self.key_filter_index.as_slice(),
+            self.pages.as_slice(),
+        ];
+        for section in sections {
+            write_section(out, section)?;
+        }
         Ok(())
     }
 
@@ -396,42 +403,6 @@ impl HotTail {
         let mut c = Cursor::new(slice, u64::from(rec.pages_offset));
         (0..n).map(|_| PageRef::decode(&mut c)).collect()
     }
-}
-
-/// A file with an empty table: header, the schema, zero directory records and
-/// empty sections 3 to 7, followed by a postscript with `row_count = 0`.
-#[cfg(test)]
-#[allow(clippy::expect_used)]
-pub(crate) fn write_empty_file(schema: SchemaRef) -> Vec<u8> {
-    let mut out = Out(Vec::new());
-    write_file_header(&mut out);
-    let hot_offset = out.len() as u64;
-    let hot = HotTail {
-        schema,
-        directory: Vec::new(),
-        sort_key_entries: Vec::new(),
-        sort_key_filter: Vec::new(),
-        map_keys: Vec::new(),
-        key_filter_index: Vec::new(),
-        pages: Vec::new(),
-    };
-    hot.encode(&mut out).expect("an empty table always encodes");
-    let hot_bytes = out
-        .0
-        .get(hot_offset as usize..)
-        .unwrap_or_default()
-        .to_vec();
-    let postscript = Postscript {
-        hot_offset,
-        hot_len: u32::try_from(hot_bytes.len()).expect("small hot tail"),
-        hot_checksum: crate::format::checksum32(&[hot_bytes.as_slice()]),
-        row_count: 0,
-        n_columns: 0,
-        version: VERSION,
-        flags: 0,
-    };
-    postscript.encode(&mut out);
-    out.0
 }
 
 #[cfg(test)]
