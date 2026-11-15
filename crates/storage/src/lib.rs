@@ -69,6 +69,7 @@ pub(crate) mod read_cache;
 mod reads;
 mod snapshot;
 mod sql;
+pub(crate) mod unwind;
 pub(crate) mod verify;
 mod views;
 
@@ -120,6 +121,11 @@ pub(crate) mod hooks;
 pub(crate) mod memtable;
 pub(crate) mod read_state;
 pub(crate) mod wal;
+
+/// Fuzz entry points (track R M3). Not part of the API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
 
 #[cfg(test)]
 mod crash_tests;
@@ -1580,13 +1586,7 @@ fn recover_table(
 ) -> Result<ReplayTable, OpenError> {
     let mut memtable = Memtable::new(table);
     let outcome = replay(dir, table, after_seq, skip_corrupt, &mut |seq, batch| {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-        let project = project_of(&batch)?;
-        memtable
-            .insert(project, batch, seq)
-            .map_err(|err| memtable_to_wal(&err))
+        replay_batch(&mut memtable, seq, batch)
     })
     .map_err(replay_error)?;
     tracing::info!(
@@ -1620,6 +1620,17 @@ fn recover_table(
             next_seq: outcome.next_seq,
         },
     })
+}
+
+/// Inserts one replayed batch into `memtable`, as WAL recovery does. An empty batch is skipped.
+fn replay_batch(memtable: &mut Memtable, seq: u64, batch: RecordBatch) -> Result<(), WalError> {
+    if batch.num_rows() == 0 {
+        return Ok(());
+    }
+    let project = project_of(&batch)?;
+    memtable
+        .insert(project, batch, seq)
+        .map_err(|err| memtable_to_wal(&err))
 }
 
 /// The steps [`Storage::open`] and [`Maintenance::open`] share: validates `config`,
@@ -3583,6 +3594,123 @@ mod tests {
         assert!(!storage.health().catalog_failed);
         assert_eq!(span_ids(&storage).await.len(), 2);
         storage.shutdown().await.unwrap();
+    }
+
+    /// `flush_now` covers every append acknowledged before it started, while
+    /// another task keeps appending. Twenty rounds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_covers_every_acknowledged_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let acknowledged = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let appender = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            let acknowledged = Arc::clone(&acknowledged);
+            tokio::spawn(async move {
+                let mut start = 0_i64;
+                while !stop.load(Ordering::SeqCst) {
+                    let receipt = storage
+                        .append_spans(project(), spans_at(&[start]))
+                        .await
+                        .unwrap();
+                    acknowledged.fetch_max(receipt.seq, Ordering::SeqCst);
+                    start += 1;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+        };
+
+        let mut rounds = 0;
+        for round in 0..20 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let target = acknowledged.load(Ordering::SeqCst);
+            if target == 0 {
+                continue;
+            }
+            rounds += 1;
+            storage
+                .flush_now(Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|error| panic!("round {round}: {error}"));
+            assert!(
+                storage.flushed_seq(Table::Spans).await >= target,
+                "round {round}: seq {target} acknowledged but not flushed"
+            );
+        }
+        assert!(rounds >= 10, "only {rounds} of 20 rounds checked a flush");
+
+        stop.store(true, Ordering::SeqCst);
+        appender.await.unwrap();
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// `flush_now` gives up once shutdown has begun, even while its flush is
+    /// held: it returns `ShuttingDown` within its own timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_gives_up_once_shutdown_began() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let hooks = storage.hooks().clone();
+        hooks.hold(HookPoint::FlushAfterWrite);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(30)).await })
+        };
+        jobs::wait_at(&storage, HookPoint::FlushAfterWrite);
+        storage.shutting_down.store(true, Ordering::Release);
+        let flushed = tokio::time::timeout(Duration::from_secs(5), flushing).await;
+        hooks.release(HookPoint::FlushAfterWrite);
+        let flushed = flushed
+            .expect("flush_now kept waiting after shutdown began")
+            .unwrap();
+        assert!(
+            matches!(flushed, Err(FlushNowError::ShuttingDown)),
+            "{flushed:?}"
+        );
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// A `flush_now` racing `shutdown` returns `Ok` or `ShuttingDown` within its
+    /// timeout, and `shutdown` still finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_racing_shutdown_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        storage
+            .append_spans(project(), spans_at(&[1, 2]))
+            .await
+            .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(5)).await })
+        };
+        let stopping = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.shutdown().await })
+        };
+        let flushed = tokio::time::timeout(Duration::from_secs(10), flushing)
+            .await
+            .expect("flush_now did not return")
+            .unwrap();
+        assert!(
+            matches!(flushed, Ok(()) | Err(FlushNowError::ShuttingDown)),
+            "{flushed:?}"
+        );
+        stopping.await.unwrap().unwrap();
     }
 
     /// A storage whose flush tasks do nothing on their own: one hour of age

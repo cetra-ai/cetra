@@ -75,6 +75,17 @@ Pending (external). The LazyFS cross-check (R2.12) needs FUSE and a real run of 
 - **M2-R2.5 (unverified): a WAL truncation whose directory fsync fails.** The flush task retries it on the next flush (spec 03 § Durability, why this is safe). No test covers the retry.
 - **M2 pre-fix assertion texts.** The findings above rest on the test-first runs recorded in their commits. The texts are not recorded, and R2.14 records them.
 
+## M3 — Fuzzing
+
+Track R, plan `docs/plans/r-hardening/03-m3-fuzzing.md`. The fuzz targets live in `fuzz/`; a crash is fixed with its input in `fuzz/regressions/<target>/`.
+
+### Findings
+
+| Id | Target | Regression | Cause | Classification | Severity | Fix |
+|---|---|---|---|---|---|---|
+| M3-1 | `wal_record`, `wal_replay` | `fuzz/regressions/wal_record/crash-fadaf511…`, `fuzz/regressions/wal_replay/crash-f945199…` | A CRC-valid WAL record declared a huge LZ4 decompressed size in a buffer prefix; arrow-ipc allocated it unchecked, so replay aborted the process on every start. | ours (storage) | medium: needs a CRC-valid corrupt record | commit 1b3311d plus this commit (R3.8) |
+| M3-2 | `parquet_file` | `fuzz/regressions/parquet_file/min-crash-3c48037…` | A 21-byte file whose footer claims more metadata than the file holds. Upstream's push decoder underflows (parquet `push_decoder.rs:391`). The guard catches it, so every read reports the file corrupt; the upstream report is not filed yet. | upstream guarded | low: the file must be corrupt already | the regression test in `verify.rs` (R3.8) |
+
 ## M4 — S3 fault injection
 
 The S3 fault milestone (plan `docs/plans/r-hardening/04-m4-s3-faults.md`, decision D-R-8). `ChaosStore` (`crates/storage/src/test_support/chaos.rs`) sits in front of an in-memory bucket and fails or delays the calls it forwards, as `object_store`'s S3 client does once its retries are exhausted. The model test has an S3 mode (`model_tests::storage_matches_the_model_on_s3`) that runs the same ops against it with the read cache on.
@@ -132,14 +143,20 @@ Environment:
 | 2026-11-15 | uncommitted: check per block, no lock | D7, same | debug, 64 MiB tmpfs | 6.7 s | fail: sampler minimum 3.7 MiB |
 | 2026-11-15 | 4c8fe6a | D7, same | debug, 64 MiB tmpfs | 9.9 s | sampler passes (minimum 15.8 MiB); fails in settle, see M5-6 |
 | 2026-11-15 | 4c8fe6a | D1 `appends_stop_at_min_free_before_the_disk_fills`, same | debug, 64 MiB tmpfs | 10.4 s | pass |
-| | | `just resources` (three runs), `LLMOBS_TEST_SMALL_FS` on an ext4 loop device | | | pending (long run, not run in this pass) |
-| | | `just resources-memory`, `just resources-memory-min defaults` and `small` | release | | pending (long run, needs free RAM and about 10 GiB of disk) |
-| | | `peak_at_the_default_limit` and the low-limit descriptor runs | debug | | pending: the run was refused by the sandbox's permission check, so it is not recorded here |
+| 2026-11-15 | a1f5ce5 | `just resources` (log `resources-3`) | debug | 53 s | 4 pass, 11 fail, before the fixes. Causes: triage §2 |
+| 2026-11-15 | a1f5ce5 + 16927ae | `just resources` | release | 372 s | 15/15 pass |
+| 2026-11-15 | a1f5ce5 + 16927ae | `resources-memory` small profile, a systemd scope per limit | release | | see Measured limits. The small profile ran in an instrumented copy (sampler thread), not the committed code |
+| earlier | a1f5ce5 | `resources-memory-min defaults` (vm-report-1) | release | 400.7 s | 8 GiB passes, peak RSS 7.40 GiB |
+| | | `just resources` three times, `LLMOBS_TEST_SMALL_FS` on an ext4 loop device, descriptor limits 1024 and 512 | | | pending: one `just resources` run only; the ext4 loop device and the 1024/512 limits were not run |
+| 2026-11-15 | a1f5ce5 + 16927ae | `peak_at_the_default_limit` (soft limit 65,536, 30 s, 4 appenders, 4 query loops) | | 30 s load | peak 189 (116 in the first run), baseline 16 to 17. Peak composition from an instrumented copy |
+| 2026-11-15 | a1f5ce5 + 16927ae | `a_low_limit_gives_errors_not_panics`, limits 256, 128, 64, 32 | | 20 s each | all run, no panic, no wedge |
+| 2026-11-15 | a1f5ce5 + 16927ae | `opening_under_a_low_limit_is_a_clean_error`, limits 64, 32, 16, 8 | | | 64, 32 and 16 open; 8 fails cleanly (`io`) |
 
 ### Measured limits
 
-- **Memory:** pending. The smallest passing limit and the documented minimum for the defaults and the small profile are not measured yet, so spec 03 § 10 gives them as provisional.
-- **Descriptors:** pending. The baseline and peak at the default limit, and the lowest limit that runs without errors, are not measured yet.
+- **Memory, defaults:** smallest passing limit 8 GiB, peak RSS 7.40 GiB at 8 GiB. The kill point is between 7.75 and 8 GiB (earlier run, before the fixes; not re-run).
+- **Memory, small profile (glibc, the test binary's allocator):** 4 GiB passes (VmHWM 4.02 GiB); 2 GiB is killed. With `MALLOC_ARENA_MAX=2` and 1 MiB trim and mmap thresholds: 2 GiB passes (VmHWM 1.56 GiB), 1.25 GiB is killed. With mimalloc, in an earlier build (`eabb4d1`): 4 GiB passes (VmHWM 3.21 GiB), 2 GiB is killed. The shipped binary uses mimalloc, so the glibc figures are not the shipped ones (M5-8). The documented minimum is 2 to 4 GiB until M5-7 and M5-8 are settled, and spec 03 § 10 says so.
+- **Descriptors:** baseline 16 to 17 at the soft limit 65,536. Peak 189 with a 128 MiB query cap, 166 of them spill files (116 in the first run). This is the "before" number for `with_max_spill_merge_fan_in(16)`, which is not applied: the test never nears 1024. Limits 256, 128, 64 and 32 all run, with clean errors (no lowest limit ran without errors). At 32 the WAL fails and a reopen recovers. Opening runs at 16 and above and fails cleanly at 8.
 
 ### Findings
 
@@ -149,11 +166,15 @@ Environment:
 
 **M5-3, D5 stops at its free-space assertion.** D5 (compaction that meets `ENOSPC`) fails at its free-space assertion, after catalog writes that follow the ballast. Cause unconfirmed. Not fixed in M5.
 
-**M5-4, a 16 MiB per-query cap refuses a trace list over a tiny project.** Found by R5.7's smoke run: with `query.max_memory` at 16 MiB, a trace list over a tiny project is refused, because spill shares can drop to about 98 KiB. Not fixed in M5; spec 03 § 10 notes it under Memory.
+**M5-4, a 16 MiB per-query cap refuses a trace list over a tiny project (open).** Found by R5.7's smoke run. Cause: DataFusion keeps `sort_spill_reservation_bytes` (10 MiB by default) per sort partition that cannot spill, so 8 partitions need about 80 MiB. The model's own trace read of the seed is refused before any load. The descriptor tests now use a 128 MiB cap (16927ae). Proposed engine change, not done: the session sets `sort_spill_reservation_bytes` to `min(10 MiB, max_memory / (4 × partitions))`, so small caps work. Spec 03 § 10 notes it under Memory.
 
 **M5-5, the read cache outran the monitor (D7).** `ReadCache::write_blocks` trusted the monitor's measurement, up to a second old, and several concurrent calls could each pass the check and then write, so the cache took the disk below `min_free_bytes`. The fix measures before each block and serializes the check with the writes (`read_cache.rs`, `write_lock`). The regression test is `read_cache::tests::writes_check_free_disk_now_not_the_last_measurement`, which fails before the change. Fixed in 4c8fe6a (R5.8). The lock was needed: a measurement per call alone still let concurrent calls overshoot.
 
-**M5-6, cache writes ignore compaction reservations (found by D7, open).** After M5-5, D7's sampler passes, and the case then fails in its settle step: a compaction job's Parquet write returns `ENOSPC` after the ballast is removed (the job's input reservation had passed). The read cache checks `free()`, not `free()` minus the outstanding reservations, so cache blocks can take space a compaction has reserved. The cause is suspected, not confirmed. Not fixed in M5: it is a rule question (whether the cache respects reservations) and the case's 64 MiB filesystem may be too small for its settle.
+**M5-6, cache writes ignore compaction reservations (found by D7, open).** After M5-5, D7's sampler passes, and the case then fails in its settle step: a compaction job's Parquet write returns `ENOSPC` after the ballast is removed (the job's input reservation had passed). The read cache checks `free()`, not `free()` minus the outstanding reservations, so cache blocks can take space a compaction has reserved. The cause is suspected, not confirmed. Not fixed in M5: it is a rule question (whether the cache respects reservations) and the case's 64 MiB filesystem may be too small for its settle. Seen again in `the_read_cache_never_fills_the_disk`: its settle compacts 42 MiB of filler on the same disk while the default read cache (about 48 MiB) holds blocks. The test now sets the read cache to 1 MiB before the settle (a test fix, not an engine fix), so the engine question stays open.
+
+**M5-7, most resident memory during ingest is outside the memory budgets (open).** In an ingest-only run the process grows about 70 MiB/s while the memtable stays at 50 to 130 MiB and is flushed. The accounted pools (memtable at most 130 MiB, query pool at most about 170 MiB) do not explain it. glibc arenas account for a large part (`MALLOC_ARENA_MAX=2` halves the peak). Not located. The next step is a heap profile (dhat or jemalloc profiling). Not fixed.
+
+**M5-8, the memory test measures glibc, the shipped binary uses mimalloc (D56, open).** The storage test binary uses glibc malloc, and `crates/cli/src/main.rs` sets mimalloc. The memory numbers above are glibc numbers. The earlier mimalloc build was no better (killed at 2 GiB, 3.0 GiB anon at 4 GiB). The fix is to set the same allocator in the memory test (a dev-dependency and `#[global_allocator]` in the test cfg, as the llmobs-m5 experiment did), then re-measure. Not done.
 
 ### Requests
 
@@ -172,6 +193,13 @@ Track R, plan `docs/plans/r-hardening/06-m6-concurrency.md`. The sub-phases add 
 ### Findings
 
 **M6-1, GC deleted a file a pre-raise snapshot still read.** A deletion pass raises a clean file: `Catalog::apply` replaces its `FileMeta` with a new `Arc`. A snapshot taken before the raise holds the old `Arc`, but when the file was later removed, the committer retired only the new `Arc`, so GC's in-use check (`strong_count`) did not count the reader. Once the grace had passed, GC deleted the object under the reader. The production grace of 5 minutes hid it. The regression test is `gc::tests::gc_keeps_a_file_a_snapshot_from_before_its_raise_reads`, which fails before the change at its GC step. Class: storage. Fixed in R6.4 (commit 5b01647): the committer keeps a `Weak` of each replaced version (`superseded`), and GC treats the file as in use while one is alive.
+
+### Pending and limits
+
+- **Nightly stress.** `just stress` (R6.7) is not yet run nightly. The nightly steps wait for M3's nightly workflow (`.github/workflows/nightly.yml`); until it exists, the stress test runs only by hand.
+- **Read cache (R6.8).** `read_cache::tests::concurrent_use_never_returns_wrong_bytes` pins no wrong bytes, the capacity and the file-to-index direction under 8 threads. A block can be indexed without its file for a moment when an eviction runs between a block's write and its index insert (benign: the next read finds the file missing, drops the entry and fetches again). The test does not reach the window that `write_blocks` guards by removing a block written after its object was evicted: with that removal taken out it still passed 200 of 200 runs, so that guard had no deterministic test. `read_cache::tests::a_block_written_after_its_object_was_evicted_is_not_indexed` now covers it through a test-only hook between the block's write and its index insert: removing the guard fails it.
+- **Gate and flush races (R6.8).** The snapshot tests pin the gate against media collection, finish_drops and obsolete collection (each removal fails a test, checked by hand). One of them passes with the gate removed and needs a stronger scenario: `a_snapshot_matches_its_copy_under_concurrent_commits` (the snapshot's retired `Arc`s keep listed files in use). `the_gate_holds_a_quarantined_file` now drops the project after the verify pass, which retires the quarantined file as an obsolete row, so removing the gate fails it. `flush_now`: removing the force flag keeps `flush_now_covers_every_acknowledged_append` green but makes it take about 60 s instead of 1 s, and removing the shutdown checks keeps `flush_now_racing_shutdown_fails_cleanly` green, because the flush finishes before shutdown wins. `flush_now_gives_up_once_shutdown_began` holds the flush and fails when the in-loop shutdown check is removed. The M1 model has no `Flush` op, so B2's `flush_now` is not exercised by the model: a follow-up for the model.
+- **Watchdog scope.** The stuck-item watchdog covers `run_segment` only. `check_full`, the barriers and `settle_concurrent` run outside it, so a hang there is not caught by the watchdog.
 
 ---
 

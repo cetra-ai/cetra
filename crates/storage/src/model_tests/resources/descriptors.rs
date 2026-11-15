@@ -351,6 +351,7 @@ fn load_child(limit: u64, seconds: u64, dir: &Path) {
             root: Some(dir.to_path_buf()),
             workers: 4,
             unrecorded: true,
+            foreign_projects: vec![filler()],
             ..HarnessOptions::default()
         },
         |config| {
@@ -360,8 +361,11 @@ fn load_child(limit: u64, seconds: u64, dir: &Path) {
             config.compaction.l0_files = 2;
             config.compaction.threads = 4;
             config.wal.segment_bytes = ByteSize::mib(1);
+            // Every sort holds 10 MiB (DataFusion's `sort_spill_reservation_bytes`) per partition
+            // that cannot spill, so the model's reads of the seed need 8 partitions x about 10 MiB
+            // (spec 03 section 10, M5-4): 16 MiB refuses them at op 0.
             config.query.target_partitions = 8;
-            config.query.max_memory = ByteSize::mib(16);
+            config.query.max_memory = ByteSize::mib(128);
             config.query.initial_memory = ByteSize::mib(8);
         },
     );

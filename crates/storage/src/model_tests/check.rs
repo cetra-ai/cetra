@@ -1547,9 +1547,10 @@ pub(super) fn check_settled_files(h: &Harness, models: &[&Model]) {
     for table in [FileTable::Spans, FileTable::Traces, FileTable::Scores] {
         for file in h.storage().catalog_files(table) {
             assert!(
-                models
-                    .iter()
-                    .any(|model| model.projects().iter().any(|p| p.id() == file.project)),
+                h.foreign_projects().contains(&file.project)
+                    || models
+                        .iter()
+                        .any(|model| model.projects().iter().any(|p| p.id() == file.project)),
                 "file of project {} belongs to no lane",
                 file.project
             );

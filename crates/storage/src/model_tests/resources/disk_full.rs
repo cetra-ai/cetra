@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use object_store::memory::InMemory;
 use sha2::{Digest, Sha256};
 
 use super::super::check::check_full;
-use super::super::harness::{Harness, HarnessOptions, MODEL_PUT_SIZES};
+use super::super::harness::{Harness, HarnessOptions, memory_store};
 use super::super::ops::{Op, new_model};
 use super::super::shape::{HOUR_NS, P, day, midnight};
 use super::fill::{Text, append_filler, filler, filler_batch, filler_rows};
@@ -63,6 +62,7 @@ fn harness_in(root: &Path, adjust: impl FnOnce(&mut StorageConfig)) -> Harness {
         HarnessOptions {
             root: Some(root.to_path_buf()),
             unrecorded: true,
+            foreign_projects: vec![filler()],
             ..HarnessOptions::default()
         },
         |config| {
@@ -720,6 +720,7 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
     on_small_fs(D5, fs, |root| {
         let mut h = harness_in(root, |config| {
             config.min_free_bytes = ByteSize::b(0);
+            config.compaction.threads = 8;
             config.flush.max_bytes = ByteSize::mib(256);
         });
         let mut model = new_model(&h, (P::A, P::B));
@@ -734,6 +735,7 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
             "two L0 files of the filler on day 0"
         );
         let before = filler_spans_paths(&h);
+        let inputs: u64 = filler_day0_files(&h).iter().map(|(_, size)| size).sum();
         closed_clock(&h, &mut clock);
         let now = clock;
 
@@ -751,7 +753,15 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
                 }),
                 "the compaction job reaches its held point"
             );
-            ballast = Some(Ballast::leave_free(root, 128 * 1024));
+            // The filler job reserves its inputs before it stages. The ballast must come after
+            // that, or the job is refused (DiskFull) instead of meeting ENOSPC.
+            assert!(
+                wait_for(Duration::from_secs(60), Duration::from_millis(10), || {
+                    h.storage().disk().reserved() >= inputs
+                }),
+                "the filler job holds its disk reservation"
+            );
+            ballast = Some(Ballast::leave_free(root, MIB));
             h.storage().disk().refresh().expect("measure the free disk");
             h.storage().hooks().release(HookPoint::CompactionAfterStage);
             pass.join().expect("the compaction pass does not panic")
@@ -778,7 +788,7 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
         // The failed job's output is removed at once (R5.5).
         let free = free_bytes(root);
         assert!(
-            free >= 64 * 1024,
+            free >= 512 * 1024,
             "the failed job gave its output back: {free} bytes free"
         );
 
@@ -961,8 +971,11 @@ fn a_spilling_query_stops_at_min_free() {
         );
         accepted += accepted_rows(&outcomes);
 
-        // Run 3: the space is back, so the same query runs.
+        // Run 3: the space is back, so the same query runs. A restart first flushes the append:
+        // with rows in the memtable the plan adds a merge that needs memory the sort already
+        // holds, and this 26 MiB sort in a 32 MiB pool is then too large (a clean TooLarge).
         ballast.remove();
+        h.restart();
         h.storage().disk().refresh().expect("measure the free disk");
         let rows = spill_query(&h).expect("run 3: the spill fits again");
         assert_eq!(rows, accepted, "the spill query counts every filler row");
@@ -989,8 +1002,9 @@ fn the_read_cache_never_fills_the_disk() {
         let mut h = Harness::with_options(
             HarnessOptions {
                 root: Some(root.to_path_buf()),
-                store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+                store: Some(memory_store()),
                 unrecorded: true,
+                foreign_projects: vec![filler()],
                 ..HarnessOptions::default()
             },
             |config| {
@@ -1118,6 +1132,11 @@ fn the_read_cache_never_fills_the_disk() {
         );
 
         ballast.remove();
+        // The settle compacts the 42 MiB of filler into 42 MiB of output on the same disk. A cache
+        // of 48 MiB takes that space while the job runs (the cache does not honour the job's
+        // reservation), the job fails with ENOSPC, and `settle` does not accept a failed job. The
+        // audit of S3 mode needs the cache on, so it shrinks to 1 MiB.
+        h.restart_with(|config| config.query.read_cache_bytes = Some(ByteSize::mib(1)));
         h.storage().disk().refresh().expect("measure the free disk");
         model_steps(&mut h, &mut model, &mut clock, &after_ops(), 100);
         settle_and_check(&mut h, &mut model, &mut clock);

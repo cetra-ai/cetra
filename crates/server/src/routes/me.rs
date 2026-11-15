@@ -91,7 +91,8 @@ async fn change_password(
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
-    if state.config.auth.disable_password {
+    // Instance admins keep their password while password login is off (D-S-3).
+    if state.config.auth.disable_password && !row.is_instance_admin {
         return Err(ApiError::Forbidden {
             code: ProblemCode::Forbidden,
         });
@@ -459,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn password_change_rejects_a_weak_password_and_a_disabled_login() {
+    async fn password_change_rejects_a_weak_password_and_a_disabled_login_except_for_admins() {
         let app = TestApp::new().await;
         insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
         let cookie = session_cookie(&login(&app, "ada@example.com", PASSWORD).await);
@@ -526,5 +527,29 @@ mod tests {
             .map(Hasher::verify_count)
             .unwrap_or(0);
         assert_eq!(after, before);
+
+        let admin = insert_account(&disabled, "root@example.com", Some(PASSWORD)).await;
+        crate::test_support::make_instance_admin(&disabled, admin).await;
+        let admin_cookie = cookie_pair(
+            &start_session(
+                &disabled.state,
+                admin,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        let changed = disabled
+            .request(Method::POST, "/api/v1/me/password")
+            .header(header::COOKIE.as_str(), &admin_cookie)
+            .json(&serde_json::json!({
+                "current_password": PASSWORD,
+                "new_password": NEW_PASSWORD,
+            }))
+            .send()
+            .await;
+        assert_eq!(changed.status, 204);
     }
 }

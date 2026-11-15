@@ -66,6 +66,25 @@ updates:
           - minor
           - patch
 
+  - package-ecosystem: cargo
+    # The fuzz crate (track R M3). Its shared crates come from the root lock through
+    # `just fuzz-lock`; Dependabot updates only the exact libfuzzer-sys pin.
+    directory: /fuzz
+    allow:
+      - dependency-name: "libfuzzer-sys"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps
+
   - package-ecosystem: npm
     directory: /
     ignore:

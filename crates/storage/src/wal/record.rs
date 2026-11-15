@@ -6,13 +6,16 @@
 //! Called by the segment writer once it exists. The tests in this file cover it until then.
 #![allow(dead_code)]
 
+use std::io::Read;
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::Schema;
-use arrow::ipc::CompressionType;
+use arrow::error::ArrowError;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use arrow::ipc::{BodyCompressionMethod, CompressionType, Message};
 
 use crate::error::WalError;
 use crate::wal::Table;
@@ -26,6 +29,18 @@ pub(crate) const HEADER_LEN: usize = 17;
 pub(crate) const MAX_PAYLOAD: u32 = 256 * 1024 * 1024;
 
 const KIND_BATCH: u8 = 1;
+
+/// Most decompressed bytes one record may declare across its IPC buffers.
+///
+/// The writer rejects a batch over this, so replay never calls acknowledged data
+/// corrupt. A batch is bounded by the memtable's `hard_limit`, which has no upper
+/// bound of its own, not by `ingest.max_request_bytes`, so the cap has to be
+/// enforced on write. Replay treats a larger declared size as corrupt.
+const MAX_DECODED_BYTES: u64 = 1 << 30;
+
+/// LZ4 expands a block by at most about 255 to 1. The slack covers the frame header.
+const LZ4_MAX_RATIO: u64 = 256;
+const LZ4_SLACK: u64 = 64;
 
 /// One step of [`decode_next`].
 #[derive(Debug, PartialEq, Eq)]
@@ -58,14 +73,30 @@ pub(crate) enum Decoded {
 /// Appends one record to `out`.
 ///
 /// The IPC stream is written into its own buffer, then the header and payload
-/// are appended. A payload over [`MAX_PAYLOAD`] is rejected and `out` is unchanged.
+/// are appended. A payload over [`MAX_PAYLOAD`], or a batch whose decoded size is
+/// over [`MAX_DECODED_BYTES`], is rejected and `out` is unchanged.
 pub(crate) fn encode(seq: u64, batch: &RecordBatch, out: &mut Vec<u8>) -> Result<(), WalError> {
+    encode_within(seq, batch, out, MAX_DECODED_BYTES)
+}
+
+/// [`encode`] with the decoded-size cap as a parameter, so a test can use a small one.
+fn encode_within(
+    seq: u64,
+    batch: &RecordBatch,
+    out: &mut Vec<u8>,
+    max_decoded: u64,
+) -> Result<(), WalError> {
     let mut payload = Vec::new();
     write_stream(batch.schema().as_ref(), &[batch], &mut payload)?;
     let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     if len > MAX_PAYLOAD {
         return Err(WalError::InvalidPayload {
             reason: "payload exceeds 256MiB",
+        });
+    }
+    if !ipc_lengths_fit(&payload, max_decoded, Check::Write) {
+        return Err(WalError::InvalidPayload {
+            reason: "decoded size exceeds 1 GiB",
         });
     }
     let crc = checksum(seq, KIND_BATCH, &payload);
@@ -142,18 +173,24 @@ pub(crate) fn decode_next(buf: &[u8], offset: usize) -> Decoded {
 ///
 /// Declared IPC message sizes are checked against the buffer first. Arrow's
 /// reader allocates a body from the size in the message, so a corrupt length
-/// must be rejected before that call.
+/// must be rejected before that call. Buffer extents and LZ4 decompressed sizes
+/// are checked the same way, because Arrow allocates each decompressed buffer
+/// from its 8-byte prefix. A payload that fails any check is an
+/// `invalid ipc stream`.
 pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, WalError> {
-    if !ipc_lengths_fit(payload) {
+    if !ipc_lengths_fit(payload, MAX_DECODED_BYTES, Check::Read) {
         return Err(WalError::InvalidPayload {
             reason: "invalid ipc stream",
         });
     }
+    // A panic in Arrow's decoder is a corrupt record (spec 03 §1, track R D-R-17).
     let cursor = std::io::Cursor::new(payload);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|_| WalError::InvalidPayload {
+    let opened = catch_unwind(AssertUnwindSafe(|| StreamReader::try_new(cursor, None)))
+        .map_err(|_| ipc_decoder_panicked())?;
+    let mut reader = opened.map_err(|_| WalError::InvalidPayload {
         reason: "invalid ipc stream",
     })?;
-    let Some(first) = reader.next() else {
+    let Some(first) = next_batch(&mut reader)? else {
         return Err(WalError::InvalidPayload {
             reason: "ipc stream has no batch",
         });
@@ -161,7 +198,7 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, Wa
     let batch = first.map_err(|_| WalError::InvalidPayload {
         reason: "invalid ipc stream",
     })?;
-    if reader.next().is_some() {
+    if next_batch(&mut reader)?.is_some() {
         return Err(WalError::InvalidPayload {
             reason: "ipc stream has more than one batch",
         });
@@ -174,7 +211,36 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, Wa
     Ok(batch)
 }
 
-fn ipc_lengths_fit(payload: &[u8]) -> bool {
+/// `reader.next()`, with a decoder panic as a corrupt payload.
+fn next_batch<R: Read>(
+    reader: &mut StreamReader<R>,
+) -> Result<Option<Result<RecordBatch, ArrowError>>, WalError> {
+    catch_unwind(AssertUnwindSafe(|| reader.next())).map_err(|_| ipc_decoder_panicked())
+}
+
+fn ipc_decoder_panicked() -> WalError {
+    WalError::InvalidPayload {
+        reason: "ipc decoder panicked",
+    }
+}
+
+/// What [`ipc_lengths_fit`] checks about each LZ4 frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The writer, through [`encode_within`]. It has just compressed these frames
+    /// itself, so the decoded size from each prefix is enough. Decoding every frame
+    /// again would add a decompression to each WAL append, the hot ingest path.
+    Write,
+    /// Replay, through [`read_batch`]. A record read from disk is not trusted, so each
+    /// frame must decode to exactly its prefix's size.
+    Read,
+}
+
+/// Whether every declared length in the payload fits its bytes, and its LZ4 buffers
+/// decode within `max_decoded` in total. Arrow allocates from these lengths, so
+/// this runs before it. `check` decides whether the frames are decoded (see [`Check`]).
+fn ipc_lengths_fit(payload: &[u8], max_decoded: u64, check: Check) -> bool {
+    let mut decoded = 0;
     let mut offset = 0;
     while offset < payload.len() {
         if payload.len() - offset < 4 {
@@ -211,9 +277,121 @@ fn ipc_lengths_fit(payload: &[u8]) -> bool {
         if body_len > payload.len() - offset {
             return false;
         }
+        if !buffers_fit(
+            &message,
+            &payload[offset..offset + body_len],
+            &mut decoded,
+            max_decoded,
+            check,
+        ) {
+            return false;
+        }
         offset += body_len;
     }
     true
+}
+
+/// Checks the buffers of a record batch message against its body. The message
+/// must be a record batch or a dictionary batch, compressed with LZ4 frames
+/// per buffer, or uncompressed. `decoded` sums the decompressed sizes over the
+/// whole payload, and it must stay within `max_decoded`.
+fn buffers_fit(
+    message: &Message<'_>,
+    body: &[u8],
+    decoded: &mut u64,
+    max_decoded: u64,
+    check: Check,
+) -> bool {
+    let batch = if let Some(batch) = message.header_as_record_batch() {
+        batch
+    } else if let Some(dictionary) = message.header_as_dictionary_batch() {
+        let Some(batch) = dictionary.data() else {
+            return true;
+        };
+        batch
+    } else {
+        return true;
+    };
+    let compressed = match batch.compression() {
+        None => false,
+        Some(compression) => {
+            if compression.codec() != CompressionType::LZ4_FRAME
+                || compression.method() != BodyCompressionMethod::BUFFER
+            {
+                return false;
+            }
+            true
+        }
+    };
+    let Some(buffers) = batch.buffers() else {
+        return true;
+    };
+    for buffer in buffers.iter() {
+        let (Ok(offset), Ok(length)) = (
+            usize::try_from(buffer.offset()),
+            usize::try_from(buffer.length()),
+        ) else {
+            return false;
+        };
+        let Some(end) = offset.checked_add(length) else {
+            return false;
+        };
+        let Some(data) = body.get(offset..end) else {
+            return false;
+        };
+        if compressed && length > 0 && !lz4_buffer_fits(data, decoded, max_decoded, check) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Checks one LZ4 buffer. Its 8-byte prefix is the decompressed size: 0 means
+/// empty, which Arrow allocates nothing for. -1 means stored raw, so its bytes
+/// count toward the total as they are. Any other size must fit the compressed
+/// bytes. On read, its LZ4 frame must also decode to exactly that size.
+fn lz4_buffer_fits(data: &[u8], decoded: &mut u64, max_decoded: u64, check: Check) -> bool {
+    let Some(prefix) = data.first_chunk::<8>() else {
+        return false;
+    };
+    let size = i64::from_le_bytes(*prefix);
+    if size == 0 {
+        return true;
+    }
+    // `first_chunk` succeeded, so `data` holds at least the 8 prefix bytes.
+    let frame = &data[8..];
+    let Ok(compressed) = u64::try_from(frame.len()) else {
+        return false;
+    };
+    let raw = size == -1;
+    let declared = if raw {
+        compressed
+    } else {
+        let Ok(size) = u64::try_from(size) else {
+            return false;
+        };
+        if size
+            > compressed
+                .saturating_mul(LZ4_MAX_RATIO)
+                .saturating_add(LZ4_SLACK)
+        {
+            return false;
+        }
+        size
+    };
+    match decoded.checked_add(declared) {
+        Some(total) if total <= max_decoded => *decoded = total,
+        _ => return false,
+    }
+    raw || check == Check::Write || lz4_frame_decodes_to(frame, declared)
+}
+
+/// Whether `frame` is an LZ4 frame that decodes to exactly `size` bytes. It decodes
+/// into a counting sink, so memory is bounded by the frame's block size rather than
+/// by `size`. It reads one byte past `size`, so a longer frame is caught as well.
+fn lz4_frame_decodes_to(frame: &[u8], size: u64) -> bool {
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(frame).take(size.saturating_add(1));
+    matches!(std::io::copy(&mut decoder, &mut std::io::sink()), Ok(n) if n == size)
 }
 
 fn write_stream(
@@ -236,9 +414,11 @@ fn write_stream(
 /// Appends one framed record whose payload is not necessarily IPC.
 ///
 /// Replay tests use this to build a checksum-valid record that `read_batch` rejects.
-#[cfg(test)]
+/// The fuzz entries use it to frame segments with a real checksum.
+#[cfg(any(test, fuzzing))]
 pub(crate) fn push_framed(buf: &mut Vec<u8>, seq: u64, payload: &[u8]) {
-    let len = u32::try_from(payload.len()).unwrap();
+    // A capped length fails the length check on decode; it never panics.
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(&checksum(seq, KIND_BATCH, payload).to_le_bytes());
     buf.extend_from_slice(&seq.to_le_bytes());
@@ -277,6 +457,8 @@ mod tests {
     use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
     use llmobs_core::span::{Span, SpanEvent};
     use proptest::prelude::*;
+
+    use crate::wal::{sample_span_batch, segment_name};
 
     use super::*;
 
@@ -588,6 +770,323 @@ mod tests {
         write_stream(schema.as_ref(), &[&other], &mut wrong).unwrap();
         let error = read_batch(&wrong, Table::Spans).unwrap_err();
         assert!(error.to_string().contains("schema does not match"));
+    }
+
+    /// Where one record batch sits in an IPC stream payload.
+    struct BatchLayout {
+        /// The message's flatbuffer metadata.
+        meta: Range<usize>,
+        /// The message's body.
+        body: Range<usize>,
+        /// Each buffer's (offset, length), relative to the body.
+        buffers: Vec<(i64, i64)>,
+    }
+
+    /// Walks the stream's messages to its first record batch.
+    fn batch_layout(payload: &[u8]) -> BatchLayout {
+        let mut offset = 0;
+        loop {
+            let mut len = [0; 4];
+            len.copy_from_slice(&payload[offset..offset + 4]);
+            offset += 4;
+            if len == [0xff; 4] {
+                len.copy_from_slice(&payload[offset..offset + 4]);
+                offset += 4;
+            }
+            let meta_len = usize::try_from(i32::from_le_bytes(len)).unwrap();
+            let meta = offset..offset + meta_len;
+            offset += meta_len;
+            let message = arrow::ipc::root_as_message(&payload[meta.clone()]).unwrap();
+            let body_len = usize::try_from(message.bodyLength()).unwrap();
+            let body = offset..offset + body_len;
+            if let Some(batch) = message.header_as_record_batch() {
+                let buffers = batch
+                    .buffers()
+                    .unwrap()
+                    .iter()
+                    .map(|buffer| (buffer.offset(), buffer.length()))
+                    .collect();
+                return BatchLayout {
+                    meta,
+                    body,
+                    buffers,
+                };
+            }
+            offset += body_len;
+        }
+    }
+
+    /// The first buffer that Arrow would decompress: an LZ4 prefix above zero.
+    /// Returns its index, and its absolute position in the payload.
+    fn first_lz4_buffer(payload: &[u8]) -> (usize, usize) {
+        let layout = batch_layout(payload);
+        layout
+            .buffers
+            .iter()
+            .enumerate()
+            .find_map(|(index, (offset, length))| {
+                let at = layout.body.start + usize::try_from(*offset).unwrap();
+                let prefix = i64::from_le_bytes(payload[at..at + 8].try_into().unwrap());
+                (*length > 8 && prefix > 0).then_some((index, at))
+            })
+            .expect("the record has a compressed buffer")
+    }
+
+    /// Overwrites the LZ4 prefix of the first compressed buffer.
+    fn set_first_lz4_prefix(payload: &mut [u8], value: i64) {
+        let (_, at) = first_lz4_buffer(payload);
+        payload[at..at + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// Overwrites one buffer's length in the flatbuffer metadata. Non-empty
+    /// buffers have distinct offsets, so the (offset, length) pair is unique.
+    fn set_buffer_length(payload: &mut [u8], index: usize, length: i64) {
+        let layout = batch_layout(payload);
+        let (offset, old) = layout.buffers[index];
+        let mut pair = Vec::new();
+        pair.extend_from_slice(&offset.to_le_bytes());
+        pair.extend_from_slice(&old.to_le_bytes());
+        let meta = &payload[layout.meta.clone()];
+        let found: Vec<usize> = meta
+            .windows(16)
+            .enumerate()
+            .filter(|(_, window)| *window == pair.as_slice())
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "buffer {index} appears once in its metadata"
+        );
+        let at = layout.meta.start + found[0] + 8;
+        payload[at..at + 8].copy_from_slice(&length.to_le_bytes());
+    }
+
+    /// The encoded payload of one record, as the segment stores it.
+    fn payload_of(table_batch: &RecordBatch, seq: u64) -> Vec<u8> {
+        let mut buf = Vec::new();
+        encode(seq, table_batch, &mut buf).unwrap();
+        let Decoded::Record { payload, .. } = decode_next(&buf, 0) else {
+            panic!("a re-encoded record frames");
+        };
+        buf[payload].to_vec()
+    }
+
+    fn is_invalid_payload(result: &Result<RecordBatch, WalError>) -> bool {
+        matches!(result, Err(WalError::InvalidPayload { .. }))
+    }
+
+    #[test]
+    fn a_lying_lz4_length_is_a_corrupt_record() {
+        for (table, batch) in [
+            (Table::Spans, spans_batch()),
+            (Table::Scores, scores_batch()),
+        ] {
+            let good = payload_of(&batch, 1);
+            assert!(
+                read_batch(&good, table).is_ok(),
+                "the unmodified record decodes"
+            );
+
+            let mut bad = good.clone();
+            // 1 TiB: the allocation Arrow would make from this prefix.
+            set_first_lz4_prefix(&mut bad, 1 << 40);
+            assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
+            assert!(is_invalid_payload(&read_batch(&bad, table)));
+        }
+    }
+
+    #[test]
+    fn an_lz4_size_past_the_ratio_bound_is_corrupt() {
+        let good = payload_of(&spans_batch(), 1);
+        let (index, at) = first_lz4_buffer(&good);
+        let length = usize::try_from(batch_layout(&good).buffers[index].1).unwrap();
+        let bound = u64::try_from(length - 8).unwrap() * LZ4_MAX_RATIO + LZ4_SLACK;
+
+        // At the bound the ratio check passes, and the frame check then decides. The
+        // prefix here is not the frame's real size, so that is corrupt; one byte past
+        // the bound is corrupt by the ratio alone.
+        let mut past = good;
+        past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
+        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Read));
+    }
+
+    #[test]
+    fn a_stored_raw_or_empty_lz4_buffer_still_fits() {
+        // One short span: every buffer is smaller than an LZ4 frame, so Arrow
+        // stores it raw with the -1 prefix.
+        let payload = payload_of(&sample_span_batch(), 1);
+        let layout = batch_layout(&payload);
+        let raw = layout.buffers.iter().any(|(offset, length)| {
+            let at = layout.body.start + usize::try_from(*offset).unwrap();
+            *length > 0 && i64::from_le_bytes(payload[at..at + 8].try_into().unwrap()) == -1
+        });
+        assert!(raw, "a one-span record stores a buffer raw");
+        assert!(read_batch(&payload, Table::Spans).is_ok());
+
+        // A prefix of 0 is an empty buffer, which needs no allocation.
+        let mut empty = payload_of(&spans_batch(), 1);
+        let (_, at) = first_lz4_buffer(&empty);
+        empty[at..at + 8].copy_from_slice(&0_i64.to_le_bytes());
+        assert!(ipc_lengths_fit(&empty, MAX_DECODED_BYTES, Check::Read));
+    }
+
+    /// The decoded bytes the cap counts for a payload: each LZ4 buffer's declared
+    /// size, or the bytes of a stored-raw buffer.
+    fn decoded_total(payload: &[u8]) -> u64 {
+        let layout = batch_layout(payload);
+        layout
+            .buffers
+            .iter()
+            .map(|(offset, length)| {
+                if *length == 0 {
+                    return 0;
+                }
+                let at = layout.body.start + usize::try_from(*offset).unwrap();
+                match i64::from_le_bytes(payload[at..at + 8].try_into().unwrap()) {
+                    0 => 0,
+                    -1 => u64::try_from(*length - 8).unwrap(),
+                    size => u64::try_from(size).unwrap(),
+                }
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_decoded_cap_counts_raw_and_lz4_buffers_exactly() {
+        for batch in [spans_batch(), sample_span_batch()] {
+            let payload = payload_of(&batch, 1);
+            let total = decoded_total(&payload);
+            assert!(total > 0);
+            assert!(ipc_lengths_fit(&payload, total, Check::Read));
+            assert!(!ipc_lengths_fit(&payload, total - 1, Check::Read));
+        }
+    }
+
+    #[test]
+    fn a_batch_over_the_decoded_cap_is_not_written() {
+        let batch = sample_span_batch();
+        let total = decoded_total(&payload_of(&batch, 1));
+
+        let mut out = vec![0xaa];
+        assert!(matches!(
+            encode_within(1, &batch, &mut out, total - 1),
+            Err(WalError::InvalidPayload {
+                reason: "decoded size exceeds 1 GiB"
+            })
+        ));
+        assert_eq!(out, [0xaa], "a rejected batch leaves the buffer as it was");
+
+        encode_within(1, &batch, &mut out, total).unwrap();
+        let Decoded::Record { payload, .. } = decode_next(&out, 1) else {
+            panic!("the accepted batch frames after the existing byte");
+        };
+        assert!(read_batch(&out[payload], Table::Spans).is_ok());
+    }
+
+    #[test]
+    fn an_lz4_prefix_that_disagrees_with_its_frame_is_corrupt() {
+        let good = payload_of(&spans_batch(), 1);
+        let (_, at) = first_lz4_buffer(&good);
+        let claimed = i64::from_le_bytes(good[at..at + 8].try_into().unwrap());
+        assert!(claimed > 1);
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
+
+        // A prefix of 1 is far inside the ratio bound, so only the frame check can
+        // see that the frame decodes to more.
+        let mut short = good.clone();
+        short[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
+        assert!(!ipc_lengths_fit(&short, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&short, Table::Spans)));
+
+        // A frame that decodes to less than its prefix claims is corrupt too.
+        let mut long = good;
+        long[at..at + 8].copy_from_slice(&(claimed + 1).to_le_bytes());
+        assert!(!ipc_lengths_fit(&long, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&long, Table::Spans)));
+    }
+
+    #[test]
+    fn the_write_check_skips_the_frame_decode_and_the_read_check_does_not() {
+        let good = payload_of(&spans_batch(), 1);
+        let (index, at) = first_lz4_buffer(&good);
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Write));
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
+
+        // A prefix of 1 disagrees with the frame the writer left. The write check
+        // only sums prefixes, so it accepts; the read check decodes and rejects.
+        let mut lying = good.clone();
+        lying[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
+        assert!(ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Write));
+        assert!(!ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&lying, Table::Spans)));
+
+        // The write check still rejects what needs no decode: a prefix past the
+        // ratio bound.
+        let length = usize::try_from(batch_layout(&good).buffers[index].1).unwrap();
+        let bound = u64::try_from(length - 8).unwrap() * LZ4_MAX_RATIO + LZ4_SLACK;
+        let mut past = good;
+        past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
+        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Write));
+    }
+
+    #[test]
+    fn a_buffer_extent_past_the_body_is_corrupt() {
+        let good = payload_of(&spans_batch(), 1);
+        let layout = batch_layout(&good);
+        let index = layout
+            .buffers
+            .iter()
+            .position(|(_, length)| *length > 0)
+            .expect("the record has a non-empty buffer");
+
+        let mut bad = good;
+        set_buffer_length(&mut bad, index, 1 << 40);
+        assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&bad, Table::Spans)));
+    }
+
+    #[test]
+    fn a_zstd_record_is_corrupt() {
+        let batch = spans_batch();
+        let options = IpcWriteOptions::default()
+            .try_with_compression(Some(CompressionType::ZSTD))
+            .unwrap();
+        let mut zstd = Vec::new();
+        let mut writer =
+            StreamWriter::try_new_with_options(&mut zstd, batch.schema().as_ref(), options)
+                .unwrap();
+        writer.write(&batch).unwrap();
+        writer.finish().unwrap();
+        assert!(!ipc_lengths_fit(&zstd, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&zstd, Table::Spans)));
+    }
+
+    #[test]
+    fn a_crc_valid_record_with_a_lying_length_is_corrupt_per_skip_corrupt() {
+        let good = payload_of(&spans_batch(), 1);
+        let mut bad = payload_of(&spans_batch(), 2);
+        set_first_lz4_prefix(&mut bad, 1 << 40);
+
+        // Every frame has a real checksum, so only the IPC check can reject seq 2.
+        let mut segment = Vec::new();
+        push_framed(&mut segment, 1, &good);
+        push_framed(&mut segment, 2, &bad);
+        push_framed(&mut segment, 3, &good);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(segment_name(1)), &segment).unwrap();
+
+        let hooks = crate::hooks::Hooks::default();
+        let strict = crate::recover_table(dir.path(), Table::Spans, 0, false, u64::MAX, &hooks);
+        assert!(
+            matches!(strict, Err(crate::error::OpenError::WalCorrupt { .. })),
+            "a corrupt record stops replay as a corrupt WAL"
+        );
+
+        // Seqs 1 and 3 replay; seq 2 is the one skipped.
+        let skipped =
+            crate::recover_table(dir.path(), Table::Spans, 0, true, u64::MAX, &hooks).unwrap();
+        assert_eq!(skipped.records, 2, "one of three frames is skipped");
     }
 
     proptest! {

@@ -30,7 +30,6 @@ use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMerge
 use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
-use datafusion_datasource::source::DataSourceExec;
 use futures::StreamExt;
 use llmobs_core::schema::{scores, scores_schema, spans, spans_schema};
 
@@ -216,7 +215,7 @@ pub(super) fn file_scan(
         .with_output_ordering(vec![ordering.clone()])
         .with_projection_indices(projection)
         .map_err(read_error)?;
-    Ok(DataSourceExec::from_data_source(builder.build()))
+    Ok(crate::unwind::guarded_scan(builder.build()))
 }
 
 /// The table's `sort_columns` as physical sort expressions, in the order the
@@ -897,6 +896,11 @@ mod tests {
             let mut scans = Vec::new();
             let mut stack = vec![plan];
             while let Some(node) = stack.pop() {
+                // A GuardExec answers the scan downcast through its delegate; count its scan once.
+                if node.name() == "GuardExec" {
+                    stack.extend(node.children().into_iter().cloned());
+                    continue;
+                }
                 if let Some(scan) = node.downcast_ref::<DataSourceExec>() {
                     scans.push(
                         scan.data_source()

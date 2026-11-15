@@ -221,13 +221,24 @@ it("maps the reset errors", async () => {
   }
 });
 
-it("explains when password sign-in is disabled with a token", async () => {
+it("shows the reset form with a token when password sign-in is disabled", async () => {
   withConfig({ password_enabled: false });
-  await renderApp("/reset?token=tok123");
-  expect(
-    await screen.findByText(
-      "Password sign-in is disabled on this server. Sign in with your identity provider.",
-    ),
-  ).toBeInTheDocument();
-  expect(screen.queryByLabelText("New password", { selector: "input#password" })).toBeNull();
+  server.use(http.post("/api/auth/password/reset", () => new HttpResponse(null, { status: 204 })));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("heading", { name: "Password updated" })).toBeInTheDocument();
+  // The admins' sign-in goes through the password form, not the provider (D-S-4).
+  expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toMatch(
+    /^\/login\?.*password=/,
+  );
+});
+
+it("explains a reset refused for a non-admin with password sign-in disabled", async () => {
+  withConfig({ password_enabled: false });
+  server.use(http.post("/api/auth/password/reset", () => problemResponse(403, "forbidden")));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Password sign-in is disabled on this server.",
+  );
 });

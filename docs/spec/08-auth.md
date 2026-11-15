@@ -11,7 +11,7 @@
 |---|---|---|
 | `LLMOBS_AUTH_SIGNUP` | `invite_only` | `open` \| `invite_only` \| `disabled`. After bootstrap, `invite_only` lets only invited emails register. |
 | `LLMOBS_AUTH_SIGNUP_DOMAINS` | empty | With `open`, restrict to these email domains. |
-| `LLMOBS_AUTH_DISABLE_PASSWORD` | `false` | Hide and refuse password login/sign-up (SSO only). The CLI admin commands still work. |
+| `LLMOBS_AUTH_DISABLE_PASSWORD` | `false` | Hide and refuse password login/sign-up (SSO only). Instance admins keep password login, password change and reset through a link, at `/login?password=1` (D-S-3, D-S-4); "forgot password", password sign-up, invite sign-up and setup stay refused for everyone. The CLI admin commands still work. |
 | `LLMOBS_AUTH_REQUIRE_EMAIL_VERIFICATION` | `false` | Requires SMTP. |
 | `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` | empty | Users with these email domains must log in through an OAuth/OIDC provider (password login refused). Any configured provider satisfies it. Enforced only with a genuine licence that lists `sso_enforcement`, expired or not (D-P-8); otherwise ignored with a startup warning. An org can enforce SSO for its own verified domains (§ Per-org SSO). Besides login and signup, enforcement ends the listed domains' password sessions (a session that no identity provider started stops resolving, with no admin exemption, as for login), refuses their personal access tokens, and answers password forgot and reset as for an enforced org (D-P-69). |
 
@@ -25,7 +25,7 @@ An invite token admits its own email only (D147). It does not prove the mailbox:
 - **Policy:** NFC-normalized, then 10 to 128 characters counted in Unicode scalar values, not equal to the email, and not in the embedded common-password list (SecLists `10k-most-common.txt`, MIT; entries of 10 characters or more are kept).
 - **Unknown email:** login verifies the password against a fixed dummy hash, so its timing matches a real user (D143).
 - **Rate limiting and lockout** are in memory; a restart clears them (D143). Login: 10 per minute per (client IP, email). Signup, setup, password forgot and verification resend: 5 per minute per client IP; password forgot and resend also 3 per hour per email. After 20 consecutive failed password logins for one email, password login for that email is locked for 15 minutes. A success or a password reset clears the lockout. Lockout does not block OAuth/OIDC login or password reset.
-- **Uniform answers (D145):** login answers the same 401 `unauthorized` for an unknown email, a wrong password, a disabled user, a user without a password and a locked email. Password forgot and verification resend always answer 204. Under an org's enforcement, a correct password of a non-admin user of its domains answers 403 `sso_required`; a wrong password still answers 401.
+- **Uniform answers (D145):** login answers the same 401 `unauthorized` for an unknown email, a wrong password, a disabled user, a user without a password and a locked email. Password forgot and verification resend always answer 204. Under an org's enforcement, a correct password of a non-admin user of its domains answers 403 `sso_required`; a wrong password still answers 401. With password login off, a correct password of a user who is not an instance admin answers 403 `forbidden`; every other failure answers the same 401 (D-S-3).
 - **Change:** `POST /api/v1/me/password` takes the current password and the new one, and revokes every other web session and all personal access tokens.
 - **Reset with SMTP:** an email with a single-use token valid for 1 h (`password_resets`, stored hashed). Resetting revokes all of the user's web sessions and personal access tokens.
 - **Reset without SMTP:**
@@ -62,7 +62,7 @@ name = "okta"            # provider id → identities.provider = "oidc:okta"
 display_name = "Okta"
 issuer = "https://acme.okta.com"
 client_id = "…"
-client_secret = "…"
+client_secret = "…"      # or LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET (spec 12, D-S-2)
 scopes = ["openid", "email", "profile"]
 link_existing_by_email = false   # default false
 allowed_domains = []             # verified email domain

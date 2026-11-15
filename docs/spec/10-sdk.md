@@ -263,7 +263,6 @@ result = llmobs.evaluate(
     dataset="faq-v1",
     task=task,
     scorers=[exact, length_ok],
-    server_evaluators=["correctness"],   # evaluator names run server-side (06)
     experiment_name="gpt-5-mini prompt v3",
     metadata={"model": "gpt-5-mini", "prompt": "v3"},
     concurrency=8, repetitions=1,
@@ -272,7 +271,12 @@ print(result.summary())                   # aggregates per score; link to the UI
 result.assert_min("exact", 0.8)           # raises for CI gating
 ```
 
-`evaluate` follows the protocol in 06 §Experiments; async tasks are supported (`await llmobs.aevaluate(...)`). Task exceptions are recorded per item and do not abort the run.
+`evaluate` follows the protocol in 06 §Experiments; async tasks are supported (`await llmobs.aevaluate(...)`). Task and scorer exceptions are recorded per item and do not abort the run. `evaluate` needs `llmobs.init()` first, and the key needs the `ingest`, `read` and `write` scopes (D-J-5). Rules (D-J-16):
+- Each run starts from an empty context: its root span (kind `chain`, named after the experiment, input = the item input, output = the task output) begins a new trace, and every span started inside it carries `llmobs.experiment.id`, `llmobs.dataset_item.id` and the `experiment` environment, whatever `init` set.
+- Python tasks are `task(input)` or `task(input, item)`; TypeScript tasks are `task(input, item)`. Scorers receive any of `input`, `output`, `expected`, `metadata`, `trace_id` by name (Python) or as one object (TypeScript), and return a bool, a number, a string (categorical label), a `Score(value, reason)` or `None`. A scorer's name is its function's name; lambdas and duplicate names are refused.
+- Outputs are sent as JSON, cut to 256 KiB; error texts to 4,096 characters. Results go in batches of at most 500 and 32 MiB.
+- The client retries only reads, deletes, the results post and finish; creates are sent once. It raises `ApiError` on an error answer. Task and scorer exceptions never raise: they are recorded per run.
+- Experiments have no server evaluators: a judge runs inside a scorer (D-J-11). `summary()` prints per-score aggregates and the experiment id; `assert_min(name, threshold)` raises when a score's mean is below the threshold.
 
 ## TypeScript API (`npm i llmobs`; ESM only; Node ≥ 22.12, Bun, Deno; edge runtimes via the fetch-based exporter)
 
@@ -320,7 +324,7 @@ await llmobs.flush();
 - **Vercel AI SDK:** no instrumentor needed; the server normalizes `ai.*` attributes (02). The AI SDK sends spans to the global tracer unless it is given one, so `llmobs.aiTelemetry({ sessionId, userId, tags })` returns `{ isEnabled: true, tracer, metadata }` with a tracer from the llmobs provider, and users pass it as `experimental_telemetry`. With `useGlobalProvider: true`, a plain `experimental_telemetry: { isEnabled: true, metadata: { sessionId, userId } }` works too.
 - Transport: one fetch-based exporter on every runtime (D-F-8).
 - Browser bundle (`llmobs/browser`): only `feedback({ baseUrl, publicKey, traceId, spanId?, name?, value, comment? })` — no tracing. It posts spec 06's end-user feedback body to `POST {baseUrl}/api/public/feedback` with `Authorization: Bearer <pk-llmobs-…>`; it imports nothing from OTel and resolves to `{ ok: boolean }`, never throwing (D-F-16).
-- Datasets/experiments: `new llmobs.Client()`, `client.datasets.*`, `llmobs.evaluate({ dataset, task, scorers, serverEvaluators, experimentName, concurrency })` with the same semantics as Python.
+- Datasets/experiments: `new llmobs.Client()`, `client.datasets.*`, `llmobs.evaluate({ dataset, task, scorers, experimentName, metadata, concurrency, repetitions })` with the same semantics as Python.
 
 ## Raw OpenTelemetry (no SDK)
 

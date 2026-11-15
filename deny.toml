@@ -45,6 +45,11 @@ confidence-threshold = 0.8
 # Workspace crates are unpublished (`publish = false`); their own licences are in LICENSE.
 ignore = true
 
+# libFuzzer (LLVM, NCSA) inside the fuzz-only crate libfuzzer-sys; fuzz/ is never shipped (track R M3).
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

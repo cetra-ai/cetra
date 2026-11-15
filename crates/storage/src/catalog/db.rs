@@ -277,7 +277,7 @@ pub(crate) async fn load_tombstones(
 
 /// Read every retention watermark (spec 03 §8) and dropped project (spec 03
 /// §7). `keep_from` is `YYYY-MM-DD`, like `data_files.day`.
-pub(super) async fn load_project_states(
+pub(crate) async fn load_project_states(
     connection: &mut SqliteConnection,
 ) -> Result<ProjectStates, CatalogError> {
     let rows: Vec<(String, String)> =

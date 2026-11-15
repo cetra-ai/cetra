@@ -47,6 +47,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Look up real versions (`cargo search`, `cargo info`); never guess one.
 - JS packages use exact versions and respect `minimumReleaseAge`; Python dev tools are pinned by `uv.lock`.
 - `typescript` stays on 5.x while `openapi-typescript` requires it (`.github/dependabot.yml` ignores TypeScript majors).
+- `fuzz/` is a cargo-fuzz crate outside the workspace (D-R-7). It pins its one fuzz-only crate, `libfuzzer-sys`, exactly in `fuzz/Cargo.toml`, and gets everything else through path dependencies on the workspace crates. Storage takes `arbitrary` from the root `[workspace.dependencies]` as usual. `fuzz/Cargo.lock` is not committed: `just fuzz-lock` generates it from the root lock (the fuzz recipes and `just deny` run it first), so the fuzzed versions are the shipped ones. `just deny` checks both graphs.
 
 **Errors.** Each library crate defines its own error enum(s) with `thiserror`. `anyhow` is only allowed in `llmobs-cli`.
 
@@ -68,6 +69,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
+- `LLMOBS_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `LLMOBS_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings).
 - `LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1).
 - `just lazyfs` runs the crash children and a short ingest on a LazyFS mount, and drops unsynced data at each crash (D-R-5). It needs FUSE 3 and `user_allow_other` (`tools/lazyfs/README.md`).
 - `LLMOBS_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 25; the last of the 26 pairs is not in the default run).
@@ -81,6 +83,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
+- A fuzz crash is fixed with its input in `fuzz/regressions/<target>/` and a named unit test. `just test` replays every corpus and regression on stable. Regressions are never passed to libFuzzer, and a crashing input never goes into `fuzz/corpus/`.
 
 **Reference implementations.** The competitors' source code is checked out in `/home/sebastien/github/{lmnr,phoenix,langfuse,langwatch,helicone,opik,mlflow}`. Read it to compare designs and learn from their mistakes. Never copy code from it.
 
@@ -108,6 +111,7 @@ fixtures/api/                example API responses (UI mocks), checked against t
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
 tools/e2e/                   run.sh for just e2e: a real llmobs serve and both SDK suites (D-G-20)
+fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
 docs/                        decisions, specs, plans, research
 ```
 
@@ -150,6 +154,7 @@ Run everything through `just`:
 | `just s3-chaos` | the S3 fault tests through toxiproxy in front of an S3 endpoint (R M4) |
 | `just lazyfs` | the storage crash tests and a short ingest on a LazyFS mount, which drops unsynced data at each crash (R2.12, D-R-5); needs FUSE 3 (`tools/lazyfs/README.md`) |
 | `just eval-live` | opt-in live provider tests; ignored by `just check` (D167) |
+| `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
 | `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |
 | `just deny-advisories` | RustSec advisories only |
@@ -160,6 +165,10 @@ Run everything through `just`:
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
 | `just run <args>` | run the `llmobs` binary |
+| `just fuzz <target> [secs]` · `just fuzz-all [secs]` | fuzz one target, or every target in turn, growing its committed corpus (track R M3) |
+| `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
+| `just fuzz-cmin` | minimize every corpus, then fit the size and file-count budgets |
+| `just fuzz-lock` · `just fuzz-tools` | write `fuzz/Cargo.lock` from the root lock · install the fuzz toolchain and cargo-fuzz |
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
@@ -180,6 +189,7 @@ Required tools:
 - `pnpm` (version in the root `package.json` `packageManager`)
 - `uv`
 - `actionlint` and `zizmor` (only when editing `.github/`)
+- for fuzzing: the nightly toolchain and cargo-fuzz 0.13.2 (`just fuzz-tools`)
 - for packaging (`just dist`, `just check-packaging`): `musl-tools` (Linux), `cargo-auditable` 0.7.7, `cargo-about` 0.9.3 (`--features cli`), Docker Engine 25+ with Compose 2.24+, helm 4.3.1, kubeconform 0.8.0; kind 0.33.0 and kubectl for `just helm-smoke`
 
 ## CI
@@ -187,6 +197,8 @@ Required tools:
 `.github/workflows/ci.yml` runs on every pull request and every push to `main`. `ci-ok` is the required status.
 
 CI runs the `just` recipes from the table. A branch that passes `just check` locally and leaves a clean tree passes CI, except for the runtime matrix (Python 3.15, Node 22.12). The `packaging` job runs `just check-packaging-lint`; the full `just check-packaging` runs in `packaging.yml` on pushes to `main` and weekly, outside `ci-ok` (D-N-13).
+
+`.github/workflows/nightly.yml` runs nightly and on demand, outside `ci-ok`: each fuzz target for 10 minutes. A failed run opens or updates one issue labelled `nightly` (track R M3). The model, stress and LazyFS jobs join it when their recipes land.
 
 Actions are pinned by commit SHA with the tag in a comment; Dependabot updates them. Never use a tag or branch reference.
 

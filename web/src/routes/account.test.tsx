@@ -4,6 +4,8 @@ import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import authConfig from "../../../fixtures/api/static/auth-config.json";
+import meFixture from "../../../fixtures/api/static/me.json";
 
 it("shows the top bar without org controls", async () => {
   await renderApp("/account");
@@ -273,4 +275,36 @@ it("redirects a signed-out user to login", async () => {
 
   await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
   expect(router.state.location.search).toMatchObject({ redirect: "/account" });
+});
+
+it("hides the password section when password sign-in is off", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({ ...authConfig, password_enabled: false }),
+    ),
+    http.get("/api/auth/me", () =>
+      HttpResponse.json({
+        ...meFixture,
+        user: { ...meFixture.user, is_instance_admin: false },
+      }),
+    ),
+  );
+
+  await renderApp("/account");
+  await screen.findByRole("heading", { name: "Account", level: 1 });
+
+  expect(screen.queryByRole("heading", { name: "Password", level: 2 })).toBeNull();
+});
+
+it("keeps the password section for an instance admin when password sign-in is off", async () => {
+  server.use(
+    http.get("/api/auth/config", () =>
+      HttpResponse.json({ ...authConfig, password_enabled: false }),
+    ),
+  );
+
+  await renderApp("/account");
+  await screen.findByRole("heading", { name: "Account", level: 1 });
+
+  expect(screen.getByRole("heading", { name: "Password", level: 2 })).toBeInTheDocument();
 });

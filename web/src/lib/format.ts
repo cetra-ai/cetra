@@ -171,8 +171,17 @@ export function formatRelative(rfc3339: string, now: number): string {
   return relative(future, `${days}d`);
 }
 
-export function shortId(hex: string): string {
-  return hex.slice(0, 8);
+const MAX_FREE_FORM_ID = 40;
+
+/**
+ * Hex ids (trace, span, UUID) show their first 8 characters. Free-form ids (session ids,
+ * tool-call ids) show in full, with an ellipsis only past 40 characters.
+ */
+export function shortId(id: string): string {
+  if (/^[0-9a-f-]+$/i.test(id)) {
+    return id.slice(0, 8);
+  }
+  return id.length > MAX_FREE_FORM_ID ? `${id.slice(0, MAX_FREE_FORM_ID)}…` : id;
 }
 
 function formatSeconds(ns: number): string {
