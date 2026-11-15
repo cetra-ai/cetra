@@ -243,6 +243,12 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/projects/{project}/evaluators/{id}/run",
   },
+  { operationId: "create_scores", method: "post", path: "/api/v1/projects/{project}/scores" },
+  {
+    operationId: "delete_score",
+    method: "delete",
+    path: "/api/v1/projects/{project}/scores/{score_id}",
+  },
 ];
 
 type Respond = (input: {
@@ -526,6 +532,13 @@ const RESPONSES: Record<string, Respond> = {
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
+  create_scores: ({ body }) => {
+    const scores = Array.isArray(body.scores) ? body.scores : [];
+    return HttpResponse.json({
+      score_ids: scores.map(() => "01900000-0000-7000-8000-000000000310"),
+    });
+  },
+  delete_score: () => noContent(),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
