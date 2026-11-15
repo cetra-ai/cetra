@@ -71,6 +71,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
     (
         "put",
         "/api/v1/orgs/{org}/sso/provider",
@@ -609,6 +610,7 @@ fn document_lint() {
                 | "get_org_sso"
                 | "put_org_sso_provider"
                 | "delete_org_sso_provider"
+                | "patch_org_sso"
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
@@ -718,6 +720,7 @@ fn document_lint() {
             || *id == "update_alert_rule"
             || *id == "put_org_sso_provider"
             || *id == "post_org_sso_domain"
+            || *id == "patch_org_sso"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {

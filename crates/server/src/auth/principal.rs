@@ -335,6 +335,11 @@ async fn pat_principal(
     if row.disabled_at.is_some() {
         return Err(ApiError::Unauthorized);
     }
+    // D-P-58: under enforcement a personal access token is always refused, so a token made
+    // while the revocation committed does not work.
+    if !row.is_instance_admin && crate::ee::org_sso::enforces(state, &row.email) {
+        return Err(ApiError::Unauthorized);
+    }
     state.token_last_used.record(cached.id, now);
     Ok(Principal::Pat {
         user: AuthUser {

@@ -79,6 +79,7 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "delete",
     path: "/api/v1/orgs/{org}/sso/domains/{id}",
   },
+  { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -284,6 +285,7 @@ const RESPONSES: Record<string, Respond> = {
   post_org_sso_domain: () => HttpResponse.json(orgSsoDocument, { status: 201 }),
   post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
   delete_org_sso_domain: () => noContent(),
+  patch_org_sso: () => HttpResponse.json(orgSsoDocument),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {

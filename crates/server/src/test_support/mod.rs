@@ -1164,6 +1164,87 @@ pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: 
     Member { id, cookie }
 }
 
+/// Saves the org's provider pointing at `idp` (the mock's client id and secret), with the
+/// flags given, verifies `domain` in `meta.db`, sets `last_login_at` to now (as if Test
+/// sign-in had run), and reloads the routing.
+pub(crate) async fn configure_org_sso(
+    app: &TestApp,
+    org: OrgId,
+    idp: &mock_idp::MockIdp,
+    domain: &str,
+    enabled: bool,
+    enforced: bool,
+) {
+    use crate::api::org_sso::JitRole;
+    use crate::ee::org_sso::store::{self, DomainRow, ProviderWrite};
+    let id = Uuid::now_v7();
+    let sealed = app
+        .state
+        .secrets
+        .seal(mock_idp::CLIENT_SECRET.as_bytes(), store::secret_aad(&id))
+        .expect("seal");
+    let token = crate::ee::org_sso::dns::new_token().expect("token");
+    let now = app.state.clock.now_ns();
+    let issuer = idp.issuer().to_owned();
+    let domain = domain.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let write = ProviderWrite {
+                    display_name: "Acme Okta".to_owned(),
+                    issuer,
+                    client_id: mock_idp::CLIENT_ID.to_owned(),
+                    client_secret_enc: Some(sealed),
+                    jit_role: JitRole::Viewer,
+                };
+                store::put_provider(conn, org, id, write, now).await?;
+                store::set_flags(conn, org, enabled, enforced, now).await?;
+                store::set_last_login(conn, org, now).await?;
+                let row = DomainRow {
+                    id: Uuid::now_v7(),
+                    org_id: org,
+                    domain,
+                    token,
+                    verified_at: None,
+                    last_checked_at: None,
+                    created_at: now,
+                };
+                let domain_id = row.id;
+                store::insert_domain(conn, &row).await?;
+                store::mark_verified(conn, domain_id, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    reload_org_sso(app).await;
+}
+
+/// Rebuilds the routing from `meta.db`, the job the server runs after every org SSO write.
+pub(crate) async fn reload_org_sso(app: &TestApp) {
+    app.state
+        .org_sso
+        .reload(&app.state.meta, &app.state.secrets, &app.state.config.auth)
+        .await
+        .expect("org SSO reload");
+}
+
+/// Makes `user_id` an instance admin.
+pub(crate) async fn make_instance_admin(app: &TestApp, user_id: Uuid) {
+    let now = app.state.clock.now_ns();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                users::set_instance_admin(conn, user_id, true, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+}
+
 /// A second org `slug` (name = slug) with a new non-admin owner `owner_email` and that owner's
 /// session.
 pub(crate) async fn second_org(app: &TestApp, slug: &str, owner_email: &str) -> (OrgId, Member) {

@@ -13,7 +13,7 @@
 | `LLMOBS_AUTH_SIGNUP_DOMAINS` | empty | With `open`, restrict to these email domains. |
 | `LLMOBS_AUTH_DISABLE_PASSWORD` | `false` | Hide and refuse password login/sign-up (SSO only). The CLI admin commands still work. |
 | `LLMOBS_AUTH_REQUIRE_EMAIL_VERIFICATION` | `false` | Requires SMTP. |
-| `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` | empty | Users with these email domains must log in through an OAuth/OIDC provider (password login refused). Any configured provider satisfies it. Enforced only with a genuine licence that lists `sso_enforcement`, expired or not (D-P-8); otherwise ignored with a startup warning. |
+| `LLMOBS_AUTH_ENFORCE_SSO_DOMAINS` | empty | Users with these email domains must log in through an OAuth/OIDC provider (password login refused). Any configured provider satisfies it. Enforced only with a genuine licence that lists `sso_enforcement`, expired or not (D-P-8); otherwise ignored with a startup warning. An org can enforce SSO for its own verified domains (§ Per-org SSO). |
 
 The default is `invite_only` (stricter than Langfuse's open default) because a self-hosted instance reachable on the internet should not accept strangers.
 
@@ -75,6 +75,16 @@ auto_provision = { org = "acme", role = "member" }   # optional: auto-join org o
 - Multi-tenant Entra issuers (`common`, `organizations`, `consumers`) are refused at config load. Provider metadata is discovered lazily and cached for one hour.
 - `id_token` is validated (`openidconnect` crate: signature via JWKS with caching, `iss`, `aud`, `exp`, `nonce`).
 - SAML: not in MVP.
+
+## Per-org SSO (track P M5, `ee`)
+
+An org owner registers one OIDC provider for the org, and the org proves its email domains with DNS TXT records (D-P-51, D-P-52, D-P-54). The client secret is sealed in `meta.db` like an LLM connection key. The provider's discovery document is loaded at save time, and every provider request goes through the SSRF guard (D-P-53).
+
+- **Domains (D-P-54).** Exact match on the email's domain. At most 20 per org. A domain is verified by at most one org at a time: the proof is a TXT record `_llmobs-verify.<domain>` with the value `llmobs-verify=<token>`, looked up with the cache off. A domain the server configuration owns (`auth.enforce_sso_domains`, Google's or an `[[auth.oidc]]`'s `allowed_domains`) cannot be added. A verified domain moves to another org when the holder's record is gone from the answer.
+- **Sign-in (D-P-55, D-P-56).** The org's provider signs in only emails of the org's verified domains. It links an existing account (a verified one without revocation; an unverified one loses its web sessions, tokens and password). A user who is not a member joins with the org's role for a pending invitation, or the org's `jit_role` (viewer or member), within `max_seats`.
+- **Enabled, then enforced (D-P-57, D-P-58).** A new provider is disabled. Enforcing needs the provider enabled, a successful sign-in through it, a verified domain, and, when the caller's own domain is covered, a session started through this org's provider. Enforcing revokes, at once, the password sessions (those not started through the org's provider), the personal access tokens and the password resets of the covered users, except instance admins. Session and token resolution check it again on every request, so a session or token made while the revocation was committing does not work. Project API keys are not affected.
+- **Lapses (D-P-8, D-P-61).** Without `org_sso`, sign-in and enforcement keep applying, and only setting up or changing the provider is refused. Turning enforcement off and disabling a provider that is not enforced still work.
+- **Break-glass (D-P-63).** `llmobs admin org-sso disable <org>` turns an org's SSO off when its provider is broken.
 
 ## Authorization (RBAC)
 

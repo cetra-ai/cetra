@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use crate::api::org_sso::JitRole;
 use crate::crypto::Aad;
+use crate::meta::password_resets::delete_user_resets;
+use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::{MetaError, unique_or};
 
 /// One `org_sso_providers` row. `Debug` omits the sealed secret.
@@ -554,6 +556,49 @@ pub(crate) async fn delete_domain(
         .await?
         .rows_affected();
     Ok(changed == 1)
+}
+
+/// Enforcement's revocation (D-P-58) for every user of `domains` who is not an instance
+/// admin: deletes their web sessions not started through `org`'s provider and their password
+/// resets, and revokes all their personal access tokens. Returns the number of users and the
+/// revoked token hashes (to evict from the PAT cache after commit).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored id is corrupt.
+pub(crate) async fn revoke_for_domains(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    domains: &[String],
+    now: i64,
+) -> Result<(u64, Vec<String>), MetaError> {
+    let mut users = std::collections::BTreeSet::new();
+    for domain in domains {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM users WHERE is_instance_admin = 0 \
+             AND substr(email, instr(email, '@') + 1) = ?",
+        )
+        .bind(domain)
+        .fetch_all(&mut *conn)
+        .await?;
+        for id in ids {
+            users.insert(parse_uuid(&id, "users", "id")?);
+        }
+    }
+    let mut hashes = Vec::new();
+    for user in &users {
+        sqlx::query(
+            "DELETE FROM web_sessions WHERE user_id = ? \
+             AND (sso_org_id IS NULL OR sso_org_id != ?)",
+        )
+        .bind(user.to_string())
+        .bind(org.to_string())
+        .execute(&mut *conn)
+        .await?;
+        hashes.extend(revoke_user_tokens(&mut *conn, *user, now).await?);
+        delete_user_resets(&mut *conn, *user).await?;
+    }
+    Ok((u64::try_from(users.len()).unwrap_or(u64::MAX), hashes))
 }
 
 /// Verified domains of active orgs that have a provider, with the provider's flags (P6's index).

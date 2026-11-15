@@ -96,6 +96,9 @@ pub(crate) async fn resolve_session(
     let Some(mut row) = session_user(state.meta.reader(), &hash, now).await? else {
         return Ok(None);
     };
+    if refused_under_enforcement(state, &row) {
+        return Ok(None);
+    }
     if now.saturating_sub(row.last_seen_at) < duration_ns(REFRESH_AFTER) {
         return Ok(Some((row, None)));
     }
@@ -113,6 +116,20 @@ pub(crate) async fn resolve_session(
         row,
         Some(set_cookie(state, cookie_value, LIFETIME.as_secs())),
     )))
+}
+
+/// Whether an enforcing org refuses this session (D-P-58): the user's domain is enforced, the
+/// user is not an instance admin, and the session was not started through that org's provider.
+/// The row stays for the revocation or its expiry to delete.
+fn refused_under_enforcement(state: &AppState, row: &SessionRow) -> bool {
+    if row.user.is_instance_admin || !crate::ee::org_sso::enforces(state, &row.user.email) {
+        return false;
+    }
+    let route_org = state
+        .org_sso
+        .route(&row.user.email)
+        .map(|route| route.org_id);
+    row.sso_org_id != route_org
 }
 
 /// The first `llmobs_session` cookie in `headers` that resolves.

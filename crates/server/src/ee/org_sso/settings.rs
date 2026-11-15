@@ -4,18 +4,20 @@
 
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use llmobs_core::ids::OrgId;
 use serde::Deserialize;
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use super::store::{DomainRow, ProviderRow, ProviderWrite};
 use super::{dns, instance_claims, normalize_domain, store};
 use crate::api::common::FieldError;
+use crate::api::common::ProblemCode;
 use crate::api::entitlements::Feature;
 use crate::api::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso as OrgSsoView, OrgSsoDomain, OrgSsoProvider,
-    PutOrgSsoProvider,
+    PatchOrgSso, PutOrgSsoProvider,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
@@ -38,6 +40,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(get_org_sso),
+        },
+        RouteDef {
+            method: Method::PATCH,
+            path: "/api/v1/orgs/{org}/sso",
+            access: Access::Org {
+                perm: OrgPerm::ManageSso,
+                session_only: true,
+            },
+            documented: true,
+            handler: patch(patch_org_sso),
         },
         RouteDef {
             method: Method::PUT,
@@ -285,6 +297,99 @@ async fn delete_org_sso_provider(
     }
 }
 
+/// Turns the flags on or off (D-P-57, D-P-58, D-P-61). Turning enforcement on revokes the
+/// password sessions and personal access tokens of the org's domains' users, except the
+/// sessions the org's provider started and the instance admins' (D-P-58).
+async fn patch_org_sso(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<PatchOrgSso>,
+) -> Result<error::Json<OrgSsoView>, ApiError> {
+    let org = access.org.id;
+    let Principal::Session { user, sso_org, .. } = &principal else {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
+        });
+    };
+    let row = store::provider(state.meta.reader(), org)
+        .await?
+        .ok_or(ApiError::Conflict {
+            detail: "Set up the identity provider first.",
+        })?;
+    let enabled = body.enabled.unwrap_or(row.enabled);
+    let enforced = body.enforced.unwrap_or(row.enforced);
+    let was_enforced = row.enforced;
+    if (enabled && !row.enabled) || (enforced && !was_enforced) {
+        require(&state, org, Feature::OrgSso)?;
+    }
+    if enforced && !enabled {
+        return Err(ApiError::Conflict {
+            detail: "Enable the identity provider before enforcing it.",
+        });
+    }
+    let mut domains = Vec::new();
+    if enforced && !was_enforced {
+        domains = state.org_sso.domains_of(org);
+        if domains.is_empty() {
+            return Err(ApiError::Conflict {
+                detail: "Verify a domain before enforcing single sign-on.",
+            });
+        }
+        if row.last_login_at.is_none() {
+            return Err(ApiError::Conflict {
+                detail: "Sign in through the identity provider once (Test sign-in) before enforcing it.",
+            });
+        }
+        let caller_domain = user.email.rsplit_once('@').map(|(_, domain)| domain);
+        let caller_covered =
+            caller_domain.is_some_and(|domain| domains.iter().any(|listed| listed == domain));
+        if !user.is_instance_admin && caller_covered && *sso_org != Some(org) {
+            return Err(ApiError::Conflict {
+                detail: "Sign in through your identity provider before enforcing it.",
+            });
+        }
+    }
+    let now = state.clock.now_ns();
+    let (users, hashes) = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::set_flags(conn, org, enabled, enforced, now).await?;
+                if enforced && !was_enforced {
+                    store::revoke_for_domains(conn, org, &domains, now).await
+                } else {
+                    Ok((0, Vec::new()))
+                }
+            })
+        })
+        .await?;
+    for hash in &hashes {
+        state.pat_cache.evict(hash);
+    }
+    super::refresh(&state).await;
+    tracing::info!(target: "audit", org_id = %org, user_id = %user.id, enabled, enforced, users, "org sso settings changed");
+    Ok(error::Json(view(&state, org).await?))
+}
+
+/// D-P-58 on a verification under enforcement: the domain's users lose their sessions and
+/// tokens in the same transaction. Returns the revoked token hashes.
+async fn revoke_if_enforced(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    domain: &str,
+    now: i64,
+) -> Result<Vec<String>, MetaError> {
+    let enforced = store::provider_tx(conn, org)
+        .await?
+        .is_some_and(|row| row.enforced);
+    if !enforced {
+        return Ok(Vec::new());
+    }
+    let (_users, hashes) = store::revoke_for_domains(conn, org, &[domain.to_owned()], now).await?;
+    Ok(hashes)
+}
+
 async fn post_org_sso_domain(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -394,7 +499,10 @@ async fn post_org_sso_domain_verify(
                 match store::verified_row_tx(conn, &domain).await? {
                     Some(holder) if holder.org_id == org => {
                         store::mark_checked(conn, id, now).await?;
-                        Ok(Check::Verified { taken_from: None })
+                        Ok(Check::Verified {
+                            taken_from: None,
+                            revoked: Vec::new(),
+                        })
                     }
                     Some(holder) => {
                         // D-P-54: the holder's record is gone from the same answer, so the
@@ -405,13 +513,18 @@ async fn post_org_sso_domain_verify(
                         } else {
                             store::mark_unverified(conn, holder.id).await?;
                             store::mark_verified(conn, id, now).await?;
+                            let revoked = revoke_if_enforced(conn, org, &domain, now).await?;
                             Ok(Check::Verified {
                                 taken_from: Some(holder.org_id),
+                                revoked,
                             })
                         }
                     }
                     None => match store::mark_verified(conn, id, now).await {
-                        Ok(()) => Ok(Check::Verified { taken_from: None }),
+                        Ok(()) => Ok(Check::Verified {
+                            taken_from: None,
+                            revoked: revoke_if_enforced(conn, org, &domain, now).await?,
+                        }),
                         Err(MetaError::Conflict(_)) => {
                             store::mark_checked(conn, id, now).await?;
                             Ok(Check::Elsewhere)
@@ -429,7 +542,13 @@ async fn post_org_sso_domain_verify(
         Check::Elsewhere => Err(ApiError::Conflict {
             detail: "This domain is verified by another organization.",
         }),
-        Check::Verified { taken_from } => {
+        Check::Verified {
+            taken_from,
+            revoked,
+        } => {
+            for hash in &revoked {
+                state.pat_cache.evict(hash);
+            }
             super::refresh(&state).await;
             tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain verified");
             if let Some(from) = taken_from {
@@ -490,7 +609,11 @@ enum Check {
     /// Another org holds the domain and its record is still in the answer.
     Elsewhere,
     /// The domain is this org's now. `taken_from` is the org it moved from.
-    Verified { taken_from: Option<OrgId> },
+    Verified {
+        taken_from: Option<OrgId>,
+        /// The personal access token hashes the enforcement revoked (D-P-58).
+        revoked: Vec<String>,
+    },
 }
 
 /// What the write found and did.
@@ -597,10 +720,12 @@ mod tests {
 
     use super::*;
     use crate::api::account::OrgRole;
+    use crate::auth::secret::{hash_token, new_opaque_token};
     use crate::meta::identities::insert_identity;
     use crate::test_support::mock_idp::{CLIENT_ID, CLIENT_SECRET, MockIdp};
     use crate::test_support::{
-        TestApp, assert_logs_clean, org_sso_app, org_sso_app_with, second_org,
+        TestApp, assert_logs_clean, configure_org_sso, make_instance_admin, org_sso_app,
+        org_sso_app_with, reload_org_sso, second_org, session_cookie_via,
     };
 
     const PATH: &str = "/api/v1/orgs/acme/sso";
@@ -1241,6 +1366,353 @@ mod tests {
             .await;
         })
         .await;
+    }
+
+    const ME: &str = "/api/auth/me";
+
+    async fn me_with_cookie(app: &TestApp, cookie: &str) -> StatusCode {
+        app.request(Method::GET, ME)
+            .header("cookie", cookie)
+            .send()
+            .await
+            .status
+    }
+
+    async fn me_with_token(app: &TestApp, token: &str) -> StatusCode {
+        app.request(Method::GET, ME)
+            .header("authorization", &format!("Bearer {token}"))
+            .send()
+            .await
+            .status
+    }
+
+    async fn patch_settings(
+        app: &TestApp,
+        cookie: &str,
+        body: &Value,
+    ) -> crate::test_support::TestResponse {
+        app.request(Method::PATCH, PATH)
+            .header("cookie", cookie)
+            .json(body)
+            .send()
+            .await
+    }
+
+    fn detail(response: &crate::test_support::TestResponse) -> String {
+        response.json::<Value>()["detail"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    }
+
+    const RESET_ROWS: &str = "SELECT COUNT(*) FROM password_resets WHERE user_id = ?";
+    const SESSION_ROWS: &str = "SELECT COUNT(*) FROM web_sessions WHERE user_id = ?";
+
+    async fn count_rows(app: &TestApp, sql: &'static str, user: Uuid) -> i64 {
+        sqlx::query_scalar(sql)
+            .bind(user.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
+    async fn run_sql(app: &TestApp, sql: &'static str) {
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(sql).execute(&mut *conn).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn enforcing_revokes_domain_users() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        let org = seeded.org_id;
+        configure_org_sso(&app, org, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(org)).await;
+        let ada = app
+            .add_member(&seeded, "ada@acme.test", OrgRole::Member)
+            .await;
+        let ada_pat = app.personal_token(ada.id, true).await;
+        let (_beta, bob) = second_org(&app, "beta", "bob@other.test").await;
+        let root = app
+            .add_member(&seeded, "root@acme.test", OrgRole::Member)
+            .await;
+        make_instance_admin(&app, root.id).await;
+
+        // Warm the PAT cache, and give Ada a password reset that enforcement must delete.
+        assert_eq!(me_with_token(&app, &ada_pat).await, StatusCode::OK);
+        let now = app.state.clock.now_ns();
+        let user = ada.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &hash_token("reset-token"),
+                        user,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(count_rows(&app, RESET_ROWS, ada.id).await, 1);
+
+        let enforced = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(enforced.status, StatusCode::OK);
+        assert!(
+            enforced
+                .json::<OrgSsoView>()
+                .provider
+                .expect("provider")
+                .enforced
+        );
+
+        assert_eq!(
+            me_with_cookie(&app, &ada.cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            me_with_token(&app, &ada_pat).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(count_rows(&app, RESET_ROWS, ada.id).await, 0);
+        assert_eq!(count_rows(&app, SESSION_ROWS, ada.id).await, 0);
+        assert_eq!(me_with_cookie(&app, &bob.cookie).await, StatusCode::OK);
+        assert_eq!(me_with_cookie(&app, &root.cookie).await, StatusCode::OK);
+        assert_eq!(me_with_cookie(&app, &owner_sso).await, StatusCode::OK);
+        assert_eq!(
+            me_with_cookie(&app, &owner.cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // Project keys are not touched by enforcement.
+        let read = app
+            .request(
+                Method::GET,
+                &format!("/api/v1/projects/{}/traces", seeded.project.id),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(read.status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn enforcing_needs_the_callers_sso_session() {
+        let idp = MockIdp::start().await;
+
+        // The caller signed in with a password.
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let refused = patch_settings(&app, &owner.cookie, &json!({"enforced": true})).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(detail(&refused).contains("Sign in through your identity provider"));
+
+        // The last sign-in was never recorded.
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        run_sql(&app, "UPDATE org_sso_providers SET last_login_at = NULL").await;
+        reload_org_sso(&app).await;
+        let refused = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(detail(&refused).contains("Sign in through the identity provider once"));
+
+        // No verified domain.
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        run_sql(&app, "UPDATE org_sso_domains SET verified_at = NULL").await;
+        reload_org_sso(&app).await;
+        let refused = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(detail(&refused).contains("Verify a domain"));
+
+        // The provider is disabled.
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", false, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        let refused = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(detail(&refused).contains("Enable the identity provider"));
+    }
+
+    #[tokio::test]
+    async fn sessions_and_tokens_created_in_the_race_are_refused() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        let org = seeded.org_id;
+        configure_org_sso(&app, org, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(org)).await;
+        let ada = app
+            .add_member(&seeded, "ada@acme.test", OrgRole::Member)
+            .await;
+        let root = app
+            .add_member(&seeded, "root@acme.test", OrgRole::Member)
+            .await;
+        make_instance_admin(&app, root.id).await;
+        let enforced = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(enforced.status, StatusCode::OK);
+
+        // A login in flight: a password session, and a token made after the revocation.
+        let token = new_opaque_token().expect("token");
+        let in_flight = format!("llmobs_session={}", token.plaintext);
+        let now = app.state.clock.now_ns();
+        let user = ada.id;
+        let hash = token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::web_sessions::insert_session(
+                        conn,
+                        crate::meta::web_sessions::NewSession {
+                            hash,
+                            user_id: user,
+                            user_agent: None,
+                            ip: None,
+                            sso_org_id: None,
+                        },
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            me_with_cookie(&app, &in_flight).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let pat = app.personal_token(ada.id, true).await;
+        assert_eq!(me_with_token(&app, &pat).await, StatusCode::UNAUTHORIZED);
+
+        // Through the org's provider, the same user works; so does the instance admin.
+        let via_sso = session_cookie_via(&app, ada.id, Some(org)).await;
+        assert_eq!(me_with_cookie(&app, &via_sso).await, StatusCode::OK);
+        assert_eq!(me_with_cookie(&app, &root.cookie).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn disable_is_refused_while_enforced() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enforced": true}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        let refused = patch_settings(&app, &owner_sso, &json!({"enabled": false})).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(detail(&refused).contains("Enable the identity provider"));
+
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enforced": false}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enabled": false}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn lapse_allows_only_turning_off() {
+        let idp = MockIdp::start().await;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let owner = app
+            .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+            .await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enforced": false}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        let locked = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert_eq!(locked.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            locked.json::<Value>()["detail"],
+            Feature::OrgSso.locked_detail()
+        );
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enabled": false}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enabled": true}))
+                .await
+                .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn verifying_under_enforcement_revokes() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        assert_eq!(
+            patch_settings(&app, &owner_sso, &json!({"enforced": true}))
+                .await
+                .status,
+            StatusCode::OK
+        );
+
+        let eve = app
+            .add_member(&seeded, "eve@acme.io", OrgRole::Member)
+            .await;
+        let eve_pat = app.personal_token(eve.id, true).await;
+        assert_eq!(me_with_token(&app, &eve_pat).await, StatusCode::OK);
+        assert_eq!(me_with_cookie(&app, &eve.cookie).await, StatusCode::OK);
+
+        assert_eq!(
+            add_domain(&app, "acme", &owner_sso, "acme.io").await.status,
+            StatusCode::CREATED
+        );
+        let row = domain_of(&app, "acme", &owner_sso, "acme.io").await;
+        app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
+        assert_eq!(
+            verify(&app, "acme", &owner_sso, row.id).await.status,
+            StatusCode::OK
+        );
+
+        assert_eq!(count_rows(&app, SESSION_ROWS, eve.id).await, 0);
+        assert_eq!(
+            me_with_cookie(&app, &eve.cookie).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            me_with_token(&app, &eve_pat).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

@@ -137,6 +137,18 @@ pub struct OrgSso {
     pub domains: Vec<OrgSsoDomain>,
 }
 
+/// `PATCH /api/v1/orgs/{org}/sso`: the flags, each optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PatchOrgSso {
+    /// Discovery sends users to the provider (D-P-57).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Enforce SSO for the org's verified domains (D-P-58).
+    #[serde(default)]
+    pub enforced: Option<bool>,
+}
+
 /// `POST /api/v1/orgs/{org}/sso/domains`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

@@ -70,7 +70,8 @@ use super::keys::{
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::org_sso::{
-    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider,
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
+    PutOrgSsoProvider,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -175,6 +176,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OrgSso>();
     set.insert::<PutOrgSsoProvider>();
     set.insert::<AddOrgSsoDomain>();
+    set.insert::<PatchOrgSso>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1118,6 +1120,26 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let mut provider = PathItem::new(HttpMethod::Put, put);
     provider.delete = Some(delete);
+    let patch_settings = operation(
+        "patch_org_sso",
+        "orgs",
+        "Turn the org's identity provider on, off or enforced",
+    )
+    .description(Some(
+        "Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("PatchOrgSso")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
     let add_domain = operation(
         "post_org_sso_domain",
         "orgs",
@@ -1175,11 +1197,10 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch_settings);
     paths
-        .path(
-            "/api/v1/orgs/{org}/sso",
-            PathItem::new(HttpMethod::Get, get),
-        )
+        .path("/api/v1/orgs/{org}/sso", settings)
         .path("/api/v1/orgs/{org}/sso/provider", provider)
         .path(
             "/api/v1/orgs/{org}/sso/domains",
