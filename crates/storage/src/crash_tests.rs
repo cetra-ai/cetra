@@ -272,6 +272,7 @@ async fn child() {
     let Ok(dir) = std::env::var("LLMOBS_FLUSH_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_FLUSH_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
@@ -457,6 +458,7 @@ async fn compaction_child() {
     let Ok(dir) = std::env::var("LLMOBS_COMPACTION_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_COMPACTION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
@@ -566,6 +568,7 @@ async fn deletion_child() {
     let Ok(dir) = std::env::var("LLMOBS_DELETION_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_DELETION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
@@ -705,6 +708,7 @@ async fn media_child() {
     let Ok(dir) = std::env::var("LLMOBS_MEDIA_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_MEDIA_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
@@ -786,6 +790,7 @@ async fn drop_child() {
     let Ok(dir) = std::env::var("LLMOBS_DROP_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_DROP_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));

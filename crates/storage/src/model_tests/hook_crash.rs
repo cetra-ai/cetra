@@ -192,6 +192,7 @@ fn hook_crash_child() {
     let Ok(dir) = std::env::var("LLMOBS_HOOK_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let number: u64 = std::env::var("LLMOBS_HOOK_CRASH_CASE")
         .expect("LLMOBS_HOOK_CRASH_CASE is set with the directory")
         .parse()

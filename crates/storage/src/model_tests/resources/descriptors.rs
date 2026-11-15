@@ -517,6 +517,7 @@ fn child_run() {
     let Some(mode) = std::env::var_os(MODE_ENV) else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let limit: u64 = std::env::var(LIMIT_ENV)
         .expect("LLMOBS_FD_CHILD_LIMIT is set")
         .parse()

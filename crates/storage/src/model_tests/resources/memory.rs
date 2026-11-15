@@ -539,6 +539,7 @@ fn child_run() {
     let Some(dir) = std::env::var_os(DIR_ENV) else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let limit: u64 = std::env::var(LIMIT_ENV)
         .expect("LLMOBS_MEMORY_CHILD_LIMIT is set")
         .parse()

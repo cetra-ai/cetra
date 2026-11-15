@@ -704,6 +704,7 @@ fn watchdog(
             panic!("{stuck} ran one item for more than 30 s (the stderr dump names it)");
         }
         let _ = writeln!(std::io::stderr(), "watchdog: a storage call hung; aborting");
+        crate::test_support::no_core_dumps();
         std::process::abort();
     }
 }

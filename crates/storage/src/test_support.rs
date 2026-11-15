@@ -32,6 +32,16 @@ use crate::Storage;
 use crate::config::StorageConfig;
 use crate::views::{ProjectQuery, QueryContext};
 
+/// Turns core dumps off for this process. A crash child calls it before it can abort, so an
+/// abort writes no `core.*` file to the working directory of the run.
+pub(crate) fn no_core_dumps() {
+    use rustix::process::{Resource, getrlimit, setrlimit};
+    let mut limit = getrlimit(Resource::Core);
+    limit.current = Some(0);
+    // Best effort: a failure leaves the default, and the child still aborts as it would.
+    let _ = setrlimit(Resource::Core, limit);
+}
+
 fn dataset_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/api/dataset")
 }

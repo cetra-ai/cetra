@@ -191,6 +191,10 @@ async fn crash_child() {
     let Ok(dir) = std::env::var("LLMOBS_CRASH_CHILD_DIR") else {
         return;
     };
+    // The child aborts on purpose. Core dumps off, so the abort writes no core file here.
+    let mut limit = rustix::process::getrlimit(rustix::process::Resource::Core);
+    limit.current = Some(0);
+    let _ = rustix::process::setrlimit(rustix::process::Resource::Core, limit);
     let run_id: u64 = std::env::var("LLMOBS_CRASH_RUN")
         .ok()
         .and_then(|value| value.parse().ok())
