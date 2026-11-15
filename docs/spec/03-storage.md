@@ -79,7 +79,7 @@ The `wal/<table>/` directory is fsynced when a segment is created or deleted.
 
 **Write errors are final.** If a write or `fdatasync` fails, the writer fails every pending ack (`WalFailed`), refuses further writes and reports the storage unhealthy; the operator restarts the process. The failed fsync is never retried, because the kernel may already have dropped the dirty pages. The write-and-sync step runs on a blocking thread and cannot be cancelled halfway.
 
-**Checkpoint.** The catalog stores `flushed_seq` per table (highest WAL seq whose rows are in Parquet files). WAL segments are deleted only after the catalog transaction that advanced `flushed_seq` has returned (§2). Segment `k` is deleted when a later segment exists and `first_seq(k + 1) - 1 <= flushed_seq`. The newest segment stays, because the writer may still be appending to it (D120). At low traffic that segment can hold flushed and unflushed records; replay skips the flushed ones. The extra bytes are at most one segment (`wal.segment_bytes`).
+**Checkpoint.** The catalog stores `flushed_seq` per table (highest WAL seq whose rows are in Parquet files). WAL segments are deleted only after the catalog transaction that advanced `flushed_seq` has returned (§2). Segment `k` is deleted when a later segment exists and `first_seq(k + 1) - 1 <= flushed_seq`. The newest segment stays, because the writer may still be appending to it (D120). After every flush that commits, the flush first asks the writer to start a new segment when the open one holds records (D-A1-14): the writer syncs the open segment when it holds unsynced bytes, creates the next one at `next_seq` (which fsyncs `wal/<table>/`), and acknowledges. The same flush then deletes every segment whose records are all flushed. A segment that also holds records newer than the flush stays until the next flush deletes it, so flushed rows leave the WAL by the end of the next flush cycle. Replay skips the flushed records in such a segment. The extra bytes are at most one segment (`wal.segment_bytes`).
 
 **Recovery.** At startup, before ingestion opens, for each table:
 - read segments in order, skip records with seq ≤ `flushed_seq`, and insert the rest into the memtable;
@@ -414,7 +414,7 @@ After each compaction pass, the compaction task runs a **deletion pass** (D-A1-5
 
 Compaction and the rewriter never run on the same file (claims, §4), and a compaction that started before a deletion records an older `deletions_applied_seq`, so its outputs remain candidates. Deleted rows cannot come back through a merge.
 
-**Guarantee:** the bytes are gone from Parquet files within `deletion.max_delay` (default 24 h). A pending deletion older than that is logged once as a warning. The WAL holds data only until the next flush checkpoint (minutes), so it ages out by itself. The meaning of GDPR deletion for backups is covered in 12 §Backups.
+**Guarantee:** the bytes are gone from Parquet files within `deletion.max_delay` (default 24 h). A pending deletion older than that is logged once as a warning. The WAL holds a deleted row only until the end of the flush cycle after it was written (§1, D-A1-14), so the row ages out with the flush checkpoints (minutes at low traffic), not at the segment size. A clean shutdown does not rotate, because the writers stop before the final flush: the drained segment then waits for the first flush after the next start. The meaning of GDPR deletion for backups is covered in 12 §Backups.
 
 ### Project drop
 
