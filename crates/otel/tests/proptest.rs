@@ -17,7 +17,8 @@ use llmobs_core::message::parse_messages;
 use llmobs_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
 use llmobs_core::span::Span;
 use llmobs_otel::{
-    IngestContext, IngestLimits, PriceTable, decode_json, decode_protobuf, normalize,
+    DecodeError, IngestContext, IngestLimits, JsonErrorCategory, PriceTable, decode_json,
+    decode_protobuf, normalize,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
@@ -562,12 +563,58 @@ proptest! {
     }
 }
 
+/// A request whose one attribute value nests `depth` times through `open`/`close`,
+/// around a valid leaf. The nesting sits inside AnyValue, which serde derives
+/// without a depth bound of its own, so only serde_json's recursion limit stops it.
+fn nested_any_value_request(open: &str, close: &str, depth: usize) -> String {
+    let prefix = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"attributes":[{"key":"k","value":"#;
+    let suffix = "}]}]}]}]}";
+    let leaf = r#"{"stringValue":"leaf"}"#;
+    format!(
+        "{prefix}{}{leaf}{}{suffix}",
+        open.repeat(depth),
+        close.repeat(depth)
+    )
+}
+
+const ARRAY_OPEN: &str = r#"{"arrayValue":{"values":["#;
+const ARRAY_CLOSE: &str = "]}}";
+const KVLIST_OPEN: &str = r#"{"kvlistValue":{"values":[{"key":"k","value":"#;
+const KVLIST_CLOSE: &str = "}]}}";
+
 #[test]
-fn deeply_nested_json_is_rejected() {
-    let mut text = "[".repeat(10_000);
-    text.push_str(&"]".repeat(10_000));
-    let error = decode_json(text.as_bytes()).expect_err("serde recursion limit");
-    let rendered = error.to_string();
-    assert!(!rendered.contains(SENTINEL));
-    assert!(rendered.contains("invalid OTLP JSON"));
+fn deeply_nested_any_value_hits_the_recursion_limit() {
+    // serde_json stops at 128 levels of nesting. Each arrayValue step adds 3 levels
+    // and each kvlistValue step adds 4, so 10 000 steps must hit the limit. Without
+    // it, the document is valid OTLP at any depth, and the derived deserializers
+    // would recurse once per step.
+    for (open, close) in [(ARRAY_OPEN, ARRAY_CLOSE), (KVLIST_OPEN, KVLIST_CLOSE)] {
+        let body = nested_any_value_request(open, close, 10_000);
+        let error = decode_json(body.as_bytes()).expect_err("serde recursion limit");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(SENTINEL));
+        assert!(rendered.contains("invalid OTLP JSON"));
+        assert!(
+            matches!(
+                error,
+                DecodeError::Json {
+                    line: 1,
+                    category: JsonErrorCategory::Syntax,
+                    column,
+                } if column < body.len() / 10
+            ),
+            "expected a syntax error near the recursion limit, got {rendered}"
+        );
+    }
+}
+
+#[test]
+fn shallow_nested_any_value_decodes() {
+    // Same shape well inside the limit (20 steps is 91 levels for kvlistValue), so
+    // the failure above comes from depth and not from the shape.
+    for (open, close) in [(ARRAY_OPEN, ARRAY_CLOSE), (KVLIST_OPEN, KVLIST_CLOSE)] {
+        let body = nested_any_value_request(open, close, 20);
+        let request = decode_json(body.as_bytes()).expect("shallow request decodes");
+        assert_eq!(request.resource_spans.len(), 1);
+    }
 }
