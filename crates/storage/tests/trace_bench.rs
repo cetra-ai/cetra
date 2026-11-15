@@ -1075,6 +1075,7 @@ fn no_rule(query: &ProjectQuery) -> QueryContext {
         target_partitions: query.target_partitions,
         optimizer_rules: Vec::<Arc<dyn PhysicalOptimizerRule + Send + Sync>>::new(),
         suspects: query.suspects.clone(),
+        visible_from: None,
     };
     QueryContext::new(source, None).unwrap()
 }
@@ -1220,7 +1221,7 @@ async fn trace_benchmark() {
         .unwrap();
     let ctx = QueryContext::new(
         storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap(),
         None,
@@ -1228,7 +1229,7 @@ async fn trace_benchmark() {
     .unwrap();
     let range = no_rule(
         &storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap(),
     );
@@ -1303,12 +1304,7 @@ async fn trace_benchmark() {
                 let one = Instant::now();
                 if use_around {
                     let q = storage
-                        .query(
-                            project(),
-                            QueryOptions {
-                                around: Some(*start),
-                            },
-                        )
+                        .query(project(), QueryOptions::new(Some(*start), None))
                         .await
                         .unwrap();
                     let c = QueryContext::new(q, None).unwrap();

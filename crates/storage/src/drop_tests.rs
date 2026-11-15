@@ -71,7 +71,10 @@ async fn connect(dir: &Path) -> sqlx::SqliteConnection {
 
 /// The first `i64` of the first row of `sql`, over `which`'s providers.
 async fn scalar(storage: &Storage, which: ProjectId, sql: &str) -> i64 {
-    let query = storage.query(which, QueryOptions::default()).await.unwrap();
+    let query = storage
+        .query(which, QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
     let batches = rows(&ctx, sql).await;
     let column = batches[0]

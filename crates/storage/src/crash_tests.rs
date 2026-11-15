@@ -6,6 +6,7 @@
 //! parents are ignored too, and `just test` runs each in a test process of
 //! its own.
 
+use crate::QueryOptions;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -234,7 +235,10 @@ fn compaction_span_ids() -> Vec<Vec<u8>> {
 }
 
 async fn stored_ids(storage: &crate::Storage) -> Vec<Vec<u8>> {
-    let query = storage.query(project(), Default::default()).await.unwrap();
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = SessionContext::new_with_config_rt(
         SessionConfig::new(),
         std::sync::Arc::clone(&query.runtime),
@@ -792,7 +796,10 @@ async fn catalog_counts(dir: &Path) -> (i64, i64) {
 /// The `trace_id` bytes of every row of the project's `spans` (`traces` is
 /// false) or `traces` provider, sorted.
 async fn stored_trace_ids(storage: &crate::Storage, traces: bool) -> Vec<Vec<u8>> {
-    let query = storage.query(project(), Default::default()).await.unwrap();
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = SessionContext::new_with_config_rt(
         SessionConfig::new(),
         std::sync::Arc::clone(&query.runtime),

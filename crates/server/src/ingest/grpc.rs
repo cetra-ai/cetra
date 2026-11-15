@@ -267,7 +267,7 @@ mod tests {
         let query = app
             .state
             .storage
-            .query(project, QueryOptions::default())
+            .query(project, QueryOptions::new(None, None))
             .await
             .expect("query opens");
         let ctx = SessionContext::new();

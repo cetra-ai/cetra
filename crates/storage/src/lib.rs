@@ -216,14 +216,39 @@ struct QueryMemory {
     wait: std::time::Duration,
 }
 
-/// Optional hints for one [`Storage::query`] call.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options of one [`Storage::query`] call. Built only with [`QueryOptions::new`], so a caller
+/// always states the data window it reads under (D-P-44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryOptions {
     /// Time hint for a single-trace lookup (`?around=`), ns.
     ///
     /// When a lookup has no `start_time` bound, only files overlapping
     /// `[around - 1 day, around + 1 day]` are read (D154).
-    pub around: Option<i64>,
+    around: Option<i64>,
+    /// Rows before this instant (ns) are hidden from the views: spans and traces by
+    /// `start_time`, scores by `created_at`. `None` hides nothing (D175, D-P-21).
+    visible_from: Option<i64>,
+}
+
+impl QueryOptions {
+    /// `around`: the single-trace time hint (D154), ns. `visible_from`: the org's data-window
+    /// bound (D175, D-P-21), ns; `None` hides nothing.
+    pub fn new(around: Option<i64>, visible_from: Option<i64>) -> Self {
+        Self {
+            around,
+            visible_from,
+        }
+    }
+
+    /// The `around` hint.
+    pub fn around(&self) -> Option<i64> {
+        self.around
+    }
+
+    /// The data-window bound.
+    pub fn visible_from(&self) -> Option<i64> {
+        self.visible_from
+    }
 }
 
 impl Storage {
@@ -1116,7 +1141,7 @@ pub(crate) fn project_query(
                 Arc::clone(&spans_snapshot),
                 Arc::clone(&catalog),
                 partitions,
-                options.around,
+                options.around(),
                 Arc::clone(&no_deletions),
                 suspects.clone(),
             )),
@@ -1142,6 +1167,7 @@ pub(crate) fn project_query(
             target_partitions,
             optimizer_rules: vec![Arc::new(query::TraceListRule)],
             suspects,
+            visible_from: options.visible_from(),
         });
     }
     let deletions = state.tombstones.for_project(project);
@@ -1176,7 +1202,7 @@ pub(crate) fn project_query(
         Arc::clone(&spans_snapshot),
         Arc::clone(&state.catalog),
         partitions,
-        options.around,
+        options.around(),
         Arc::clone(&deletions),
         suspects.clone(),
     ));
@@ -1208,6 +1234,7 @@ pub(crate) fn project_query(
         target_partitions,
         optimizer_rules: vec![Arc::new(query::TraceListRule)],
         suspects,
+        visible_from: options.visible_from(),
     })
 }
 
@@ -2051,11 +2078,17 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
-        let during = storage.query(project(), Default::default()).await.unwrap();
+        let during = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert!(span_names(Arc::clone(&during.spans)).await.is_empty());
         storage.hooks().release(HookPoint::AfterWalSync);
         append.await.unwrap().unwrap();
-        let after = storage.query(project(), Default::default()).await.unwrap();
+        let after = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert_eq!(span_names(after.spans).await.len(), 1);
         assert!(span_names(during.spans).await.is_empty());
         storage.shutdown().await.unwrap();
@@ -2153,11 +2186,19 @@ mod tests {
         let storage = Storage::open(config_with_query_memory(dir.path(), 2))
             .await
             .unwrap();
-        let held = storage.query(project(), Default::default()).await.unwrap();
-        let busy = storage.query(project(), Default::default()).await;
+        let held = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let busy = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await;
         assert!(matches!(busy, Err(QueryError::Busy)), "a second query fits");
         drop(held);
-        storage.query(project(), Default::default()).await.unwrap();
+        storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         storage.shutdown().await.unwrap();
     }
 
@@ -2185,7 +2226,10 @@ mod tests {
 
         let storage = Storage::open(config).await.unwrap();
         let ctx = QueryContext::new(
-            storage.query(project(), Default::default()).await.unwrap(),
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
             None,
         )
         .unwrap();
@@ -2244,7 +2288,7 @@ mod tests {
         while !append.is_finished() {
             let names = span_names(
                 storage
-                    .query(project(), Default::default())
+                    .query(project(), QueryOptions::new(None, None))
                     .await
                     .unwrap()
                     .spans,
@@ -2256,7 +2300,7 @@ mod tests {
         assert_eq!(append.await.unwrap().unwrap_err(), AppendError::WalFailed);
         let names = span_names(
             storage
-                .query(project(), Default::default())
+                .query(project(), QueryOptions::new(None, None))
                 .await
                 .unwrap()
                 .spans,
@@ -2326,8 +2370,14 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         let storage = Storage::open(config.clone()).await.unwrap();
-        let first = storage.query(project(), Default::default()).await.unwrap();
-        let second = storage.query(project(), Default::default()).await.unwrap();
+        let first = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let second = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         // Each query has a runtime of its own (spec 03 §6).
         assert!(!Arc::ptr_eq(&first.runtime, &second.runtime));
         let receipt = storage
@@ -2669,7 +2719,10 @@ mod tests {
         assert!(storage.read_cache_stats().unwrap().blocks > 0);
 
         // The file is read through the query's runtime, which has the store.
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
             datafusion::prelude::SessionConfig::new(),
             Arc::clone(&query.runtime),

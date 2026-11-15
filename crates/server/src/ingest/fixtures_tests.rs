@@ -202,7 +202,7 @@ fn span_key(
 /// Every stored span of `project`, in the order of the expected batch.
 async fn stored_batch(storage: &Storage, project: ProjectId) -> RecordBatch {
     let query = storage
-        .query(project, QueryOptions::default())
+        .query(project, QueryOptions::new(None, None))
         .await
         .expect("query opens");
     // The query's runtime carries the object store that the Parquet files are read from.
@@ -500,7 +500,7 @@ async fn post_over_tcp(addr: SocketAddr, body: &str) -> Option<u16> {
 /// Span ids stored for `project`, read from the raw `spans` provider.
 async fn stored_span_ids(storage: &Storage, project: ProjectId) -> HashSet<u64> {
     let query = storage
-        .query(project, QueryOptions::default())
+        .query(project, QueryOptions::new(None, None))
         .await
         .expect("query opens");
     // The query's runtime carries the object store that the Parquet files are read from.

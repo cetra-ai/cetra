@@ -112,7 +112,7 @@ async fn load_trace_capped(
         .map_err(|_| LoadError::Busy)?;
     let source = state
         .storage
-        .query(project, QueryOptions { around })
+        .query(project, QueryOptions::new(around, None))
         .await
         .map_err(|error| match error {
             QueryError::Busy => LoadError::Busy,

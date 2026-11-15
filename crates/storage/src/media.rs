@@ -213,7 +213,7 @@ impl MediaGc {
         let query = project_query(
             &state,
             project,
-            QueryOptions::default(),
+            QueryOptions::new(None, None),
             &self.runtime,
             self.target_partitions,
             self.lookback,

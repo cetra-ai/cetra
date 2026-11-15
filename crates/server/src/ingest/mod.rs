@@ -645,7 +645,7 @@ mod tests {
         let query = app
             .state
             .storage
-            .query(project, QueryOptions::default())
+            .query(project, QueryOptions::new(None, None))
             .await
             .expect("query opens");
         let ctx = datafusion::prelude::SessionContext::new();
@@ -931,7 +931,7 @@ mod tests {
         let query = app
             .state
             .storage
-            .query(seeded.project.id, QueryOptions::default())
+            .query(seeded.project.id, QueryOptions::new(None, None))
             .await
             .expect("query opens");
         let ctx = datafusion::prelude::SessionContext::new();

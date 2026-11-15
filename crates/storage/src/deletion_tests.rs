@@ -56,7 +56,7 @@ fn traces_deletion(traces: &[u16], cutoff: i64) -> Deletion {
 async fn context(storage: &crate::Storage) -> QueryContext {
     QueryContext::new(
         storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap(),
         None,
@@ -128,7 +128,7 @@ async fn trace_count(storage: &crate::Storage, trace: u16) -> i64 {
 /// The single flushed spans file of the project.
 async fn spans_file(storage: &crate::Storage) -> crate::catalog::FileMeta {
     let query = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let files = query
@@ -438,7 +438,7 @@ async fn a_limit_over_clean_and_gated_sides_sits_above_the_union() {
 
     // Raise the file with no covered row: it becomes the clean side.
     let query = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let files = query

@@ -47,7 +47,9 @@ pub(crate) async fn open_query_on(
     around: Option<i64>,
     window: Option<TimeWindow>,
 ) -> Result<QueryContext, ApiError> {
-    let source = storage.query(project, QueryOptions { around }).await?;
+    let source = storage
+        .query(project, QueryOptions::new(around, None))
+        .await?;
     Ok(QueryContext::new(source, window)?)
 }
 
