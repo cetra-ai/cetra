@@ -842,6 +842,30 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
+    /// The copy keeps the format marker, so a restored directory is stamped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_snapshot_keeps_the_format_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+        let storage = Storage::open(config).await.unwrap();
+        let target = dir.path().join("catalog-copy.db");
+        let snapshot = storage.snapshot_catalog(&target).await.unwrap();
+        drop(snapshot);
+        storage.shutdown().await.unwrap();
+
+        let mut copy = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&target)
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let marker: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut copy)
+            .await
+            .unwrap();
+        assert_eq!(marker, i64::from(crate::format::FORMAT_VERSION));
+    }
+
     /// The gate holds media collection while a snapshot lives: the collection
     /// waits, and the blob stays until the snapshot is dropped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

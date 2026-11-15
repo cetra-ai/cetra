@@ -53,6 +53,7 @@ pub(crate) mod disk;
 pub mod error;
 mod filter;
 pub(crate) mod flush;
+pub(crate) mod format;
 pub(crate) mod fs;
 pub(crate) mod gc;
 mod maintenance;
@@ -1920,14 +1921,15 @@ mod tests {
     use llmobs_core::schema::{spans, spans_schema};
     use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
     use object_store::ObjectStoreExt;
-    use sqlx::ConnectOptions;
     use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::{ConnectOptions, Connection};
 
     use super::*;
     use crate::catalog::FileTable;
     use crate::compaction::job::tests as jobs;
     use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, WalConfig};
-    use crate::error::StorageError;
+    use crate::error::{CatalogError, StorageError};
+    use crate::format::tests_support;
     use crate::hooks::HookPoint;
     use crate::media::MediaBlob;
     use crate::partials::partials_from_spans;
@@ -2715,6 +2717,56 @@ mod tests {
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert!(entries[0].starts_with("datafusion-"), "{entries:?}");
         storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_refuses_a_newer_directory_and_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("wal").join("spans");
+        std::fs::create_dir_all(&wal).unwrap();
+        std::fs::write(wal.join("00000000000000000001.wal"), b"a newer segment").unwrap();
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let before = tests_support::dir_digest(dir.path());
+
+        let Err(error) = Storage::open(config_in(dir.path())).await else {
+            panic!("Storage::open should refuse a newer directory");
+        };
+        assert!(matches!(
+            error,
+            OpenError::Catalog(CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            })
+        ));
+        assert_eq!(tests_support::dir_digest(dir.path()), before);
+
+        let Err(error) = Maintenance::open(config_in(dir.path())).await else {
+            panic!("Maintenance::open should refuse a newer directory");
+        };
+        assert!(matches!(
+            error,
+            OpenError::Catalog(CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            })
+        ));
+        assert_eq!(tests_support::dir_digest(dir.path()), before);
+        let copies = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".pre-"))
+            .count();
+        assert_eq!(copies, 0);
     }
 
     #[test]

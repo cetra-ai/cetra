@@ -156,7 +156,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 
 ## 4. Catalog
 
-`catalog.db` belongs to `llmobs-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards).
+`catalog.db` belongs to `llmobs-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards). `PRAGMA user_version` holds the data directory's format version (§ 12); `open` refuses a newer one before it migrates.
 
 ```sql
 CREATE TABLE data_files (
@@ -547,7 +547,7 @@ From the first public release (D185), a data directory written by any release mu
 
 | Surface | Where the number is | A reader that finds a newer one |
 |---|---|---|
-| Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. (M8) | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
+| Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
 | WAL | an 8-byte header at the start of every segment (§1) (M8) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
 | Parquet | KV key `llmobs.format_version` in every file (§3) (M8) | not read at query time: the directory marker comes first. Checked by the golden tests. |
 

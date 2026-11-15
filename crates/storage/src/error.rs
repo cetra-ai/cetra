@@ -296,6 +296,29 @@ pub enum CatalogError {
         /// The offending `data_files.id`.
         file: Uuid,
     },
+    /// The directory was written by a newer format (spec 03 § 12).
+    #[error(
+        "this data directory has format version {found}, which this build (format {supported}) does not read; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    FormatTooNew {
+        /// The `PRAGMA user_version` of `catalog.db`.
+        found: i64,
+        /// The format version this build reads and writes.
+        supported: u16,
+    },
+    /// A directory from before format versions existed (pre-release).
+    #[error(
+        "this data directory has no format version: it was written before format versions were introduced; create a new data directory"
+    )]
+    PreFormat,
+    /// `catalog.db` has applied a migration this build does not have.
+    #[error(
+        "catalog.db has applied migration {version}, which this build does not have; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    SchemaTooNew {
+        /// The version recorded in `_sqlx_migrations`.
+        version: i64,
+    },
     /// A commit failed with a fatal SQLite I/O error earlier in this process.
     /// Every catalog call is refused until a restart (D-R-6).
     #[error("catalog stopped after an I/O error; restart required")]

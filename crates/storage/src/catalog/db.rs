@@ -10,12 +10,13 @@ use std::time::Duration;
 use chrono::NaiveDate;
 use llmobs_core::ids::ProjectId;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqliteSynchronous};
-use sqlx::{ConnectOptions, Row, SqliteConnection};
+use sqlx::{AssertSqlSafe, ConnectOptions, Connection, Row, SqliteConnection};
 use uuid::Uuid;
 
 use super::{Catalog, FileId, FileMeta, FileTable, insert_sorted};
 use crate::deletion::{PendingDeletion, Tombstones};
 use crate::error::CatalogError;
+use crate::format::FORMAT_VERSION;
 use crate::projects::ProjectStates;
 
 /// `flushed_seq` for the two tables. A missing `table_state` row is `0`.
@@ -32,8 +33,27 @@ pub(crate) struct TableState {
 /// The directory must already exist. Pragmas are applied on connect, before
 /// the migrations run. This is the only connection: readers use the in-memory
 /// catalog.
+///
+/// The format marker (`PRAGMA user_version`, spec 03 § 12) is checked before
+/// anything is copied or migrated, and stamped once the catalog is current.
 pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection, CatalogError> {
     let path = data_dir.join("catalog.db");
+    // The refusals are decided on a read-only connection. Connecting for writing
+    // with `journal_mode=WAL` rewrites the header of a rollback-journal file, and
+    // a refused directory must come back unchanged.
+    if path.is_file() {
+        let mut reader = SqliteConnectOptions::new()
+            .filename(&path)
+            .read_only(true)
+            .connect()
+            .await
+            .map_err(|source| CatalogError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        check_format(&mut reader).await?;
+        reader.close().await.map_err(CatalogError::db)?;
+    }
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true)
@@ -45,6 +65,7 @@ pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection,
         .connect()
         .await
         .map_err(|source| CatalogError::Open { path, source })?;
+    let marker = read_user_version(&mut connection).await?;
     let applied = applied_version(&mut connection).await?;
     let expected = sqlx::migrate!("./migrations/catalog")
         .migrations
@@ -56,8 +77,92 @@ pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection,
     sqlx::migrate!("./migrations/catalog")
         .run(&mut connection)
         .await
-        .map_err(|source| CatalogError::Migrate { source })?;
+        .map_err(|source| match source {
+            sqlx::migrate::MigrateError::VersionMissing(version) => {
+                CatalogError::SchemaTooNew { version }
+            }
+            source => CatalogError::Migrate { source },
+        })?;
+    if marker == 0 {
+        // The catalog is new or empty. A crash between the migrations and this
+        // statement leaves a marker of 0 that the next open accepts.
+        // `FORMAT_VERSION` is a constant integer, not input.
+        sqlx::query(AssertSqlSafe(format!(
+            "PRAGMA user_version = {FORMAT_VERSION}"
+        )))
+        .execute(&mut connection)
+        .await
+        .map_err(CatalogError::db)?;
+    }
     Ok(connection)
+}
+
+/// Refuses a directory this build does not read (spec 03 § 12). Nothing is
+/// copied, migrated or stamped before this check passes.
+async fn check_format(connection: &mut SqliteConnection) -> Result<(), CatalogError> {
+    let marker = read_user_version(connection).await?;
+    // No older format exists, so any other value (a newer one, or a corrupt
+    // negative one) is refused.
+    if marker != 0 && marker != i64::from(FORMAT_VERSION) {
+        return Err(CatalogError::FormatTooNew {
+            found: marker,
+            supported: FORMAT_VERSION,
+        });
+    }
+    let applied = applied_version(connection).await?;
+    if marker == 0 && applied > 0 && catalog_has_data(connection).await? {
+        return Err(CatalogError::PreFormat);
+    }
+    Ok(())
+}
+
+/// `PRAGMA user_version`: the data directory's format marker, `0` when unset.
+async fn read_user_version(connection: &mut SqliteConnection) -> Result<i64, CatalogError> {
+    sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(CatalogError::db)
+}
+
+/// Whether a table that holds data has a row, among the tables an older
+/// catalog may have. Tables that do not exist yet (migrations are pending) are
+/// skipped, and `table_state` counts only a flushed sequence above `0`.
+async fn catalog_has_data(connection: &mut SqliteConnection) -> Result<bool, CatalogError> {
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+    let present = |name: &str| tables.iter().any(|table| table == name);
+    // Only these constant names are interpolated into the SQL below.
+    for table in [
+        "data_files",
+        "deletions",
+        "media",
+        "projects",
+        "retention_watermarks",
+    ] {
+        if present(table) {
+            let found: bool = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT EXISTS(SELECT 1 FROM {table})"
+            )))
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+            if found {
+                return Ok(true);
+            }
+        }
+    }
+    if present("table_state") {
+        let found: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM table_state WHERE flushed_seq > 0)")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(CatalogError::db)?;
+        return Ok(found);
+    }
+    Ok(false)
 }
 
 /// The highest applied migration version, or `0` when the database has none.
@@ -505,6 +610,8 @@ fn parse_flag(value: i64) -> Result<bool, CatalogError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::tests_support::dir_digest;
+    use sqlx::Connection;
 
     const PROJECT: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000001";
     const DAY: &str = "2024-06-01";
@@ -850,5 +957,224 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(error, CatalogError::SourcesInvariant { file } if file == traces));
+    }
+
+    /// Sets `PRAGMA user_version` of `<dir>/catalog.db` through its own
+    /// connection, which is closed before the function returns.
+    async fn set_user_version(dir: &Path, version: u16) {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query(AssertSqlSafe(format!("PRAGMA user_version = {version}")))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+    }
+
+    /// Reads `PRAGMA user_version` through a second connection.
+    async fn user_version(dir: &Path) -> i64 {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let version = read_user_version(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+        version
+    }
+
+    /// Creates `<dir>/catalog.db` with only migration 0001 applied, as an M2
+    /// binary left it, and closes it.
+    async fn first_migration_only(dir: &Path) {
+        let mut first_only = sqlx::migrate!("./migrations/catalog");
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = SqliteConnectOptions::new()
+            .filename(dir.join("catalog.db"))
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+    }
+
+    /// Opens `dir`, which must be refused, and returns the error.
+    async fn refused(dir: &Path) -> CatalogError {
+        match open_catalog_db(dir).await {
+            Ok(_) => panic!("the open of the data directory should be refused"),
+            Err(error) => error,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_catalog_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn a_newer_marker_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 2).await;
+        let before = dir_digest(dir.path());
+
+        let error = refused(dir.path()).await;
+        assert!(matches!(
+            error,
+            CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            }
+        ));
+        assert_eq!(dir_digest(dir.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_newer_marker_is_refused_before_pending_migrations() {
+        let dir = tempfile::tempdir().unwrap();
+        first_migration_only(dir.path()).await;
+        set_user_version(dir.path(), 2).await;
+        let before = dir_digest(dir.path());
+
+        let error = refused(dir.path()).await;
+        assert!(matches!(
+            error,
+            CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            }
+        ));
+        assert_eq!(dir_digest(dir.path()), before);
+        assert!(pre_copies(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_catalog_with_data_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        insert_file(&mut connection, file_id(1), "spans", DAY).await;
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 0).await;
+
+        assert!(matches!(refused(dir.path()).await, CatalogError::PreFormat));
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM data_files")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_catalog_with_data_and_pending_migrations_is_refused_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        first_migration_only(dir.path()).await;
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .connect()
+            .await
+            .unwrap();
+        insert_file(&mut connection, file_id(1), "spans", DAY).await;
+        connection.close().await.unwrap();
+        let before = dir_digest(dir.path());
+
+        assert!(matches!(refused(dir.path()).await, CatalogError::PreFormat));
+        assert!(pre_copies(dir.path()).is_empty());
+        assert_eq!(dir_digest(dir.path()), before);
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(applied, 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalog_without_a_marker_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        set_user_version(dir.path(), 0).await;
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn an_empty_catalog_with_pending_migrations_migrates_then_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        first_migration_only(dir.path()).await;
+        assert_eq!(user_version(dir.path()).await, 0);
+
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        assert!(has_file_sources(&mut connection).await);
+        connection.close().await.unwrap();
+        assert_eq!(user_version(dir.path()).await, i64::from(FORMAT_VERSION));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_applied_migration_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+             VALUES (9999, 'x', 1, X'00', 0)",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+
+        assert!(matches!(
+            refused(dir.path()).await,
+            CatalogError::SchemaTooNew { version: 9999 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_vacuum_copy_keeps_the_marker() {
+        // The pre-migration copy and the snapshot are both `VACUUM INTO`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = open_catalog_db(dir.path()).await.unwrap();
+        let copy = dir.path().join("copy.db");
+        sqlx::query("VACUUM INTO ?")
+            .bind(copy.to_str().unwrap())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        let mut copied = SqliteConnectOptions::new()
+            .filename(&copy)
+            .read_only(true)
+            .connect()
+            .await
+            .unwrap();
+        let version = read_user_version(&mut copied).await.unwrap();
+        assert_eq!(version, i64::from(FORMAT_VERSION));
     }
 }
