@@ -9,25 +9,37 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Datelike, Months, NaiveDate};
 use llmobs_core::ids::{OrgId, ProjectId};
-use sqlx::SqliteConnection;
 
 use crate::meta::MetaDb;
 use crate::meta::MetaError;
 
-/// Deletes every `usage_daily` row of the org (org drop, D-M-7).
+/// How long a dropped org's usage rows stay (D-P-46).
+pub(crate) const DROPPED_USAGE_KEEP_NS: i64 = 40 * 86_400_000_000_000;
+
+/// Deletes the `usage_daily` rows of orgs whose org drop was applied 40 or more days before
+/// `now` and that have no `orgs` row. Returns the rows deleted.
 ///
 /// # Errors
 ///
 /// Returns [`MetaError::Db`] when the delete fails.
-pub(crate) async fn delete_org_usage(
-    conn: &mut SqliteConnection,
-    org: OrgId,
-) -> Result<(), MetaError> {
-    sqlx::query("DELETE FROM usage_daily WHERE org_id = ?")
-        .bind(org.to_string())
-        .execute(&mut *conn)
-        .await?;
-    Ok(())
+pub(crate) async fn prune_dropped_orgs(meta: &MetaDb, now: i64) -> Result<u64, MetaError> {
+    let applied_before = now.saturating_sub(DROPPED_USAGE_KEEP_NS);
+    meta.write(move |conn| {
+        Box::pin(async move {
+            let result = sqlx::query(
+                "DELETE FROM usage_daily \
+                 WHERE org_id IN ( \
+                   SELECT org_id FROM deletions \
+                   WHERE kind = 'org' AND status = 'applied' AND applied_at <= ?) \
+                 AND org_id NOT IN (SELECT id FROM orgs)",
+            )
+            .bind(applied_before)
+            .execute(&mut *conn)
+            .await?;
+            Ok(result.rows_affected())
+        })
+    })
+    .await
 }
 
 /// One `usage_daily` row.
@@ -317,7 +329,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::deletion::run_once;
+    use crate::meta::deletions::{
+        ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails, insert_deletion,
+    };
+    use crate::meta::orgs::insert_org;
     use crate::meta::test_db;
+    use crate::test_support::TestApp;
 
     const DAY: i64 = 86_400_000_000_000;
     /// 2026-01-01T12:00:00Z.
@@ -613,5 +631,113 @@ mod tests {
         flusher.await.unwrap();
         loader.await.unwrap();
         assert_eq!(usage.month_units(&meta, org, DAY_ONE).await.unwrap(), 2_000);
+    }
+
+    /// An org deletion of `org`, created at `now` and still pending.
+    fn org_deletion(org: OrgId, now: i64) -> NewDeletion {
+        NewDeletion {
+            id: uuid::Uuid::now_v7(),
+            org_id: org,
+            project_id: None,
+            kind: DeletionKind::Org,
+            user_id: None,
+            request: RequestDetails::default(),
+            actor_kind: ActorKind::User,
+            actor_id: uuid::Uuid::now_v7(),
+            state: DeletionState::Pending,
+            created_at: now,
+        }
+    }
+
+    /// The `usage_daily` row count of `org`.
+    async fn usage_rows(meta: &MetaDb, org: OrgId) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM usage_daily WHERE org_id = ?")
+            .bind(org.to_string())
+            .fetch_one(meta.reader())
+            .await
+            .unwrap()
+    }
+
+    /// Gives a new org one usage row today, then drops it through the deletion worker.
+    async fn dropped_org_with_usage(app: &TestApp) -> OrgId {
+        let now = app.state.clock.now_ns();
+        let org = OrgId::new_v7();
+        app.state.usage.add(org, ProjectId::new_v7(), now, 5, 0, 0);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        let new = org_deletion(org, now);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_org(conn, org, "Dropped", "dropped", now).await?;
+                    insert_deletion(conn, &new).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        run_once(&app.state).await.unwrap();
+        org
+    }
+
+    #[tokio::test]
+    async fn dropped_orgs_usage_is_pruned_after_40_days() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dropped = dropped_org_with_usage(&app).await;
+        let applied = app.state.clock.now_ns();
+        app.state
+            .usage
+            .add(seeded.org_id, seeded.project.id, applied, 1, 0, 0);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        assert_eq!(usage_rows(&app.state.meta, dropped).await, 1);
+
+        let early = prune_dropped_orgs(&app.state.meta, applied + 39 * DAY)
+            .await
+            .unwrap();
+        assert_eq!(early, 0);
+        assert_eq!(usage_rows(&app.state.meta, dropped).await, 1);
+
+        let due = prune_dropped_orgs(&app.state.meta, applied + 40 * DAY)
+            .await
+            .unwrap();
+        assert_eq!(due, 1);
+        assert_eq!(usage_rows(&app.state.meta, dropped).await, 0);
+        assert_eq!(usage_rows(&app.state.meta, seeded.org_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn an_org_row_protects_its_usage() {
+        let app = TestApp::new().await;
+        let now = app.state.clock.now_ns();
+        let org = OrgId::new_v7();
+        app.state.usage.add(org, ProjectId::new_v7(), now, 5, 0, 0);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        let new = org_deletion(org, now);
+        let id = new.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_org(conn, org, "Kept", "kept", now).await?;
+                    insert_deletion(conn, &new).await?;
+                    sqlx::query(
+                        "UPDATE deletions SET status = 'applied', applied_at = ? WHERE id = ?",
+                    )
+                    .bind(now)
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let pruned = prune_dropped_orgs(&app.state.meta, now + 40 * DAY)
+            .await
+            .unwrap();
+        assert_eq!(pruned, 0);
+        assert_eq!(usage_rows(&app.state.meta, org).await, 1);
     }
 }

@@ -541,8 +541,8 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     Ok(())
 }
 
-/// Drops every project of the org (including any created after the request), its usage
-/// and the org row.
+/// Drops every project of the org (including any created after the request) and the org row.
+/// The org's `usage_daily` rows stay for the control plane's billing (D-P-46).
 async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), Step> {
     let reader = state.meta.reader();
     let mut projects = scope_projects(reader, row.id)
@@ -575,7 +575,6 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                crate::usage::delete_org_usage(conn, org).await?;
                 delete_org(conn, org).await?;
                 mark_dropped(conn, id, now).await
             })
@@ -1247,7 +1246,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn org_drop_removes_the_org_and_its_usage() {
+    async fn org_drop_keeps_the_usage() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -1313,14 +1312,14 @@ mod tests {
                     .is_none()
             );
         }
-        assert_eq!(
+        assert!(
             count_rows(
                 &app,
                 "SELECT COUNT(*) FROM usage_daily WHERE org_id = ?",
                 globex.to_string()
             )
-            .await,
-            0
+            .await
+                > 0
         );
         assert!(
             count_rows(
