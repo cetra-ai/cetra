@@ -177,8 +177,15 @@ def main(argv: list[str] | None = None) -> None:
     plots = out / "plots"
     plots.mkdir(exist_ok=True)
 
-    def draw(name: str, *args_: Any, **kwargs: Any) -> None:
-        plot(plots / name, *args_, warmup=warmup, **kwargs)
+    def draw(
+        name: str,
+        title: str,
+        ylabel: str,
+        series: list[Series],
+        bounds: list[tuple[str, float]] | None = None,
+        log: bool = False,
+    ) -> None:
+        plot(plots / name, title, ylabel, series, warmup, bounds, log)
 
     draw(
         "memory.png",
