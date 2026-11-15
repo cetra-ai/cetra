@@ -26,6 +26,11 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_survives_a_lossy_crash
 
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":

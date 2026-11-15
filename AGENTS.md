@@ -68,6 +68,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
+- `LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1).
 - `LLMOBS_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default 8); `just model N` runs it in release mode. It is separate from `LLMOBS_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable.
 - `LLMOBS_TEST_S3_ENDPOINT` (with `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage S3 test against a real S3-compatible server; `crates/storage/tests/s3.rs` shows how to start one (D119).
 - Tests cover the current behaviour only.
