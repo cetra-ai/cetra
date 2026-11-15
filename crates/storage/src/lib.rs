@@ -3585,6 +3585,86 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
+    /// `flush_now` covers every append acknowledged before it started, while
+    /// another task keeps appending. Twenty rounds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_covers_every_acknowledged_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let acknowledged = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let appender = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            let acknowledged = Arc::clone(&acknowledged);
+            tokio::spawn(async move {
+                let mut start = 0_i64;
+                while !stop.load(Ordering::SeqCst) {
+                    let receipt = storage
+                        .append_spans(project(), spans_at(&[start]))
+                        .await
+                        .unwrap();
+                    acknowledged.fetch_max(receipt.seq, Ordering::SeqCst);
+                    start += 1;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+        };
+
+        for round in 0..20 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let target = acknowledged.load(Ordering::SeqCst);
+            if target == 0 {
+                continue;
+            }
+            storage
+                .flush_now(Duration::from_secs(5))
+                .await
+                .unwrap_or_else(|error| panic!("round {round}: {error}"));
+            assert!(
+                storage.flushed_seq(Table::Spans).await >= target,
+                "round {round}: seq {target} acknowledged but not flushed"
+            );
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        appender.await.unwrap();
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// A `flush_now` racing `shutdown` returns `Ok` or `ShuttingDown` within its
+    /// timeout, and `shutdown` still finishes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_racing_shutdown_fails_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        storage
+            .append_spans(project(), spans_at(&[1, 2]))
+            .await
+            .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(5)).await })
+        };
+        let stopping = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.shutdown().await })
+        };
+        let flushed = tokio::time::timeout(Duration::from_secs(10), flushing)
+            .await
+            .expect("flush_now did not return")
+            .unwrap();
+        assert!(
+            matches!(flushed, Ok(()) | Err(FlushNowError::ShuttingDown)),
+            "{flushed:?}"
+        );
+        stopping.await.unwrap().unwrap();
+    }
+
     /// A storage whose flush tasks do nothing on their own: one hour of age
     /// and 1 MiB of size. Only [`Storage::flush_now`] flushes.
     fn quiet_config_in(dir: &Path) -> StorageConfig {
