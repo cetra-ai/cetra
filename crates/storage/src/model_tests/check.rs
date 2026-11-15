@@ -23,7 +23,7 @@ use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, t
 use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
 use crate::reads::{AlertMeasure, Kpi, KpiName, ListScope, MAX_PAGE};
-use crate::test_support::{object_rows, trace_ids_of};
+use crate::test_support::{object_rows, orphan_objects, trace_ids_of};
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
@@ -36,11 +36,12 @@ pub(super) fn check_quick(h: &Harness, model: &Model, project: P, index: usize) 
     check_scores(h, state, project, index);
 }
 
-/// After Restart, Crash and Settle, and at the end: both projects, the reads of
-/// `check_quick`, plus the sampled details, the score reads by id and latest, and the
-/// deletion statuses.
+/// After Restart, Crash, LossyCrash and Settle, and at the end: both projects, the reads of
+/// `check_quick`, plus the sampled details, the score reads by id and latest, the deletion
+/// statuses, and the physical audit of the object store.
 pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
     check_deletions(h, model, index);
+    check_no_orphans(h, index);
     let model: &Model = model;
     for project in [P::A, P::B] {
         let state = model.project(project);
@@ -50,6 +51,16 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
         check_score_reads(h, model, project, index);
         check_aggregates(h, state, project, index);
     }
+}
+
+/// Every object under `objects/` is named by a catalog row, so no crash left an object the
+/// catalog does not know (R2.3). Obsolete files keep their rows until GC deletes them.
+fn check_no_orphans(h: &Harness, index: usize) {
+    let orphans = h.block_on(orphan_objects(h.dir()));
+    assert!(
+        orphans.is_empty(),
+        "op {index}: objects with no catalog row: {orphans:?}"
+    );
 }
 
 /// Every registered deletion of both projects reads `Pending` or `Applied`. Once one reads

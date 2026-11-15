@@ -63,6 +63,43 @@ pub(super) struct ModelDeletion {
 pub(super) struct Model {
     pub(super) a: ProjectModel,
     pub(super) b: ProjectModel,
+    /// The spans WAL, shared by both projects (R2.9).
+    pub(super) spans_wal: Wal<SpanPush>,
+    /// The scores WAL, shared by both projects (R2.9).
+    pub(super) scores_wal: Wal<ScorePush>,
+}
+
+/// A span copy the model stored for one WAL record (R2.9).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SpanPush {
+    pub(super) project: P,
+    pub(super) trace: u8,
+    pub(super) span_no: u8,
+    pub(super) ingest: i64,
+}
+
+/// A score version the model stored for one WAL record (R2.9).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScorePush {
+    pub(super) key: ScoreKey,
+    pub(super) version: u32,
+    pub(super) ingest: i64,
+}
+
+/// One WAL (`spans` or `scores`) as a lossy crash sees it (R2.9): which of its records are
+/// durable, and which model rows each record carried.
+#[derive(Debug)]
+pub(super) struct Wal<T> {
+    /// One entry per record appended in this life, in order: the rows the model stored for it.
+    /// An entry is empty when the keep rule kept nothing; the record is in the WAL all the same.
+    pub(super) unsynced: Vec<Vec<T>>,
+    /// Records of earlier lives still in the WAL, unflushed. They are durable: R2.4 syncs the
+    /// replayed segment at open.
+    pub(super) durable_unflushed: u64,
+    /// How many of the first `unsynced` records are known to be durable.
+    pub(super) synced_floor: usize,
+    /// Segment files of this WAL, as read from its directory after the last append or reopen.
+    pub(super) segments: usize,
 }
 
 /// One expected `traces` view row.
@@ -100,12 +137,84 @@ pub(super) struct ExpectedScore {
     pub(super) user_id: Option<String>,
 }
 
+impl<T> Wal<T> {
+    /// A WAL with `segments` segment files and no records of this life.
+    pub(super) fn new(segments: usize) -> Self {
+        Self {
+            unsynced: Vec::new(),
+            durable_unflushed: 0,
+            synced_floor: 0,
+            segments,
+        }
+    }
+
+    /// The life ended with a clean shutdown (`Restart`, `Settle`), which flushed every record.
+    pub(super) fn flushed(&mut self, segments: usize) {
+        self.unsynced.clear();
+        self.synced_floor = 0;
+        self.durable_unflushed = 0;
+        self.segments = segments;
+    }
+
+    /// The life ended without shutdown (`Crash`). The process died, so its records are in the
+    /// page cache and replay after the reopen.
+    pub(super) fn crashed(&mut self, segments: usize) {
+        self.durable_unflushed += self.unsynced.len() as u64;
+        self.unsynced.clear();
+        self.synced_floor = 0;
+        self.segments = segments;
+    }
+
+    /// One successful append, whose stored rows are `pushed`. `always` syncs every record before
+    /// its ack. In interval mode, a new segment file means the writer rotated, and a rotation
+    /// syncs every record so far (R2.4).
+    pub(super) fn appended(&mut self, pushed: Vec<T>, segments: usize, always: bool) {
+        self.unsynced.push(pushed);
+        if always || segments > self.segments {
+            self.synced_floor = self.unsynced.len();
+        }
+        self.segments = segments;
+    }
+
+    /// The reopen after a lossy crash. `replayed` is what replay counted: the earlier lives'
+    /// records still in the WAL, then this life's surviving prefix. Panics unless every record
+    /// known durable survived. Returns the rows of the records after the surviving prefix: the
+    /// model forgets them. The records of this life become durable.
+    pub(super) fn lossy_crashed(&mut self, replayed: u64, segments: usize, wal: &str) -> Vec<T> {
+        let survived = replayed
+            .checked_sub(self.durable_unflushed)
+            .expect("replayed fewer records than the earlier lives left durable");
+        let survived = usize::try_from(survived).expect("a record count fits in usize");
+        assert!(
+            self.synced_floor <= survived && survived <= self.unsynced.len(),
+            "lossy crash lost a durable {wal} record: {survived} of this life's records replayed, \
+             {} were known durable, {} were appended",
+            self.synced_floor,
+            self.unsynced.len(),
+        );
+        let lost: Vec<T> = self
+            .unsynced
+            .split_off(survived)
+            .into_iter()
+            .flatten()
+            .collect();
+        self.durable_unflushed += survived as u64;
+        self.unsynced.clear();
+        self.synced_floor = 0;
+        self.segments = segments;
+        lost
+    }
+}
+
 impl Model {
-    /// `a.project = P::A`, `b.project = P::B`, everything else empty.
-    pub(super) fn new() -> Self {
+    /// `a.project = P::A`, `b.project = P::B`, everything else empty. `segments` is each WAL's
+    /// segment count at the first open.
+    pub(super) fn new(spans_segments: usize, scores_segments: usize) -> Self {
         Self {
             a: ProjectModel::new(P::A),
             b: ProjectModel::new(P::B),
+            spans_wal: Wal::new(spans_segments),
+            scores_wal: Wal::new(scores_segments),
         }
     }
 
@@ -142,26 +251,61 @@ impl ProjectModel {
         !self.dropped && self.keep_from.is_none_or(|keep| day >= keep)
     }
 
-    /// Stores one copy of span `(trace, span_no)` written at `ingest`, unless the keep rule drops it.
-    pub(super) fn write_span(&mut self, trace: u8, span_no: u8, ingest: i64) {
+    /// Stores one copy of span `(trace, span_no)` written at `ingest`, unless the keep rule drops
+    /// it. Returns whether it stored one.
+    pub(super) fn write_span(&mut self, trace: u8, span_no: u8, ingest: i64) -> bool {
         let shape = trace_shape(self.project, trace);
-        if self.keeps(day(shape.day_offset)) {
+        let keep = self.keeps(day(shape.day_offset));
+        if keep {
             self.spans
                 .entry((trace, span_no))
                 .or_default()
                 .push(SpanCopy { ingest });
         }
+        keep
     }
 
-    /// Stores one version of `key` written at `ingest`, unless the keep rule drops it.
-    pub(super) fn write_score(&mut self, key: ScoreKey, version: u32, deleted: bool, ingest: i64) {
+    /// Stores one version of `key` written at `ingest`, unless the keep rule drops it. Returns
+    /// whether it stored one.
+    pub(super) fn write_score(
+        &mut self,
+        key: ScoreKey,
+        version: u32,
+        deleted: bool,
+        ingest: i64,
+    ) -> bool {
         debug_assert_eq!(key.project, self.project, "a score of the other project");
-        if self.keeps(date_of(score_created_at(&key))) {
+        let keep = self.keeps(date_of(score_created_at(&key)));
+        if keep {
             self.scores.entry(key).or_default().push(ScoreVersion {
                 version,
                 deleted,
                 ingest,
             });
+        }
+        keep
+    }
+
+    /// Forgets the copy a lost WAL record carried (R2.9). Copies are told apart by their ingest
+    /// time, which no two writes of one key share.
+    pub(super) fn unstore_span(&mut self, push: &SpanPush) {
+        let key = (push.trace, push.span_no);
+        if let Some(copies) = self.spans.get_mut(&key) {
+            copies.retain(|copy| copy.ingest != push.ingest);
+            if copies.is_empty() {
+                self.spans.remove(&key);
+            }
+        }
+    }
+
+    /// Forgets the version a lost WAL record carried (R2.9).
+    pub(super) fn unstore_score(&mut self, push: &ScorePush) {
+        if let Some(versions) = self.scores.get_mut(&push.key) {
+            versions
+                .retain(|version| version.version != push.version || version.ingest != push.ingest);
+            if versions.is_empty() {
+                self.scores.remove(&push.key);
+            }
         }
     }
 

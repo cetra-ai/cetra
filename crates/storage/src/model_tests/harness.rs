@@ -12,6 +12,7 @@ use crate::Storage;
 use crate::config::{
     CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
+use crate::fs::lossy::{CrashReport, Lossy};
 use crate::test_support::{span_row, span_rows};
 use crate::wal::Table;
 
@@ -48,9 +49,13 @@ pub(super) struct Life {
 }
 
 pub(super) struct Harness {
-    /// Kept so the directory lives as long as the harness.
-    dir: tempfile::TempDir,
+    /// Kept so the directory lives as long as the harness. The data directory
+    /// is `data` below it, and the lossy shadow is `shadow`.
+    _dir: tempfile::TempDir,
+    data: std::path::PathBuf,
     config: StorageConfig,
+    /// The data directory's lossy root (R2.2), registered before the first open.
+    lossy: Lossy,
     life: Option<Life>,
 }
 
@@ -67,16 +72,31 @@ fn open_life(config: &StorageConfig) -> Life {
 }
 
 impl Harness {
-    /// A fresh temp dir and `model_config(dir)`, opened.
-    pub(super) fn new() -> Self {
+    /// A fresh temp dir, its data directory in lossy mode, and `model_config(data)` with `change`
+    /// applied, opened.
+    pub(super) fn with_config(change: impl FnOnce(&mut StorageConfig)) -> Self {
         let dir = tempfile::TempDir::new().expect("temp dir for a model case");
-        let config = model_config(dir.path());
+        let data = dir.path().join("data");
+        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+        let mut config = model_config(&data);
+        change(&mut config);
         let life = Some(open_life(&config));
-        Self { dir, config, life }
+        Self {
+            _dir: dir,
+            data,
+            config,
+            lossy,
+            life,
+        }
+    }
+
+    /// `with_config` with no change: `wal.sync = "always"`.
+    pub(super) fn new() -> Self {
+        Self::with_config(|_| {})
     }
 
     pub(super) fn dir(&self) -> &std::path::Path {
-        self.dir.path()
+        &self.data
     }
 
     pub(super) fn config(&self) -> &StorageConfig {
@@ -109,6 +129,17 @@ impl Harness {
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.life = Some(open_life(&self.config));
+    }
+
+    /// Drop without shutdown, apply a lossy crash with `seed` to the data directory, then a new
+    /// life. The storage is closed before the crash, as `Lossy::crash_with` requires.
+    pub(super) fn lossy_crash(&mut self, seed: u64) -> CrashReport {
+        let Life { storage, runtime } = self.life.take().expect("a life");
+        drop(storage);
+        runtime.shutdown_timeout(Duration::from_secs(10));
+        let report = self.lossy.crash(seed);
+        self.life = Some(open_life(&self.config));
+        report
     }
 }
 

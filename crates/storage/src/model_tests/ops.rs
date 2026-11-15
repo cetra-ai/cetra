@@ -13,14 +13,16 @@ use uuid::Uuid;
 
 use super::check::check_settled_files;
 use super::harness::Harness;
-use super::model::{Model, ModelDeletion, ProjectModel, SpanCopy};
+use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
 use super::observe::{observe_eval_trace_ids, observe_user_scope};
 use super::shape::{
     HOUR_NS, P, ScoreKey, Target, day, hex, midnight, score, score_created_at, span, trace_id,
 };
+use crate::config::WalSync;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
 use crate::test_support::span_rows;
+use crate::wal::{Table, parse_segment_name};
 use llmobs_core::batch::scores_to_record_batch;
 use llmobs_core::ids::TraceId;
 use llmobs_core::span::Span;
@@ -123,6 +125,11 @@ pub(super) enum Op {
     },
     /// Drops project B.
     DropB,
+    /// Drops the storage without shutdown, applies a lossy crash with `seed`
+    /// (`CrashMode::from_seed`) to the data directory, and reopens (R2.9).
+    LossyCrash {
+        seed: u64,
+    },
 }
 
 impl Op {
@@ -143,7 +150,8 @@ impl Op {
             | Self::Gc
             | Self::Settle
             | Self::ApplyDeletions { .. }
-            | Self::DropB => None,
+            | Self::DropB
+            | Self::LossyCrash { .. } => None,
         }
     }
 }
@@ -236,6 +244,12 @@ fn op() -> impl Strategy<Value = Op> {
                 .boxed(),
         ),
         (1, Just(Op::DropB).boxed()),
+        (
+            3,
+            any::<u64>()
+                .prop_map(|seed| Op::LossyCrash { seed })
+                .boxed(),
+        ),
     ])
 }
 
@@ -269,8 +283,15 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             trace,
             pick,
         } => resend(harness, model, project, trace, pick, *clock),
-        Op::Restart => harness.restart(),
-        Op::Crash => harness.crash(),
+        Op::Restart => {
+            harness.restart();
+            flushed(harness, model);
+        }
+        Op::Crash => {
+            harness.crash();
+            crashed(harness, model);
+        }
+        Op::LossyCrash { seed } => lossy_crash(harness, model, seed),
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
             compact(harness, *clock);
@@ -358,16 +379,42 @@ fn append(
         .collect();
     if split && spans.len() >= 2 {
         let (head, tail) = spans.split_at(spans.len() / 2);
+        let middle = first + u8::try_from(head.len()).expect("a batch of at most 6 spans");
         send(harness, project, head);
+        record_spans(harness, model, project, trace, first..middle, clock);
         send(harness, project, tail);
+        record_spans(harness, model, project, trace, middle..end, clock);
     } else {
         send(harness, project, &spans);
+        record_spans(harness, model, project, trace, first..end, clock);
     }
+    model.project_mut(project).next_span.insert(trace, end);
+}
+
+/// Stores the spans `span_nos` of `trace` in the model after a successful append of them, which
+/// is one WAL record (R2.9).
+fn record_spans(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    trace: u8,
+    span_nos: std::ops::Range<u8>,
+    clock: i64,
+) {
     let state = model.project_mut(project);
-    for span_no in first..end {
-        state.write_span(trace, span_no, clock);
-    }
-    state.next_span.insert(trace, end);
+    let pushed: Vec<SpanPush> = span_nos
+        .filter(|&span_no| state.write_span(trace, span_no, clock))
+        .map(|span_no| SpanPush {
+            project,
+            trace,
+            span_no,
+            ingest: clock,
+        })
+        .collect();
+    let segments = segment_count(harness, Table::Spans);
+    model
+        .spans_wal
+        .appended(pushed, segments, always_synced(harness));
 }
 
 fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8, clock: i64) {
@@ -388,7 +435,7 @@ fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8,
         return;
     }
     send(harness, project, &batch);
-    model.project_mut(project).write_span(trace, span_no, clock);
+    record_spans(harness, model, project, trace, span_no..span_no + 1, clock);
 }
 
 /// The key a score target number names (see `Op::Score`).
@@ -558,9 +605,21 @@ fn send_score(
         return;
     }
     result.expect("append_scores of one score");
-    model
+    let stored = model
         .project_mut(project)
         .write_score(key, version, deleted, clock);
+    let pushed: Vec<ScorePush> = stored
+        .then_some(ScorePush {
+            key,
+            version,
+            ingest: clock,
+        })
+        .into_iter()
+        .collect();
+    let segments = segment_count(harness, Table::Scores);
+    model
+        .scores_wal
+        .appended(pushed, segments, always_synced(harness));
 }
 
 fn compact(harness: &Harness, clock: i64) {
@@ -788,6 +847,7 @@ fn drop_day_closed_scores(state: &mut ProjectModel) {
 pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) {
     // 1. Everything in files, so no memtable batch blocks "applied".
     harness.restart();
+    flushed(harness, model);
 
     // 2. The clock must be past the newest ingest by `close_delay` too, or a late L0 file
     //    is legitimately not closed yet and compaction cannot make progress.
@@ -841,4 +901,72 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
     drop_day_closed_scores(&mut model.b);
 
     check_settled_files(harness, model);
+}
+
+/// A model for a fresh case on `harness`: its WALs start with the segments the open found.
+pub(super) fn new_model(harness: &Harness) -> Model {
+    Model::new(
+        segment_count(harness, Table::Spans),
+        segment_count(harness, Table::Scores),
+    )
+}
+
+/// Segment files of `table`'s WAL in this life, read from its directory (R2.9).
+fn segment_count(harness: &Harness, table: Table) -> usize {
+    let dir = harness.dir().join("wal").join(table.name());
+    std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("read the {} WAL directory: {error}", table.name()))
+        .filter_map(Result::ok)
+        .filter(|entry| parse_segment_name(&entry.file_name().to_string_lossy()).is_some())
+        .count()
+}
+
+/// Whether this case syncs every record before its ack (`wal.sync = "always"`).
+fn always_synced(harness: &Harness) -> bool {
+    matches!(harness.config().wal.sync, WalSync::Always)
+}
+
+/// The clean shutdown of `Restart` and `Settle` flushed this life's records.
+fn flushed(harness: &Harness, model: &mut Model) {
+    model
+        .spans_wal
+        .flushed(segment_count(harness, Table::Spans));
+    model
+        .scores_wal
+        .flushed(segment_count(harness, Table::Scores));
+}
+
+/// `Crash`: this life's records replay after the reopen.
+fn crashed(harness: &Harness, model: &mut Model) {
+    model
+        .spans_wal
+        .crashed(segment_count(harness, Table::Spans));
+    model
+        .scores_wal
+        .crashed(segment_count(harness, Table::Scores));
+}
+
+/// `LossyCrash`: applies a lossy crash, reopens, and makes the model forget the rows of the
+/// records that did not survive. The surviving count of each WAL is `replayed` minus the records
+/// of earlier lives that were still in the WAL (R2.9).
+fn lossy_crash(harness: &mut Harness, model: &mut Model, seed: u64) {
+    harness.lossy_crash(seed);
+    let spans_replayed = harness.storage().replayed(Table::Spans);
+    let scores_replayed = harness.storage().replayed(Table::Scores);
+    let lost_spans = model.spans_wal.lossy_crashed(
+        spans_replayed,
+        segment_count(harness, Table::Spans),
+        "spans",
+    );
+    for push in &lost_spans {
+        model.project_mut(push.project).unstore_span(push);
+    }
+    let lost_scores = model.scores_wal.lossy_crashed(
+        scores_replayed,
+        segment_count(harness, Table::Scores),
+        "scores",
+    );
+    for push in &lost_scores {
+        model.project_mut(push.key.project).unstore_score(push);
+    }
 }

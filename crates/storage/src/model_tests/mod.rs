@@ -8,16 +8,19 @@ mod observe;
 mod ops;
 mod shape;
 
+use std::time::Duration;
+
 use proptest::prelude::*;
 
 use check::{check_deletions, check_dropped, check_full, check_quick};
 use harness::Harness;
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
-use ops::{Op, apply, settle};
+use ops::{Op, apply, new_model, settle};
 use shape::{HOUR_NS, P, day, midnight, trace_id};
 use uuid::Uuid;
 
+use crate::config::{StorageConfig, WalSync};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::reads::MAX_PAGE;
 
@@ -29,24 +32,51 @@ fn cases() -> u32 {
         .unwrap_or(8)
 }
 
+/// Cases of the interval variant: half of `cases()`, at least 2 (R2.9).
+fn interval_cases() -> u32 {
+    (cases() / 2).max(2)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(cases()))]
 
-    /// Random ops on two projects read back exactly as the model predicts.
+    /// Random ops on two projects read back exactly as the model predicts, with lossy crashes.
     #[test]
     fn storage_matches_the_model(ops in ops::ops()) {
         run_case(&ops);
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(interval_cases()))]
+
+    /// `wal.sync = "1h"`: a lossy crash may drop a suffix of each WAL (R2.9).
+    #[test]
+    fn storage_matches_the_model_in_interval_mode(ops in ops::ops()) {
+        run_case_with(&ops, interval_mode);
+    }
+}
+
+/// `wal.sync` one hour: the writer syncs only when it must (rotation, shutdown, open), which
+/// maximizes what a lossy crash may drop.
+fn interval_mode(config: &mut StorageConfig) {
+    config.wal.sync = WalSync::Interval(Duration::from_secs(3_600));
+}
+
 fn run_case(ops: &[Op]) {
-    let mut harness = Harness::new();
-    let mut model = Model::new();
+    run_case_with(ops, |_| {});
+}
+
+fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) {
+    let mut harness = Harness::with_config(change);
+    let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for (index, op) in ops.iter().enumerate() {
         apply(op, &mut harness, &mut model, &mut clock);
         match op {
-            Op::Restart | Op::Crash | Op::Settle => check_full(&harness, &mut model, index),
+            Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle => {
+                check_full(&harness, &mut model, index);
+            }
             // The projects share trace ids, so these may hide rows of the other project too.
             Op::DeleteTraces { .. } | Op::DeleteUser { .. } | Op::Retention { .. } => {
                 check_both(&harness, &model, index);
@@ -156,7 +186,7 @@ fn drop_keeps_project_a() {
         Op::Settle,
     ];
     let mut harness = Harness::new();
-    let mut model = Model::new();
+    let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -194,7 +224,7 @@ fn drop_keeps_project_a() {
 #[test]
 fn deletion_of_dropped_project_is_applied() {
     let mut harness = Harness::new();
-    let mut model = Model::new();
+    let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in [
         Op::Append {
@@ -294,7 +324,7 @@ fn score_ops_produce_live_scores() {
     run_case(&ops);
 
     let mut harness = Harness::new();
-    let mut model = Model::new();
+    let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -440,7 +470,7 @@ fn stale_score_skips_deleted_keys() {
     run_case(&ops);
 
     let mut harness = Harness::new();
-    let mut model = Model::new();
+    let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops[..3] {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -452,5 +482,52 @@ fn stale_score_skips_deleted_keys() {
         model.a.scores.values().next().map(Vec::len),
         versions,
         "StaleScore wrote a version of a deleted key"
+    );
+}
+
+/// Audit item 2 in model form (R2.3): GC's unlinks stay undone-proof through a lossy crash. Three
+/// flushed lives, a compaction and a GC, then a crash that drops every unsynced change.
+#[test]
+fn regression_lossy_crash_after_gc() {
+    let append = || Op::Append {
+        project: P::A,
+        trace: 1,
+        count: 2,
+        split: false,
+    };
+    run_case(&[
+        append(),
+        Op::Restart,
+        append(),
+        Op::Restart,
+        append(),
+        Op::Restart,
+        Op::Compact { hours: 30 },
+        Op::Gc,
+        Op::LossyCrash { seed: 0 },
+    ]);
+}
+
+/// A lossy crash in interval mode may tear the WAL tail: the second record may be cut or lost
+/// (R2.9). `TearLast` keeps the names and cuts the last unsynced write.
+#[test]
+fn regression_lossy_crash_tears_the_wal_tail() {
+    run_case_with(
+        &[
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 3,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 3,
+                split: false,
+            },
+            Op::LossyCrash { seed: 2 },
+        ],
+        interval_mode,
     );
 }
