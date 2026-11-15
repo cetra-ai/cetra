@@ -64,6 +64,8 @@ pub(crate) struct State {
     fail_syncs: Vec<PathBuf>,
     /// Set by [`Lossy::crash_on_abort`]: the crash applied before an abort.
     seed: Option<u64>,
+    /// Set by [`Lossy::halt`]: the process is crashed, and the disk and the model are frozen.
+    halted: bool,
 }
 
 #[derive(Debug)]
@@ -227,6 +229,15 @@ impl Lossy {
         report
     }
 
+    /// From now on the process is considered crashed; nothing it does reaches the disk model.
+    /// Syncs return `Ok` without making anything durable. Every other tracked call that would
+    /// change the disk or the model fails, so the directory stays as it was at this point until
+    /// [`Self::crash_with`] applies a crash to it. A test calls this before it drops a storage
+    /// whose drop would otherwise sync, so the crash does not depend on the drop order.
+    pub(crate) fn halt(&self) {
+        self.root.lock().halted = true;
+    }
+
     /// The next sync of a file or directory under `prefix` fails with `EIO`.
     pub(crate) fn fail_next_sync(&self, prefix: &Path) {
         let prefix = canonical(prefix).expect("lossy fs: the prefix resolves");
@@ -321,6 +332,9 @@ impl Root {
         let rel = self.rel(path);
         let mut st = self.lock();
         let existed = st.resolve(self, &rel).is_some();
+        if st.halted && !existed && (opts.create || opts.create_new) {
+            return Err(halted_error());
+        }
         let inner = opts.to_std(path)?;
         if !existed && !(opts.create || opts.create_new) {
             // A directory, or a path that is not a file: not recorded.
@@ -359,6 +373,9 @@ impl Root {
     pub(crate) fn create_dir(&'static self, path: &Path) -> io::Result<()> {
         let rel = self.rel(path);
         let mut st = self.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         std::fs::create_dir(path)?;
         let child = st.new_id();
         st.incarnations
@@ -388,6 +405,9 @@ impl Root {
     pub(crate) fn remove_file(&'static self, path: &Path) -> io::Result<()> {
         let rel = self.rel(path);
         let mut st = self.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         let Some(ino) = st.resolve(self, &rel) else {
             return std::fs::remove_file(path);
         };
@@ -412,6 +432,9 @@ impl Root {
     pub(crate) fn remove_dir(&'static self, path: &Path) -> io::Result<()> {
         let rel = self.rel(path);
         let mut st = self.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         std::fs::remove_dir(path)?;
         let child = st.dir_id(&rel);
         st.dirs.remove(&rel);
@@ -433,6 +456,9 @@ impl Root {
             "lossy fs: renaming a directory; extend fs::lossy"
         );
         let mut st = self.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         let Some(ino) = st.resolve(self, &from_rel) else {
             return std::fs::rename(from, to);
         };
@@ -484,6 +510,9 @@ impl Root {
     pub(crate) fn sync_dir(&'static self, path: &Path) -> io::Result<()> {
         let rel = self.rel(path);
         let mut st = self.lock();
+        if st.halted {
+            return Ok(());
+        }
         let id = st.dir_id(&rel);
         if st.take_fail(&self.abs(&rel)) {
             if let Some(inc) = st.incarnations.get_mut(&id) {
@@ -619,6 +648,9 @@ impl Tracked {
     /// file's length: writes are appends.
     pub(crate) fn write(&self, inner: &mut std::fs::File, buf: &[u8]) -> io::Result<usize> {
         let mut st = self.root.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         let len = st.inodes.get(&self.ino).map_or(0, |inode| inode.len);
         let start = if self.append {
             inner.metadata()?.len()
@@ -655,6 +687,9 @@ impl Tracked {
         real: fn(&std::fs::File) -> io::Result<()>,
     ) -> io::Result<()> {
         let mut st = self.root.lock();
+        if st.halted {
+            return Ok(());
+        }
         if st.take_fail(&self.path) {
             if let Some(inode) = st.inodes.get_mut(&self.ino) {
                 for pending in &mut inode.writes {
@@ -678,6 +713,9 @@ impl Tracked {
     /// at once, as the storage always syncs after such a call.
     pub(crate) fn set_len(&self, inner: &std::fs::File, len: u64) -> io::Result<()> {
         let mut st = self.root.lock();
+        if st.halted {
+            return Err(halted_error());
+        }
         let inode = st
             .inodes
             .get_mut(&self.ino)
@@ -935,6 +973,11 @@ fn undo(root: &Root, st: &mut State, op: &Op) {
     }
 }
 
+/// The error of a call that a halted process makes (see [`Lossy::halt`]).
+fn halted_error() -> io::Error {
+    io::Error::other("lossy fs: the process is halted")
+}
+
 /// An undo step whose parent an earlier undo already removed is skipped.
 fn undo_step(result: io::Result<()>, step: &str, path: &Path) {
     match result {
@@ -1025,6 +1068,30 @@ mod tests {
         assert_eq!(report.dropped_writes, 1);
         assert_eq!(report.torn_writes, 0);
         assert_eq!(report.dropped_entries, 0);
+    }
+
+    #[test]
+    fn a_halted_sync_makes_nothing_durable() {
+        let (_t, data, lossy) = setup();
+        let path = data.join("f");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        crate::fs::sync_dir(&data).unwrap();
+        file.write_all(b"abc").unwrap();
+
+        lossy.halt();
+        assert!(file.write_all(b"d").is_err(), "a halted write must fail");
+        file.sync_all().unwrap();
+        drop(file);
+
+        let report = lossy.crash_with(CrashMode::DropAll, 0);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        assert_eq!(report.dropped_writes, 1);
+        assert_eq!(report.torn_writes, 0);
     }
 
     #[test]

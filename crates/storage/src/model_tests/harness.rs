@@ -407,12 +407,16 @@ impl Harness {
             "a lossy crash covers local files only, not a harness with an object store"
         );
         let Life { storage, runtime } = self.life.take().expect("a life");
-        drop(storage);
-        runtime.shutdown_timeout(Duration::from_secs(10));
         let lossy = self
             .lossy
             .as_ref()
             .expect("a lossy crash needs a recorded harness");
+        // The storage's drop syncs what the WAL writer still holds. A process that crashes
+        // here would not sync it, so the shim halts first: the drop and the shutdown of the
+        // runtime then cannot make the tail durable, whichever order they run in.
+        lossy.halt();
+        drop(storage);
+        runtime.shutdown_timeout(Duration::from_secs(10));
         self.crashes.push(lossy.crash(seed));
         self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
