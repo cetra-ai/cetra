@@ -544,6 +544,39 @@ pub(crate) async fn insert_traces(
     Ok(())
 }
 
+/// Stores a `trace_ids` deletion `id` of `traces` that follows `parent` (D-M-6): same org,
+/// project and actor, `requested` = the trace count, status `resolving`, `created_at = now`.
+/// It skips the open-request limit (`count_open_in_project`).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the row or its scope cannot be stored.
+pub(crate) async fn insert_follow_up(
+    conn: &mut SqliteConnection,
+    parent: &DeletionRow,
+    id: Uuid,
+    traces: &[TraceId],
+    now: i64,
+) -> Result<(), MetaError> {
+    let new = NewDeletion {
+        id,
+        org_id: parent.org_id,
+        project_id: parent.project_id,
+        kind: DeletionKind::TraceIds,
+        user_id: None,
+        request: RequestDetails {
+            requested: Some(u32::try_from(traces.len()).unwrap_or(u32::MAX)),
+            ..RequestDetails::default()
+        },
+        actor_kind: parent.actor_kind,
+        actor_id: parent.actor_id,
+        state: DeletionState::Resolving,
+        created_at: now,
+    };
+    insert_deletion(conn, &new).await?;
+    insert_traces(conn, id, traces).await
+}
+
 /// Adds session ids to the scope. Ids already present are ignored.
 ///
 /// # Errors
@@ -1828,5 +1861,46 @@ mod tests {
             entries.users,
             vec![(project_a(), "user-1".to_owned(), Uuid::from_u128(3), 30)]
         );
+    }
+
+    #[tokio::test]
+    async fn insert_follow_up_copies_the_actor() {
+        let (_dir, db) = test_db().await;
+        let parent = insert(&db, new(1, DeletionKind::TraceIds, project_a(), 100)).await;
+        // Fill the project's open-request limit: a follow-up skips it.
+        db.write(move |conn| {
+            Box::pin(async move {
+                for n in 0..1_000_u128 {
+                    insert_deletion(
+                        conn,
+                        &new(5_000 + n, DeletionKind::TraceIds, project_a(), 100),
+                    )
+                    .await?;
+                }
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        let id = Uuid::from_u128(9);
+        let traces = vec![trace(1), trace(2)];
+        let stored = traces.clone();
+        let copy = parent.clone();
+        db.write(move |conn| {
+            Box::pin(async move { insert_follow_up(conn, &copy, id, &stored, 200).await })
+        })
+        .await
+        .unwrap();
+
+        let row = state(&db, id).await;
+        assert_eq!(row.org_id, parent.org_id);
+        assert_eq!(row.project_id, parent.project_id);
+        assert_eq!(row.kind, DeletionKind::TraceIds);
+        assert_eq!(row.state, DeletionState::Resolving);
+        assert_eq!(row.created_at, 200);
+        assert_eq!(row.actor_kind, parent.actor_kind);
+        assert_eq!(row.actor_id, parent.actor_id);
+        assert_eq!(row.request.requested, Some(2));
+        assert_eq!(scope_traces(db.reader(), id).await.unwrap(), traces);
     }
 }

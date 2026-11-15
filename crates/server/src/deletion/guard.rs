@@ -1,6 +1,5 @@
 //! Trace ids and end users of recent deletions, so a judge run that started before a
 //! deletion does not write a copy of deleted data after its cut-off (D-M-6).
-#![cfg_attr(not(test), allow(dead_code))] // `blocking` is called by I's executor from M8 on
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};

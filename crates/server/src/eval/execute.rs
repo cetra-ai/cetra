@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use llmobs_core::enums::SpanKind;
 use llmobs_core::ids::{OrgId, ProjectId, TraceId};
 use llmobs_core::score::ScoreTarget;
+use llmobs_core::span::Span;
 use llmobs_eval::{
     Adapter, Check, ErrorClass, EvalError, EvalOrigin, EvalOutcome, EvalRun, EvalTarget, Evaluator,
     EvaluatorConfig, JudgeConfig, JudgeConnection, JudgeError, PromptTemplate, RunInput, Secret,
@@ -22,6 +23,7 @@ use uuid::Uuid;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::online_rules::BudgetPeriod;
 use crate::api::scores::ScoreCreate;
+use crate::deletion;
 use crate::entitlements::{Visibility, units};
 use crate::eval::budget::{self, Reservation, Reserve};
 use crate::eval::definitions::fits_definition;
@@ -202,6 +204,60 @@ pub(crate) async fn commit_judge_trace(
     .await
 }
 
+/// The distinct end users of `spans`, each with the smallest `ingest_time` of its spans (D-M-6).
+/// Empty user ids are not users.
+pub(crate) fn users_of(spans: &[Span]) -> Vec<(String, i64)> {
+    let mut oldest: BTreeMap<&str, i64> = BTreeMap::new();
+    for span in spans {
+        if let Some(user) = span.user_id.as_deref().filter(|user| !user.is_empty()) {
+            oldest
+                .entry(user)
+                .and_modify(|at| *at = (*at).min(span.ingest_time))
+                .or_insert(span.ingest_time);
+        }
+    }
+    oldest
+        .into_iter()
+        .map(|(user, at)| (user.to_owned(), at))
+        .collect()
+}
+
+/// [`users_of`] borrowed, as the deletion guard takes it.
+pub(crate) fn borrowed_users(users: &[(String, i64)]) -> Vec<(&str, i64)> {
+    users
+        .iter()
+        .map(|(user, at)| (user.as_str(), *at))
+        .collect()
+}
+
+/// D-M-6, after a commit: asks the deletion guard whether a run about `target` is now blocked by a
+/// deletion, for the copy it just committed (`judge_trace_id`, and the score's target). A block
+/// means that copy is stamped after its deletion's cut-off, which storage does not cover, so this
+/// stores a follow-up deletion of `judge_trace_id` and `target` (`deletion::follow_up`). Returns
+/// `true` when it blocked; a failed follow-up is logged and still counts as blocked.
+pub(crate) async fn after_commit(
+    state: &AppState,
+    project: ProjectId,
+    target: TraceId,
+    users: &[(&str, i64)],
+    judge_trace_id: TraceId,
+) -> bool {
+    let now = state.clock.now_ns();
+    // D-M-6: the check after a commit.
+    let Some(blocking) = state.deletions.guard.blocking(project, target, users, now) else {
+        return false;
+    };
+    if let Err(error) = deletion::follow_up(state, blocking, &[judge_trace_id, target]).await {
+        tracing::warn!(
+            deletion_id = %blocking,
+            project_id = %project,
+            error = %error,
+            "follow-up deletion failed; the copy waits for a later deletion"
+        );
+    }
+    true
+}
+
 /// The judge trace id of a job's run (D-I-16): the first 16 bytes of
 /// SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
 pub(crate) fn job_judge_trace_id(job: Uuid, claims: u32) -> TraceId {
@@ -257,6 +313,30 @@ pub(crate) struct ClaimedJob {
 /// Runs one claimed job and records its outcome (§ Job execution). Every step's failure is a job
 /// outcome; `Err` is only a `meta.db` failure, which leaves the job `running` for the janitor.
 pub(crate) async fn run_job(state: &AppState, job: ClaimedJob) -> Result<(), MetaError> {
+    // D-M-6, check 0: a job re-queued from `running` (a retry, the janitor, a restart) whose target
+    // was deleted. Only the trace id is known here, so the trace is not loaded.
+    if state
+        .deletions
+        .guard
+        .blocking(
+            job.row.project_id,
+            job.row.trace_id,
+            &[],
+            state.clock.now_ns(),
+        )
+        .is_some()
+    {
+        return finish_job(
+            state,
+            &job,
+            Ended::plain(Finish::Deleted {
+                usage: JobUsage::default(),
+            }),
+            None,
+            job.row.attempts,
+        )
+        .await;
+    }
     let ready = match prepare(state, &job).await {
         Ok(ready) => ready,
         Err(Exit::Gone) => return Ok(()),
@@ -360,6 +440,8 @@ struct Call {
     judge_trace_id: TraceId,
     session_id: Option<String>,
     user_id: Option<String>,
+    /// The target's end users with their oldest ingest times (D-M-6, checks B to C).
+    users: Vec<(String, i64)>,
     truncated: bool,
     /// The estimate reserved for a budgeted judge job.
     estimate: Option<f64>,
@@ -458,6 +540,23 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
             return Err(permanent("storage read failed"));
         }
     };
+    // D-M-6, check A: the target is loaded; nothing is reserved or sent yet.
+    let users = users_of(&loaded.spans);
+    if state
+        .deletions
+        .guard
+        .blocking(
+            project.id,
+            row.trace_id,
+            &borrowed_users(&users),
+            state.clock.now_ns(),
+        )
+        .is_some()
+    {
+        return Err(ended(Finish::Deleted {
+            usage: JobUsage::default(),
+        }));
+    }
     // Step 7.
     let data = TraceData::new(&loaded.spans, row.span_id);
     let variables =
@@ -555,6 +654,7 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
             judge_trace_id: job_judge_trace_id(row.id, job.claims),
             session_id,
             user_id,
+            users,
             truncated: loaded.truncated,
             estimate,
             attempts,
@@ -703,6 +803,7 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
         judge_trace_id,
         session_id,
         user_id,
+        users,
         truncated,
         estimate,
         attempts,
@@ -762,21 +863,49 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
         outcome,
         judge_trace,
     } = run;
-    // Step 14: the judge trace, whether the run succeeded or not (D-I-16).
+    let guard_users = borrowed_users(&users);
+    // Step 14: the judge trace, whether the run succeeded or not (D-I-16). Check B runs before each
+    // try: a deletion that landed during the call commits nothing.
     let committed = retry_write(
         retry::WRITE_TRIES,
         retry::WRITE_RETRY,
         |_: &IngestError| true,
-        || commit_judge_trace(state, &project, now, judge_trace.clone()),
+        || {
+            commit_unless_deleted(
+                state,
+                &project,
+                now,
+                row.trace_id,
+                &guard_users,
+                judge_trace.clone(),
+            )
+        },
     )
     .await;
-    if committed.is_err() {
-        return Ended {
-            finish: retryable(job, attempts, now, STORE_ERROR, None, job_usage),
-            reached_evaluator: false,
-            pause: Pause::None,
-            actual,
-        };
+    match committed {
+        Ok(true) => {}
+        Ok(false) => return deleted(job_usage, actual),
+        Err(_) => {
+            return Ended {
+                finish: retryable(job, attempts, now, STORE_ERROR, None, job_usage),
+                reached_evaluator: false,
+                pause: Pause::None,
+                actual,
+            };
+        }
+    }
+    // D-M-6: the judge trace is stored, whether the evaluation succeeded or failed (D-I-16). A
+    // block here stores the follow-up deletion of the judge trace and the target.
+    if after_commit(
+        state,
+        project.id,
+        row.trace_id,
+        &guard_users,
+        judge_trace_id,
+    )
+    .await
+    {
+        return deleted(job_usage, actual);
     }
     match outcome {
         // Step 15: the score.
@@ -804,6 +933,7 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                 rule_id: row.rule_id,
             };
             // A refusal (a bad request, the units cap) is final: it is not retried (D-I-35).
+            // Check B2 runs before each try of the write.
             let written = retry_write(
                 retry::WRITE_TRIES,
                 retry::WRITE_RETRY,
@@ -813,21 +943,51 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                         ApiError::BadRequest { .. } | ApiError::QuotaExceeded { .. }
                     )
                 },
-                || scores::write(state, &project, writer, vec![item.clone()]),
+                || {
+                    write_score_unless_deleted(
+                        state,
+                        &project,
+                        writer,
+                        &item,
+                        row.trace_id,
+                        &guard_users,
+                        judge_trace_id,
+                    )
+                },
             )
             .await;
-            match written.map(|ids| ids.first().copied()) {
-                Ok(Some(score_id)) => Ended {
-                    finish: Finish::Done {
+            let written = match written {
+                // D-M-6, check B2 blocked: no score was written.
+                Ok(ScoreWrite::Blocked) => return deleted(job_usage, actual),
+                Ok(ScoreWrite::Written(score)) => Ok(score),
+                Err(error) => Err(error),
+            };
+            match written {
+                Ok(Some(score_id)) => {
+                    // D-M-6, check C: the score is stored; a block here stores its follow-up too.
+                    if after_commit(
+                        state,
+                        project.id,
+                        row.trace_id,
+                        &guard_users,
                         judge_trace_id,
-                        score_id,
-                        evaluator_version,
-                        usage: job_usage,
-                    },
-                    reached_evaluator: true,
-                    pause: Pause::None,
-                    actual,
-                },
+                    )
+                    .await
+                    {
+                        return deleted(job_usage, actual);
+                    }
+                    Ended {
+                        finish: Finish::Done {
+                            judge_trace_id,
+                            score_id,
+                            evaluator_version,
+                            usage: job_usage,
+                        },
+                        reached_evaluator: true,
+                        pause: Pause::None,
+                        actual,
+                    }
+                }
                 Err(ApiError::BadRequest { .. }) => Ended {
                     finish: Finish::Failed {
                         class: "permanent",
@@ -1232,6 +1392,69 @@ fn retryable(
     }
 }
 
+/// Check B (D-M-6): commits the judge trace unless the deletion guard blocks its target now.
+/// `Ok(false)` when it blocks: nothing is committed.
+async fn commit_unless_deleted(
+    state: &AppState,
+    project: &ProjectRow,
+    now: i64,
+    target: TraceId,
+    users: &[(&str, i64)],
+    judge_trace: Normalized,
+) -> Result<bool, IngestError> {
+    // D-M-6: check B, before this try of the commit.
+    if state
+        .deletions
+        .guard
+        .blocking(project.id, target, users, state.clock.now_ns())
+        .is_some()
+    {
+        return Ok(false);
+    }
+    commit_judge_trace(state, project, now, judge_trace)
+        .await
+        .map(|_| true)
+}
+
+/// What one try of the score write of step 15 did (D-M-6).
+enum ScoreWrite {
+    /// Check B2 blocked the write: no score was written, and the follow-up deletion of the judge
+    /// trace and the target is stored.
+    Blocked,
+    /// The write went through; the id is the first score it stored, `None` when it returned none.
+    Written(Option<Uuid>),
+}
+
+/// Check B2 (D-M-6) and the score write: after the judge trace committed, writes `item` unless the
+/// guard blocks its target now.
+async fn write_score_unless_deleted(
+    state: &AppState,
+    project: &ProjectRow,
+    writer: Writer,
+    item: &ScoreCreate,
+    target: TraceId,
+    users: &[(&str, i64)],
+    judge_trace_id: TraceId,
+) -> Result<ScoreWrite, ApiError> {
+    // D-M-6: check B2, before this try of the write.
+    if after_commit(state, project.id, target, users, judge_trace_id).await {
+        return Ok(ScoreWrite::Blocked);
+    }
+    let ids = scores::write(state, project, writer, vec![item.clone()]).await?;
+    Ok(ScoreWrite::Written(ids.first().copied()))
+}
+
+/// An outcome of a run that a deletion stopped after the call (D-M-6): the call's usage and cost
+/// are kept, the breaker and the pauses are not touched (D-I-14).
+fn deleted(usage: JobUsage, actual: f64) -> Ended {
+    Ended {
+        finish: Finish::Deleted { usage },
+        reached_evaluator: false,
+        pause: Pause::None,
+        actual,
+    }
+}
+
 /// Runs `write` up to `tries` times, `delay` apart, while `retry_on` says the error is worth another
 /// try (D-I-13).
 async fn retry_write<T, E, F, Fut>(
@@ -1320,6 +1543,7 @@ fn finish_label(finish: &Finish) -> &'static str {
         Finish::LoadRetry { .. } => "load_retry",
         Finish::Requeue { .. } | Finish::PauseRequeue { .. } => "requeued",
         Finish::Skipped { .. } => "skipped",
+        Finish::Deleted { .. } => "deleted",
     }
 }
 
@@ -1451,16 +1675,22 @@ mod tests {
 #[cfg(test)]
 mod job_tests {
     use std::cell::Cell;
+    use std::time::Duration;
 
     use axum::http::{Method, header};
     use llmobs_core::enums::PayloadFormat;
     use llmobs_core::ids::{SpanId, TraceId};
+    use llmobs_core::score::ScoreValue;
     use llmobs_core::span::Span;
     use serde_json::{Value, json};
 
     use super::*;
     use crate::eval::trace_load::MAX_LOADS;
     use crate::meta::connections::{ConnectionRow, get_connection};
+    use crate::meta::deletions::{
+        ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails, deletion_by_id,
+        insert_deletion, insert_traces, scope_traces,
+    };
     use crate::meta::eval_jobs::{KIND_MANUAL, KIND_RULE, NewJob, insert_job};
     use crate::meta::evaluators;
     use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
@@ -3447,5 +3677,473 @@ mod job_tests {
         .await
         .expect("read");
         assert_eq!(spent, estimate);
+    }
+
+    /// Stores one span of `trace` per time in `ingest_times`, all of `user`: the first is the root.
+    /// Each span keeps its `ingest_time`, so a deletion's cut-off can fall between them.
+    async fn store_user_spans(
+        app: &TestApp,
+        project: &ProjectRow,
+        trace: TraceId,
+        user: &str,
+        ingest_times: &[i64],
+    ) {
+        let now = app.state.clock.now_ns();
+        let mut rows = Vec::new();
+        for (index, at) in ingest_times.iter().enumerate() {
+            let mut row: Span = dataset_span(0);
+            row.trace_id = trace;
+            row.span_id = span(index as u64 + 1);
+            row.parent_span_id = (index > 0).then(|| span(1));
+            row.input = Some(QUESTION.to_owned());
+            row.input_format = Some(PayloadFormat::Text);
+            row.output = Some(ANSWER.to_owned());
+            row.output_format = Some(PayloadFormat::Text);
+            row.environment = Some("production".to_owned());
+            row.session_id = Some("session-7".to_owned());
+            row.user_id = Some(user.to_owned());
+            row.start_time = now - 30_000_000_000;
+            row.end_time = now - 20_000_000_000;
+            row.ingest_time = *at;
+            rows.push(row);
+        }
+        app.commit_spans(project, rows).await;
+    }
+
+    /// Waits until the mock has seen `count` requests (a judge call in flight).
+    async fn wait_for_requests(mock: &MockLlm, count: usize) {
+        for _ in 0..500 {
+            if mock.requests().len() >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the judge was not called");
+    }
+
+    #[tokio::test]
+    async fn a_job_on_a_deleted_trace_is_skipped() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(10), "production").await;
+        let now = app.state.clock.now_ns();
+        // D-M-6: the guard holds the trace from a deletion made just now.
+        app.state
+            .deletions
+            .guard
+            .add_traces(seeded.project.id, &[trace(10)], Uuid::now_v7(), now);
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(10),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        assert_eq!(row.input_tokens, None, "no call, no usage");
+        assert!(scores_of(&app, &seeded, evaluator).await.is_empty());
+        assert!(!judge_trace_exists(&app, &seeded, job_judge_trace_id(job, 1)).await);
+        assert!(
+            mock.requests().is_empty(),
+            "no request reaches the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_on_a_deleted_users_old_trace_is_skipped() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        let t = app.state.clock.now_ns() - 1_000_000_000;
+        // Older data of u1, and newer data of u1 in the same trace.
+        store_user_spans(&app, &seeded.project, trace(11), "u1", &[t, t + 2]).await;
+        let now = app.state.clock.now_ns();
+        // D-M-6: the user was deleted after the older data was ingested.
+        app.state
+            .deletions
+            .guard
+            .add_user(seeded.project.id, "u1", Uuid::now_v7(), t + 1);
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(11),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_data_of_a_deleted_user_is_still_evaluated() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        let t = app.state.clock.now_ns() - 1_000_000_000;
+        store_user_spans(&app, &seeded.project, trace(12), "u1", &[t, t]).await;
+        let now = app.state.clock.now_ns();
+        // The deletion predates all the data of u1 in the trace.
+        app.state
+            .deletions
+            .guard
+            .add_user(seeded.project.id, "u1", Uuid::now_v7(), t - 1);
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(12),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "done", "{:?}", row.error);
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(scores_of(&app, &seeded, evaluator).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_trace_deleted_during_the_judge_call_is_not_committed() {
+        let mock =
+            MockLlm::start_with_delay(vec![completion(JUDGE_ANSWER)], Duration::from_millis(1500))
+                .await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(13), "production").await;
+        let now = app.state.clock.now_ns();
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(13),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let claimed = claimed(&app, &seeded.project, job, Some(conn)).await;
+        let claims = claimed.claims;
+        let state = app.state.clone();
+        let task = tokio::spawn(async move { run_job(&state, claimed).await });
+        wait_for_requests(&mock, 1).await;
+        // D-M-6: the deletion lands while the provider is answering.
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace(13)],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+        task.await.expect("the task").expect("run");
+
+        let row = job_row(&app, &seeded.project, job).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        // The call's usage is kept; its cost is unpriced (`gpt-test`).
+        assert_eq!(row.input_tokens, Some(10));
+        assert_eq!(row.output_tokens, Some(3));
+        assert_eq!(row.cost_usd, None);
+        assert_eq!(mock.requests().len(), 1, "the provider was called once");
+        assert!(scores_of(&app, &seeded, evaluator).await.is_empty());
+        assert!(!judge_trace_exists(&app, &seeded, job_judge_trace_id(job, claims)).await);
+    }
+
+    #[tokio::test]
+    async fn deleted_after_the_call_spends_the_actual_cost() {
+        let mock = MockLlm::start_with_delay(
+            vec![completion_for(PRICED, JUDGE_ANSWER)],
+            Duration::from_millis(1500),
+        )
+        .await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, PRICED).await;
+        let rule_id = rule(&app, &seeded, evaluator, Some((5.0, "day")), MAPPING).await;
+        store_trace(&app, &seeded.project, trace(14), "production").await;
+        let now = app.state.clock.now_ns();
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(14),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let claimed = claimed(&app, &seeded.project, job, Some(conn)).await;
+        let state = app.state.clone();
+        let task = tokio::spawn(async move { run_job(&state, claimed).await });
+        wait_for_requests(&mock, 1).await;
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace(14)],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+        task.await.expect("the task").expect("run");
+
+        let row = job_row(&app, &seeded.project, job).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        let cost = row.cost_usd.expect("the priced call has a cost");
+        assert!(cost > 0.0);
+        let day = budget::day_start(app.state.clock.now_ns());
+        let spent =
+            rule_spend::spent_between(app.state.meta.reader(), rule_id, day, day + budget::DAY_NS)
+                .await
+                .expect("read");
+        assert_eq!(spent, cost, "the rule pays the call's actual cost");
+        let (_, reserved) = app.state.eval.budgets.view(rule_id, day).expect("loaded");
+        assert_eq!(reserved, 0.0, "the reservation is settled");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copy_committed_after_the_cut_off_gets_a_follow_up() {
+        let (app, seeded) = test_app().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let (target, judge_copy) = (trace(15), trace(16));
+        store_trace(&app, &seeded.project, target, "production").await;
+        // A stand-in judge trace of `target`, committed with its own ingest time.
+        let mut copy: Span = dataset_span(0);
+        copy.trace_id = judge_copy;
+        copy.span_id = span(1);
+        copy.parent_span_id = None;
+        copy.environment = Some("llmobs-eval".to_owned());
+        copy.metadata.clear();
+        copy.metadata.insert(
+            llmobs_core::names::metadata_key::EVAL_TARGET_TRACE_ID.to_owned(),
+            target.to_hex(),
+        );
+        copy.ingest_time = now - 1_000_000_000;
+        app.commit_spans(&seeded.project, vec![copy]).await;
+        assert!(judge_trace_exists(&app, &seeded, judge_copy).await);
+
+        // The deletion of `target` (its row P), and the guard entry the request makes.
+        let parent = Uuid::now_v7();
+        let parent_row = NewDeletion {
+            id: parent,
+            org_id: seeded.org_id,
+            project_id: Some(project),
+            kind: DeletionKind::TraceIds,
+            user_id: None,
+            request: RequestDetails::default(),
+            actor_kind: ActorKind::User,
+            actor_id: seeded.user_id,
+            state: DeletionState::Resolving,
+            created_at: now,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_deletion(conn, &parent_row).await?;
+                    insert_traces(conn, parent, &[target]).await
+                })
+            })
+            .await
+            .expect("parent");
+        app.state
+            .deletions
+            .guard
+            .add_traces(project, &[target], parent, now);
+
+        assert!(after_commit(&app.state, project, target, &[], judge_copy).await);
+        let follow_up: String =
+            sqlx::query_scalar("SELECT id FROM deletions WHERE project_id = ? AND id <> ?")
+                .bind(project.to_string())
+                .bind(parent.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("the follow-up row");
+        let follow_up = Uuid::parse_str(&follow_up).expect("uuid");
+        let row = deletion_by_id(app.state.meta.reader(), follow_up)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.state, DeletionState::Resolving);
+        assert_eq!(row.actor_id, seeded.user_id, "the parent's actor");
+        assert_eq!(row.request.requested, Some(2));
+        let mut expected = vec![target, judge_copy];
+        expected.sort();
+        assert_eq!(
+            scope_traces(app.state.meta.reader(), follow_up)
+                .await
+                .expect("scope"),
+            expected
+        );
+
+        deletion::run_once(&app.state).await.expect("worker");
+        let row = deletion_by_id(app.state.meta.reader(), follow_up)
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.state, DeletionState::Pending);
+        assert!(!judge_trace_exists(&app, &seeded, judge_copy).await);
+
+        // A trace nobody guards blocks nothing and stores nothing.
+        let deletions_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("count");
+        assert!(!after_commit(&app.state, project, trace(17), &[], judge_copy).await);
+        let deletions_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("count");
+        assert_eq!(deletions_before, deletions_after);
+    }
+
+    #[tokio::test]
+    async fn a_failed_evaluation_of_a_deleted_trace_commits_nothing() {
+        // The provider refuses the call, so the evaluation fails (D-I-16 still commits the judge
+        // trace when it runs). The deletion lands during the call and check B stops the commit.
+        let mock = MockLlm::start_with_delay(
+            vec![reply_status(400, "bad request")],
+            Duration::from_millis(1500),
+        )
+        .await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(20), "production").await;
+        let now = app.state.clock.now_ns();
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(20),
+            now,
+        );
+        enqueue(&app, new).await;
+
+        let claimed = claimed(&app, &seeded.project, job, Some(conn)).await;
+        let claims = claimed.claims;
+        let state = app.state.clone();
+        let task = tokio::spawn(async move { run_job(&state, claimed).await });
+        wait_for_requests(&mock, 1).await;
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace(20)],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+        task.await.expect("the task").expect("run");
+
+        let row = job_row(&app, &seeded.project, job).await;
+        assert_eq!(row.status, "skipped", "{:?}", row.error);
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        assert!(scores_of(&app, &seeded, evaluator).await.is_empty());
+        assert!(!judge_trace_exists(&app, &seeded, job_judge_trace_id(job, claims)).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_score_write_blocked_by_a_deletion_stores_one_follow_up() {
+        let (app, seeded) = test_app().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let (target, judge_copy) = (trace(21), trace(22));
+        store_trace(&app, &seeded.project, target, "production").await;
+        // The deletion of `target` is stored, and the guard knows it (as `create_deletion` does).
+        let parent = Uuid::now_v7();
+        let parent_row = NewDeletion {
+            id: parent,
+            org_id: seeded.org_id,
+            project_id: Some(project),
+            kind: DeletionKind::TraceIds,
+            user_id: None,
+            request: RequestDetails::default(),
+            actor_kind: ActorKind::User,
+            actor_id: seeded.user_id,
+            state: DeletionState::Resolving,
+            created_at: now,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_deletion(conn, &parent_row).await?;
+                    insert_traces(conn, parent, &[target]).await
+                })
+            })
+            .await
+            .expect("parent");
+        app.state
+            .deletions
+            .guard
+            .add_traces(project, &[target], parent, now);
+
+        let item = ScoreCreate {
+            score_id: None,
+            target: ScoreTarget::Trace { trace_id: target },
+            session_id: None,
+            user_id: None,
+            name: "relevance".to_owned(),
+            value: ScoreValue::Numeric(0.5),
+            reason: None,
+            source: None,
+            metadata: BTreeMap::new(),
+        };
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::LlmJudge,
+            evaluator_id: Uuid::now_v7(),
+            rule_id: None,
+        };
+        let outcome = write_score_unless_deleted(
+            &app.state,
+            &seeded.project,
+            writer,
+            &item,
+            target,
+            &[],
+            judge_copy,
+        )
+        .await
+        .expect("no write error");
+        assert!(matches!(outcome, ScoreWrite::Blocked));
+
+        let response = app
+            .request(Method::GET, &format!("/api/v1/projects/{project}/scores"))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let page: Value = response.json();
+        assert!(
+            page["data"].as_array().expect("data").is_empty(),
+            "no score row"
+        );
+
+        let follow_ups: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM deletions WHERE project_id = ? AND id <> ?")
+                .bind(project.to_string())
+                .bind(parent.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("count");
+        assert_eq!(follow_ups, 1, "exactly one follow-up");
     }
 }

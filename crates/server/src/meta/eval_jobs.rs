@@ -2,7 +2,7 @@
 //! D-I-28). `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and
 //! there is no lease: startup and the janitor re-queue interrupted `running` jobs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use sqlx::query::Query;
@@ -208,6 +208,12 @@ pub(crate) enum Finish {
     Skipped {
         /// Why the job was skipped.
         error: &'static str,
+    },
+    /// `skipped` because the target trace was deleted (D-M-6); sets `finished_at`,
+    /// `error = 'deleted'` and the usage (all `None` before the call); clears `error_class`.
+    Deleted {
+        /// The usage of the call, when the job made one.
+        usage: JobUsage,
     },
 }
 
@@ -657,8 +663,80 @@ pub(crate) async fn finish(
             .execute(&mut *conn)
             .await?
         }
+        Finish::Deleted { usage } => {
+            let query = sqlx::query(
+                "UPDATE eval_jobs SET status = 'skipped', finished_at = ?, updated_at = ?, \
+                 error = 'deleted', error_class = NULL, input_tokens = ?, output_tokens = ?, \
+                 cost_usd = ?, latency_ms = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+            )
+            .bind(now)
+            .bind(now);
+            bind_usage(query, usage)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+        }
     };
     Ok(result.rows_affected() > 0)
+}
+
+/// Rows one write of [`delete_jobs`] deletes at most.
+const DELETE_CHUNK: usize = 500;
+
+/// The ids of the jobs of `project` whose `trace_id` is in `traces`, except `running` ones
+/// (D-M-6: those are stopped by the deletion guard). Runs on the reader pool, since a scope can
+/// hold many traces and the table has no index on `trace_id`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn jobs_for_traces(
+    pool: &SqlitePool,
+    project: ProjectId,
+    traces: &[TraceId],
+) -> Result<Vec<Uuid>, MetaError> {
+    if traces.is_empty() {
+        return Ok(Vec::new());
+    }
+    let wanted: HashSet<TraceId> = traces.iter().copied().collect();
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, trace_id FROM eval_jobs WHERE project_id = ? AND status <> 'running'",
+    )
+    .bind(project.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter(|(_, trace)| TraceId::from_slice(trace).is_ok_and(|trace| wanted.contains(&trace)))
+        .filter_map(|(id, _)| Uuid::parse_str(id).ok())
+        .collect())
+}
+
+/// Deletes the jobs `ids`, in chunks of [`DELETE_CHUNK`], and returns the rows deleted. A job that
+/// is `running` by now is left alone (`AND status <> 'running'`).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a delete fails.
+pub(crate) async fn delete_jobs(
+    conn: &mut SqliteConnection,
+    ids: &[Uuid],
+) -> Result<u64, MetaError> {
+    let mut deleted = 0;
+    for chunk in ids.chunks(DELETE_CHUNK) {
+        let mut builder = sqlx::QueryBuilder::<Sqlite>::new(
+            "DELETE FROM eval_jobs WHERE status <> 'running' AND id IN (",
+        );
+        let mut list = builder.separated(", ");
+        for id in chunk {
+            list.push_bind(id.to_string());
+        }
+        list.push_unseparated(")");
+        deleted += builder.build().execute(&mut *conn).await?.rows_affected();
+    }
+    Ok(deleted)
 }
 
 /// Rows one write of [`skip_queued_of_rule`] changes at most, so a large backlog is skipped in
@@ -1041,9 +1119,9 @@ mod tests {
 
     use super::{
         Candidate, Finish, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL, KIND_RULE,
-        NewJob, candidates, claim, counts_since, dedup_key, finish, get_job, insert_job,
-        insert_rule_job, list_jobs, prune, recover, requeue_stale, skip_queued_of_rule,
-        start_attempt,
+        NewJob, candidates, claim, counts_since, dedup_key, delete_jobs, finish, get_job,
+        insert_job, insert_rule_job, jobs_for_traces, list_jobs, prune, recover, requeue_stale,
+        skip_queued_of_rule, start_attempt,
     };
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -2220,5 +2298,183 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    /// A second project of `seeded`'s org, with a judge of its own: its jobs are not the
+    /// first project's. Returns the project and the judge.
+    async fn other_project(db: &MetaDb, seeded: &Seed) -> (ProjectId, Uuid) {
+        let (org, connection) = (seeded.org, seeded.connection);
+        db.write(move |conn| {
+            Box::pin(async move {
+                let project = insert_project(conn, org, "Other", "other", None, NOW)
+                    .await?
+                    .id;
+                let judge = Uuid::now_v7();
+                insert_evaluator(
+                    conn,
+                    judge,
+                    project,
+                    "llm_judge",
+                    evaluator_fields("other", Some(connection)),
+                    None,
+                    NOW,
+                )
+                .await?;
+                Ok::<(ProjectId, Uuid), MetaError>((project, judge))
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Enqueues a manual job of `project` (with `evaluator`) for `trace`; returns its id.
+    async fn queued_in(
+        db: &MetaDb,
+        seeded: &Seed,
+        project: ProjectId,
+        evaluator: Uuid,
+        trace_id: TraceId,
+    ) -> Uuid {
+        let mut job = manual_job(seeded, trace_id, evaluator);
+        job.project_id = project;
+        let id = job.id;
+        assert!(enqueue(db, job, NOW).await);
+        id
+    }
+
+    #[tokio::test]
+    async fn deletes_jobs_of_deleted_traces_except_running() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let (other, other_judge) = other_project(&db, &seeded).await;
+        let (a, b) = (
+            trace("00000000000000000000000000000a01"),
+            trace("00000000000000000000000000000b01"),
+        );
+        let project = seeded.project;
+        let judge = seeded.judge;
+
+        let queued_a = queued_in(&db, &seeded, project, judge, a).await;
+        let done_a = queued_in(&db, &seeded, project, judge, a).await;
+        raw(
+            &db,
+            "UPDATE eval_jobs SET status = 'done' WHERE id = ?",
+            done_a,
+        )
+        .await;
+        let running_a = queued_in(&db, &seeded, project, judge, a).await;
+        raw(
+            &db,
+            "UPDATE eval_jobs SET status = 'running' WHERE id = ?",
+            running_a,
+        )
+        .await;
+        let queued_b = queued_in(&db, &seeded, project, judge, b).await;
+        let other_a = queued_in(&db, &seeded, other, other_judge, a).await;
+
+        let mut ids = jobs_for_traces(db.reader(), project, &[a]).await.unwrap();
+        ids.sort();
+        let mut expected = vec![queued_a, done_a];
+        expected.sort();
+        assert_eq!(ids, expected);
+        let deleted = db
+            .write({
+                let ids = ids.clone();
+                move |conn| Box::pin(async move { delete_jobs(conn, &ids).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+        assert!(
+            get_job(db.reader(), project, queued_a)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_job(db.reader(), project, done_a)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_job(db.reader(), project, running_a)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            get_job(db.reader(), project, queued_b)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            get_job(db.reader(), other, other_a)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // A job that is running by the time of the delete keeps its row.
+        let late = queued_in(&db, &seeded, project, judge, a).await;
+        let late_ids = jobs_for_traces(db.reader(), project, &[a]).await.unwrap();
+        assert_eq!(late_ids, vec![late]);
+        raw(
+            &db,
+            "UPDATE eval_jobs SET status = 'running' WHERE id = ?",
+            late,
+        )
+        .await;
+        let deleted = db
+            .write(move |conn| Box::pin(async move { delete_jobs(conn, &late_ids).await }))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0);
+        assert!(get_job(db.reader(), project, late).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn empty_scope_deletes_nothing() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        assert!(
+            jobs_for_traces(db.reader(), seeded.project, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let deleted = db
+            .write(|conn| Box::pin(async move { delete_jobs(conn, &[]).await }))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn finish_deleted_writes_skipped_with_usage() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let (id, claims) = running_job(&db, &seeded, "00000000000000000000000000000c01").await;
+        let usage = JobUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cost_usd: Some(0.01),
+            latency_ms: Some(20),
+        };
+        let later = NOW + 7;
+        assert!(!finish_job(&db, id, claims + 1, Finish::Deleted { usage }, later).await);
+        assert_eq!(read(&db, seeded.project, id).await.status, "running");
+
+        assert!(finish_job(&db, id, claims, Finish::Deleted { usage }, later).await);
+        let row = read(&db, seeded.project, id).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("deleted"));
+        assert_eq!(row.error_class, None);
+        assert_eq!(row.finished_at, Some(later));
+        assert_eq!(row.input_tokens, Some(10));
+        assert_eq!(row.output_tokens, Some(5));
+        assert_eq!(row.cost_usd, Some(0.01));
+        assert_eq!(row.latency_ms, Some(20));
     }
 }
