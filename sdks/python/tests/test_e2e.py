@@ -76,3 +76,48 @@ def test_traced_function_and_score_read_back_through_the_api() -> None:
             for item in body.get("data", [])
         ),
     )
+
+
+def _experiment_ready(body: dict[str, Any]) -> bool:
+    """The experiment is finished and its boolean scorer has both rows."""
+    if body["summary"]["experiment"]["status"] != "completed":
+        return False
+    return any(
+        score["name"] == "exact" and score["count"] == 2 and score.get("pass_rate") == 1.0
+        for score in body["summary"]["scores"]
+    )
+
+
+def test_dataset_experiment_round_trip() -> None:
+    base_url = os.environ["LLMOBS_E2E_BASE_URL"]
+    key = os.environ["LLMOBS_E2E_API_KEY"]
+    llmobs.init(api_key=key, base_url=base_url)
+    client = llmobs.Client(api_key=key, base_url=base_url)
+    dataset = client.datasets.create(f"e2e-py-{llmobs.uuid7()}")
+    try:
+        dataset = dataset.add_items(
+            [
+                {"input": {"q": "a"}, "expected_output": "A"},
+                {"input": {"q": "b"}, "expected_output": "B"},
+            ]
+        )
+
+        def exact(output: str, expected: str) -> bool:
+            return output == expected
+
+        result = llmobs.evaluate(
+            dataset=dataset,
+            task=lambda item: item["q"].upper(),
+            scorers=[exact],
+        )
+        assert result.error_count == 0
+        result.assert_min("exact", 1.0)
+        llmobs.shutdown()
+
+        _poll(
+            f"{base_url}/api/v1/projects/current/experiments/{result.experiment_id}/results",
+            key,
+            ready=_experiment_ready,
+        )
+    finally:
+        client.datasets.delete(dataset.id)
