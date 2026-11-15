@@ -584,7 +584,7 @@ Inputs must share one schema and be sorted by the first sort-key column; both ar
 
 Memory:
 - Narrow phase: peak ≤ 2 × the largest single column's decoded Arrow size across the inputs, plus the row-source map (16 bytes per row) and the sort-key row format. Tested on 4 inputs of 1,000,000 rows in release (`tests/merge_memory.rs`, M6.1); the test allows 48 bytes per row for the map and keys, and half the largest column for the output and codecs.
-- Payload phase: peak memory is reported, not bounded.
+- Payload phase: peak memory is reported, not bounded. The frame copy keeps the merged array plus every input's stored and raw frames of that column in memory.
 
 ## Phases
 
