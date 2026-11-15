@@ -223,6 +223,73 @@ it("shows the org-admin message when the server refuses the deletion", async () 
   );
 });
 
+it("saves the trace completion timeout", async () => {
+  let body: unknown;
+  server.use(
+    http.patch("/api/v1/projects/:project", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ...projectFixture, trace_completion_timeout_s: 120 });
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  await user.clear(timeout);
+  await user.type(timeout, "120");
+  await user.click(screen.getByRole("button", { name: "Save timeout" }));
+
+  await waitFor(() => expect(body).toEqual({ trace_completion_timeout_s: 120 }));
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+});
+
+it("refuses an out-of-range timeout without calling the server", async () => {
+  let calls = 0;
+  server.use(
+    http.patch("/api/v1/projects/:project", () => {
+      calls += 1;
+      return HttpResponse.json(projectFixture);
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  await user.clear(timeout);
+  await user.type(timeout, "5");
+  await user.click(screen.getByRole("button", { name: "Save timeout" }));
+
+  expect(await screen.findByText("Enter a whole number from 10 to 3600.")).toBeInTheDocument();
+  expect(calls).toBe(0);
+});
+
+it("shows a server field error under the timeout", async () => {
+  server.use(
+    http.patch("/api/v1/projects/:project", () =>
+      problemResponse(400, "bad_request", {
+        errors: [{ field: "trace_completion_timeout_s", message: "must be 10 to 3600" }],
+      }),
+    ),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  await screen.findByLabelText("Trace completion timeout (seconds)");
+  await user.click(screen.getByRole("button", { name: "Save timeout" }));
+
+  expect(await screen.findByText("must be 10 to 3600")).toBeInTheDocument();
+  expect(screen.getByLabelText("Trace completion timeout (seconds)")).toHaveAttribute(
+    "aria-invalid",
+    "true",
+  );
+});
+
+it("does not let a member change the timeout", async () => {
+  server.use(projectAs("member"));
+
+  await renderApp("/acme/support-bot/settings/general");
+
+  expect(await screen.findByLabelText("Trace completion timeout (seconds)")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save timeout" })).toBeDisabled();
+});
+
 it("shows the Pro plan message when retention is refused by the plan", async () => {
   server.use(
     http.patch("/api/v1/projects/:project", () =>
