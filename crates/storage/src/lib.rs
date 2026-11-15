@@ -3611,12 +3611,14 @@ mod tests {
             })
         };
 
+        let mut rounds = 0;
         for round in 0..20 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let target = acknowledged.load(Ordering::SeqCst);
             if target == 0 {
                 continue;
             }
+            rounds += 1;
             storage
                 .flush_now(Duration::from_secs(5))
                 .await
@@ -3626,9 +3628,44 @@ mod tests {
                 "round {round}: seq {target} acknowledged but not flushed"
             );
         }
+        assert!(rounds >= 10, "only {rounds} of 20 rounds checked a flush");
 
         stop.store(true, Ordering::SeqCst);
         appender.await.unwrap();
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    /// `flush_now` gives up once shutdown has begun, even while its flush is
+    /// held: it returns `ShuttingDown` within its own timeout.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_gives_up_once_shutdown_began() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let hooks = storage.hooks().clone();
+        hooks.hold(HookPoint::FlushAfterWrite);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let flushing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.flush_now(Duration::from_secs(30)).await })
+        };
+        jobs::wait_at(&storage, HookPoint::FlushAfterWrite);
+        storage.shutting_down.store(true, Ordering::Release);
+        let flushed = tokio::time::timeout(Duration::from_secs(5), flushing).await;
+        hooks.release(HookPoint::FlushAfterWrite);
+        let flushed = flushed
+            .expect("flush_now kept waiting after shutdown began")
+            .unwrap();
+        assert!(
+            matches!(flushed, Err(FlushNowError::ShuttingDown)),
+            "{flushed:?}"
+        );
         Arc::try_unwrap(storage)
             .unwrap_or_else(|_| panic!("storage still shared"))
             .shutdown()

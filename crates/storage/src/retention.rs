@@ -5,7 +5,6 @@
 //! one score with `created_at` on that day.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Datelike, NaiveDate};
@@ -270,7 +269,7 @@ async fn late_rows_of_a_dropped_day_are_hidden_and_never_flushed() {
 async fn a_flush_prepared_before_the_retention_conflicts_and_drops_the_partition() {
     let dir = tempfile::tempdir().unwrap();
     let config = config_in(dir.path(), quiet_compaction(8), Duration::from_millis(100));
-    let storage = Arc::new(Storage::open(config.clone()).await.unwrap());
+    let storage = std::sync::Arc::new(Storage::open(config.clone()).await.unwrap());
     let hooks = storage.hooks().clone();
     hooks.hold(HookPoint::FlushAfterWrite);
     let span = span_row(1, 0, noon(day(3)), noon(day(3)));
@@ -288,7 +287,7 @@ async fn a_flush_prepared_before_the_retention_conflicts_and_drops_the_partition
     );
 
     let retention = {
-        let storage = Arc::clone(&storage);
+        let storage = std::sync::Arc::clone(&storage);
         tokio::spawn(async move { storage.apply_retention(project(), day(4)).await })
     };
     retention.await.unwrap().unwrap();
@@ -321,7 +320,7 @@ async fn a_flush_prepared_before_the_retention_conflicts_and_drops_the_partition
         staged.iter().all(|path| path.contains("day=2026-03-03")),
         "{staged:?}"
     );
-    Arc::try_unwrap(storage)
+    std::sync::Arc::try_unwrap(storage)
         .unwrap_or_else(|_| panic!("storage still shared"))
         .shutdown()
         .await
@@ -346,11 +345,11 @@ async fn a_compaction_started_before_the_retention_fails_and_is_collected() {
     }
     assert_eq!(storage.catalog_files(Table::Spans).len(), 2);
 
-    let storage = Arc::new(storage);
+    let storage = std::sync::Arc::new(storage);
     let hooks = storage.hooks().clone();
     hooks.hold(HookPoint::CompactionAfterWrite);
     let racing = {
-        let storage = Arc::clone(&storage);
+        let storage = std::sync::Arc::clone(&storage);
         tokio::spawn(async move { storage.compact(noon(day(5))).await })
     };
     wait_at(&storage, HookPoint::CompactionAfterWrite);
@@ -370,7 +369,7 @@ async fn a_compaction_started_before_the_retention_fails_and_is_collected() {
         storage.staged_paths().await.unwrap().is_empty(),
         "the job's staged outputs are collected"
     );
-    Arc::try_unwrap(storage)
+    std::sync::Arc::try_unwrap(storage)
         .unwrap_or_else(|_| panic!("storage still shared"))
         .shutdown()
         .await
@@ -473,11 +472,11 @@ async fn a_rewrite_started_before_the_retention_fails_and_the_deletion_applies()
     };
     storage.register_deletion(deletion.clone()).await.unwrap();
 
-    let storage = Arc::new(storage);
+    let storage = std::sync::Arc::new(storage);
     let hooks = storage.hooks().clone();
     hooks.hold(HookPoint::CompactionAfterWrite);
     let rewriting = {
-        let storage = Arc::clone(&storage);
+        let storage = std::sync::Arc::clone(&storage);
         tokio::spawn(async move { storage.apply_deletions(noon(day(5))).await })
     };
     wait_at(&storage, HookPoint::CompactionAfterWrite);
@@ -504,7 +503,7 @@ async fn a_rewrite_started_before_the_retention_fails_and_the_deletion_applies()
         storage.staged_paths().await.unwrap().is_empty(),
         "the rewrite's staged output is collected"
     );
-    Arc::try_unwrap(storage)
+    std::sync::Arc::try_unwrap(storage)
         .unwrap_or_else(|_| panic!("storage still shared"))
         .shutdown()
         .await

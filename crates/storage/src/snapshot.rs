@@ -879,10 +879,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A quarantined file leaves the snapshot but is not retired, so only the
-    /// gate protects it during a backup. Every object the snapshot lists still
-    /// exists while the snapshot lives, through a verify pass and an obsolete
-    /// collection.
+    /// A quarantined file leaves the snapshot, and a drop then retires it: it
+    /// becomes an obsolete row that is never in `retired`, so only the gate
+    /// protects it during a backup. Every object the snapshot lists still
+    /// exists while the snapshot lives, through a verify pass, a drop and an
+    /// obsolete collection.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_gate_holds_a_quarantined_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -891,7 +892,6 @@ mod tests {
         let storage = flush_cycle(&config, storage, spans_at(&[1, 2])).await;
         let victim = storage.catalog_files(Table::Spans)[0].clone();
         let (victim_id, victim_path) = (victim.id, victim.path.clone());
-        drop(victim);
         // Truncate the object: its size no longer matches the catalog.
         let object = dir.path().join("objects").join(&victim_path);
         let bytes = std::fs::read(&object).unwrap();
@@ -902,6 +902,8 @@ mod tests {
         let snapshot = storage.snapshot_catalog(&target).await.unwrap();
         let report = storage.verify_pass().await;
         assert_eq!(report.quarantined, 1, "{report:?}");
+        // The drop retires the quarantined file (obsolete row, never in `retired`).
+        storage.drop_project(project()).await.unwrap();
 
         let storage = Arc::new(storage);
         let collector = {
@@ -928,7 +930,8 @@ mod tests {
 
     /// A copy taken while commits and compactions run lists exactly the active
     /// files the snapshot holds, and every object it lists exists while the
-    /// snapshot lives.
+    /// snapshot lives. The listed files stay in use through the snapshot's
+    /// retired references, so this test does not isolate the gate.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_snapshot_matches_its_copy_under_concurrent_commits() {
         let dir = tempfile::tempdir().unwrap();
@@ -957,7 +960,8 @@ mod tests {
         };
 
         // Obsolete-file GC runs too: a file the snapshot lists that a later
-        // compaction obsoletes must stay on disk while the snapshot lives.
+        // compaction obsoletes must stay on disk while the snapshot lives
+        // (kept by the retired references, not the gate).
         let collecting = {
             let storage = Arc::clone(&storage);
             let stop = Arc::clone(&stop);

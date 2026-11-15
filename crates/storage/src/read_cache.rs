@@ -93,6 +93,9 @@ pub(crate) struct ReadCache {
     write_lock: Mutex<()>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Test seam: runs in `write_blocks` after a block file is written and before it is indexed.
+    #[cfg(test)]
+    after_block_write: Mutex<Option<fn(&ReadCache)>>,
 }
 
 #[derive(Debug, Default)]
@@ -231,6 +234,8 @@ impl ReadCache {
             write_lock: Mutex::new(()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            #[cfg(test)]
+            after_block_write: Mutex::new(None),
         };
         let victims = {
             let mut state = cache.lock();
@@ -350,6 +355,14 @@ impl ReadCache {
             {
                 tracing::debug!(%error, index, "writing a read cache block failed");
                 continue;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &*self
+                .after_block_write
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                hook(self);
             }
             let victims = {
                 let mut state = self.lock();
@@ -1007,6 +1020,36 @@ mod tests {
             cache.read_blocks(NAME, &[0]).is_empty(),
             "a block was written on a stale free-disk measurement"
         );
+    }
+
+    #[test]
+    fn a_block_written_after_its_object_was_evicted_is_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
+        disk.set_free_for_test(Some(10 * MIB));
+        let cache =
+            ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
+        cache.set_size(NAME, 4_096).unwrap();
+
+        // The object is evicted between the block's write and its index insert.
+        let evict: fn(&ReadCache) = |cache| cache.evict_file(NAME);
+        *cache.after_block_write.lock().unwrap() = Some(evict);
+        cache.write_blocks(NAME, &[(0, Bytes::from(vec![7_u8; 4_096]))]);
+
+        assert_eq!(
+            cache.stats().bytes,
+            0,
+            "a block of an evicted object is indexed"
+        );
+        assert!(cache.read_blocks(NAME, &[0]).is_empty());
     }
 
     #[tokio::test]
