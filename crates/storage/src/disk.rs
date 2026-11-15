@@ -136,6 +136,16 @@ impl Disk {
         Ok(least)
     }
 
+    /// Sets the free bytes the next `measure` reports, without refreshing the stored
+    /// value: the stored value stays stale until something measures again.
+    #[cfg(test)]
+    pub(crate) fn set_next_measurement_for_test(&self, free: Option<u64>) {
+        *self
+            .fake_free
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = free;
+    }
+
     /// Sets the free bytes `measure` reports (`None` measures the disk again),
     /// and refreshes the stored value at once.
     #[cfg(test)]

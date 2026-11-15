@@ -84,6 +84,9 @@ pub(crate) struct ReadCache {
     disk: Arc<Disk>,
     min_free: u64,
     state: Mutex<CacheState>,
+    /// Held by `write_blocks` from its free-disk check to its last write, so concurrent
+    /// calls cannot each pass the check and then write (D7).
+    write_lock: Mutex<()>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -221,6 +224,7 @@ impl ReadCache {
             disk,
             min_free,
             state: Mutex::new(state),
+            write_lock: Mutex::new(()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         };
@@ -303,19 +307,26 @@ impl ReadCache {
 
     /// Writes `blocks` of `name`, the bytes of each block without its CRC. Blocks
     /// already cached are skipped. Nothing is written while free disk is under
-    /// `2 × min_free`, nor for an object whose size is not recorded. Evicts the
-    /// least recently used blocks while the cache is over capacity. Failures are
-    /// logged at debug and skipped. Blocking.
+    /// `2 × min_free` (measured before each block, not the monitor's last value), nor for an
+    /// object whose size is not recorded. Evicts the least recently used blocks while the
+    /// cache is over capacity. Failures are logged at debug and skipped. Blocking.
     pub(crate) fn write_blocks(&self, name: &str, blocks: &[(u64, Bytes)]) {
-        if !self.writable() {
-            return;
-        }
+        let _writing = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(size) = self.size(name) else {
             return;
         };
         let dir = self.dir.join(name);
         for (index, data) in blocks {
             let index = *index;
+            // The monitor measures once a second, so the stored value can be stale, and one call
+            // may write many blocks: measure before every block (one `statvfs` per 1 MiB block).
+            // A failed measurement writes nothing.
+            if self.disk.refresh().is_err() || !self.writable() {
+                return;
+            }
             if block_len(size, index) != Some(len_u64(data.len())) {
                 tracing::debug!(index, "read cache block has the wrong length; not cached");
                 continue;
@@ -960,6 +971,35 @@ mod tests {
 
     fn block_file(cache_dir: &Path, index: u64) -> PathBuf {
         cache_dir.join(NAME).join(index.to_string())
+    }
+
+    #[test]
+    fn writes_check_free_disk_now_not_the_last_measurement() {
+        // D7: the monitor measures once a second, so the stored value can say writable after the
+        // disk has filled. `write_blocks` must measure again before it writes.
+        let dir = tempfile::tempdir().unwrap();
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
+        disk.set_free_for_test(Some(10 * MIB));
+        let cache =
+            ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
+        cache.set_size(NAME, 4 * MIB).unwrap();
+
+        // The stored measurement says 10 MiB; the disk now has 1 MiB, under 2 × min_free.
+        disk.set_next_measurement_for_test(Some(MIB));
+        cache.write_blocks(NAME, &[(0, content(MIB))]);
+
+        assert!(
+            cache.read_blocks(NAME, &[0]).is_empty(),
+            "a block was written on a stale free-disk measurement"
+        );
     }
 
     #[tokio::test]
