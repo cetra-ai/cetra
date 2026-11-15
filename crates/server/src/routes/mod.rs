@@ -9,6 +9,7 @@ pub(crate) mod channels;
 pub(crate) mod connections;
 pub(crate) mod deletions;
 pub(crate) mod entitlements;
+pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
 pub(crate) mod feedback;
 pub(crate) mod internal_members;
