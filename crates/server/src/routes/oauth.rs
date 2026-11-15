@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::auth::oidc::flow::{self, LoginError, StartError};
 use crate::auth::oidc::state_cookie;
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
@@ -118,7 +118,9 @@ async fn callback(
                     .get(header::USER_AGENT)
                     .and_then(|value| value.to_str().ok()),
                 Some(ip),
-                logged_in.sso_org,
+                logged_in
+                    .sso_org
+                    .map_or(SessionOrigin::Provider, SessionOrigin::OrgProvider),
             )
             .await
             {

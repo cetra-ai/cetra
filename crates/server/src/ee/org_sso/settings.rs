@@ -1667,6 +1667,7 @@ mod tests {
                             user_agent: None,
                             ip: None,
                             sso_org_id: None,
+                            via_provider: false,
                         },
                         now,
                         now + 3_600_000_000_000,

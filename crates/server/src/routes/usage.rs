@@ -129,9 +129,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let set_cookie = start_session(&app.state, user.id, None, None, None)
-            .await
-            .unwrap();
+        let set_cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         set_cookie
             .to_str()
             .unwrap()

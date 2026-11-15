@@ -42,7 +42,7 @@ use crate::api::common::Problem;
 use crate::auth::Limits;
 use crate::auth::roles::{KeyScope, OrgRole};
 use crate::auth::secret::{self, KeyKind, NewKey};
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
@@ -850,9 +850,15 @@ pub(crate) async fn session_cookie_via(
     user_id: Uuid,
     sso_org: Option<OrgId>,
 ) -> String {
-    let header = start_session(&app.state, user_id, None, None, sso_org)
-        .await
-        .unwrap();
+    let header = start_session(
+        &app.state,
+        user_id,
+        None,
+        None,
+        sso_org.map_or(SessionOrigin::Password, SessionOrigin::OrgProvider),
+    )
+    .await
+    .unwrap();
     header
         .to_str()
         .unwrap()

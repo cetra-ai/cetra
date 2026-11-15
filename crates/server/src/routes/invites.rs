@@ -510,9 +510,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -882,9 +888,15 @@ mod tests {
         let org = create_org(&app, &ada).await;
         let guest_id = insert_unverified(&app, "guest@example.com").await;
         let guest_cookie = cookie_pair(
-            &start_session(&app.state, guest_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
         let org_id = org.id.to_string();
@@ -920,9 +932,15 @@ mod tests {
         let org = create_org(&app, &ada).await;
         let guest_id = insert_unverified(&app, "guest@example.com").await;
         let guest_cookie = cookie_pair(
-            &start_session(&app.state, guest_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
 
@@ -1026,9 +1044,15 @@ mod tests {
         let viewer_id = insert_unverified(&app, "viewer@example.com").await;
         add_member(&app, org.id, viewer_id, OrgRole::Viewer).await;
         let viewer_cookie = cookie_pair(
-            &start_session(&app.state, viewer_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                viewer_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let kept = app
             .request(

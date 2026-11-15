@@ -857,9 +857,15 @@ mod tests {
     }
 
     async fn cookie(app: &TestApp, user_id: uuid::Uuid) -> HeaderValueCookie {
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let pair = header.to_str().unwrap().split_once(';').unwrap().0;
         HeaderValueCookie(pair.to_owned())
     }

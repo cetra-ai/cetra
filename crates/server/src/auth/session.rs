@@ -26,6 +26,17 @@ pub(crate) const LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// A session slides at most once per this interval.
 pub(crate) const REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
 
+/// What signed the user in, for [`start_session`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionOrigin {
+    /// A password: login, signup, setup or the first session after a reset.
+    Password,
+    /// A provider of the instance configuration (Google, GitHub, `[[auth.oidc]]`).
+    Provider,
+    /// The identity provider of this org (D-P-59).
+    OrgProvider(OrgId),
+}
+
 /// Inserts a session and returns the `Set-Cookie` value.
 ///
 /// `user_agent` is cut to 256 characters. `Secure` is set when `public_url` is https.
@@ -39,7 +50,7 @@ pub(crate) async fn start_session(
     user_id: uuid::Uuid,
     user_agent: Option<&str>,
     ip: Option<IpAddr>,
-    sso_org: Option<OrgId>,
+    origin: SessionOrigin,
 ) -> Result<HeaderValue, ApiError> {
     let token = new_opaque_token().map_err(|error| ApiError::Internal(Box::new(error)))?;
     let now = state.clock.now_ns();
@@ -58,7 +69,11 @@ pub(crate) async fn start_session(
                         user_id,
                         user_agent,
                         ip,
-                        sso_org_id: sso_org,
+                        sso_org_id: match origin {
+                            SessionOrigin::OrgProvider(org) => Some(org),
+                            SessionOrigin::Password | SessionOrigin::Provider => None,
+                        },
+                        via_provider: origin != SessionOrigin::Password,
                     },
                     now,
                     expires_at,
@@ -122,6 +137,11 @@ pub(crate) async fn resolve_session(
 /// user is not an instance admin, and the session was not started through that org's provider.
 /// The row stays for the revocation or its expiry to delete.
 fn refused_under_enforcement(state: &AppState, row: &SessionRow) -> bool {
+    // `auth.enforce_sso_domains` (D-P-69) has no admin exemption, as for login: a session from
+    // before the domain was listed, which no provider started, stops resolving.
+    if !row.via_provider && crate::ee::sso_enforcement::requires_sso(state, &row.user.email) {
+        return true;
+    }
     if row.user.is_instance_admin || !crate::ee::org_sso::enforces(state, &row.user.email) {
         return false;
     }
@@ -188,6 +208,8 @@ fn duration_ns(duration: Duration) -> i64 {
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+
+    use super::SessionOrigin;
     use std::time::Duration;
 
     use axum::http::{HeaderMap, HeaderValue};
@@ -243,18 +265,30 @@ mod tests {
             .await
             .unwrap();
 
-        let via_org = start_session(&app.state, user_id, None, None, Some(org))
-            .await
-            .unwrap();
+        let via_org = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            SessionOrigin::OrgProvider(org),
+        )
+        .await
+        .unwrap();
         let (row, _) = resolve_session(&app.state, &token_of(&via_org), now)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.sso_org_id, Some(org));
 
-        let by_password = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let by_password = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let (row, _) = resolve_session(&app.state, &token_of(&by_password), now)
             .await
             .unwrap()
@@ -279,9 +313,15 @@ mod tests {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
         let ip: IpAddr = "203.0.113.8".parse().unwrap();
-        let header = start_session(&app.state, user_id, Some(&"a".repeat(300)), Some(ip), None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            Some(&"a".repeat(300)),
+            Some(ip),
+            SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let text = header.to_str().unwrap();
         assert!(!text.contains("Secure"), "{text}");
         let token = token_of(&header);
@@ -312,9 +352,15 @@ mod tests {
             config.public_url = serde_json::from_str("\"https://llmobs.example\"").unwrap();
         })
         .await;
-        let secure = start_session(&https.state, user(&https).await, None, None, None)
-            .await
-            .unwrap();
+        let secure = start_session(
+            &https.state,
+            user(&https).await,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         assert!(secure.to_str().unwrap().ends_with("; Secure"));
         let clearing = clear_cookie(&https.state);
         let clearing = clearing.to_str().unwrap();
@@ -332,9 +378,15 @@ mod tests {
     async fn refresh_waits_an_hour_and_thirty_idle_days_expire() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let token = token_of(&header);
         let started = app.state.clock.now_ns();
 
@@ -380,9 +432,15 @@ mod tests {
     async fn a_disabled_user_and_a_garbage_cookie_do_not_resolve() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let token = token_of(&header);
         let now = app.state.clock.now_ns();
         app.state
@@ -412,9 +470,15 @@ mod tests {
     async fn the_first_cookie_that_resolves_wins() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let token = token_of(&header);
         let unknown = new_opaque_token().unwrap().plaintext;
         let now = app.state.clock.now_ns();

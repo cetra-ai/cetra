@@ -341,9 +341,15 @@ mod tests {
         let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
         let logged_in = login(&app, "ada@example.com", PASSWORD).await;
         let cookie = session_cookie(&logged_in);
-        let other = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let other = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let other_cookie = cookie_pair(&other);
         let now = app.state.clock.now_ns();
         for _ in 0..19 {
@@ -406,9 +412,15 @@ mod tests {
         let app = TestApp::new().await;
         let user_id = insert_account(&app, "ada@example.com", None).await;
         let cookie = cookie_pair(
-            &start_session(&app.state, user_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                user_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let rejected = app
             .request(Method::POST, "/api/v1/me/password")
@@ -480,9 +492,15 @@ mod tests {
         let disabled = TestApp::with_config(|config| config.auth.disable_password = true).await;
         let user_id = insert_account(&disabled, "ada@example.com", Some(PASSWORD)).await;
         let cookie = cookie_pair(
-            &start_session(&disabled.state, user_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &disabled.state,
+                user_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let before = disabled
             .state

@@ -17,7 +17,7 @@ use crate::auth::password::check_policy;
 use crate::auth::principal::{self, Principal};
 use crate::auth::reset::{ResetError, reset_link, verification_link};
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
-use crate::auth::session::{clear_cookie, resolve_cookie_header, start_session};
+use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
@@ -186,7 +186,7 @@ async fn setup(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         Some(ip),
-        None,
+        SessionOrigin::Password,
     )
     .await?;
     let trace_completion_timeout_s = created.created.project.completion_timeout_s();
@@ -358,7 +358,9 @@ async fn reset_password(
     let Some(user) = users::user_by_id(state.meta.reader(), user_id).await? else {
         return Err(invalid_link());
     };
-    if crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin {
+    if crate::ee::sso_enforcement::requires_sso(&state, &user.email)
+        || (crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin)
+    {
         return Err(ApiError::Forbidden {
             code: ProblemCode::SsoRequired,
         });
@@ -458,6 +460,7 @@ async fn forgot_password(
     let now = state.clock.now_ns();
     if let Some(user) = users::user_by_email(state.meta.reader(), &email).await?
         && user.disabled_at.is_none()
+        && !crate::ee::sso_enforcement::requires_sso(&state, &email)
         && !(crate::ee::org_sso::enforces(&state, &email) && !user.is_instance_admin)
         && mail_allowed(&state, &email, now)
     {
@@ -766,7 +769,7 @@ async fn session_cookie(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         ip,
-        None,
+        SessionOrigin::Password,
     )
     .await
 }
@@ -2116,9 +2119,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let pair = cookie
             .to_str()
             .unwrap()
