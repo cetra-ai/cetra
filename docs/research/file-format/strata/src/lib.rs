@@ -30,6 +30,8 @@
 mod format;
 #[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
 mod hot;
+#[allow(dead_code)] // used by the writer from M2.2 on
+mod payload;
 #[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
 mod segment;
 
