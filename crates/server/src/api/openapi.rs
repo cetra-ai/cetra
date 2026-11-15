@@ -58,9 +58,10 @@ use super::evaluators::{
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::internal::{
-    CreateInternalOrgRequest, InternalMember, InternalMembers, InternalMembersQuery, InternalOrg,
-    InternalOwner, InternalUsageQuery, InternalUsageRow, InternalUserDeleted, InternalUserRef,
-    MembershipLookup, MembershipLookupRequest, MembershipOrg,
+    CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
+    InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
+    InternalUsageRow, InternalUserDeleted, InternalUserRef, MembershipLookup,
+    MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
@@ -181,6 +182,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<InternalMember>();
     set.insert::<InternalMembers>();
     set.insert_page::<InternalUsageRow>("InternalUsagePage");
+    set.insert::<InternalDropKind>();
+    set.insert_page::<InternalDrop>("InternalDropPage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -1284,6 +1287,25 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 429],
         ))
         .build();
+    let list_internal_deletions = operation(
+        "list_internal_deletions",
+        "internal",
+        "List applied org and project drops",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(with_query::<InternalDropsQuery>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("InternalDropPage", "One page of applied drops, oldest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
     let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
     let post_internal_user_revoke = operation(
         "post_internal_user_revoke",
@@ -1421,6 +1443,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/internal/v1/usage",
             PathItem::new(HttpMethod::Get, list_internal_usage),
+        )
+        .path(
+            "/api/internal/v1/deletions",
+            PathItem::new(HttpMethod::Get, list_internal_deletions),
         )
         .path(
             "/api/internal/v1/users/revoke",

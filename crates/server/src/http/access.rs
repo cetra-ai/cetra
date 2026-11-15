@@ -144,6 +144,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::internal_members::routes());
     routes.extend(crate::routes::internal_orgs::routes());
     routes.extend(crate::routes::internal_usage::routes());
+    routes.extend(crate::routes::internal_deletions::routes());
     routes.extend(crate::routes::internal_users::routes());
     routes.extend(crate::routes::connections::routes());
     routes.extend(crate::routes::api_keys::routes());

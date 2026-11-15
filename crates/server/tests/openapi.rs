@@ -83,6 +83,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/internal/v1/usage", "list_internal_usage"),
     (
+        "get",
+        "/api/internal/v1/deletions",
+        "list_internal_deletions",
+    ),
+    (
         "post",
         "/api/internal/v1/users/revoke",
         "post_internal_user_revoke",
@@ -403,6 +408,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 const QUERY_OR_BODY: &[&str] = &[
     "get_org_usage",
     "list_internal_usage",
+    "list_internal_deletions",
     "post_internal_user_revoke",
     "post_internal_user_disable",
     "post_internal_membership_lookup",
@@ -535,6 +541,7 @@ fn document_lint() {
                 | "post_internal_org"
                 | "delete_internal_org"
                 | "list_internal_usage"
+                | "list_internal_deletions"
                 | "post_internal_user_revoke"
                 | "post_internal_user_disable"
                 | "post_internal_user_delete"
@@ -618,6 +625,7 @@ fn document_lint() {
         } else if *id == "post_internal_org" {
             expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
         } else if *id == "list_internal_usage"
+            || *id == "list_internal_deletions"
             || *id == "post_internal_user_delete"
             || *id == "post_internal_membership_lookup"
         {
@@ -1057,6 +1065,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertRulePage",
         "AlertEventPage",
         "InternalUsagePage",
+        "InternalDropPage",
     ];
     let expected: BTreeSet<String> = pages
         .iter()

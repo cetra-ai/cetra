@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/deletions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List applied org and project drops
+         * @description Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.
+         */
+        get: operations["list_internal_deletions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/memberships/lookup": {
         parameters: {
             query?: never;
@@ -2838,6 +2858,39 @@ export interface components {
             name: string;
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
+        };
+        /** @description One applied drop in the feed (D-P-49). */
+        InternalDrop: {
+            /**
+             * Format: date-time
+             * @description When the drop was applied.
+             */
+            applied_at: string;
+            /**
+             * Format: uuid
+             * @description The deletion id.
+             */
+            id: string;
+            kind: components["schemas"]["InternalDropKind"];
+            /** Format: uuid */
+            org_id: string;
+            /**
+             * Format: uuid
+             * @description Project drops only.
+             */
+            project_id?: string;
+        };
+        /**
+         * @description A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).
+         * @enum {string}
+         */
+        InternalDropKind: "project" | "org";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalDropPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalDrop"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
         };
         /** @description One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it. */
         InternalMember: {
@@ -5693,6 +5746,69 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_internal_deletions: {
+        parameters: {
+            query?: {
+                /** @description `project` or `org`; both when omitted. */
+                kind?: components["schemas"]["InternalDropKind"];
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of applied drops, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalDropPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

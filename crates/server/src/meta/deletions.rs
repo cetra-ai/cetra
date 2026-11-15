@@ -777,6 +777,72 @@ pub(crate) async fn org_drop_of(
     record.map(row_from).transpose()
 }
 
+/// One applied project or org drop, as the control plane's feed lists it (D-P-49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedDrop {
+    /// The deletion id.
+    pub(crate) id: Uuid,
+    /// `project` or `org`.
+    pub(crate) kind: DeletionKind,
+    /// Owning org.
+    pub(crate) org_id: OrgId,
+    /// `Some` for `project` only.
+    pub(crate) project_id: Option<ProjectId>,
+    /// When the drop was applied, nanoseconds.
+    pub(crate) applied_at: i64,
+}
+
+/// Applied project and org drops, oldest first, after `after` (`(applied_at, id)` of the last
+/// row of the previous page). `kind` narrows to one kind. Rows are kept forever (D-M-17), so
+/// any position can be paged from. At most `limit` rows.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored row does not decode.
+pub(crate) async fn applied_drops(
+    pool: &SqlitePool,
+    kind: Option<DeletionKind>,
+    after: Option<(i64, Uuid)>,
+    limit: u32,
+) -> Result<Vec<AppliedDrop>, MetaError> {
+    let kind_text = kind.map(DeletionKind::as_str);
+    // An empty id sorts before every id, and no time is below `i64::MIN`: no cursor means "from
+    // the first row".
+    let (after_at, after_id) = match after {
+        Some((at, id)) => (at, id.to_string()),
+        None => (i64::MIN, String::new()),
+    };
+    let rows: Vec<(String, String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id, kind, org_id, project_id, applied_at FROM deletions \
+         WHERE kind IN ('project', 'org') AND status = 'applied' \
+           AND (? IS NULL OR kind = ?) \
+           AND (applied_at, id) > (?, ?) \
+         ORDER BY applied_at, id LIMIT ?",
+    )
+    .bind(kind_text)
+    .bind(kind_text)
+    .bind(after_at)
+    .bind(after_id)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|(id, kind, org_id, project_id, applied_at)| {
+            Ok(AppliedDrop {
+                id: Uuid::parse_str(&id).map_err(|_| corrupt("id"))?,
+                kind: DeletionKind::parse(&kind).ok_or_else(|| corrupt("kind"))?,
+                org_id: org_id.parse::<OrgId>().map_err(|_| corrupt("org_id"))?,
+                project_id: project_id
+                    .as_deref()
+                    .map(str::parse::<ProjectId>)
+                    .transpose()
+                    .map_err(|_| corrupt("project_id"))?,
+                applied_at,
+            })
+        })
+        .collect()
+}
+
 /// Whether any org deletion exists for `org`, in this transaction. An id with one is never
 /// created again (D-P-49).
 ///

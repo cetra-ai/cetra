@@ -719,6 +719,104 @@
         "security": []
       }
     },
+    "/api/internal/v1/deletions": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List applied org and project drops",
+        "description": "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+        "operationId": "list_internal_deletions",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`project` or `org`; both when omitted.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/InternalDropKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1–10 000. Default 1 000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of applied drops, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalDropPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/v1/memberships/lookup": {
       "post": {
         "tags": [
@@ -13440,6 +13538,72 @@
           "signature": {
             "type": "string",
             "description": "Argument and return types, for example `score(name: string) -> float`."
+          }
+        }
+      },
+      "InternalDrop": {
+        "type": "object",
+        "description": "One applied drop in the feed (D-P-49).",
+        "required": [
+          "id",
+          "kind",
+          "org_id",
+          "applied_at"
+        ],
+        "properties": {
+          "applied_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the drop was applied."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The deletion id."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InternalDropKind"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Project drops only."
+          }
+        }
+      },
+      "InternalDropKind": {
+        "type": "string",
+        "description": "A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).",
+        "enum": [
+          "project",
+          "org"
+        ]
+      },
+      "InternalDropPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalDrop"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
           }
         }
       },
