@@ -56,9 +56,18 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
   the token stays out of browser history. A token created by the sign-in page expires after 90
   days; run `llmobs login` again when it does.
+- `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
+  `api_key` again (400 on `api_key`), so a new host never receives the stored key.
 
 ### Fixed
 
+- Auth security review (`docs/research/auth/review-2026-11-15.md`): deleting another project's
+  evaluator answers 404 instead of naming that project's online rules; deleting another org's
+  connection answers 404 while it is in use; a control-plane org creation clears the password,
+  sessions and tokens of an unverified account it makes owner; a disabled owner no longer counts as
+  the org's last owner; an invitation to an org that is not active cannot be accepted; a trusted
+  proxy seen as an IPv4-mapped IPv6 address is trusted; a config file with a TOML syntax error no
+  longer prints the offending line.
 - Online evaluation: an exhausted Anthropic credit balance or Gemini daily quota now pauses the rule at once, like OpenAI's; the egress guard also denies `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, `64:ff9b:1::/48`, `2002::/16` and `fec0::/10`; a judge or webhook header can no longer override `content-type` or the auth header.
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.

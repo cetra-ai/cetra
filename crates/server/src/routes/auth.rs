@@ -623,10 +623,13 @@ async fn signup(
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let Some((pending, _)) = invites::invite_by_hash_tx(conn, &hash, now).await?
+                    let Some((pending, org)) = invites::invite_by_hash_tx(conn, &hash, now).await?
                     else {
                         return Ok(InvitedSignup::Missing);
                     };
+                    if org.state != "active" {
+                        return Ok(InvitedSignup::Missing);
+                    }
                     if pending.email != email_for_insert {
                         return Ok(InvitedSignup::Missing);
                     }

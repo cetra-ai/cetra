@@ -37,6 +37,8 @@ use super::orgs::page_named;
 const BASE_URL_MESSAGE: &str = "base_url must be an http or https URL without credentials, fragment or query other than api-version";
 /// At most this many extra headers (D-I-4).
 const MAX_EXTRA_HEADERS: usize = 20;
+/// A PATCH that changes the host must send the key again (review 2026-11-15 #2).
+const KEY_NEEDED_FOR_HOST: &str = "api_key is required with base_url or adapter";
 /// The prompt of a connection test's one boolean judge call (D-I-5).
 const TEST_PROMPT: &str = "Reply true.";
 
@@ -241,6 +243,10 @@ async fn update_llm_connection(
     if let Some(headers) = body.extra_headers.as_ref() {
         check_extra_headers(headers, &mut errors);
     }
+    // A new host must not receive the saved key, as a webhook's new URL needs its secret.
+    if (body.base_url.is_some() || body.adapter.is_some()) && body.api_key.is_none() {
+        errors.push(field_error("api_key", KEY_NEEDED_FOR_HOST));
+    }
     if !errors.is_empty() {
         return Err(ApiError::BadRequest {
             detail: None,
@@ -360,6 +366,13 @@ async fn delete_llm_connection(
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // Another org's id is 404 before the in-use check, which is not org-bound.
+                if connections::get_connection_tx(conn, org_id, id)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(false);
+                }
                 // An evaluator that uses the connection keeps it (D-I-19).
                 if evaluators::connection_in_use(conn, id).await? {
                     return Err(MetaError::Conflict("connection is used by evaluators"));
@@ -1764,7 +1777,10 @@ mod tests {
         assert_eq!(created.status, 201);
         let id = created_id(&created);
         for (field, body) in [
-            ("base_url", json!({ "base_url": "ftp://x" })),
+            (
+                "base_url",
+                json!({ "base_url": "ftp://x", "api_key": "sk-test-0123456789abcdef" }),
+            ),
             ("default_model", json!({ "default_model": "a/b" })),
             ("api_key", json!({ "api_key": " sk-x" })),
             (
@@ -1805,7 +1821,13 @@ mod tests {
         let id = created_id(&created);
 
         // A whitespace-only value clears the field, like "".
-        let patched = patch(&app, &cookie, id, &json!({ "base_url": "   " })).await;
+        let patched = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({ "base_url": "   ", "api_key": "sk-test-0123456789abcdef" }),
+        )
+        .await;
         assert_eq!(patched.status, 200, "{}", text(&patched));
         let patched: LlmConnection = patched.json();
         assert_eq!(patched.base_url, None);
@@ -1818,7 +1840,7 @@ mod tests {
             &app,
             &cookie,
             id,
-            &json!({ "base_url": "  https://x.com/v2 " }),
+            &json!({ "base_url": "  https://x.com/v2 ", "api_key": "sk-test-0123456789abcdef" }),
         )
         .await;
         assert_eq!(set.status, 200, "{}", text(&set));
@@ -1826,6 +1848,39 @@ mod tests {
             set.json::<LlmConnection>().base_url.as_deref(),
             Some("https://x.com/v2")
         );
+    }
+
+    /// Review 2026-11-15 #2: a new base_url or adapter took the stored key, so an org admin
+    /// could send it to a host of their choice with the connection test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_of_the_host_needs_the_key_again() {
+        let (app, cookie) = app().await;
+        let created = create(&app, &cookie, &body("Stored")).await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        for change in [
+            json!({ "base_url": "https://attacker.example.com/v1" }),
+            json!({ "base_url": "" }),
+            json!({ "adapter": "anthropic" }),
+        ] {
+            let response = patch(&app, &cookie, id, &change).await;
+            assert_eq!(response.status, 400, "{change}");
+            let problem = response.problem();
+            assert_eq!(problem.errors.len(), 1, "{change}");
+            assert_eq!(problem.errors[0].field, "api_key");
+            assert_eq!(problem.errors[0].message, KEY_NEEDED_FOR_HOST);
+        }
+        let got: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(got.base_url, None);
+        assert_eq!(got.adapter.as_str(), "openai");
+        let moved = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({ "base_url": "https://proxy.example.com/v1", "api_key": "sk-new-0123456789abcdef" }),
+        )
+        .await;
+        assert_eq!(moved.status, 200, "{}", text(&moved));
     }
 
     #[tokio::test(flavor = "multi_thread")]
