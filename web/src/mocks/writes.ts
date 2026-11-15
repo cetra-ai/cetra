@@ -3,6 +3,8 @@ import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-cr
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
+import backfillDocument from "../../../fixtures/api/static/backfill.json";
+import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
@@ -237,6 +239,16 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_online_rule_resume",
     method: "post",
     path: "/api/v1/projects/{project}/online-rules/{id}/resume",
+  },
+  {
+    operationId: "post_backfill_estimate",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate",
+  },
+  {
+    operationId: "post_backfill",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills",
   },
   {
     operationId: "post_evaluator_run",
@@ -525,6 +537,8 @@ const RESPONSES: Record<string, Respond> = {
   post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
+  post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
+  post_backfill: () => HttpResponse.json(backfillDocument, { status: 202 }),
   post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
 };
 
