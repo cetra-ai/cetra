@@ -2475,9 +2475,15 @@ mod tests {
     async fn a_flush_retries_failed_uploads_without_duplicating_rows() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::FaultStore::new(Arc::clone(&inner) as _);
-        fault.enqueue(test_support::FaultKind::FailBefore);
-        fault.enqueue(test_support::FaultKind::FailBefore);
+        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        fault.push(
+            test_support::Call::Put,
+            test_support::Fault::Before(test_support::Status::SlowDown),
+        );
+        fault.push(
+            test_support::Call::Put,
+            test_support::Fault::Before(test_support::Status::SlowDown),
+        );
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
@@ -2505,8 +2511,11 @@ mod tests {
     async fn an_ambiguous_upload_is_retried_under_a_new_name() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::FaultStore::new(Arc::clone(&inner) as _);
-        fault.enqueue(test_support::FaultKind::FailAfter);
+        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        fault.push(
+            test_support::Call::Put,
+            test_support::Fault::After(test_support::Status::SlowDown),
+        );
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
@@ -2577,11 +2586,17 @@ mod tests {
     async fn an_ambiguous_traces_upload_is_retried_under_new_names() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::FaultStore::new(Arc::clone(&inner) as _);
+        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
         // Serial uploads: the spans upload consumes the delay, the traces
         // upload writes the object and then fails ambiguously.
-        fault.enqueue(test_support::FaultKind::Delay(Duration::ZERO));
-        fault.enqueue(test_support::FaultKind::FailAfter);
+        fault.push(
+            test_support::Call::Put,
+            test_support::Fault::Delay(Duration::ZERO),
+        );
+        fault.push(
+            test_support::Call::Put,
+            test_support::Fault::After(test_support::Status::SlowDown),
+        );
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
@@ -2634,8 +2649,8 @@ mod tests {
     async fn failed_uploads_backpressure_until_the_store_recovers() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::FaultStore::new(Arc::clone(&inner) as _);
-        fault.hold_failures();
+        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        fault.hold(&[test_support::Call::Put, test_support::Call::MultipartStart]);
         let mut config = config_in(dir.path());
         config.memtable.hard_limit = ByteSize::mib(16);
         config.flush.max_bytes = ByteSize::mib(1);

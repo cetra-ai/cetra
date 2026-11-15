@@ -879,7 +879,7 @@ mod tests {
 
     use super::*;
     use crate::fs::lossy::{CrashMode, Lossy};
-    use crate::test_support::FaultStore;
+    use crate::test_support::{Call, ChaosStore};
 
     const MIB: u64 = 1 << 20;
     const DATA: &str =
@@ -902,7 +902,7 @@ mod tests {
     /// A cache over `inner` in `dir`, with its disk reporting `free` bytes.
     struct Fixture {
         inner: Arc<InMemory>,
-        fault: FaultStore,
+        fault: ChaosStore,
         cache: Arc<ReadCache>,
         store: CacheStore,
         cache_dir: PathBuf,
@@ -910,7 +910,7 @@ mod tests {
 
     fn fixture(dir: &Path, capacity: u64, min_free: u64) -> Fixture {
         let inner = Arc::new(InMemory::new());
-        let fault = FaultStore::new(Arc::clone(&inner) as Arc<dyn ObjectStore>);
+        let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn ObjectStore>);
         let disk = Arc::new(Disk::open(vec![dir.to_path_buf()], 0).unwrap());
         let cache_dir = dir.join("cache");
         let cache = Arc::new(ReadCache::open(cache_dir.clone(), capacity, disk, min_free).unwrap());
@@ -965,10 +965,14 @@ mod tests {
         assert_eq!(first, expected(7 * MIB / 2, range.clone()));
         assert_eq!(fixture.cache.stats().misses, 3);
 
-        let gets = fixture.fault.gets();
+        let gets = fixture.fault.count(Call::Get) + fixture.fault.count(Call::Head);
         let second = read(&fixture.store, DATA, range.clone()).await.unwrap();
         assert_eq!(second, expected(7 * MIB / 2, range));
-        assert_eq!(fixture.fault.gets(), gets, "the second read went to S3");
+        assert_eq!(
+            fixture.fault.count(Call::Get) + fixture.fault.count(Call::Head),
+            gets,
+            "the second read went to S3"
+        );
         assert_eq!(fixture.cache.stats().hits, 3);
         assert_eq!(fixture.cache.stats().misses, 3);
     }
@@ -1092,7 +1096,7 @@ mod tests {
         let cache = Arc::new(ReadCache::open(cache_dir, 64 * MIB, disk, 0).unwrap());
         assert_eq!(cache.stats().blocks, 3);
         let store = CacheStore {
-            inner: Arc::new(FaultStore::new(inner as Arc<dyn ObjectStore>)),
+            inner: Arc::new(ChaosStore::new(inner as Arc<dyn ObjectStore>)),
             cache: Arc::clone(&cache),
         };
         assert_eq!(

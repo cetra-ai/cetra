@@ -153,7 +153,7 @@ impl Objects {
         }
     }
 
-    /// Remote store for tests. `store` is usually [`crate::test_support::FaultStore`].
+    /// Remote store for tests. `store` is usually [`crate::test_support::ChaosStore`].
     #[cfg(test)]
     pub(crate) fn remote_for_test(
         store: Arc<dyn ObjectStore>,
@@ -1183,7 +1183,7 @@ mod tests {
     use crate::fs::lossy::{CrashMode, Lossy};
     use crate::hooks::{HookPoint, Hooks};
     use crate::objects::Objects;
-    use crate::test_support::{FaultKind, FaultStore};
+    use crate::test_support::{Call, ChaosStore, Fault, Status};
 
     fn local_config(dir: &std::path::Path) -> StorageConfig {
         StorageConfig {
@@ -1321,7 +1321,7 @@ mod tests {
     async fn remote_put_round_trips_and_reports_faults() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(InMemory::new());
-        let fault = FaultStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
+        let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
         let objects =
             Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default())
                 .unwrap();
@@ -1349,7 +1349,7 @@ mod tests {
             large
         );
 
-        fault.arm(FaultKind::FailBefore);
+        fault.push(Call::Put, Fault::Before(Status::SlowDown));
         let error = objects
             .put_durable("tables/spans/c.parquet", Bytes::from_static(b"x"))
             .await
@@ -1361,7 +1361,7 @@ mod tests {
             object_store::Error::NotFound { .. }
         ));
 
-        fault.arm(FaultKind::FailAfter);
+        fault.push(Call::Put, Fault::After(Status::SlowDown));
         let error = objects
             .put_durable("tables/spans/d.parquet", Bytes::from_static(b"landed"))
             .await
@@ -1372,7 +1372,7 @@ mod tests {
             Bytes::from_static(b"landed")
         );
 
-        fault.arm(FaultKind::Delay(Duration::from_millis(20)));
+        fault.push(Call::Put, Fault::Delay(Duration::from_millis(20)));
         objects
             .put_durable("tables/spans/e.parquet", Bytes::from_static(b"slow"))
             .await
@@ -1382,7 +1382,7 @@ mod tests {
             Bytes::from_static(b"slow")
         );
 
-        fault.arm(FaultKind::FailAfter);
+        fault.push(Call::Complete, Fault::After(Status::SlowDown));
         let error = objects
             .put_durable("tables/spans/f.parquet", large)
             .await
@@ -1527,11 +1527,11 @@ mod tests {
     async fn a_failed_remote_output_upload_removes_the_spill_file() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(InMemory::new());
-        let fault = FaultStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
+        let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
         let objects =
             Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default())
                 .unwrap();
-        fault.arm(FaultKind::FailBefore);
+        fault.push(Call::MultipartStart, Fault::Before(Status::SlowDown));
         let (target, mut file) = objects
             .create_output("tables/spans/fail.parquet")
             .await
