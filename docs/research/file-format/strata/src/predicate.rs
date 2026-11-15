@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array,
-    Scalar, StringArray, UInt64Array, new_null_array,
+    MapArray, Scalar, StringArray, UInt64Array, new_null_array,
 };
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::compute::{
@@ -19,6 +19,7 @@ use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::narrow::{BlockEntry, Dictionary, Encoding, flags};
+use crate::payload::MAX_NEEDLE;
 
 /// A literal in a predicate.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,8 +59,10 @@ pub enum CmpOp {
 
 /// A boolean predicate over the columns of one file. Columns are schema indexes.
 ///
-/// Comparisons, `In`, `IsNull` and `IsNotNull` take part in SQL three-valued logic. `Contains`
-/// and `MapKeyEq` are M4.3 and are not yet supported.
+/// Comparisons, `In`, `IsNull` and `IsNotNull` take part in SQL three-valued logic, and may name
+/// only narrow columns. `MapKeyEq` may name only a shredded map column, and is NULL unless the
+/// key has exactly one non-null value in the row's map. `Contains` may name only a payload
+/// column; it is never NULL, so a null row is not a match and `Not(Contains(..))` selects it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// All of the terms; TRUE when empty.
@@ -76,9 +79,12 @@ pub enum Predicate {
     IsNull(usize),
     /// `column IS NOT NULL`.
     IsNotNull(usize),
-    /// `map_column['key'] = literal` (M4.3).
+    /// `map_column['key'] = literal`: the single non-null value of `key` in the row's map,
+    /// compared with the literal. NULL when the map is null, the key is absent, its value is
+    /// null, or the key occurs more than once. The literal must be `Lit::Utf8` or `Lit::Null`.
     MapKeyEq(usize, String, Lit),
-    /// The payload column's value contains the bytes (M4.3).
+    /// The payload column's value contains the bytes. Never NULL: a null row is FALSE. The
+    /// needle is at most 64 bytes long.
     Contains(usize, Vec<u8>),
 }
 
@@ -93,6 +99,18 @@ pub(crate) enum Bound {
     Cmp(usize, CmpOp, ArrayRef),
     IsNull(usize),
     IsNotNull(usize),
+    /// The precomputed mask at this index of the masks of [`bind`].
+    Mask(usize),
+}
+
+/// Where the mask of a [`Bound::Mask`] leaf comes from.
+#[derive(Debug, Clone)]
+pub(crate) enum MaskSource {
+    /// `Contains(column, needle)` on a payload column. The scan computes the whole column's mask.
+    Contains(usize, Vec<u8>),
+    /// A `MapKeyEq` on a key that is not promoted: the residual column of the map, the key and
+    /// the literal, as a one-element Utf8 array (or a null one). Computed per row range.
+    MapKey(usize, String, ArrayRef),
 }
 
 /// The field of column `column`, which must be a narrow column of the file.
@@ -186,7 +204,7 @@ fn cast_literal(array: ArrayRef, dt: &DataType, column: usize) -> Result<ArrayRe
 }
 
 /// Converts `lit` to a one-element array of `dt`, the type of `column`.
-fn literal(column: usize, dt: &DataType, lit: &Lit) -> Result<ArrayRef> {
+pub(crate) fn literal(column: usize, dt: &DataType, lit: &Lit) -> Result<ArrayRef> {
     let unsupported = || StrataError::Unsupported {
         what: format!("literal type for column {column}"),
     };
@@ -215,25 +233,62 @@ fn literal(column: usize, dt: &DataType, lit: &Lit) -> Result<ArrayRef> {
     }
 }
 
-/// Binds `p` to `file`: checks every column and literal, and converts the literals once.
+/// Binds `p` to `file`: checks every column and literal, and converts the literals once. It
+/// returns the bound predicate and the sources of its masks, which the [`Bound::Mask`] leaves
+/// index.
 ///
-/// Errors are reported before any read, so they never depend on pruning. `Contains` and
-/// `MapKeyEq` are not yet supported (M4.3).
-pub(crate) fn bind(p: &Predicate, file: &StrataFile) -> Result<Bound> {
+/// Errors are reported before any read, so they never depend on pruning. A `MapKeyEq` on a
+/// promoted key binds to the key's child column; on any other key it becomes a mask.
+pub(crate) fn bind(p: &Predicate, file: &StrataFile) -> Result<(Bound, Vec<MaskSource>)> {
+    let mut masks = Vec::new();
+    let bound = bind_into(p, file, &mut masks)?;
+    Ok((bound, masks))
+}
+
+/// The layer of schema column `column`.
+fn schema_layer(file: &StrataFile, column: usize) -> Result<Layer> {
+    let no_column = || StrataError::Schema {
+        reason: format!("no column {column}"),
+    };
+    if column >= file.schema().fields().len() {
+        return Err(no_column());
+    }
+    file.directory()
+        .get(column)
+        .map(|record| record.layer)
+        .ok_or_else(no_column)
+}
+
+/// The shredding layout of map column `column`.
+pub(crate) fn layout_of(file: &StrataFile, column: usize) -> Result<&crate::hot::MapLayout> {
+    file.hot
+        .maps
+        .iter()
+        .find(|layout| usize::try_from(layout.map).ok() == Some(column))
+        .ok_or_else(|| StrataError::Corrupt {
+            what: "map layout",
+            offset: 0,
+        })
+}
+
+/// Binds one predicate, appending the sources of its masks to `masks`.
+fn bind_into(p: &Predicate, file: &StrataFile, masks: &mut Vec<MaskSource>) -> Result<Bound> {
     match p {
-        Predicate::And(terms) => Ok(Bound::And(
-            terms
-                .iter()
-                .map(|term| bind(term, file))
-                .collect::<Result<_>>()?,
-        )),
-        Predicate::Or(terms) => Ok(Bound::Or(
-            terms
-                .iter()
-                .map(|term| bind(term, file))
-                .collect::<Result<_>>()?,
-        )),
-        Predicate::Not(inner) => Ok(Bound::Not(Box::new(bind(inner, file)?))),
+        Predicate::And(terms) => {
+            let mut bound = Vec::with_capacity(terms.len());
+            for term in terms {
+                bound.push(bind_into(term, file, masks)?);
+            }
+            Ok(Bound::And(bound))
+        }
+        Predicate::Or(terms) => {
+            let mut bound = Vec::with_capacity(terms.len());
+            for term in terms {
+                bound.push(bind_into(term, file, masks)?);
+            }
+            Ok(Bound::Or(bound))
+        }
+        Predicate::Not(inner) => Ok(Bound::Not(Box::new(bind_into(inner, file, masks)?))),
         Predicate::Cmp(column, op, lit) => {
             let field = comparable_field(file, *column)?;
             let array = literal(*column, field.data_type(), lit)?;
@@ -256,12 +311,45 @@ pub(crate) fn bind(p: &Predicate, file: &StrataFile) -> Result<Bound> {
             narrow_field(file, *column)?;
             Ok(Bound::IsNotNull(*column))
         }
-        Predicate::MapKeyEq(..) => Err(StrataError::Unsupported {
-            what: "map key predicate".to_string(),
-        }),
-        Predicate::Contains(..) => Err(StrataError::Unsupported {
-            what: "contains predicate".to_string(),
-        }),
+        Predicate::MapKeyEq(column, key, lit) => {
+            if schema_layer(file, *column)? != Layer::MapParent {
+                return Err(StrataError::Unsupported {
+                    what: format!("map key predicate on column {column}"),
+                });
+            }
+            // Only Utf8 or null literals convert to the Utf8 values of a map.
+            let value = literal(*column, &DataType::Utf8, lit)?;
+            let layout = layout_of(file, *column)?;
+            let corrupt = || StrataError::Corrupt {
+                what: "map layout",
+                offset: 0,
+            };
+            if let Some(entry) = layout
+                .keys
+                .iter()
+                .find(|entry| entry.key.as_slice() == key.as_bytes())
+            {
+                let child = usize::try_from(entry.child).map_err(|_| corrupt())?;
+                return Ok(Bound::Cmp(child, CmpOp::Eq, value));
+            }
+            let residual = usize::try_from(layout.residual).map_err(|_| corrupt())?;
+            masks.push(MaskSource::MapKey(residual, key.clone(), value));
+            Ok(Bound::Mask(masks.len() - 1))
+        }
+        Predicate::Contains(column, needle) => {
+            if schema_layer(file, *column)? != Layer::Payload {
+                return Err(StrataError::Unsupported {
+                    what: format!("contains on column {column}"),
+                });
+            }
+            if needle.len() > MAX_NEEDLE {
+                return Err(StrataError::Unsupported {
+                    what: format!("needle of {} bytes on column {column}", needle.len()),
+                });
+            }
+            masks.push(MaskSource::Contains(*column, needle.clone()));
+            Ok(Bound::Mask(masks.len() - 1))
+        }
     }
 }
 
@@ -277,18 +365,20 @@ fn column_of(columns: &[Option<ArrayRef>], column: usize) -> Result<&ArrayRef> {
 }
 
 /// Evaluates `b` over `rows` rows. `columns` is indexed by directory id and holds the decoded
-/// rows of every column `b` references. A row is selected only where the mask is valid and
-/// true: a null is not a match.
+/// rows of every column `b` references; `masks` holds the masks of the [`Bound::Mask`] leaves,
+/// in the order of [`bind`]. A row is selected only where the mask is valid and true: a null is
+/// not a match.
 pub(crate) fn evaluate(
     b: &Bound,
     columns: &[Option<ArrayRef>],
+    masks: &[BooleanArray],
     rows: usize,
 ) -> Result<BooleanArray> {
     match b {
         Bound::And(terms) => {
             let mut acc = BooleanArray::from(vec![true; rows]);
             for term in terms {
-                let mask = evaluate(term, columns, rows)?;
+                let mask = evaluate(term, columns, masks, rows)?;
                 acc = and_kleene(&acc, &mask)?;
             }
             Ok(acc)
@@ -296,12 +386,18 @@ pub(crate) fn evaluate(
         Bound::Or(terms) => {
             let mut acc = BooleanArray::from(vec![false; rows]);
             for term in terms {
-                let mask = evaluate(term, columns, rows)?;
+                let mask = evaluate(term, columns, masks, rows)?;
                 acc = or_kleene(&acc, &mask)?;
             }
             Ok(acc)
         }
-        Bound::Not(inner) => Ok(not(&evaluate(inner, columns, rows)?)?),
+        Bound::Not(inner) => Ok(not(&evaluate(inner, columns, masks, rows)?)?),
+        Bound::Mask(index) => masks
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("internal: missing mask {index}"),
+            }),
         Bound::Cmp(column, op, lit) => {
             let values = column_of(columns, *column)?;
             let array: &dyn Array = values.as_ref();
@@ -325,6 +421,73 @@ pub(crate) fn evaluate(
             Ok(is_not_null(array)?)
         }
     }
+}
+
+/// The mask of `MapKeyEq(.., key, lit)` over the rows of a map array `map`, which is a map
+/// column or the residual of a shredded one. A row is NULL when its map is null, when `lit` is
+/// null, or when `key` does not occur exactly once in it with a non-null value. Otherwise the
+/// row is `value == lit`.
+pub(crate) fn map_key_mask(map: &dyn Array, key: &str, lit: &dyn Array) -> Result<BooleanArray> {
+    let corrupt = || StrataError::Schema {
+        reason: "internal: map of a key predicate".to_string(),
+    };
+    let map = map
+        .as_any()
+        .downcast_ref::<MapArray>()
+        .ok_or_else(corrupt)?;
+    let entries = map.entries();
+    let keys = entries
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(corrupt)?;
+    let values = entries
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(corrupt)?;
+    let lit = lit
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(corrupt)?;
+    let literal: Option<&str> = if lit.len() == 1 && lit.is_valid(0) {
+        Some(lit.value(0))
+    } else {
+        None
+    };
+    let offsets = map.value_offsets();
+    let bound = |row: usize| -> Result<usize> {
+        offsets
+            .get(row)
+            .and_then(|offset| usize::try_from(*offset).ok())
+            .ok_or_else(corrupt)
+    };
+    let mut out: Vec<Option<bool>> = Vec::with_capacity(map.len());
+    for row in 0..map.len() {
+        let Some(literal) = literal else {
+            out.push(None);
+            continue;
+        };
+        if map.is_null(row) {
+            out.push(None);
+            continue;
+        }
+        let (start, end) = (bound(row)?, bound(row + 1)?);
+        let mut count = 0usize;
+        let mut found = 0usize;
+        for i in start..end {
+            if keys.is_valid(i) && keys.value(i) == key {
+                count += 1;
+                found = i;
+            }
+        }
+        let value = match count {
+            1 if values.is_valid(found) => Some(values.value(found) == literal),
+            _ => None,
+        };
+        out.push(value);
+    }
+    Ok(BooleanArray::from(out))
 }
 
 /// The conjuncts of `b`: the terms of `b` when it is an `And`, flattened through nested `And`s,
@@ -391,6 +554,7 @@ pub(crate) fn bound_columns(b: &Bound) -> Vec<usize> {
             Bound::Cmp(column, _, _) | Bound::IsNull(column) | Bound::IsNotNull(column) => {
                 out.insert(*column);
             }
+            Bound::Mask(_) => {}
         }
     }
     let mut columns = BTreeSet::new();
@@ -429,7 +593,7 @@ pub(crate) fn matching_codes(
     }
     let mut keep = BooleanArray::from(vec![true; n]);
     for term in terms {
-        let mask = evaluate(term, &columns, n)?;
+        let mask = evaluate(term, &columns, &[], n)?;
         keep = and_kleene(&keep, &mask)?;
     }
     let mut codes = BTreeSet::new();
@@ -582,7 +746,7 @@ fn conjunct_may_match(
         if let Some(slot) = columns.get_mut(column) {
             *slot = Some(row);
         }
-        let mask = evaluate(conjunct, &columns, 1)?;
+        let mask = evaluate(conjunct, &columns, &[], 1)?;
         return Ok(mask.is_valid(0) && mask.value(0));
     }
     match conjunct {

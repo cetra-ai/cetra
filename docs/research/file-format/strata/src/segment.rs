@@ -103,6 +103,9 @@ pub struct SegmentRef {
     pub len: u32,
 }
 
+/// Segments to fetch, with the kind each one is decoded as.
+pub(crate) type Segments = Vec<(SegmentRef, Kind)>;
+
 /// Appends one segment to `out` and returns its reference.
 ///
 /// The body is compressed with `codec` when `prefer` is [`Codec::Zstd`] and the result is

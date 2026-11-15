@@ -12,7 +12,12 @@ mod trigram;
 mod varint;
 mod write;
 
-pub(crate) use read::read_payload_column;
+pub(crate) use header::PayloadHeader;
+pub(crate) use read::{
+    build_values, decode_frames, decode_header, frame_segments, ids_of, read_header,
+    read_payload_column, refs_segments,
+};
+pub(crate) use search::payload_contains;
 pub use write::PayloadStats;
 pub(crate) use write::{is_payload, write_payload_column};
 

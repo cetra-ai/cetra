@@ -473,12 +473,12 @@ Returning a `Vec` instead of a stream is a prototype simplification; M5 wraps it
 **Waves.** A **wave** is one `try_join_all` batch of requests. `IoStats` counts waves, requests and bytes. Metadata already cached costs no request and no wave.
 
 **`scan`, wave by wave:**
-1. **Metadata.** Fetch, not yet cached: the block-table pages covering the requested row ranges (all pages of a column for a full scan) for every predicate and projection column; their dictionaries; the payload headers of the payload columns involved; and, for `Contains`, the filters segment.
-2. **Filter.** Zones prune chunks, and dictionary predicates become code sets. Fetch the surviving chunks of the predicate columns, and evaluate them to a row mask. For `Contains`, also fetch the candidate frames and the needed edge groups.
+1. **Metadata.** Fetch, not yet cached: the block-table pages covering the requested row ranges (all pages of a column for a full scan) for every predicate and projection column; their dictionaries; the payload headers of the payload columns involved; the residuals of `MapKeyEq` masks; and, for `Contains`, the filters segment.
+2. **Filter.** Zones prune chunks, and dictionary predicates become code sets. Fetch the surviving chunks of the predicate columns, and evaluate them to a row mask. `MapKeyEq` on a promoted key is a plain comparison on its child column; other `MapKeyEq` terms are masks over the residual.
 3. **Project.** Fetch the projection's narrow chunks that hold a selected row, plus the refs pages covering the selected rows.
 4. **Frames.** Fetch the frames the selected rows reference that are not already loaded.
 
-Waves with nothing to fetch are skipped. A cold predicate scan therefore takes at most 4 waves after open.
+Waves with nothing to fetch are skipped. Without `Contains`, a cold scan therefore takes at most 4 waves after open. Each `Contains` term adds up to 4 waves of its own, before the filter wave: its filters, refs pages, candidate frames and edge groups, as `payload_contains` reads them.
 
 **Output.** One batch per chunk-aligned range of up to 8,192 rows. Columns use the file schema's types (Utf8, not Utf8View); the DataFusion layer converts (S8).
 
@@ -496,7 +496,7 @@ Waves with nothing to fetch are skipped. A cold predicate scan therefore takes a
 | W2 | Decode the sort-key chunks to get the exact row ranges. Fetch the projected narrow chunks overlapping those ranges, plus the refs pages covering them. |
 | W3 | the frames |
 
-`lookup_scan` drives this sequence. So a single-trace lookup takes 4 waves cold, and 2 waves (W2, W3) when the metadata is already cached, since W1's sort-key chunk is then the only fetch left and is merged into W2.
+`lookup_scan` drives this sequence, as M4.3 sets it out. Cold, a single-trace lookup takes 3 waves (W1, W2, W3) when a payload column is projected, and 2 (W1, W2) when none is: W3 is skipped. When the metadata is already cached, W1 holds only the candidate sort-key chunks, the narrow chunks overlapping the candidate span and the refs pages of its rows, so the lookup takes 2 waves with a payload column (W1, then the frames) and 1 without. Absent keys that the sort-key filter or the zones rule out cost no wave at all.
 
 The Parquet baseline is measured with the same counting store (`bench/src/counting.rs`), so its waves and bytes come from the same instrument.
 

@@ -19,7 +19,7 @@ use super::{EDGE, EDGE_ENTRY_LEN, EDGE_GROUP_CHUNKS, FILTER_MIN_BITS, MAX_NEEDLE
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::format::Cursor;
-use crate::hot::{DirectoryRecord, Layer};
+use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::segment::{Kind, SegmentRef};
 
@@ -198,24 +198,32 @@ pub(crate) fn decode_edge_group(bytes: &[u8], offset: u64, n: usize) -> Result<V
 }
 
 /// Result of a substring search over one payload column.
-#[allow(dead_code)] // called by scan from M4 on
 pub(crate) struct ContainsResult {
     /// One flag per row: whether its value contains the needle. Null rows are false.
     pub rows: Vec<bool>,
     /// Frames whose body was decoded.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub frames_read: u32,
     /// Edge groups that were read.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub edge_groups_read: u32,
 }
 
-/// Finds the rows of a payload column whose value contains `needle`. Only the frames whose
-/// filters can hold the needle are read, and only the edge groups of the boundaries they need.
-#[allow(dead_code)] // called by scan from M4 on
+/// Finds the rows of payload column `column` whose value contains `needle`. Only the frames
+/// whose filters can hold the needle are read, and only the edge groups of the boundaries they
+/// need. It is four waves at most: the filters, the refs pages, the candidate frames and the
+/// edge groups.
 pub(crate) async fn payload_contains(
     file: &StrataFile,
-    record: &DirectoryRecord,
+    column: usize,
     needle: &[u8],
 ) -> Result<ContainsResult> {
+    let record = file
+        .directory()
+        .get(column)
+        .ok_or_else(|| StrataError::Schema {
+            reason: format!("no column {column}"),
+        })?;
     if record.layer != Layer::Payload {
         return Err(StrataError::Unsupported {
             what: "contains on a non-payload column".to_string(),
@@ -232,7 +240,7 @@ pub(crate) async fn payload_contains(
         offset: at,
     };
 
-    let header = read_header(file, record).await?;
+    let header = read_header(file, column).await?;
     if header.filters_len == 0 {
         return Err(StrataError::Corrupt {
             what: "payload filters",
@@ -602,9 +610,7 @@ mod tests {
 
     /// Searches column 1 of `file` for `needle`.
     async fn contains(file: &StrataFile, needle: &[u8]) -> ContainsResult {
-        payload_contains(file, &file.directory()[1], needle)
-            .await
-            .unwrap()
+        payload_contains(file, 1, needle).await.unwrap()
     }
 
     /// Config that stores every Utf8 or Binary column with the payload layer.
@@ -930,7 +936,7 @@ mod tests {
         let (file, _) = write_and_open(&batch, payload_config()).await;
         let long = vec![b'a'; MAX_NEEDLE + 1];
         assert!(matches!(
-            payload_contains(&file, &file.directory()[1], &long).await,
+            payload_contains(&file, 1, &long).await,
             Err(StrataError::Unsupported { .. })
         ));
         let empty = contains(&file, b"").await;
@@ -939,7 +945,7 @@ mod tests {
         // Column 0 is narrow.
         assert_eq!(file.directory()[0].layer, Layer::Narrow);
         assert!(matches!(
-            payload_contains(&file, &file.directory()[0], b"ab").await,
+            payload_contains(&file, 0, b"ab").await,
             Err(StrataError::Unsupported { .. })
         ));
     }
@@ -1080,7 +1086,7 @@ mod tests {
         let (file, _) = write_and_open(&batch, Config::default()).await;
         let record = &file.directory()[1];
         assert_eq!(record.layer, Layer::Payload);
-        let header = read_header(&file, record).await.unwrap();
+        let header = read_header(&file, 1).await.unwrap();
         assert!(header.n_chunks > 1_024, "{} chunks", header.n_chunks);
         let bytes = as_bytes(&column);
 
@@ -1117,10 +1123,13 @@ mod tests {
             needles.push(value[start..start + 16].to_vec());
         }
 
+        let mut edge_groups_read = 0;
         for needle in &needles {
             let got = contains(&file, needle).await;
             assert_eq!(got.rows, brute(&bytes, needle), "needle {needle:?}");
+            edge_groups_read += got.edge_groups_read;
         }
+        assert!(edge_groups_read > 0, "no needle read an edge group");
     }
 
     #[tokio::test]

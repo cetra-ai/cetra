@@ -20,6 +20,7 @@ use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
 use crate::io::{IoStats, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
+use crate::payload::{PayloadHeader, decode_header};
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -127,14 +128,28 @@ fn check_map_layout(hot: &HotTail, hot_offset: u64) -> Result<()> {
     Ok(())
 }
 
-/// One column of a metadata wave: its directory record, its page references, and the
-/// positions of its page bodies and dictionary body in the wave's segment list.
-struct MetaItem<'a> {
-    column: usize,
-    record: &'a DirectoryRecord,
-    pages: Vec<PageRef>,
-    pages_range: Range<usize>,
-    dict_at: Option<usize>,
+/// The items of one metadata wave, and where each item's bodies sit in the wave's segments.
+#[derive(Default)]
+pub(crate) struct MetadataPlan {
+    /// A column with block-table pages: its directory id, its pages, and the positions of its
+    /// page bodies in the wave.
+    pub entries: Vec<(usize, Vec<PageRef>, Range<usize>)>,
+    /// A column with a dictionary, and the position of its body in the wave.
+    pub dicts: Vec<(usize, usize)>,
+    /// A payload column, and the position of its header body in the wave.
+    pub headers: Vec<(usize, usize)>,
+    /// A column with no dictionary, which caches `None`.
+    pub no_dict: Vec<usize>,
+}
+
+impl MetadataPlan {
+    /// Whether the wave has nothing to load.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+            && self.dicts.is_empty()
+            && self.headers.is_empty()
+            && self.no_dict.is_empty()
+    }
 }
 
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
@@ -158,6 +173,8 @@ pub struct StrataFile {
     blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
     /// Dictionaries of each narrow column, read on first use. `None` for a column without one.
     dicts: Mutex<HashMap<usize, Option<Arc<Dictionary>>>>,
+    /// Payload headers of each payload column, read on first use, by column id.
+    payload_headers: Mutex<HashMap<usize, Arc<PayloadHeader>>>,
     /// Ranged GET requests issued by `fetch`.
     requests: AtomicU64,
     /// Bytes fetched by `fetch`.
@@ -355,6 +372,7 @@ impl StrataFile {
             key_filters: Mutex::new(HashMap::new()),
             blocks: Mutex::new(HashMap::new()),
             dicts: Mutex::new(HashMap::new()),
+            payload_headers: Mutex::new(HashMap::new()),
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
@@ -522,17 +540,32 @@ impl StrataFile {
         Ok(cached.unwrap_or_else(|| Arc::new(Vec::new())))
     }
 
-    /// Loads into the caches the block entries and dictionaries of `columns` (directory ids)
-    /// that are not cached yet. The pages and dictionaries of all of them are one `fetch`, so
-    /// the call is one wave, or none when nothing is left to read. Payload and map-parent
-    /// columns are skipped.
+    /// Loads into the caches the block entries, dictionaries and payload headers of `columns`
+    /// (directory ids) that are not cached yet, with one `fetch` for all of them. Map parents
+    /// are skipped. The call is one wave, or none when nothing is left to read.
     pub(crate) async fn load_metadata(&self, columns: &[usize], kind: ScanKind) -> Result<()> {
+        let (segments, plan) = self.metadata_segments(columns)?;
+        if plan.is_empty() {
+            return Ok(());
+        }
+        let bodies = self.fetch(&segments, kind).await?;
+        self.store_metadata(plan, &bodies)
+    }
+
+    /// The segments that loading `columns` reads, and where each item sits in them. Nothing is
+    /// read here. A column that is already cached, and a map parent, is left out.
+    pub(crate) fn metadata_segments(
+        &self,
+        columns: &[usize],
+    ) -> Result<(Vec<(SegmentRef, Kind)>, MetadataPlan)> {
         let mut segments: Vec<(SegmentRef, Kind)> = Vec::new();
-        let mut items: Vec<MetaItem<'_>> = Vec::new();
+        let mut plan = MetadataPlan::default();
+        let mut seen: Vec<usize> = Vec::new();
         for &column in columns {
-            if items.iter().any(|item| item.column == column) {
+            if seen.contains(&column) {
                 continue;
             }
+            seen.push(column);
             let record = self
                 .hot
                 .directory
@@ -540,90 +573,128 @@ impl StrataFile {
                 .ok_or_else(|| StrataError::Schema {
                     reason: format!("no column {column}"),
                 })?;
-            if matches!(record.layer, Layer::Payload | Layer::MapParent) {
-                continue;
-            }
-            let cached = self
-                .blocks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&column);
-            if cached {
-                continue;
-            }
-
-            let pages = self.hot.pages_of(record)?;
-            let pages_start = segments.len();
-            for page in &pages {
-                let segment = SegmentRef {
-                    offset: page.offset,
-                    len: page.len,
-                };
-                segments.push((segment, Kind::BlockTablePage));
-            }
-            let pages_range = pages_start..segments.len();
-
-            // Bit 0 of the flags says the column has a dictionary, and the offset must agree.
-            // A column with no chunks has no dictionary read.
-            let dict_at = if record.n_chunks == 0 {
-                None
-            } else {
-                match (record.flags & 1 != 0, record.dict_offset != 0) {
-                    (true, true) => {
+            match record.layer {
+                Layer::MapParent => {}
+                Layer::Payload => {
+                    let cached = self
+                        .payload_headers
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .contains_key(&column);
+                    if !cached {
                         let segment = SegmentRef {
-                            offset: record.dict_offset,
-                            len: record.dict_len,
+                            offset: record.payload_offset,
+                            len: record.payload_len,
                         };
-                        segments.push((segment, Kind::Dictionary));
-                        Some(segments.len() - 1)
-                    }
-                    (false, false) => None,
-                    _ => {
-                        return Err(StrataError::Corrupt {
-                            what: "dictionary flag",
-                            offset: record.dict_offset,
-                        });
+                        segments.push((segment, Kind::PayloadHeader));
+                        plan.headers.push((column, segments.len() - 1));
                     }
                 }
-            };
-            items.push(MetaItem {
-                column,
-                record,
-                pages,
-                pages_range,
-                dict_at,
-            });
-        }
-        if items.is_empty() {
-            return Ok(());
-        }
+                _ => {
+                    let cached = self
+                        .blocks
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .contains_key(&column);
+                    if cached {
+                        continue;
+                    }
+                    let pages = self.hot.pages_of(record)?;
+                    let pages_start = segments.len();
+                    for page in &pages {
+                        let segment = SegmentRef {
+                            offset: page.offset,
+                            len: page.len,
+                        };
+                        segments.push((segment, Kind::BlockTablePage));
+                    }
+                    let pages_range = pages_start..segments.len();
 
-        let bodies = self.fetch(&segments, kind).await?;
-        let mut loaded = Vec::with_capacity(items.len());
-        for item in &items {
-            let corrupt = || StrataError::Corrupt {
-                what: "segment range",
-                offset: u64::from(item.record.pages_offset),
-            };
-            let page_bodies = bodies.get(item.pages_range.clone()).ok_or_else(corrupt)?;
-            let entries = self.decode_pages(item.record, &item.pages, page_bodies)?;
-            let dict = match item.dict_at {
-                Some(at) => {
-                    let body = bodies.get(at).ok_or_else(corrupt)?;
-                    Some(Arc::new(Dictionary::decode(body, item.record.dict_offset)?))
+                    // Bit 0 of the flags says the column has a dictionary, and the offset must
+                    // agree. A column with no chunks has no dictionary read.
+                    if record.n_chunks == 0 {
+                        plan.no_dict.push(column);
+                    } else {
+                        match (record.flags & 1 != 0, record.dict_offset != 0) {
+                            (true, true) => {
+                                let segment = SegmentRef {
+                                    offset: record.dict_offset,
+                                    len: record.dict_len,
+                                };
+                                segments.push((segment, Kind::Dictionary));
+                                plan.dicts.push((column, segments.len() - 1));
+                            }
+                            (false, false) => plan.no_dict.push(column),
+                            _ => {
+                                return Err(StrataError::Corrupt {
+                                    what: "dictionary flag",
+                                    offset: record.dict_offset,
+                                });
+                            }
+                        }
+                    }
+                    plan.entries.push((column, pages, pages_range));
                 }
-                None => None,
-            };
-            loaded.push((item.column, entries, dict));
+            }
+        }
+        Ok((segments, plan))
+    }
+
+    /// Decodes the bodies of one metadata wave, which `metadata_segments` described with `plan`,
+    /// and caches the results. `bodies` are the bodies of the segments of that wave, in order.
+    pub(crate) fn store_metadata(&self, plan: MetadataPlan, bodies: &[Vec<u8>]) -> Result<()> {
+        let corrupt = || StrataError::Corrupt {
+            what: "segment range",
+            offset: self.postscript.hot_offset,
+        };
+        let mut entries = Vec::with_capacity(plan.entries.len());
+        for (column, pages, range) in &plan.entries {
+            let record = self.hot.directory.get(*column).ok_or_else(corrupt)?;
+            let page_bodies = bodies.get(range.clone()).ok_or_else(corrupt)?;
+            entries.push((*column, self.decode_pages(record, pages, page_bodies)?));
+        }
+        let mut dicts = Vec::with_capacity(plan.dicts.len());
+        for &(column, at) in &plan.dicts {
+            let record = self.hot.directory.get(column).ok_or_else(corrupt)?;
+            let body = bodies.get(at).ok_or_else(corrupt)?;
+            let dict = Dictionary::decode(body, record.dict_offset)?;
+            dicts.push((column, Arc::new(dict)));
+        }
+        let mut headers = Vec::with_capacity(plan.headers.len());
+        for &(column, at) in &plan.headers {
+            let record = self.hot.directory.get(column).ok_or_else(corrupt)?;
+            let body = bodies.get(at).ok_or_else(corrupt)?;
+            headers.push((column, Arc::new(decode_header(self, record, body)?)));
         }
 
         let mut blocks = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut dicts = self.dicts.lock().unwrap_or_else(PoisonError::into_inner);
-        for (column, entries, dict) in loaded {
+        let mut cached_dicts = self.dicts.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut cached_headers = self
+            .payload_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (column, entries) in entries {
             blocks.insert(column, Arc::new(entries));
-            dicts.insert(column, dict);
+        }
+        for column in plan.no_dict {
+            cached_dicts.insert(column, None);
+        }
+        for (column, dict) in dicts {
+            cached_dicts.insert(column, Some(dict));
+        }
+        for (column, header) in headers {
+            cached_headers.insert(column, header);
         }
         Ok(())
+    }
+
+    /// The payload header of column `column`, if it is cached.
+    pub(crate) fn cached_header(&self, column: usize) -> Option<Arc<PayloadHeader>> {
+        self.payload_headers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&column)
+            .cloned()
     }
 
     /// The dictionary of column `column`, or `None` for a column without one. It is read with
@@ -753,12 +824,11 @@ impl StrataFile {
         Ok(filter.may_contain(value))
     }
 
-    /// The row ranges whose first sort-key column equals `key`, in row order, with adjacent
-    /// rows merged. Only the sort-key chunks whose zones may hold `key` are read.
-    ///
-    /// The first sort-key column must be FixedSizeBinary of 1 to 16 bytes, and `key` must have
-    /// that width. Otherwise this is `Unsupported`.
-    pub async fn lookup(&self, key: &[u8]) -> Result<Vec<Range<u32>>> {
+    /// The sort-key chunks that may hold `key`, in row order, or `None` when the sort-key filter
+    /// or the zones rule `key` out, so no read is needed. The first sort-key column must be
+    /// FixedSizeBinary of 1 to 16 bytes, and `key` must have that width; otherwise this is
+    /// `Unsupported`.
+    pub(crate) fn lookup_candidates(&self, key: &[u8]) -> Result<Option<Vec<BlockEntry>>> {
         let unsupported = || StrataError::Unsupported {
             what: "lookup on this sort key".to_string(),
         };
@@ -771,14 +841,13 @@ impl StrataFile {
         if !matches!(width, Some(w) if (1..=16).contains(&w) && w == key.len()) {
             return Err(unsupported());
         }
-
         if self
             .sort_key_filter
             .as_ref()
             .and_then(|filter| filter.may_contain(key))
             == Some(false)
         {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let candidates: Vec<BlockEntry> = self
             .sort_key_entries
@@ -786,36 +855,34 @@ impl StrataFile {
             .filter(|entry| zone_may_hold(entry, key))
             .copied()
             .collect();
+        Ok((!candidates.is_empty()).then_some(candidates))
+    }
+
+    /// The index of the first sort-key column, or `None` when the file has no sort key.
+    pub(crate) fn sort_key_column(&self) -> Option<usize> {
+        self.sort_key
+    }
+
+    /// The row ranges of `key` in the candidate chunks, with adjacent rows merged. `bodies` are
+    /// the chunk bodies in candidate order, `None` for a chunk with no segment.
+    pub(crate) fn rows_of_key(
+        &self,
+        candidates: &[BlockEntry],
+        bodies: &[Option<Vec<u8>>],
+        key: &[u8],
+    ) -> Result<Vec<Range<u32>>> {
+        let sort = self.sort_key.ok_or_else(|| StrataError::Unsupported {
+            what: "lookup on this sort key".to_string(),
+        })?;
+        let field = self.field_of(sort)?;
         let hot_offset = self.postscript.hot_offset;
         let corrupt = || StrataError::Corrupt {
             what: "sort-key block table",
             offset: hot_offset,
         };
-
-        let segments: Vec<(SegmentRef, Kind)> = candidates
-            .iter()
-            .filter(|entry| entry.segment_len > 0)
-            .map(|entry| {
-                let segment = SegmentRef {
-                    offset: entry.segment_offset,
-                    len: entry.segment_len,
-                };
-                (segment, Kind::NarrowChunk)
-            })
-            .collect();
-        let mut fetched = self.fetch(&segments, ScanKind::Point).await?.into_iter();
-        let mut bodies: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidates.len());
-        for entry in &candidates {
-            bodies.push(if entry.segment_len == 0 {
-                None
-            } else {
-                Some(fetched.next().ok_or_else(corrupt)?)
-            });
-        }
-
         let mut rows = Vec::new();
-        for (entry, body) in candidates.iter().zip(&bodies) {
-            let array = decode_chunk(entry, body.as_deref(), field.as_ref(), None)?;
+        for (entry, body) in candidates.iter().zip(bodies) {
+            let array = decode_chunk(entry, body.as_deref(), &field, None)?;
             let column = array
                 .as_any()
                 .downcast_ref::<FixedSizeBinaryArray>()
@@ -834,6 +901,42 @@ impl StrataFile {
             }
         }
         Ok(merge_rows(&rows))
+    }
+
+    /// The row ranges whose first sort-key column equals `key`, in row order, with adjacent
+    /// rows merged. Only the sort-key chunks whose zones may hold `key` are read.
+    ///
+    /// The first sort-key column must be FixedSizeBinary of 1 to 16 bytes, and `key` must have
+    /// that width. Otherwise this is `Unsupported`.
+    pub async fn lookup(&self, key: &[u8]) -> Result<Vec<Range<u32>>> {
+        let Some(candidates) = self.lookup_candidates(key)? else {
+            return Ok(Vec::new());
+        };
+        let hot_offset = self.postscript.hot_offset;
+        let segments: Vec<(SegmentRef, Kind)> = candidates
+            .iter()
+            .filter(|entry| entry.segment_len > 0)
+            .map(|entry| {
+                let segment = SegmentRef {
+                    offset: entry.segment_offset,
+                    len: entry.segment_len,
+                };
+                (segment, Kind::NarrowChunk)
+            })
+            .collect();
+        let mut fetched = self.fetch(&segments, ScanKind::Point).await?.into_iter();
+        let mut bodies: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidates.len());
+        for entry in &candidates {
+            bodies.push(if entry.segment_len == 0 {
+                None
+            } else {
+                Some(fetched.next().ok_or_else(|| StrataError::Corrupt {
+                    what: "sort-key block table",
+                    offset: hot_offset,
+                })?)
+            });
+        }
+        self.rows_of_key(&candidates, &bodies, key)
     }
 }
 

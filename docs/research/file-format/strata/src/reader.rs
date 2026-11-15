@@ -34,7 +34,7 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
             reason: format!("no column {column}"),
         })?;
     match record.layer {
-        Layer::Payload => read_payload_column(file, record, field).await,
+        Layer::Payload => read_payload_column(file, column, record, field).await,
         Layer::Narrow => read_narrow(file, column, field).await,
         Layer::MapParent => read_shredded(file, column, field).await,
         Layer::MapChild | Layer::Residual => Err(StrataError::Unsupported {

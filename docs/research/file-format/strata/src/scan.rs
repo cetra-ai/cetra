@@ -1,16 +1,19 @@
-//! Scans of narrow columns: a predicate pruned by zones and dictionaries, late materialisation
-//! of the projection, and a limit (design S7 § scan).
+//! Scans and point lookups over a file: a predicate pruned by zones and dictionaries, late
+//! materialisation of the projection (narrow, payload and map columns), `Contains`, `MapKeyEq`,
+//! a limit, and the lookup of one sort key (design S7 § scan and § lookup_scan).
 //!
-//! A scan runs in waves. The first wave loads the metadata of every column it reads. The filter
-//! wave fetches the surviving chunks of the predicate columns. The projection wave fetches the
-//! projected chunks that hold a selected row. Each wave is one `fetch`, so it is counted once.
+//! A scan runs in waves. The first wave loads the metadata of every column it reads: block
+//! tables, dictionaries and payload headers. Each `Contains` term then takes four waves of its
+//! own. The filter wave fetches the surviving chunks of the predicate columns. The projection
+//! fetches the narrow chunks that hold a selected row, then the refs pages and the frames of the
+//! payload columns. Each wave is one `fetch`, so it is counted once.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, RecordBatch, RecordBatchOptions, UInt32Array, new_empty_array,
+    Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array, new_empty_array,
 };
 use arrow::compute::{concat, take};
 use arrow::datatypes::{Field, SchemaRef};
@@ -20,11 +23,16 @@ use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::io::ScanKind;
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk};
-use crate::predicate::{
-    Bound, Predicate, bind, bound_columns, chunk_may_match, evaluate, matching_codes,
-    pruned_columns,
+use crate::payload::{
+    PayloadHeader, build_values, decode_frames, frame_segments, ids_of, payload_contains,
+    read_header, refs_segments,
 };
-use crate::segment::{Kind, SegmentRef};
+use crate::predicate::{
+    Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
+    map_key_mask, matching_codes, pruned_columns,
+};
+use crate::segment::{Kind, SegmentRef, Segments};
+use crate::shred::unshred;
 
 /// Rows per output batch.
 const BATCH_ROWS: usize = 8_192;
@@ -47,11 +55,44 @@ pub struct ScanRequest {
 /// The decoded chunks read so far, by (directory id, chunk index).
 type Decoded = HashMap<(usize, usize), ArrayRef>;
 
-/// What a scan needs of one column: its field, its dictionary and its block-table entries.
+/// What a scan needs of one chunked column: its field, its dictionary and its block-table
+/// entries.
 struct ColumnInfo {
     field: Field,
     dict: Option<Arc<Dictionary>>,
     entries: Arc<Vec<BlockEntry>>,
+}
+
+/// The masks of a bound predicate: the source of each `Mask` leaf, and for each `Contains`
+/// source the full-column mask once it is computed.
+struct Masks {
+    sources: Vec<MaskSource>,
+    full: Vec<Option<BooleanArray>>,
+}
+
+/// What the filter wave evaluates: the bound predicate, its masks, and the columns it reads.
+struct FilterPlan<'a> {
+    bound: &'a Bound,
+    masks: &'a Masks,
+    columns: &'a [usize],
+}
+
+/// One payload column of a read: its header, and what its refs pages and frames hold.
+struct PayloadRead {
+    column: usize,
+    /// The file offset of the column's payload header, used in errors.
+    at: u64,
+    header: Arc<PayloadHeader>,
+    /// Indexes into `header.ref_pages` of the pages that were fetched, in order.
+    pages: Vec<usize>,
+    /// Segments of `pages` in the wave that fetched them.
+    n_pages: usize,
+    /// The chunk ids of the rows read, `None` for a null row.
+    ids: Vec<Option<Vec<u32>>>,
+    /// Indexes into `header.frames` of the frames that were fetched, in order.
+    frames: Vec<usize>,
+    /// Segments of `frames` in the wave that fetched them.
+    n_frames: usize,
 }
 
 /// Removes `remove` from `ranges`, which are sorted and disjoint. The result is sorted,
@@ -125,6 +166,21 @@ fn decoded_chunk(decoded: &Decoded, column: usize, index: usize) -> Result<&Arra
         })
 }
 
+/// The information of a chunked column, which every wave builds before it is used.
+fn info_of(infos: &HashMap<usize, ColumnInfo>, column: usize) -> Result<&ColumnInfo> {
+    infos.get(&column).ok_or_else(|| StrataError::Schema {
+        reason: format!("internal: no info for column {column}"),
+    })
+}
+
+/// A directory id that a map layout names, as an index.
+fn index_of(id: u32) -> Result<usize> {
+    usize::try_from(id).map_err(|_| StrataError::Corrupt {
+        what: "map layout",
+        offset: u64::from(id),
+    })
+}
+
 /// The rows of the decoded `column` at `rows` (ascending, with each row in a chunk of `info`),
 /// as one array of the column's type.
 fn take_rows(
@@ -171,19 +227,250 @@ fn take_rows(
     }
 }
 
+/// The rows of the (sorted, disjoint) ranges, in order.
+fn rows_in(ranges: &[Range<u32>]) -> Vec<u32> {
+    ranges.iter().flat_map(|range| range.clone()).collect()
+}
+
+/// The segments of the chunks of `candidates` that have one, in order.
+fn candidate_segments(candidates: &[BlockEntry]) -> Vec<(SegmentRef, Kind)> {
+    candidates
+        .iter()
+        .filter(|entry| entry.segment_len > 0)
+        .map(|entry| {
+            let segment = SegmentRef {
+                offset: entry.segment_offset,
+                len: entry.segment_len,
+            };
+            (segment, Kind::NarrowChunk)
+        })
+        .collect()
+}
+
+/// The fetched bodies of `candidates` in candidate order: `None` for a chunk with no segment.
+fn with_gaps(candidates: &[BlockEntry], bodies: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>> {
+    let mut fetched = bodies.into_iter();
+    let mut out = Vec::with_capacity(candidates.len());
+    for entry in candidates {
+        out.push(if entry.segment_len == 0 {
+            None
+        } else {
+            Some(fetched.next().ok_or_else(|| StrataError::Corrupt {
+                what: "segment range",
+                offset: entry.segment_offset,
+            })?)
+        });
+    }
+    Ok(out)
+}
+
+/// The rows of the candidate chunks from their first row to their end.
+fn span_of(candidates: &[BlockEntry]) -> Result<Range<u32>> {
+    let corrupt = || StrataError::Corrupt {
+        what: "sort-key block table",
+        offset: 0,
+    };
+    let first = candidates.first().ok_or_else(corrupt)?;
+    let last = candidates.last().ok_or_else(corrupt)?;
+    let end = last
+        .first_row
+        .checked_add(last.n_rows)
+        .ok_or_else(corrupt)?;
+    Ok(first.first_row..end)
+}
+
+/// Chunks of one `plan_chunks` call that wait for their segment bodies.
+type Pending = Vec<(usize, usize, BlockEntry)>;
+
+/// Plans the fetch of the chunks in `wanted` that are not decoded yet. Chunks with no segment
+/// are decoded into `decoded` at once. Returns the segments to fetch and, in the same order,
+/// the chunks that wait for their bodies.
+fn plan_chunks(
+    infos: &HashMap<usize, ColumnInfo>,
+    wanted: &BTreeSet<(usize, usize)>,
+    decoded: &mut Decoded,
+) -> Result<(Segments, Pending)> {
+    let mut segments = Vec::new();
+    let mut pending = Vec::new();
+    for &(column, index) in wanted {
+        if decoded.contains_key(&(column, index)) {
+            continue;
+        }
+        let info = info_of(infos, column)?;
+        let entry = *info.entries.get(index).ok_or_else(|| StrataError::Schema {
+            reason: "internal: missing chunk".to_string(),
+        })?;
+        if entry.segment_len > 0 {
+            let segment = SegmentRef {
+                offset: entry.segment_offset,
+                len: entry.segment_len,
+            };
+            segments.push((segment, Kind::NarrowChunk));
+            pending.push((column, index, entry));
+        } else {
+            let array = decode_chunk(&entry, None, &info.field, info.dict.as_deref())?;
+            decoded.insert((column, index), array);
+        }
+    }
+    Ok((segments, pending))
+}
+
+/// Decodes the fetched bodies of the chunks planned by [`plan_chunks`] into `decoded`.
+fn decode_chunks(
+    infos: &HashMap<usize, ColumnInfo>,
+    pending: Vec<(usize, usize, BlockEntry)>,
+    bodies: Vec<Vec<u8>>,
+    decoded: &mut Decoded,
+) -> Result<()> {
+    if bodies.len() != pending.len() {
+        return Err(StrataError::Corrupt {
+            what: "segment range",
+            offset: 0,
+        });
+    }
+    for ((column, index, entry), body) in pending.into_iter().zip(&bodies) {
+        let info = info_of(infos, column)?;
+        let array = decode_chunk(
+            &entry,
+            Some(body.as_slice()),
+            &info.field,
+            info.dict.as_deref(),
+        )?;
+        decoded.insert((column, index), array);
+    }
+    Ok(())
+}
+
+/// The directory ids of the narrow-layout columns that `projection` reads: the narrow columns
+/// themselves, and the children and residual of every projected map.
+fn narrow_reads(file: &StrataFile, projection: &[usize]) -> Result<BTreeSet<usize>> {
+    let mut out = BTreeSet::new();
+    for &column in projection {
+        match file.directory().get(column).map(|record| record.layer) {
+            Some(Layer::Narrow) => {
+                out.insert(column);
+            }
+            Some(Layer::MapParent) => {
+                let layout = layout_of(file, column)?;
+                out.insert(index_of(layout.residual)?);
+                for key in &layout.keys {
+                    out.insert(index_of(key.child)?);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Whether directory record `column` holds block-table chunks: a narrow column, a map child or
+/// a residual.
+fn is_chunked(file: &StrataFile, column: usize) -> bool {
+    matches!(
+        file.directory().get(column).map(|record| record.layer),
+        Some(Layer::Narrow | Layer::MapChild | Layer::Residual)
+    )
+}
+
+/// The projected payload columns, once each, in ascending order.
+fn payload_projection(file: &StrataFile, projection: &[usize]) -> Vec<usize> {
+    projection
+        .iter()
+        .copied()
+        .filter(|&column| {
+            file.directory()
+                .get(column)
+                .is_some_and(|record| record.layer == Layer::Payload)
+        })
+        .collect::<BTreeSet<usize>>()
+        .into_iter()
+        .collect()
+}
+
+/// Builds the output batches of `selection` (ascending rows) for `projection`. Narrow columns
+/// are taken from the decoded chunks, payload columns from their full-selection arrays, and a
+/// map is rebuilt from its children and residual.
+fn build_batches(
+    file: &StrataFile,
+    projection: &[usize],
+    selection: &[u32],
+    infos: &HashMap<usize, ColumnInfo>,
+    decoded: &Decoded,
+    payloads: &HashMap<usize, ArrayRef>,
+    output: &SchemaRef,
+) -> Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    for (index, batch_rows) in selection.chunks(BATCH_ROWS).enumerate() {
+        let start = index * BATCH_ROWS;
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(projection.len());
+        for &column in projection {
+            let layer = file.directory().get(column).map(|record| record.layer);
+            let array = match layer {
+                Some(Layer::Narrow) => {
+                    take_rows(decoded, info_of(infos, column)?, column, batch_rows)?
+                }
+                Some(Layer::Payload) => {
+                    let full = payloads.get(&column).ok_or_else(|| StrataError::Schema {
+                        reason: format!("internal: no values of column {column}"),
+                    })?;
+                    full.slice(start, batch_rows.len())
+                }
+                Some(Layer::MapParent) => {
+                    let layout = layout_of(file, column)?;
+                    let mut children = Vec::with_capacity(layout.keys.len());
+                    for key in &layout.keys {
+                        let child = index_of(key.child)?;
+                        children.push(take_rows(
+                            decoded,
+                            info_of(infos, child)?,
+                            child,
+                            batch_rows,
+                        )?);
+                    }
+                    let residual = index_of(layout.residual)?;
+                    let residual =
+                        take_rows(decoded, info_of(infos, residual)?, residual, batch_rows)?;
+                    let keys: Vec<Vec<u8>> =
+                        layout.keys.iter().map(|key| key.key.clone()).collect();
+                    let field = file.field_of(column)?;
+                    unshred(field.data_type(), &keys, &children, &residual)?
+                }
+                _ => {
+                    return Err(StrataError::Schema {
+                        reason: format!("internal: projection of column {column}"),
+                    });
+                }
+            };
+            columns.push(array);
+        }
+        let options = RecordBatchOptions::new().with_row_count(Some(batch_rows.len()));
+        batches.push(RecordBatch::try_new_with_options(
+            Arc::clone(output),
+            columns,
+            &options,
+        )?);
+    }
+    Ok(batches)
+}
+
 impl StrataFile {
     /// Rows of the file matching `req`, as record batches of at most 8,192 rows. The batches
     /// hold the projection, in output order, and the rows are in file order.
     ///
-    /// The scan takes at most four waves after the metadata is cached: the metadata, the filter,
-    /// and the projection. A wave with nothing to fetch makes no request. Scans of payload and
-    /// map columns, `Contains` and `MapKeyEq` are not yet supported (M4.3).
+    /// The scan takes one metadata wave, then four waves for each `Contains` term, then the
+    /// filter wave, then the projection: the narrow chunks, then for payload columns the refs
+    /// pages and the frames. A wave with nothing to fetch makes no request.
+    /// `MapKeyEq` and map or payload projections are supported; `Cmp`, `In`, `IsNull` and
+    /// `IsNotNull` take narrow columns only.
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
         // 1. Validate. Every error is found before any read.
         self.check_projection(&req.projection)?;
-        let bound = match &req.predicate {
-            Some(predicate) => Some(bind(predicate, self)?),
-            None => None,
+        let (bound, sources) = match &req.predicate {
+            Some(predicate) => {
+                let (bound, sources) = bind(predicate, self)?;
+                (Some(bound), sources)
+            }
+            None => (None, Vec::new()),
         };
         self.check_row_ranges(req.row_ranges.as_deref())?;
         let output: SchemaRef = Arc::new(self.schema().project(&req.projection)?);
@@ -191,20 +478,37 @@ impl StrataFile {
             return Ok(Vec::new());
         }
 
-        // 2. Metadata wave: the block tables and dictionaries of every column the scan reads.
+        // 2. Metadata wave: the block tables, dictionaries and payload headers that the scan
+        // reads, including the residuals of `MapKeyEq` masks and the payload of `Contains`.
         let predicate_columns = bound.as_ref().map(bound_columns).unwrap_or_default();
-        let mut all_columns: BTreeSet<usize> = predicate_columns.iter().copied().collect();
-        all_columns.extend(req.projection.iter().copied());
+        let mut filter_columns: BTreeSet<usize> = predicate_columns.iter().copied().collect();
+        let mut all_columns: BTreeSet<usize> = BTreeSet::new();
+        for source in &sources {
+            match source {
+                MaskSource::MapKey(residual, _, _) => {
+                    filter_columns.insert(*residual);
+                }
+                MaskSource::Contains(column, _) => {
+                    all_columns.insert(*column);
+                }
+            }
+        }
+        all_columns.extend(filter_columns.iter().copied());
+        all_columns.extend(narrow_reads(self, &req.projection)?);
+        all_columns.extend(payload_projection(self, &req.projection));
+        let filter_columns: Vec<usize> = filter_columns.into_iter().collect();
         let all_columns: Vec<usize> = all_columns.into_iter().collect();
         self.load_metadata(&all_columns, req.kind).await?;
         let mut infos: HashMap<usize, ColumnInfo> = HashMap::new();
         for &column in &all_columns {
-            let info = ColumnInfo {
-                field: self.field_of(column)?,
-                dict: self.dictionary(column).await?,
-                entries: self.block_entries(column).await?,
-            };
-            infos.insert(column, info);
+            if is_chunked(self, column) {
+                let info = ColumnInfo {
+                    field: self.field_of(column)?,
+                    dict: self.dictionary(column).await?,
+                    entries: self.block_entries(column).await?,
+                };
+                infos.insert(column, info);
+            }
         }
 
         // 3. Candidate rows, pruned by the zones and dictionaries of the predicate's columns.
@@ -222,9 +526,7 @@ impl StrataFile {
         };
         if let Some(b) = &bound {
             for column in pruned_columns(b) {
-                let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                    reason: format!("internal: no info for column {column}"),
-                })?;
+                let info = info_of(&infos, column)?;
                 let codes = matching_codes(b, column, info.dict.as_deref())?;
                 for entry in info.entries.iter() {
                     let may = chunk_may_match(
@@ -251,24 +553,38 @@ impl StrataFile {
             }
         }
 
-        // 4. Filter wave: the surviving chunks of the predicate columns, then the mask.
+        // 4. The masks of `Contains` terms, four waves each, computed before the filter wave.
+        let mut masks = Masks {
+            full: vec![None; sources.len()],
+            sources,
+        };
+        if bound.is_some() && !candidates.is_empty() {
+            for (index, source) in masks.sources.iter().enumerate() {
+                if let MaskSource::Contains(column, needle) = source {
+                    let result = payload_contains(self, *column, needle).await?;
+                    if let Some(slot) = masks.full.get_mut(index) {
+                        *slot = Some(BooleanArray::from(result.rows));
+                    }
+                }
+            }
+        }
+
+        // 5. Filter wave: the surviving chunks of the predicate columns, then the mask.
         let mut decoded: Decoded = HashMap::new();
         let mut selection: Vec<u32> = match &bound {
-            None => candidates.iter().flat_map(|range| range.clone()).collect(),
+            None => rows_in(&candidates),
             Some(b) => {
-                self.filter(
-                    b,
-                    &predicate_columns,
-                    &infos,
-                    &candidates,
-                    req.kind,
-                    &mut decoded,
-                )
-                .await?
+                let plan = FilterPlan {
+                    bound: b,
+                    masks: &masks,
+                    columns: &filter_columns,
+                };
+                self.filter(&plan, &infos, &candidates, req.kind, &mut decoded)
+                    .await?
             }
         };
 
-        // 5. Limit.
+        // 6. Limit.
         if let Some(limit) = req.limit {
             selection.truncate(limit);
         }
@@ -276,43 +592,164 @@ impl StrataFile {
             return Ok(Vec::new());
         }
 
-        // 6. Projection wave: the projected chunks that hold a selected row and are not decoded.
+        // 7. Projection: the narrow chunks, then the payload columns (two waves).
+        let narrow = narrow_reads(self, &req.projection)?;
         let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
-        for &column in &req.projection {
-            let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                reason: format!("internal: no info for column {column}"),
-            })?;
+        for &column in &narrow {
+            let info = info_of(&infos, column)?;
             for &row in &selection {
-                let index = chunk_of(&info.entries, row)?;
-                if !decoded.contains_key(&(column, index)) {
-                    wanted.insert((column, index));
-                }
+                wanted.insert((column, chunk_of(&info.entries, row)?));
             }
         }
         self.decode_wave(&infos, &wanted, req.kind, &mut decoded)
             .await?;
-
-        // Take the rows of each output batch.
-        let mut batches = Vec::new();
-        for batch_rows in selection.chunks(BATCH_ROWS) {
-            let mut columns: Vec<ArrayRef> = Vec::with_capacity(req.projection.len());
-            for &column in &req.projection {
-                let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                    reason: format!("internal: no info for column {column}"),
-                })?;
-                columns.push(take_rows(&decoded, info, column, batch_rows)?);
-            }
-            let options = RecordBatchOptions::new().with_row_count(Some(batch_rows.len()));
-            batches.push(RecordBatch::try_new_with_options(
-                Arc::clone(&output),
-                columns,
-                &options,
-            )?);
-        }
-        Ok(batches)
+        let payload = payload_projection(self, &req.projection);
+        let payloads = self.payload_values(&payload, &selection, req.kind).await?;
+        build_batches(
+            self,
+            &req.projection,
+            &selection,
+            &infos,
+            &decoded,
+            &payloads,
+            &output,
+        )
     }
 
-    /// Checks that every projected column is a narrow column of the file.
+    /// Rows whose first sort-key column equals `key`, with the projected columns. It runs in
+    /// waves, with the sort-key chunks of the first wave: cold (metadata not cached) it takes
+    /// two waves, or three with a payload column; warm, one or two. A key the sort-key filter or
+    /// the zones rule out costs no wave.
+    pub async fn lookup_scan(&self, key: &[u8], projection: &[usize]) -> Result<Vec<RecordBatch>> {
+        self.check_projection(projection)?;
+        let output: SchemaRef = Arc::new(self.schema().project(projection)?);
+        let Some(candidates) = self.lookup_candidates(key)? else {
+            return Ok(Vec::new());
+        };
+        let kind = ScanKind::Point;
+        let sort = self
+            .sort_key_column()
+            .ok_or_else(|| StrataError::Unsupported {
+                what: "lookup on this sort key".to_string(),
+            })?;
+        let span = span_of(&candidates)?;
+        let span_rows: Vec<u32> = (span.start..span.end).collect();
+        let narrow = narrow_reads(self, projection)?;
+        let payload = payload_projection(self, projection);
+        let mut meta_columns: BTreeSet<usize> = narrow.clone();
+        meta_columns.extend(payload.iter().copied());
+        let meta_columns: Vec<usize> = meta_columns.into_iter().collect();
+        let (meta_segments, meta_plan) = self.metadata_segments(&meta_columns)?;
+        let cold = !meta_plan.is_empty();
+        let narrow_vec: Vec<usize> = narrow.iter().copied().collect();
+
+        let mut decoded: Decoded = HashMap::new();
+        let mut infos: HashMap<usize, ColumnInfo>;
+        let exact: Vec<u32>;
+        let mut reads: Vec<PayloadRead>;
+
+        if cold {
+            // W1: the candidate sort-key chunks and the metadata, in one wave.
+            let cand_segments = candidate_segments(&candidates);
+            let n_cand = cand_segments.len();
+            let mut segments = cand_segments;
+            segments.extend(meta_segments);
+            let mut bodies = self.fetch(&segments, kind).await?;
+            let meta_bodies = bodies.split_off(n_cand);
+            self.store_metadata(meta_plan, &meta_bodies)?;
+            let cand_bodies = with_gaps(&candidates, bodies)?;
+            let exact_ranges = self.rows_of_key(&candidates, &cand_bodies, key)?;
+            exact = rows_in(&exact_ranges);
+            infos = HashMap::new();
+            for &column in &narrow_vec {
+                infos.insert(
+                    column,
+                    ColumnInfo {
+                        field: self.field_of(column)?,
+                        dict: self.dictionary(column).await?,
+                        entries: self.block_entries(column).await?,
+                    },
+                );
+            }
+            // A projected sort-key column comes from the same candidate bodies.
+            if let Some(info) = infos.get(&sort) {
+                for (entry, body) in candidates.iter().zip(&cand_bodies) {
+                    let index = info
+                        .entries
+                        .binary_search_by_key(&entry.first_row, |e| e.first_row)
+                        .map_err(|_| StrataError::Corrupt {
+                            what: "sort-key block table",
+                            offset: entry.segment_offset,
+                        })?;
+                    let array =
+                        decode_chunk(entry, body.as_deref(), &info.field, info.dict.as_deref())?;
+                    decoded.insert((sort, index), array);
+                }
+            }
+            // W2: the narrow chunks that overlap the exact rows, and the refs pages of those rows.
+            let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
+            for (&column, info) in &infos {
+                for index in overlapping_chunks(&info.entries, &exact_ranges) {
+                    wanted.insert((column, index));
+                }
+            }
+            let (narrow_segments, pending) = plan_chunks(&infos, &wanted, &mut decoded)?;
+            let n_narrow = narrow_segments.len();
+            let (planned, refs) = self.plan_refs(&payload, &exact).await?;
+            reads = planned;
+            let mut segments = narrow_segments;
+            segments.extend(refs);
+            let mut bodies = self.fetch(&segments, kind).await?;
+            let refs_bodies = bodies.split_off(n_narrow);
+            decode_chunks(&infos, pending, bodies, &mut decoded)?;
+            Self::take_ids(&mut reads, refs_bodies, &exact)?;
+        } else {
+            // The metadata is cached. W1: the candidate chunks, the narrow chunks that overlap
+            // the span, and the refs pages of the span.
+            infos = HashMap::new();
+            for &column in &narrow_vec {
+                infos.insert(
+                    column,
+                    ColumnInfo {
+                        field: self.field_of(column)?,
+                        dict: self.dictionary(column).await?,
+                        entries: self.block_entries(column).await?,
+                    },
+                );
+            }
+            let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
+            for (&column, info) in &infos {
+                for index in overlapping_chunks(&info.entries, std::slice::from_ref(&span)) {
+                    wanted.insert((column, index));
+                }
+            }
+            let cand_segments = candidate_segments(&candidates);
+            let n_cand = cand_segments.len();
+            let (narrow_segments, pending) = plan_chunks(&infos, &wanted, &mut decoded)?;
+            let n_narrow = narrow_segments.len();
+            let (planned, refs) = self.plan_refs(&payload, &span_rows).await?;
+            reads = planned;
+            let mut segments = cand_segments;
+            segments.extend(narrow_segments);
+            segments.extend(refs);
+            let mut bodies = self.fetch(&segments, kind).await?;
+            let mut rest = bodies.split_off(n_cand);
+            let refs_bodies = rest.split_off(n_narrow);
+            let cand_bodies = with_gaps(&candidates, bodies)?;
+            let exact_ranges = self.rows_of_key(&candidates, &cand_bodies, key)?;
+            exact = rows_in(&exact_ranges);
+            decode_chunks(&infos, pending, rest, &mut decoded)?;
+            Self::take_ids(&mut reads, refs_bodies, &exact)?;
+        }
+
+        // W2 (warm) or W3 (cold): the frames of the payload columns.
+        let payloads = self.finish_payloads(&mut reads, kind).await?;
+        build_batches(
+            self, projection, &exact, &infos, &decoded, &payloads, &output,
+        )
+    }
+
+    /// Checks that every projected column is a narrow, payload or map column of the file.
     fn check_projection(&self, projection: &[usize]) -> Result<()> {
         for &column in projection {
             if column >= self.schema().fields().len() {
@@ -326,7 +763,10 @@ impl StrataFile {
                 .ok_or_else(|| StrataError::Schema {
                     reason: format!("no column {column}"),
                 })?;
-            if record.layer != Layer::Narrow {
+            if !matches!(
+                record.layer,
+                Layer::Narrow | Layer::Payload | Layer::MapParent
+            ) {
                 return Err(StrataError::Unsupported {
                     what: format!("projection of column {column}"),
                 });
@@ -358,28 +798,23 @@ impl StrataFile {
     /// predicate is TRUE, in order.
     async fn filter(
         &self,
-        b: &Bound,
-        columns: &[usize],
+        plan: &FilterPlan<'_>,
         infos: &HashMap<usize, ColumnInfo>,
         candidates: &[Range<u32>],
         kind: ScanKind,
         decoded: &mut Decoded,
     ) -> Result<Vec<u32>> {
-        let mut wanted: Vec<(usize, usize)> = Vec::new();
+        let (b, masks, columns) = (plan.bound, plan.masks, plan.columns);
+        let mut wanted: BTreeSet<(usize, usize)> = BTreeSet::new();
         for &column in columns {
-            let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                reason: format!("internal: no info for column {column}"),
-            })?;
+            let info = info_of(infos, column)?;
             for index in overlapping_chunks(&info.entries, candidates) {
-                if !decoded.contains_key(&(column, index)) {
-                    wanted.push((column, index));
-                }
+                wanted.insert((column, index));
             }
         }
-        let wanted: BTreeSet<(usize, usize)> = wanted.into_iter().collect();
         self.decode_wave(infos, &wanted, kind, decoded).await?;
 
-        let n_fields = self.schema().fields().len();
+        let n_dirs = self.directory().len();
         let mut selection = Vec::new();
         for range in candidates {
             let len = range
@@ -390,11 +825,9 @@ impl StrataFile {
                     what: "row range",
                     offset: u64::from(range.start),
                 })?;
-            let mut arrays: Vec<Option<ArrayRef>> = vec![None; n_fields];
+            let mut arrays: Vec<Option<ArrayRef>> = vec![None; n_dirs];
             for &column in columns {
-                let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                    reason: format!("internal: no info for column {column}"),
-                })?;
+                let info = info_of(infos, column)?;
                 let mut pieces: Vec<ArrayRef> = Vec::new();
                 for index in overlapping_chunks(&info.entries, std::slice::from_ref(range)) {
                     let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
@@ -428,7 +861,38 @@ impl StrataFile {
                     *slot = Some(assembled);
                 }
             }
-            let mask = evaluate(b, &arrays, len)?;
+
+            // The masks of this range: `Contains` masks are sliced, `MapKeyEq` masks are built
+            // from the residual's rows.
+            let mut range_masks: Vec<BooleanArray> = Vec::with_capacity(masks.sources.len());
+            for (index, source) in masks.sources.iter().enumerate() {
+                let mask =
+                    match source {
+                        MaskSource::Contains(..) => {
+                            let full = masks.full.get(index).and_then(Option::as_ref).ok_or_else(
+                                || StrataError::Schema {
+                                    reason: format!("internal: missing contains mask {index}"),
+                                },
+                            )?;
+                            let offset =
+                                usize::try_from(range.start).map_err(|_| StrataError::Corrupt {
+                                    what: "row range",
+                                    offset: u64::from(range.start),
+                                })?;
+                            full.slice(offset, len)
+                        }
+                        MaskSource::MapKey(residual, key, lit) => {
+                            let map = arrays.get(*residual).and_then(Option::as_ref).ok_or_else(
+                                || StrataError::Schema {
+                                    reason: format!("internal: missing column {residual}"),
+                                },
+                            )?;
+                            map_key_mask(map.as_ref(), key, lit.as_ref())?
+                        }
+                    };
+                range_masks.push(mask);
+            }
+            let mask = evaluate(b, &arrays, &range_masks, len)?;
             for i in 0..len {
                 if mask.is_valid(i) && mask.value(i) {
                     selection.push(row_at(range.start, i)?);
@@ -439,8 +903,7 @@ impl StrataFile {
     }
 
     /// Fetches, in one wave, the bodies of the chunks in `wanted` that are not decoded yet, and
-    /// decodes them into `decoded`. Chunks without a segment are decoded from nothing. A wave
-    /// with nothing to fetch makes no request.
+    /// decodes them into `decoded`. A wave with nothing to fetch makes no request.
     async fn decode_wave(
         &self,
         infos: &HashMap<usize, ColumnInfo>,
@@ -448,47 +911,110 @@ impl StrataFile {
         kind: ScanKind,
         decoded: &mut Decoded,
     ) -> Result<()> {
-        let mut segments: Vec<(SegmentRef, Kind)> = Vec::new();
-        let mut pending: Vec<(usize, usize, BlockEntry)> = Vec::new();
-        for &(column, index) in wanted {
-            let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                reason: format!("internal: no info for column {column}"),
-            })?;
-            let entry = *info.entries.get(index).ok_or_else(|| StrataError::Schema {
-                reason: "internal: missing chunk".to_string(),
-            })?;
-            if entry.segment_len > 0 {
-                let segment = SegmentRef {
-                    offset: entry.segment_offset,
-                    len: entry.segment_len,
-                };
-                segments.push((segment, Kind::NarrowChunk));
-                pending.push((column, index, entry));
-            } else {
-                let array = decode_chunk(&entry, None, &info.field, info.dict.as_deref())?;
-                decoded.insert((column, index), array);
-            }
-        }
+        let (segments, pending) = plan_chunks(infos, wanted, decoded)?;
         let bodies = self.fetch(&segments, kind).await?;
-        if bodies.len() != pending.len() {
-            return Err(StrataError::Corrupt {
-                what: "segment range",
-                offset: 0,
+        decode_chunks(infos, pending, bodies, decoded)
+    }
+
+    /// Plans the refs pages of the payload columns `columns` for `rows` (sorted, unique): one
+    /// read per column, and the segments of all of them in one list.
+    async fn plan_refs(
+        &self,
+        columns: &[usize],
+        rows: &[u32],
+    ) -> Result<(Vec<PayloadRead>, Vec<(SegmentRef, Kind)>)> {
+        let mut reads = Vec::with_capacity(columns.len());
+        let mut segments = Vec::new();
+        for &column in columns {
+            let record = self
+                .directory()
+                .get(column)
+                .ok_or_else(|| StrataError::Schema {
+                    reason: format!("no column {column}"),
+                })?;
+            let header = read_header(self, column).await?;
+            let (page_segments, pages) = refs_segments(&header, rows)?;
+            reads.push(PayloadRead {
+                column,
+                at: record.payload_offset,
+                header,
+                pages,
+                n_pages: page_segments.len(),
+                ids: Vec::new(),
+                frames: Vec::new(),
+                n_frames: 0,
             });
+            segments.extend(page_segments);
         }
-        for ((column, index, entry), body) in pending.into_iter().zip(&bodies) {
-            let info = infos.get(&column).ok_or_else(|| StrataError::Schema {
-                reason: format!("internal: no info for column {column}"),
-            })?;
-            let array = decode_chunk(
-                &entry,
-                Some(body.as_slice()),
-                &info.field,
-                info.dict.as_deref(),
-            )?;
-            decoded.insert((column, index), array);
+        Ok((reads, segments))
+    }
+
+    /// Decodes the fetched refs pages of `reads` (their bodies in the order of `plan_refs`) into
+    /// the chunk ids of `rows`.
+    fn take_ids(reads: &mut [PayloadRead], bodies: Vec<Vec<u8>>, rows: &[u32]) -> Result<()> {
+        let mut bodies = bodies.into_iter();
+        for read in reads.iter_mut() {
+            let pages: Vec<Vec<u8>> = bodies.by_ref().take(read.n_pages).collect();
+            read.ids = ids_of(&read.header, &read.pages, &pages, rows, read.at)?;
         }
         Ok(())
+    }
+
+    /// Plans the frames that the chunk ids of `reads` need, and returns their segments in the
+    /// order of the reads.
+    fn plan_frames(reads: &mut [PayloadRead]) -> Result<Vec<(SegmentRef, Kind)>> {
+        let mut segments = Vec::new();
+        for read in reads.iter_mut() {
+            let (frame_segs, frames) = frame_segments(&read.header, &read.ids)?;
+            read.n_frames = frame_segs.len();
+            read.frames = frames;
+            segments.extend(frame_segs);
+        }
+        Ok(segments)
+    }
+
+    /// Decodes the fetched frames (bodies in the order of `plan_frames`), and rebuilds the values
+    /// of each column from them.
+    fn build_payloads(
+        &self,
+        reads: &[PayloadRead],
+        bodies: Vec<Vec<u8>>,
+    ) -> Result<HashMap<usize, ArrayRef>> {
+        let mut bodies = bodies.into_iter();
+        let mut out = HashMap::with_capacity(reads.len());
+        for read in reads {
+            let raws: Vec<Vec<u8>> = bodies.by_ref().take(read.n_frames).collect();
+            let frames = decode_frames(&read.header, &read.frames, raws)?;
+            let field = self.field_of(read.column)?;
+            let array = build_values(&read.header, &frames, &read.ids, &field, read.at)?;
+            out.insert(read.column, array);
+        }
+        Ok(out)
+    }
+
+    /// The frame wave of `reads`: one fetch for the frames their chunk ids need, then the values.
+    async fn finish_payloads(
+        &self,
+        reads: &mut [PayloadRead],
+        kind: ScanKind,
+    ) -> Result<HashMap<usize, ArrayRef>> {
+        let segments = Self::plan_frames(reads)?;
+        let bodies = self.fetch(&segments, kind).await?;
+        self.build_payloads(reads, bodies)
+    }
+
+    /// The values of the payload columns `columns` over `rows` (sorted, unique): the refs pages
+    /// in one wave, then the frames in one wave.
+    async fn payload_values(
+        &self,
+        columns: &[usize],
+        rows: &[u32],
+        kind: ScanKind,
+    ) -> Result<HashMap<usize, ArrayRef>> {
+        let (mut reads, segments) = self.plan_refs(columns, rows).await?;
+        let bodies = self.fetch(&segments, kind).await?;
+        Self::take_ids(&mut reads, bodies, rows)?;
+        self.finish_payloads(&mut reads, kind).await
     }
 }
 
@@ -503,12 +1029,13 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::narrow::Encoding;
-    use crate::predicate::{CmpOp, Lit};
+    use crate::predicate::{CmpOp, Lit, literal};
     use crate::reader::read_column;
     use crate::testgen::{assert_same, wide_batch, wide_schema};
     use crate::writer::StrataWriter;
-    use arrow::array::BooleanArray;
-    use arrow::compute::filter_record_batch;
+    use arrow::array::{BinaryArray, BooleanArray, StringArray};
+    use arrow::compute::{and_kleene, filter_record_batch, not, or_kleene};
+    use arrow::datatypes::DataType;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
@@ -540,8 +1067,86 @@ mod tests {
         wide_schema().index_of(name).unwrap()
     }
 
+    /// The bytes of row `i` of a Utf8 or Binary array, or `None` for a null row.
+    fn bytes_at(array: &dyn Array, i: usize) -> Option<&[u8]> {
+        if let Some(binaries) = array.as_any().downcast_ref::<BinaryArray>() {
+            return binaries.is_valid(i).then(|| binaries.value(i));
+        }
+        let strings = array.as_any().downcast_ref::<StringArray>()?;
+        strings.is_valid(i).then(|| strings.value(i).as_bytes())
+    }
+
+    /// Whether `hay` contains `needle`. The empty needle is in every value.
+    fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
+        needle.is_empty() || hay.windows(needle.len()).any(|window| window == needle)
+    }
+
+    /// The mask of `p` over whole decoded columns, evaluated leaf by leaf with the same kernels
+    /// and literal conversion as the engine, but without pruning, shredding or payload reads:
+    /// `MapKeyEq` runs over the whole map, and `Contains` by brute force.
+    fn oracle_mask(
+        p: &Predicate,
+        file: &StrataFile,
+        columns: &[Option<ArrayRef>],
+        rows: usize,
+    ) -> Result<BooleanArray> {
+        let leaf = |b: Bound| evaluate(&b, columns, &[], rows);
+        let column = |c: usize| -> Result<ArrayRef> {
+            columns
+                .get(c)
+                .and_then(Option::clone)
+                .ok_or_else(|| StrataError::Schema {
+                    reason: format!("no column {c}"),
+                })
+        };
+        let data_type = |c: usize| file.schema().field(c).data_type().clone();
+        Ok(match p {
+            Predicate::And(terms) => {
+                let mut acc = BooleanArray::from(vec![true; rows]);
+                for term in terms {
+                    acc = and_kleene(&acc, &oracle_mask(term, file, columns, rows)?)?;
+                }
+                acc
+            }
+            Predicate::Or(terms) => {
+                let mut acc = BooleanArray::from(vec![false; rows]);
+                for term in terms {
+                    acc = or_kleene(&acc, &oracle_mask(term, file, columns, rows)?)?;
+                }
+                acc
+            }
+            Predicate::Not(inner) => not(&oracle_mask(inner, file, columns, rows)?)?,
+            Predicate::Cmp(c, op, lit) => {
+                leaf(Bound::Cmp(*c, *op, literal(*c, &data_type(*c), lit)?))?
+            }
+            Predicate::In(c, lits) => {
+                let mut acc = BooleanArray::from(vec![false; rows]);
+                for lit in lits {
+                    let term = Bound::Cmp(*c, CmpOp::Eq, literal(*c, &data_type(*c), lit)?);
+                    acc = or_kleene(&acc, &leaf(term)?)?;
+                }
+                acc
+            }
+            Predicate::IsNull(c) => leaf(Bound::IsNull(*c))?,
+            Predicate::IsNotNull(c) => leaf(Bound::IsNotNull(*c))?,
+            Predicate::MapKeyEq(c, key, lit) => {
+                let value = literal(*c, &DataType::Utf8, lit)?;
+                map_key_mask(column(*c)?.as_ref(), key, value.as_ref())?
+            }
+            Predicate::Contains(c, needle) => {
+                let values = column(*c)?;
+                let found: Vec<bool> = (0..rows)
+                    .map(|i| {
+                        bytes_at(values.as_ref(), i).is_some_and(|v| contains_bytes(v, needle))
+                    })
+                    .collect();
+                BooleanArray::from(found)
+            }
+        })
+    }
+
     /// The rows of the full table that match `p` within `ranges`, projected onto `projection`.
-    /// Evaluated with Arrow on the whole columns, through the same binding.
+    /// `p` is bound first, so its errors are those of `bind`.
     async fn oracle(
         file: &StrataFile,
         p: Option<&Predicate>,
@@ -560,8 +1165,8 @@ mod tests {
         )?;
         let mut keep = vec![true; rows];
         if let Some(p) = p {
-            let bound = bind(p, file)?;
-            let mask = evaluate(&bound, &columns, rows)?;
+            bind(p, file)?;
+            let mask = oracle_mask(p, file, &columns, rows)?;
             for (i, k) in keep.iter_mut().enumerate() {
                 *k = *k && mask.is_valid(i) && mask.value(i);
             }
@@ -960,10 +1565,7 @@ mod tests {
                 .await,
                 Err(StrataError::Unsupported { .. })
             ));
-            assert!(matches!(
-                scan(vec![col("attrs")], None, None).await,
-                Err(StrataError::Unsupported { .. })
-            ));
+            assert!(scan(vec![col("attrs")], None, None).await.is_ok());
             let mixed = Predicate::And(vec![
                 Predicate::Cmp(col("status"), CmpOp::Eq, Lit::Utf8("missing".into())),
                 Predicate::Cmp(trace, CmpOp::Eq, Lit::Bytes(vec![0; 3])),
@@ -1046,5 +1648,271 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// `wide_batch` with every Utf8 and Binary column stored as payload.
+    fn payload_config() -> Config {
+        Config {
+            payload_min_avg: 0,
+            ..Config::default()
+        }
+    }
+
+    /// `batch(rows)`, written with the default config, and opened.
+    async fn open_batch(rows: usize) -> StrataFile {
+        let mut w = StrataWriter::new(
+            crate::testgen::schema(),
+            &["trace_id", "start_time"],
+            Config::default(),
+        )
+        .unwrap();
+        w.write(&crate::testgen::batch(rows)).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("batch.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap()
+    }
+
+    /// The rows whose `trace_id` (column 0) is `key`, from a scan: the oracle of the lookups.
+    async fn trace_rows(file: &StrataFile, key: u128, projection: &[usize]) -> RecordBatch {
+        let req = ScanRequest {
+            projection: projection.to_vec(),
+            predicate: Some(Predicate::Cmp(
+                0,
+                CmpOp::Eq,
+                Lit::Bytes(key.to_be_bytes().to_vec()),
+            )),
+            row_ranges: None,
+            limit: None,
+            kind: ScanKind::Scan,
+        };
+        let batches = file.scan(&req).await.unwrap();
+        let schema = Arc::new(file.schema().project(projection).unwrap());
+        joined(&schema, &batches)
+    }
+
+    /// `traces` traces of the datagen, sorted, written with the default config, and opened.
+    async fn open_datagen(traces: usize) -> StrataFile {
+        let world = fmt_testdata::datagen::World::new(7);
+        let mut rng = fmt_testdata::datagen::Rng::new(42);
+        let mut spans = Vec::new();
+        for _ in 0..traces {
+            world.trace(&mut rng, &mut spans);
+        }
+        spans.sort_by_key(|s| (s.trace_id, s.start_time));
+        let schema = llmobs_core::schema::spans_schema();
+        let mut w =
+            StrataWriter::new(schema, &["trace_id", "start_time"], Config::default()).unwrap();
+        for chunk in spans.chunks(8192) {
+            w.write(&llmobs_core::batch::spans_to_record_batch(chunk).unwrap())
+                .unwrap();
+        }
+        let (bytes, _) = w.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("datagen.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn map_key_predicates_match_the_oracle_and_a_promoted_key_takes_three_waves() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &Config::default()).await;
+            let (attrs, uid) = (col("attrs"), col("uid"));
+            let key = |name: &str, lit: Lit| Predicate::MapKeyEq(attrs, name.to_string(), lit);
+
+            // `k0` is promoted: it binds to its child column, and a cold scan takes three waves.
+            let promoted = key("k0", Lit::Utf8("v5-0".into()));
+            assert!(matches!(
+                bind(&promoted, &file).unwrap().0,
+                Bound::Cmp(_, CmpOp::Eq, _)
+            ));
+            let req = ScanRequest {
+                projection: vec![uid],
+                predicate: Some(promoted.clone()),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+            };
+            file.reset_io_stats();
+            let batches = file.scan(&req).await.unwrap();
+            assert_eq!(file.io_stats().waves, 3);
+            let want = oracle(&file, Some(&promoted), None, &[uid]).await.unwrap();
+            assert_batches_equal(&joined(&want.schema(), &batches), &want);
+
+            // An absent key selects nothing, and so does its negation: NULL is not TRUE.
+            let absent = key("k9", Lit::Utf8("x".into()));
+            check(&file, absent.clone(), &[uid, attrs]).await;
+            check(&file, Predicate::Not(Box::new(absent)), &[uid]).await;
+            // A NULL literal is NULL for every row.
+            check(&file, key("k0", Lit::Null), &[uid]).await;
+            check(
+                &file,
+                Predicate::Not(Box::new(key("k0", Lit::Null))),
+                &[uid],
+            )
+            .await;
+        });
+    }
+
+    #[test]
+    fn map_and_payload_projections_match_the_oracle() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &Config::default()).await;
+            let (attrs, uid) = (col("attrs"), col("uid"));
+            let ranges = 10..60u32;
+            let req = ScanRequest {
+                projection: vec![attrs, uid],
+                predicate: None,
+                row_ranges: Some(vec![ranges.clone()]),
+                limit: None,
+                kind: ScanKind::Scan,
+            };
+            let batches = file.scan(&req).await.unwrap();
+            let want = oracle(
+                &file,
+                None,
+                Some(std::slice::from_ref(&ranges)),
+                &[attrs, uid],
+            )
+            .await
+            .unwrap();
+            assert_eq!(want.num_rows(), 50);
+            assert_batches_equal(&joined(&want.schema(), &batches), &want);
+
+            let payload = open_wide(20_000, &payload_config()).await;
+            let (blob, tokens) = (col("blob"), col("input_tokens"));
+            check(
+                &payload,
+                Predicate::Cmp(tokens, CmpOp::Gt, lit_int(2_500)),
+                &[blob, uid],
+            )
+            .await;
+            check(&payload, Predicate::IsNull(tokens), &[blob]).await;
+        });
+    }
+
+    #[test]
+    fn contains_matches_brute_force_and_null_rows_are_not_matches() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &payload_config()).await;
+            let (blob, uid) = (col("blob"), col("uid"));
+            let needle = Predicate::Contains(blob, vec![7u8; 4]);
+            check(&file, needle.clone(), &[uid]).await;
+            // `Not(Contains)` selects the rows where `blob` is null.
+            check(&file, Predicate::Not(Box::new(needle)), &[uid]).await;
+            check(&file, Predicate::Contains(blob, Vec::new()), &[uid]).await;
+
+            // Only payload columns take `Contains`, and needles of at most 64 bytes.
+            let narrow = open_wide(2_000, &Config::default()).await;
+            let result = narrow
+                .scan(&ScanRequest {
+                    projection: vec![uid],
+                    predicate: Some(Predicate::Contains(uid, b"x".to_vec())),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                })
+                .await;
+            assert!(matches!(result, Err(StrataError::Unsupported { .. })));
+            let long = file
+                .scan(&ScanRequest {
+                    projection: vec![uid],
+                    predicate: Some(Predicate::Contains(blob, vec![1u8; 65])),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                })
+                .await;
+            assert!(matches!(long, Err(StrataError::Unsupported { .. })));
+        });
+    }
+
+    #[test]
+    fn lookup_scan_waves_and_results() {
+        runtime().block_on(async {
+            let file = open_batch(20_000).await;
+            let all: Vec<usize> = (0..file.schema().fields().len()).collect();
+            let trace = |row: u64| u128::from(row / 5);
+
+            // Cold: the metadata and the narrow chunks, two waves.
+            file.reset_io_stats();
+            let got = file
+                .lookup_scan(&trace(1_000).to_be_bytes(), &all)
+                .await
+                .unwrap();
+            assert_eq!(file.io_stats().waves, 2);
+            let want = trace_rows(&file, trace(1_000), &all).await;
+            assert_batches_equal(&joined(&want.schema(), &got), &want);
+
+            // Warm: one wave.
+            file.reset_io_stats();
+            let got = file
+                .lookup_scan(&trace(15_000).to_be_bytes(), &all)
+                .await
+                .unwrap();
+            assert_eq!(file.io_stats().waves, 1);
+            let want = trace_rows(&file, trace(15_000), &all).await;
+            assert_batches_equal(&joined(&want.schema(), &got), &want);
+
+            // A key above every zone costs nothing; [0; 16] is present, in rows 0 to 4.
+            file.reset_io_stats();
+            assert!(
+                file.lookup_scan(&[0xFF; 16], &all)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(file.io_stats().waves, 0);
+            let present = file.lookup_scan(&[0u8; 16], &all).await.unwrap();
+            let rows: usize = present.iter().map(RecordBatch::num_rows).sum();
+            assert_eq!(rows, 5);
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn scan_datagen_map_pruning() {
+        runtime().block_on(async {
+            let file = open_datagen(3_000).await;
+            let attrs = file.schema().index_of("resource_attributes").unwrap();
+            let trace_id = file.schema().index_of("trace_id").unwrap();
+            let layout = file
+                .hot
+                .maps
+                .iter()
+                .find(|layout| usize::try_from(layout.map).ok() == Some(attrs))
+                .unwrap();
+            assert!(!layout.keys.is_empty(), "no promoted key");
+            let first = &layout.keys[0];
+            let child = usize::try_from(first.child).unwrap();
+            assert!(
+                file.directory()[child].flags & 1 != 0,
+                "the first promoted key has no dictionary"
+            );
+            let key = String::from_utf8(first.key.clone()).unwrap();
+
+            // The JSON-quoted value is absent, so the child's dictionary prunes every chunk: the
+            // metadata wave is the only wave.
+            file.reset_io_stats();
+            let req = ScanRequest {
+                projection: vec![trace_id],
+                predicate: Some(Predicate::MapKeyEq(
+                    attrs,
+                    key,
+                    Lit::Utf8("\"nope\"".into()),
+                )),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+            };
+            assert!(file.scan(&req).await.unwrap().is_empty());
+            assert_eq!(file.io_stats().waves, 1);
+        });
     }
 }
