@@ -7,7 +7,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 
 use super::bitpack::{pack, width_for};
-use super::{Class, Dictionary, Encoding, Numeric, flags, numeric_of, unsupported};
+use super::lengths::encode_lengths;
+use super::{Class, Dictionary, Encoding, Numeric, flags, is_utf8_map, numeric_of, unsupported};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, le_u64};
@@ -80,6 +81,7 @@ pub fn encode_chunk(
                 None => encode_ipc(array),
             }
         }
+        DataType::Map(..) if is_utf8_map(dt) => encode_map(values),
         _ => match numeric_of(dt) {
             Some(num) => encode_numeric(values, num),
             None => encode_ipc(array),
@@ -510,8 +512,8 @@ fn varbin_rows(array: &dyn Array) -> Result<Vec<&[u8]>> {
 
 /// A Utf8 or Binary chunk without a dictionary. When every row is the same and at most 16
 /// bytes long, and none is null, it is `Const` with the bytes inline. Otherwise it is
-/// `Varbin`: the validity bitmap if there are nulls, `u32 offsets[n+1]` (null slots have
-/// zero length), then the bytes.
+/// `Varbin`: the validity bitmap if there are nulls, a lengths block of the value lengths
+/// (null slots have length 0), then the bytes.
 fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
     let rows = varbin_rows(array)?;
     let has_nulls = array.null_count() > 0;
@@ -530,13 +532,11 @@ fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
         chunk_flags |= flags::HAS_NULLS;
         body.extend(validity_bitmap(array));
     }
-    let mut total = 0u32;
-    body.extend_from_slice(&total.to_le_bytes());
-    for row in &rows {
-        let len = u32::try_from(row.len()).map_err(|_| too_long())?;
-        total = total.checked_add(len).ok_or_else(too_long)?;
-        body.extend_from_slice(&total.to_le_bytes());
-    }
+    let lens = rows
+        .iter()
+        .map(|row| u32::try_from(row.len()).map_err(|_| too_long()))
+        .collect::<Result<Vec<u32>>>()?;
+    encode_lengths(&lens, &mut body);
     for row in &rows {
         body.extend_from_slice(row);
     }
@@ -565,9 +565,9 @@ fn encode_ipc(array: &ArrayRef) -> Result<EncodedChunk> {
     Ok(chunk)
 }
 
-/// A List(Utf8) chunk with a dictionary, as `ListDict`: the list offsets, then the packed
-/// codes of every element. Returns `None` when a non-null list holds a null element, which
-/// the caller stores as `IPC`.
+/// A List(Utf8) chunk with a dictionary, as `ListDict`: a lengths block of the element counts
+/// of the lists, then the packed codes of every element. Returns `None` when a non-null list
+/// holds a null element, which the caller stores as `IPC`.
 fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<EncodedChunk>> {
     let list = array
         .as_list_opt::<i32>()
@@ -581,9 +581,10 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
     let mut codes: Vec<u64> = Vec::new();
     // The decoded bytes of the elements of the valid lists, checked against `MAX_CHUNK_OUTPUT`.
     let mut decoded = 0usize;
-    let mut offsets: Vec<u32> = Vec::with_capacity(n + 1);
-    offsets.push(0);
+    // The element count of each list. A null list has none.
+    let mut counts: Vec<u32> = Vec::with_capacity(n);
     for (i, pair) in list.value_offsets().windows(2).enumerate() {
+        let before = codes.len();
         if list.is_valid(i) {
             let [start, end] = pair else {
                 return Err(StrataError::Schema {
@@ -611,10 +612,10 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
                 what: format!("a list chunk of more than {MAX_CHUNK_ELEMENTS} elements"),
             });
         }
-        let end = u32::try_from(codes.len()).map_err(|_| StrataError::Unsupported {
+        let count = codes.len().saturating_sub(before);
+        counts.push(u32::try_from(count).map_err(|_| StrataError::Unsupported {
             what: "a list chunk of more than 4 billion elements".to_string(),
-        })?;
-        offsets.push(end);
+        })?);
     }
 
     let mut body = Vec::new();
@@ -623,15 +624,102 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
         chunk_flags |= flags::HAS_NULLS;
         body.extend(validity_bitmap(array));
     }
-    for offset in &offsets {
-        body.extend_from_slice(&offset.to_le_bytes());
-    }
+    encode_lengths(&counts, &mut body);
     let width = width_for(codes.iter().copied().max().unwrap_or_default());
     body.push(width);
     pack(&codes, width, &mut body);
     let mut chunk = EncodedChunk::bare(Encoding::ListDict, chunk_flags);
     chunk.body = Some(body);
     Ok(Some(chunk))
+}
+
+/// A `Map<Utf8, Utf8>` chunk, as `Map`: the validity bitmap if there are nulls, a lengths
+/// block of the entry count of each map, a lengths block of the key lengths and the key bytes,
+/// then the value-validity byte with its bitmap when a value is null, a lengths block of the
+/// value lengths and the value bytes. Null maps have no entries, and null values have length 0.
+fn encode_map(array: &dyn Array) -> Result<EncodedChunk> {
+    let dt = array.data_type();
+    let map = array.as_map_opt().ok_or_else(|| unsupported(dt))?;
+    let entries = map.entries();
+    let keys = entries
+        .column(0)
+        .as_string_opt::<i32>()
+        .ok_or_else(|| unsupported(dt))?;
+    let values = entries
+        .column(1)
+        .as_string_opt::<i32>()
+        .ok_or_else(|| unsupported(dt))?;
+
+    // The offsets index the whole entries array, so a sliced map reads its own range.
+    let mut counts: Vec<u32> = Vec::with_capacity(map.len());
+    let mut key_lens: Vec<u32> = Vec::new();
+    let mut key_bytes: Vec<u8> = Vec::new();
+    let mut value_lens: Vec<u32> = Vec::new();
+    let mut value_bytes: Vec<u8> = Vec::new();
+    let mut value_valid: Vec<bool> = Vec::new();
+    for (i, pair) in map.value_offsets().windows(2).enumerate() {
+        let [start, end] = pair else {
+            return Err(StrataError::Schema {
+                reason: "map offsets are not paired".to_string(),
+            });
+        };
+        if !map.is_valid(i) {
+            counts.push(0);
+            continue;
+        }
+        let start = usize::try_from(*start).map_err(|_| StrataError::Schema {
+            reason: "map offset is negative".to_string(),
+        })?;
+        let end = usize::try_from(*end).map_err(|_| StrataError::Schema {
+            reason: "map offset is negative".to_string(),
+        })?;
+        counts.push(u32::try_from(end.saturating_sub(start)).map_err(|_| unsupported(dt))?);
+        for j in start..end {
+            let key = keys.value(j).as_bytes();
+            key_lens.push(u32::try_from(key.len()).map_err(|_| unsupported(dt))?);
+            key_bytes.extend_from_slice(key);
+            let valid = values.is_valid(j);
+            let value: &[u8] = if valid {
+                values.value(j).as_bytes()
+            } else {
+                &[]
+            };
+            value_lens.push(u32::try_from(value.len()).map_err(|_| unsupported(dt))?);
+            value_bytes.extend_from_slice(value);
+            value_valid.push(valid);
+        }
+        if key_lens.len() > MAX_CHUNK_ELEMENTS {
+            return Err(StrataError::Unsupported {
+                what: format!("a map chunk of more than {MAX_CHUNK_ELEMENTS} entries"),
+            });
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut chunk_flags = 0u8;
+    if map.null_count() > 0 {
+        chunk_flags |= flags::HAS_NULLS;
+        body.extend(validity_bitmap(array));
+    }
+    encode_lengths(&counts, &mut body);
+    encode_lengths(&key_lens, &mut body);
+    body.extend_from_slice(&key_bytes);
+    let value_nulls = value_valid.iter().any(|valid| !valid);
+    body.push(u8::from(value_nulls));
+    if value_nulls {
+        let mut bitmap = vec![0u8; value_valid.len().div_ceil(8)];
+        for (j, valid) in value_valid.iter().enumerate() {
+            if *valid {
+                set_bit(&mut bitmap, j);
+            }
+        }
+        body.extend(bitmap);
+    }
+    encode_lengths(&value_lens, &mut body);
+    body.extend_from_slice(&value_bytes);
+    let mut chunk = EncodedChunk::bare(Encoding::Map, chunk_flags);
+    chunk.body = Some(body);
+    Ok(chunk)
 }
 
 #[cfg(test)]
@@ -704,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn map_column_is_ipc() {
+    fn map_column_is_map() {
         let mut builder = arrow::array::MapBuilder::new(
             None,
             arrow::array::StringBuilder::new(),
@@ -715,7 +803,85 @@ mod tests {
         builder.append(true).unwrap();
         let array: ArrayRef = Arc::new(builder.finish());
         let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Map);
+    }
+
+    #[test]
+    fn map_with_non_nullable_values_is_ipc() {
+        let mut builder = arrow::array::MapBuilder::new(
+            None,
+            arrow::array::StringBuilder::new(),
+            arrow::array::StringBuilder::new(),
+        )
+        .with_values_field(Arc::new(Field::new("values", DataType::Utf8, false)));
+        builder.keys().append_value("k");
+        builder.values().append_value("v");
+        builder.append(true).unwrap();
+        let array: ArrayRef = Arc::new(builder.finish());
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
         assert_eq!(chunk.encoding, Encoding::Ipc);
+    }
+
+    #[test]
+    fn map_with_int64_values_is_ipc() {
+        let mut builder = arrow::array::MapBuilder::new(
+            None,
+            arrow::array::StringBuilder::new(),
+            arrow::array::Int64Builder::new(),
+        );
+        builder.keys().append_value("k");
+        builder.values().append_value(1);
+        builder.append(true).unwrap();
+        let array: ArrayRef = Arc::new(builder.finish());
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Ipc);
+    }
+
+    #[test]
+    fn list_dict_of_one_repeated_element_is_tiny() {
+        // Every list has one element, so the lengths block is 5 bytes and the codes take no
+        // bits: the body is the lengths block and the width byte.
+        let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+        for _ in 0..4096 {
+            builder.values().append_value("openinference");
+            builder.append(true);
+        }
+        let array: ArrayRef = Arc::new(builder.finish());
+        let dict = crate::narrow::for_column(array.as_ref(), &Config::default());
+        let chunk = encode_chunk(&array, dict.as_ref(), &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::ListDict);
+        let body = chunk.body.unwrap();
+        assert!(body.len() <= 64, "{} bytes", body.len());
+    }
+
+    #[test]
+    fn map_rows_repeating_six_entries_compress_to_two_kib() {
+        let pairs = [
+            ("telemetry.sdk.name", "opentelemetry"),
+            ("telemetry.sdk.language", "python"),
+            ("telemetry.sdk.version", "1.27.0"),
+            ("host.name", "chat-api-3"),
+            ("process.pid", "1003"),
+            ("deployment.environment", "production"),
+        ];
+        let mut builder = arrow::array::MapBuilder::new(
+            None,
+            arrow::array::StringBuilder::new(),
+            arrow::array::StringBuilder::new(),
+        );
+        for _ in 0..4096 {
+            for (key, value) in pairs {
+                builder.keys().append_value(key);
+                builder.values().append_value(value);
+            }
+            builder.append(true).unwrap();
+        }
+        let array: ArrayRef = Arc::new(builder.finish());
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Map);
+        let body = chunk.body.unwrap();
+        let compressed = zstd::bulk::compress(&body, 3).unwrap();
+        assert!(compressed.len() <= 2048, "{} bytes", compressed.len());
     }
 
     /// Encodes `array` without a dictionary, decodes it and checks the values bitwise.

@@ -3,16 +3,18 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayData, ArrayRef, BinaryArray, ListArray, StringArray, StringBuilder, make_array,
-    new_null_array,
+    ArrayData, ArrayRef, BinaryArray, ListArray, MapArray, StringArray, StringBuilder, StructArray,
+    make_array, new_null_array,
 };
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 use arrow::ipc::reader::StreamReader;
 
 use super::bitpack::unpack;
+use super::lengths::{decode_lengths, offsets_of, total_of};
 use super::{
-    BlockEntry, Class, Dictionary, Encoding, Numeric, fits, flags, numeric_of, unsupported,
+    BlockEntry, Class, Dictionary, Encoding, Numeric, fits, flags, is_utf8_map, numeric_of,
+    unsupported,
 };
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, MAX_CHUNK_ROWS, le_u64};
@@ -58,6 +60,12 @@ pub fn decode_chunk(
         DataType::Binary => decode_varbin(entry, &mut c, n, nulls, dt, at),
         DataType::List(child) if child.data_type() == &DataType::Utf8 => {
             decode_list_utf8(entry, &mut c, n, nulls, child, dict, at)
+        }
+        DataType::Map(..) => {
+            if entry.encoding != Encoding::Map || !is_utf8_map(dt) {
+                return Err(corrupt("encoding for type"));
+            }
+            decode_map(&mut c, n, nulls, dt, at)
         }
         DataType::Boolean => {
             if entry.encoding != Encoding::Bool {
@@ -107,8 +115,9 @@ fn decode_ipc(
     }
 }
 
-/// A `VARBIN` chunk of Utf8 or Binary: the validity bitmap if flagged, `u32 offsets[n+1]`
-/// (zero length for null slots), then the bytes. Utf8 values are checked to be UTF-8.
+/// A `VARBIN` chunk of Utf8 or Binary: the validity bitmap if flagged, a lengths block of the
+/// `n` value lengths (null slots have length 0), then the bytes. Utf8 values are checked to be
+/// UTF-8 by the array constructor.
 fn decode_varbin(
     entry: &BlockEntry,
     c: &mut Cursor<'_>,
@@ -121,53 +130,21 @@ fn decode_varbin(
     if entry.encoding != Encoding::Varbin {
         return Err(corrupt("encoding for type"));
     }
-    let mut offsets: Vec<usize> = Vec::with_capacity(n + 1);
-    for _ in 0..=n {
-        offsets.push(c.u32("varbin offsets")? as usize);
-    }
-    if offsets.first() != Some(&0) {
-        return Err(corrupt("varbin offsets"));
-    }
-    for (i, pair) in offsets.windows(2).enumerate() {
-        let [start, end] = pair else {
-            return Err(corrupt("varbin offsets"));
-        };
-        if start > end {
-            return Err(corrupt("varbin offsets"));
-        }
-        let valid = nulls.as_ref().is_none_or(|v| v.is_valid(i));
-        if !valid && start != end {
-            return Err(corrupt("varbin null length"));
-        }
-    }
-    let total = offsets.last().copied().unwrap_or_default();
+    let lens = decode_lengths(c, n, at)?;
+    check_null_lengths(&lens, nulls.as_ref(), at)?;
+    // The bytes are taken before the offsets are built, so the offsets are bounded by the body.
+    let total = total_of(&lens, "varbin bytes", at)?;
     let bytes = c.bytes(total, "varbin bytes")?;
     expect_end(c, at)?;
-    if matches!(dt, DataType::Utf8) {
-        for pair in offsets.windows(2) {
-            let [start, end] = pair else {
-                return Err(corrupt("varbin offsets"));
-            };
-            let value = bytes
-                .get(*start..*end)
-                .ok_or_else(|| corrupt("varbin offsets"))?;
-            if std::str::from_utf8(value).is_err() {
-                return Err(corrupt("varbin utf8"));
-            }
-        }
-    }
-    let offsets = offsets
-        .iter()
-        .map(|o| i32::try_from(*o).map_err(|_| corrupt("varbin offsets")))
-        .collect::<Result<Vec<i32>>>()?;
-    // Invariant: `offsets` has n + 1 entries, starts at 0, never decreases and fits in i32
-    // (all checked above), so `OffsetBuffer::new` cannot panic.
-    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
+    // Invariant: the offsets start at 0 and never decrease, and the total fits the body, so
+    // `OffsetBuffer::new` cannot panic.
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets_of(&lens, "varbin offsets", at)?));
     let values = Buffer::from_vec(bytes.to_vec());
     match dt {
         DataType::Utf8 => {
-            let array = StringArray::try_new(offsets, values, nulls)
-                .map_err(|_| corrupt("varbin values"))?;
+            // `try_new` checks the UTF-8 of every value and the character boundaries.
+            let array =
+                StringArray::try_new(offsets, values, nulls).map_err(|_| corrupt("varbin utf8"))?;
             Ok(Arc::new(array))
         }
         DataType::Binary => {
@@ -177,6 +154,20 @@ fn decode_varbin(
         }
         _ => Err(corrupt("encoding for type")),
     }
+}
+
+/// The null rule of the lengths-based encodings: a null slot has length 0.
+fn check_null_lengths(lens: &[u32], nulls: Option<&NullBuffer>, at: u64) -> Result<()> {
+    for (i, len) in lens.iter().enumerate() {
+        let valid = nulls.is_none_or(|v| v.is_valid(i));
+        if !valid && *len != 0 {
+            return Err(StrataError::Corrupt {
+                what: "null length",
+                offset: at,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Reads the validity bitmap of `n` rows.
@@ -425,8 +416,8 @@ fn corrupt_output(at: u64) -> StrataError {
     }
 }
 
-/// A `ListDict` chunk of List(Utf8): `n + 1` list offsets, then the codes of all elements.
-/// A null list has zero length.
+/// A `ListDict` chunk of List(Utf8): a lengths block of the `n` element counts, then the codes
+/// of all elements. A null list has zero elements.
 fn decode_list_utf8(
     entry: &BlockEntry,
     c: &mut Cursor<'_>,
@@ -442,26 +433,9 @@ fn decode_list_utf8(
     }
     let dict = require_dict(dict, at)?;
 
-    let mut offsets: Vec<usize> = Vec::new();
-    for _ in 0..=n {
-        offsets.push(c.u32("list offsets")? as usize);
-    }
-    if offsets.first() != Some(&0) {
-        return Err(corrupt("list offsets"));
-    }
-    for (i, pair) in offsets.windows(2).enumerate() {
-        let [start, end] = pair else {
-            return Err(corrupt("list offsets"));
-        };
-        if start > end {
-            return Err(corrupt("list offsets"));
-        }
-        let valid = nulls.as_ref().is_none_or(|v| v.is_valid(i));
-        if !valid && start != end {
-            return Err(corrupt("list null length"));
-        }
-    }
-    let total = offsets.last().copied().unwrap_or_default();
+    let counts = decode_lengths(c, n, at)?;
+    check_null_lengths(&counts, nulls.as_ref(), at)?;
+    let total = total_of(&counts, "list elements", at)?;
     if total > MAX_CHUNK_ELEMENTS {
         return Err(corrupt("list elements"));
     }
@@ -484,16 +458,98 @@ fn decode_list_utf8(
     }
     let values: StringArray = builder.finish();
 
-    let offsets = offsets
-        .iter()
-        .map(|o| i32::try_from(*o).map_err(|_| corrupt("list offsets")))
-        .collect::<Result<Vec<i32>>>()?;
-    // Invariant: `offsets` is non-empty, starts at 0 and never decreases, checked above, so
-    // `OffsetBuffer::new` cannot panic.
-    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
+    // Invariant: the offsets start at 0 and never decrease, and the total is the number of
+    // elements, so `OffsetBuffer::new` cannot panic.
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets_of(&counts, "list offsets", at)?));
     let list = ListArray::try_new(Arc::clone(child), offsets, Arc::new(values), nulls)
         .map_err(|_| corrupt("list values"))?;
     Ok(Arc::new(list))
+}
+
+/// A `Map` chunk of Map<Utf8, Utf8>, in the layout of `encode_map`. Every count is checked
+/// before the bytes it covers are taken from the body, and the output limit is checked before
+/// anything is allocated.
+fn decode_map(
+    c: &mut Cursor<'_>,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    dt: &DataType,
+    at: u64,
+) -> Result<ArrayRef> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let DataType::Map(entries_field, sorted) = dt else {
+        return Err(corrupt("encoding for type"));
+    };
+    let DataType::Struct(fields) = entries_field.data_type() else {
+        return Err(corrupt("encoding for type"));
+    };
+
+    let counts = decode_lengths(c, n, at)?;
+    check_null_lengths(&counts, nulls.as_ref(), at)?;
+    let entries = total_of(&counts, "map entries", at)?;
+    if entries > MAX_CHUNK_ELEMENTS {
+        return Err(corrupt("map entries"));
+    }
+
+    let key_lens = decode_lengths(c, entries, at)?;
+    let key_total = total_of(&key_lens, "map keys", at)?;
+    let key_bytes = c.bytes(key_total, "map keys")?;
+
+    let value_nulls = c.u8("map value nulls")?;
+    let value_valid = match value_nulls {
+        0 => None,
+        1 => {
+            let bits = c.bytes(entries.div_ceil(8), "map value validity")?.to_vec();
+            Some(NullBuffer::new(BooleanBuffer::new(
+                Buffer::from_vec(bits),
+                0,
+                entries,
+            )))
+        }
+        _ => return Err(corrupt("map value nulls")),
+    };
+    let value_lens = decode_lengths(c, entries, at)?;
+    check_null_lengths(&value_lens, value_valid.as_ref(), at)?;
+    let value_total = total_of(&value_lens, "map values", at)?;
+    if key_total
+        .checked_add(value_total)
+        .is_none_or(|sum| sum > MAX_CHUNK_OUTPUT)
+    {
+        return Err(corrupt_output(at));
+    }
+    let value_bytes = c.bytes(value_total, "map values")?;
+    expect_end(c, at)?;
+
+    // Invariant: every offsets vector starts at 0, never decreases and ends at its child's
+    // length, so the constructors below cannot panic.
+    let keys = StringArray::try_new(
+        OffsetBuffer::new(ScalarBuffer::from(offsets_of(&key_lens, "map keys", at)?)),
+        Buffer::from_vec(key_bytes.to_vec()),
+        None,
+    )
+    .map_err(|_| corrupt("map utf8"))?;
+    let values = StringArray::try_new(
+        OffsetBuffer::new(ScalarBuffer::from(offsets_of(
+            &value_lens,
+            "map values",
+            at,
+        )?)),
+        Buffer::from_vec(value_bytes.to_vec()),
+        value_valid,
+    )
+    .map_err(|_| corrupt("map utf8"))?;
+    let structs =
+        StructArray::try_new(fields.clone(), vec![Arc::new(keys), Arc::new(values)], None)
+            .map_err(|_| corrupt("map entries"))?;
+    let map = MapArray::try_new(
+        Arc::clone(entries_field),
+        OffsetBuffer::new(ScalarBuffer::from(offsets_of(&counts, "map offsets", at)?)),
+        structs,
+        nulls,
+        *sorted,
+    )
+    .map_err(|_| corrupt("map values"))?;
+    Ok(Arc::new(map))
 }
 
 /// A `Const` chunk: its one value repeated `n` times. For Utf8 with a dictionary the value is
@@ -597,8 +653,9 @@ fn decode_const(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::narrow::lengths::encode_lengths;
     use crate::narrow::{EncodedChunk, encode_chunk, for_column};
-    use crate::testgen::{assert_same, batch};
+    use crate::testgen::{assert_same, batch, wide_batch};
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
         Int16Array, Int32Array, Int64Array, ListBuilder, MapBuilder, StringArray, StringBuilder,
@@ -840,14 +897,12 @@ mod tests {
     }
 
     #[test]
-    fn list_dict_offsets_past_the_element_limit_are_corrupt() {
+    fn list_dict_lengths_past_the_element_limit_are_corrupt() {
         let sample: ArrayRef = Arc::new(StringArray::from(vec!["a"]));
         let dict = dict_of(&sample).unwrap();
-        // One list whose offsets end at MAX_CHUNK_ELEMENTS + 1, with width 0 and no codes.
+        // One list of MAX_CHUNK_ELEMENTS + 1 elements, with width 0 and no codes.
         let mut body = Vec::new();
-        for offset in [0u32, MAX_CHUNK_ELEMENTS as u32 + 1] {
-            body.extend_from_slice(&offset.to_le_bytes());
-        }
+        encode_lengths(&[MAX_CHUNK_ELEMENTS as u32 + 1], &mut body);
         body.push(0);
         let entry = BlockEntry {
             first_row: 0,
@@ -1112,7 +1167,7 @@ mod tests {
 
         #[test]
         fn random_entries_and_bodies_never_panic(
-            encoding in 0u8..=10,
+            encoding in 0u8..=11,
             n_rows in 0u32..70_000,
             const_len in 0u16..40,
             entry_flags in any::<u8>(),
@@ -1298,13 +1353,54 @@ mod tests {
         }
 
         #[test]
-        fn maps_round_trip_as_ipc(
+        fn maps_round_trip_as_map(
             rows in proptest::collection::vec(
                 proptest::option::of(proptest::collection::vec(
                     (".{0,6}", proptest::option::of(".{0,6}")),
                     0..4,
                 )),
                 0..300,
+            ),
+        ) {
+            let chunk = round_trip_with(map_of(&rows), None);
+            if rows.iter().any(|row| row.is_some()) {
+                assert_eq!(chunk.encoding, Encoding::Map);
+            }
+        }
+
+        #[test]
+        fn varbin_round_trips_with_empty_and_long_values(
+            v in proptest::collection::vec(proptest::option::of(".{0,12}"), 0..300),
+            b in proptest::collection::vec(proptest::option::of(proptest::collection::vec(any::<u8>(), 0..40)), 0..300),
+        ) {
+            let mut text = v;
+            text.push(Some("x".repeat(64 * 1024)));
+            round_trip_with(Arc::new(StringArray::from_iter(text)), None);
+            let mut bytes = b;
+            bytes.push(Some(vec![7u8; 64 * 1024]));
+            round_trip_with(Arc::new(BinaryArray::from_iter(bytes)), None);
+        }
+
+        #[test]
+        fn list_dict_round_trips_null_empty_and_single_element_lists(
+            rows in proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(".{0,6}", 0..2)),
+                0..300,
+            ),
+        ) {
+            let array = list_of_utf8(&rows);
+            let dict = dict_of(&array);
+            round_trip_with(array, dict.as_ref());
+        }
+
+        #[test]
+        fn map_round_trips_with_null_and_empty_keys_and_values(
+            rows in proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(
+                    (".{0,6}", proptest::option::of(".{0,6}")),
+                    0..50,
+                )),
+                0..200,
             ),
         ) {
             round_trip_with(map_of(&rows), None);
@@ -1323,8 +1419,8 @@ mod tests {
         }
 
         #[test]
-        fn random_varbin_and_ipc_bodies_never_panic(
-            ipc in any::<bool>(),
+        fn random_varbin_ipc_and_map_bodies_never_panic(
+            pick in 0usize..3,
             kind in 0usize..4,
             n_rows in 0u32..2_000,
             entry_flags in any::<u8>(),
@@ -1339,12 +1435,17 @@ mod tests {
                 2 => events_of(&[]).data_type().clone(),
                 _ => map_of(&[]).data_type().clone(),
             };
+            let encoding = match pick {
+                0 => Encoding::Varbin,
+                1 => Encoding::Ipc,
+                _ => Encoding::Map,
+            };
             let entry = BlockEntry {
                 first_row: 0,
                 n_rows,
                 segment_offset: 8,
                 segment_len: body.len() as u32 + 16,
-                encoding: if ipc { Encoding::Ipc } else { Encoding::Varbin },
+                encoding,
                 flags: entry_flags,
                 const_len,
                 min,
@@ -1383,11 +1484,10 @@ mod tests {
     }
 
     #[test]
-    fn varbin_with_decreasing_offsets_is_corrupt() {
+    fn varbin_lengths_whose_sum_exceeds_the_bytes_are_corrupt() {
+        // Two values of 3 bytes each, but only 3 bytes follow the lengths block.
         let mut body = Vec::new();
-        for offset in [0u32, 3, 2] {
-            body.extend_from_slice(&offset.to_le_bytes());
-        }
+        encode_lengths(&[3, 3], &mut body);
         body.extend_from_slice(b"abc");
         let entry = BlockEntry {
             first_row: 0,
@@ -1403,10 +1503,117 @@ mod tests {
         let field = Field::new("c", DataType::Utf8, true);
         assert!(matches!(
             decode_chunk(&entry, Some(&body), &field, None),
+            Err(StrataError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn varbin_null_slot_with_a_length_is_corrupt() {
+        // Row 1 is null (bit 1 clear) but has length 1.
+        let mut body = vec![0b01u8];
+        encode_lengths(&[3, 1], &mut body);
+        body.extend_from_slice(b"abcd");
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 2,
+            segment_offset: 8,
+            segment_len: body.len() as u32 + 16,
+            encoding: Encoding::Varbin,
+            flags: flags::HAS_NULLS,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new("c", DataType::Utf8, true);
+        assert!(matches!(
+            decode_chunk(&entry, Some(&body), &field, None),
             Err(StrataError::Corrupt {
-                what: "varbin offsets",
+                what: "null length",
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn map_with_a_bad_value_nulls_byte_is_corrupt() {
+        // One map with one entry ("k", null), then a value-nulls byte of 2.
+        let mut body = Vec::new();
+        encode_lengths(&[1], &mut body);
+        encode_lengths(&[1], &mut body);
+        body.push(b'k');
+        body.push(2);
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 1,
+            segment_offset: 8,
+            segment_len: body.len() as u32 + 16,
+            encoding: Encoding::Map,
+            flags: 0,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new("c", map_of(&[]).data_type().clone(), true);
+        assert!(matches!(
+            decode_chunk(&entry, Some(&body), &field, None),
+            Err(StrataError::Corrupt {
+                what: "map value nulls",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn map_on_a_non_map_encoding_is_corrupt() {
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 1,
+            segment_offset: 8,
+            segment_len: 16,
+            encoding: Encoding::Varbin,
+            flags: 0,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new("c", map_of(&[]).data_type().clone(), true);
+        assert!(matches!(
+            decode_chunk(&entry, Some(&[0u8; 8][..]), &field, None),
+            Err(StrataError::Corrupt {
+                what: "encoding for type",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn wide_batch_columns_round_trip() {
+        let full = wide_batch(2_000);
+        for column in full.columns() {
+            round_trip(Arc::clone(column));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn random_map_bodies_never_panic(
+            n_rows in 0u32..2_000,
+            entry_flags in any::<u8>(),
+            body in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let entry = BlockEntry {
+                first_row: 0,
+                n_rows,
+                segment_offset: 8,
+                segment_len: body.len() as u32 + 16,
+                encoding: Encoding::Map,
+                flags: entry_flags,
+                const_len: 0,
+                min: [0; 16],
+                max: [0; 16],
+            };
+            let field = Field::new("c", map_of(&[]).data_type().clone(), true);
+            let _ = decode_chunk(&entry, Some(&body), &field, None);
+        }
     }
 }

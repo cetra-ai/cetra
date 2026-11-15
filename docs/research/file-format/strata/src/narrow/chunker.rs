@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{Array, AsArray, ListArray, MapArray};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
 
@@ -29,7 +29,7 @@ pub fn chunk_ranges(
     let mut start = 0;
     let mut rows = 0usize;
     let mut bytes = 0usize;
-    for (i, row_bytes) in row_sizes(array).into_iter().enumerate() {
+    for (i, row_bytes) in row_sizes(array, has_dict).into_iter().enumerate() {
         rows += 1;
         bytes = bytes.saturating_add(row_bytes);
         if rows >= max_rows || bytes >= max_bytes {
@@ -46,13 +46,15 @@ pub fn chunk_ranges(
 }
 
 /// Whether a column of type `dt` is stored as `IPC` chunks. Every type without a narrow
-/// encoding of its own is, and a List(Utf8) column is only when it has no dictionary.
+/// encoding of its own is, a List(Utf8) column is only when it has no dictionary, and a map is
+/// only when it is not `Map<Utf8, Utf8>`.
 pub(crate) fn uses_ipc(dt: &DataType, has_dict: bool) -> bool {
     match dt {
         DataType::List(field) if field.data_type() == &DataType::Utf8 => !has_dict,
         DataType::Utf8 | DataType::Binary | DataType::Boolean | DataType::FixedSizeBinary(_) => {
             false
         }
+        DataType::Map(..) => !super::is_utf8_map(dt),
         _ => super::numeric_of(dt).is_none(),
     }
 }
@@ -145,13 +147,18 @@ fn covered_child(child: &dyn Array, (first, last): (i64, i64)) -> Result<usize> 
     slice_bytes(child.slice(start, end - start).as_ref())
 }
 
-/// The bytes each row of `array` counts for in the chunk budget.
+/// The bytes each row of `array` counts for in the chunk budget. `has_dict` tells whether the
+/// column has a dictionary, which decides what a Utf8 row and a List(Utf8) row cost.
 ///
-/// Fixed-width types count their width. A Utf8 or Binary row counts its length plus 4. A
-/// List(Utf8) row counts, for each element, its length plus 4, and 4 more for the row.
-fn row_sizes(array: &dyn Array) -> Vec<usize> {
+/// Fixed-width types count their width. A Utf8 row with a dictionary counts its 4-byte code;
+/// without one it counts its length plus 4. A Binary row counts its length plus 4. A List(Utf8)
+/// row with a dictionary counts 4 bytes per element and 4 more for the row. A `Map<Utf8, Utf8>`
+/// row counts, per entry, its key length, its value length (0 for a null value) and 8, and 4
+/// more for the row.
+fn row_sizes(array: &dyn Array, has_dict: bool) -> Vec<usize> {
     let n = array.len();
     match array.data_type() {
+        DataType::Utf8 if has_dict => vec![4; n],
         DataType::Utf8 => match array.as_string_opt::<i32>() {
             Some(strings) => (0..n).map(|i| strings.value(i).len() + 4).collect(),
             None => vec![0; n],
@@ -166,16 +173,39 @@ fn row_sizes(array: &dyn Array) -> Vec<usize> {
                 None => vec![0; n],
             }
         }
+        dt if super::is_utf8_map(dt) => match array.as_map_opt() {
+            Some(map) => map_row_sizes(map),
+            None => vec![0; n],
+        },
         dt => vec![value_bytes(dt); n],
     }
 }
 
-/// The byte budget of each row of a List(Utf8) array.
-fn list_row_sizes(list: &arrow::array::ListArray) -> Vec<usize> {
-    let Some(child) = list.values().as_string_opt::<i32>() else {
-        return vec![0; list.len()];
-    };
+/// The byte budget of each row of a List(Utf8) array with a dictionary: 4 bytes per element
+/// and 4 for the row. The elements are counted from the offsets, so no child is read.
+fn list_row_sizes(list: &ListArray) -> Vec<usize> {
     list.value_offsets()
+        .windows(2)
+        .map(|pair| {
+            let elements = match pair {
+                [start, end] => usize::try_from(end.saturating_sub(*start)).unwrap_or(0),
+                _ => 0,
+            };
+            elements * 4 + 4
+        })
+        .collect()
+}
+
+/// The byte budget of each row of a `Map<Utf8, Utf8>` array, as its encoding stores it.
+fn map_row_sizes(map: &MapArray) -> Vec<usize> {
+    let entries = map.entries();
+    let (Some(keys), Some(values)) = (
+        entries.column(0).as_string_opt::<i32>(),
+        entries.column(1).as_string_opt::<i32>(),
+    ) else {
+        return vec![0; map.len()];
+    };
+    map.value_offsets()
         .windows(2)
         .map(|pair| {
             let (start, end) = match pair {
@@ -185,8 +215,17 @@ fn list_row_sizes(list: &arrow::array::ListArray) -> Vec<usize> {
                 ),
                 _ => (0, 0),
             };
-            let elements: usize = (start..end).map(|j| child.value(j).len() + 4).sum();
-            elements + 4
+            let entry_bytes: usize = (start..end)
+                .map(|j| {
+                    let value = if values.is_valid(j) {
+                        values.value(j).len()
+                    } else {
+                        0
+                    };
+                    keys.value(j).len() + value + 8
+                })
+                .sum();
+            entry_bytes + 4
         })
         .collect()
 }
@@ -282,7 +321,8 @@ mod tests {
 
     #[test]
     fn list_of_utf8_rows_count_elements_and_row() {
-        // A row with two elements of 2 bytes: 2 * (2 + 4) + 4 = 16 bytes.
+        // With a dictionary a row with two elements costs 4 + 4 * 2 = 12 bytes. Rows of 12, 24
+        // and 36 bytes: the third row reaches the 32-byte budget, so the chunks are [3, 1] rows.
         let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
         for _ in 0..4 {
             builder.values().append_value("ab");
@@ -291,7 +331,48 @@ mod tests {
         }
         let array = builder.finish();
         let ranges = chunk_ranges(&array, 4096, 32, true).unwrap();
-        assert_eq!(lens(&ranges), vec![2, 2]);
+        assert_eq!(lens(&ranges), vec![3, 1]);
+    }
+
+    #[test]
+    fn utf8_with_a_dictionary_costs_four_bytes_per_row() {
+        let array = StringArray::from(vec!["abc"; 20_000]);
+        let ranges = chunk_ranges(&array, 65_535, 32 * 1024, true).unwrap();
+        assert_eq!(lens(&ranges), vec![8192, 8192, 3616]);
+        let ranges = chunk_ranges(&array, 4096, 32 * 1024, true).unwrap();
+        assert_eq!(lens(&ranges), vec![4096, 4096, 4096, 4096, 3616]);
+    }
+
+    #[test]
+    fn list_of_utf8_with_a_dictionary_costs_four_per_element_and_row() {
+        // One element per row costs 4 + 4 = 8 bytes, so 4,096 rows reach 32 KiB.
+        let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+        for _ in 0..10_000 {
+            builder.values().append_value("v");
+            builder.append(true);
+        }
+        let array = builder.finish();
+        let ranges = chunk_ranges(&array, 65_535, 32 * 1024, true).unwrap();
+        assert_eq!(lens(&ranges), vec![4096, 4096, 1808]);
+    }
+
+    #[test]
+    fn map_rows_cost_their_entries_and_row() {
+        // One entry ("k", "v") costs 1 + 1 + 8 = 10 bytes and a row adds 4, so a row costs 14.
+        // 100 rows reach the 1,400-byte budget exactly.
+        let mut builder = arrow::array::MapBuilder::new(
+            None,
+            arrow::array::StringBuilder::new(),
+            arrow::array::StringBuilder::new(),
+        );
+        for _ in 0..250 {
+            builder.keys().append_value("k");
+            builder.values().append_value("v");
+            builder.append(true).unwrap();
+        }
+        let array = builder.finish();
+        let ranges = chunk_ranges(&array, 65_535, 1_400, false).unwrap();
+        assert_eq!(lens(&ranges), vec![100, 100, 50]);
     }
 
     #[test]

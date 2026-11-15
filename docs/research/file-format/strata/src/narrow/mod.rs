@@ -9,6 +9,7 @@ mod chunker;
 mod decode;
 mod dict;
 mod encode;
+mod lengths;
 
 pub use chunker::chunk_ranges;
 pub use decode::decode_chunk;
@@ -38,14 +39,18 @@ pub enum Encoding {
     FsbRle = 5,
     /// Dictionary codes, for Utf8.
     Dict = 6,
-    /// Variable-length values (M1.4).
+    /// Variable-length values: a lengths block of the value lengths, then the bytes.
     Varbin = 7,
-    /// Dictionary codes of list elements, for List(Utf8).
+    /// Dictionary codes of list elements, for List(Utf8): a lengths block of the list
+    /// lengths, then the packed codes of all elements.
     ListDict = 8,
     /// A bit per row, for booleans.
     Bool = 9,
-    /// An Arrow IPC stream (M1.4).
+    /// An Arrow IPC stream of one batch with one column.
     Ipc = 10,
+    /// `Map<Utf8, Utf8>`: lengths blocks of the entry counts, the key lengths and the value
+    /// lengths, with the key and value bytes and a value-validity bitmap when a value is null.
+    Map = 11,
 }
 
 impl Encoding {
@@ -63,6 +68,7 @@ impl Encoding {
             8 => Some(Self::ListDict),
             9 => Some(Self::Bool),
             10 => Some(Self::Ipc),
+            11 => Some(Self::Map),
             _ => None,
         }
     }
@@ -215,6 +221,29 @@ pub(crate) fn numeric_of(dt: &DataType) -> Option<Numeric> {
         width,
         signed,
     })
+}
+
+/// True for `Map` columns that use the `MAP` encoding: the entries are a non-nullable struct
+/// of a non-nullable Utf8 key and a nullable Utf8 value. Other maps are stored as `IPC`.
+/// The encoder, the decoder and the chunker all use this one predicate.
+pub(crate) fn is_utf8_map(dt: &DataType) -> bool {
+    let DataType::Map(entries, _) = dt else {
+        return false;
+    };
+    if entries.is_nullable() {
+        return false;
+    }
+    let DataType::Struct(fields) = entries.data_type() else {
+        return false;
+    };
+    let mut fields = fields.iter();
+    let (Some(key), Some(value), None) = (fields.next(), fields.next(), fields.next()) else {
+        return false;
+    };
+    key.data_type() == &DataType::Utf8
+        && !key.is_nullable()
+        && value.data_type() == &DataType::Utf8
+        && value.is_nullable()
 }
 
 /// The error for a type the writer cannot store yet. It names the type, never values.

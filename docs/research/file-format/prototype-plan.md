@@ -142,7 +142,7 @@ bytes[stored_len]
 ```
 
 - Every reference to a segment stores its offset (the header's offset) and its length (`16 + stored_len`), so the reader fetches the header and the body in one range.
-- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 1) for narrow, frame and table segments; level 3 for payload frames.
+- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 3 for payload frames.
 - The writer stores a segment raw when zstd does not make it smaller (a#12).
 
 | `kind` | Content |
@@ -226,7 +226,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 
 **Chunks.**
 - Each column is cut into chunks independently.
-- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the sum of value lengths + 4 B per row. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
+- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the encoded width of the row: a Utf8 row with a dictionary is 4 B (its code), a Utf8 or Binary row without one is its length + 4 B, a List(Utf8) row with a dictionary is 4 B per element + 4 B, and a `MAP` row is, per entry, key length + value length + 8 B, plus 4 B. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
 - The chunk is the unit of I/O and decoding: a mini-block in the Lance sense (b#1).
 
 **Block table.** One 56-byte entry per chunk, stored raw in kind 7 pages of at most 64 entries (3.6 KiB). A lookup fetches only the page holding its row range, found through hot-tail section 7. The sort-key column's entries are also copied whole into hot-tail section 3.
@@ -265,10 +265,15 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 | 4 | `FSB_RAW` | FixedSizeBinary | Values back to back. |
 | 5 | `FSB_RLE` | FixedSizeBinary when runs < n_rows / 2 | `u16 n_runs` · `u16 run_len[n_runs]` · `n_runs` values. |
 | 6 | `DICT` | Utf8 with a sorted file dictionary | `u8 width`, then the codes packed like `FOR_BITPACK` with an explicit base of 0 (the zone's min code is not used as the base). |
-| 7 | `VARBIN` | other Utf8 and Binary | `u32 offsets[n+1]`, then the bytes. |
-| 8 | `LIST_DICT` | List(Utf8) whose values use a dictionary and with no null element inside any list (a chunk with one uses `IPC`) | `u32 list_offsets[n+1]`, then `u8 width` and the packed codes of all elements. |
+| 7 | `VARBIN` | other Utf8 and Binary | lengths block of the `n` value lengths, then the bytes (see below). |
+| 8 | `LIST_DICT` | List(Utf8) whose values use a dictionary and with no null element inside any list (a chunk with one uses `IPC`) | lengths block of the `n` list lengths, then `u8 width` and the packed codes of all elements. |
 | 9 | `BOOL` | Boolean | Arrow bitmap, `ceil(n/8)` bytes. |
-| 10 | `IPC` | every other type (events, links, residual maps) | Arrow IPC stream (`StreamWriter`) of a one-column batch holding the chunk. |
+| 10 | `IPC` | every other type (events, links, maps other than Map<Utf8, Utf8>) | Arrow IPC stream (`StreamWriter`) of a one-column batch holding the chunk. |
+| 11 | `MAP` | `Map<Utf8, Utf8>` with the shape below | lengths block of the entry count of each map (null maps 0) · lengths block of the key lengths · key bytes · `u8 value_nulls` (0, or 1 and a value-validity bitmap of E bits) · lengths block of the value lengths · value bytes. `E` is the number of entries. |
+
+**Lengths block.** `u32 base · u8 width · packed (len − base)`, where `base` is the minimum length (0 when there is a null, since null slots have length 0) and `width` is the bit width of the largest `len − base`. `width` above 32 is corrupt. The packed values use the `FOR_BITPACK` bit layout. Storing lengths instead of cumulative offsets keeps the bodies small and repetitive, so zstd compresses them well. **Null rule:** in `VARBIN`, `LIST_DICT` and `MAP`, a null slot has length 0, and a decoder rejects any other length there as corrupt.
+
+**`MAP` shape.** A column uses `MAP` when `is_utf8_map` holds: the type is `Map(entries, _)` with a non-nullable `entries` field, whose struct has exactly two fields, a non-nullable Utf8 `keys` field and a nullable Utf8 `values` field. Other maps stay `IPC`.
 
 **`FOR_BITPACK` rules:**
 - Each value becomes `u = (v as i64 as u64).wrapping_sub(min as u64)`.

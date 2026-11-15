@@ -3,7 +3,7 @@
 /// Tuning parameters. [`Config::default`] gives the values documented on each field.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// zstd level for narrow, frame and table segments. Default 1.
+    /// zstd level for narrow, frame and table segments. Default 3.
     pub zstd_level: i32,
     /// Maximum rows per narrow chunk. Default 4,096. The writer rejects values above 65,535
     /// (the `FSB_RLE` run lengths are `u16`).
@@ -25,7 +25,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            zstd_level: 1,
+            zstd_level: 3,
             chunk_max_rows: 4_096,
             chunk_max_bytes: 32 * 1024,
             page_max_entries: 64,

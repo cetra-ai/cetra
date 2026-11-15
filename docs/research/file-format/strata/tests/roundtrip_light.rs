@@ -112,7 +112,7 @@ async fn roundtrip_light() {
         summary.columns.iter().map(|c| c.chunks).sum::<u32>()
     );
     println!(
-        "{:<22} {:>12} {:>12} {:>7}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc)",
+        "{:<22} {:>12} {:>12} {:>7}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc, Map)",
         "column", "strata B", "pq_default B", "ratio"
     );
     for column in &summary.columns {
@@ -139,5 +139,11 @@ async fn roundtrip_light() {
         summary.bytes,
         pq_total,
         summary.bytes as f64 / pq_total as f64
+    );
+    assert!(
+        summary.bytes * 100 <= pq_total * 135,
+        "strata {} B is above 1.35 times pq_default {} B",
+        summary.bytes,
+        pq_total
     );
 }

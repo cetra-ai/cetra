@@ -6,8 +6,9 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, ListArray,
-    RecordBatch, StringArray, TimestampNanosecondArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array,
+    Int64Array, ListArray, MapBuilder, RecordBatch, StringArray, StringBuilder,
+    TimestampNanosecondArray,
 };
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -110,6 +111,83 @@ pub(crate) fn batch(n: usize) -> RecordBatch {
         Arc::new(tags),
     ];
     RecordBatch::try_new(schema(), columns).unwrap()
+}
+
+/// The schema of [`wide_batch`]: the columns of [`schema`], with a Float32, a FixedSizeBinary(8),
+/// a Binary, a Utf8 and a `Map<Utf8, Utf8>` column between its first two columns and its others.
+pub(crate) fn wide_schema() -> SchemaRef {
+    let base = schema();
+    let attrs = DataType::Map(
+        Arc::new(Field::new(
+            "entries",
+            DataType::Struct(
+                vec![
+                    Field::new("keys", DataType::Utf8, false),
+                    Field::new("values", DataType::Utf8, true),
+                ]
+                .into(),
+            ),
+            false,
+        )),
+        false,
+    );
+    let mut fields = vec![
+        base.field(0).clone(),
+        base.field(1).clone(),
+        Field::new("f32", DataType::Float32, true),
+        Field::new("short_id", DataType::FixedSizeBinary(8), false),
+        Field::new("blob", DataType::Binary, true),
+        Field::new("uid", DataType::Utf8, false),
+        Field::new("attrs", attrs, true),
+    ];
+    fields.extend(base.fields().iter().skip(2).map(|f| f.as_ref().clone()));
+    Arc::new(Schema::new(fields))
+}
+
+/// `n` rows of [`wide_schema`], sorted by `(trace_id, start_time)`. The columns of [`batch`]
+/// are reused. The others cover the narrow types: nulls, empty and long values, and maps with
+/// null maps and null values.
+pub(crate) fn wide_batch(n: usize) -> RecordBatch {
+    let base = batch(n);
+    let f32s =
+        Float32Array::from_iter((0..n).map(|i| (!i.is_multiple_of(9)).then_some(i as f32 * 0.5)));
+    let mut short_ids = Vec::with_capacity(n * 8);
+    for i in 0..n {
+        short_ids.extend_from_slice(&(i as u64).to_le_bytes());
+    }
+    let short_ids = FixedSizeBinaryArray::try_new(8, Buffer::from_vec(short_ids), None).unwrap();
+    let blobs = BinaryArray::from_iter(
+        (0..n).map(|i| (!i.is_multiple_of(5)).then(|| vec![(i % 251) as u8; i % 300])),
+    );
+    let uids = StringArray::from_iter_values((0..n).map(|i| format!("user-{i:08}")));
+    let mut attrs = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+    for i in 0..n {
+        if i.is_multiple_of(13) {
+            attrs.append(false).unwrap();
+            continue;
+        }
+        for j in 0..i % 4 {
+            attrs.keys().append_value(format!("k{j}"));
+            if (i + j).is_multiple_of(7) {
+                attrs.values().append_null();
+            } else {
+                attrs.values().append_value(format!("v{i}-{j}"));
+            }
+        }
+        attrs.append(true).unwrap();
+    }
+
+    let mut columns: Vec<ArrayRef> = vec![
+        Arc::clone(base.column(0)),
+        Arc::clone(base.column(1)),
+        Arc::new(f32s),
+        Arc::new(short_ids),
+        Arc::new(blobs),
+        Arc::new(uids),
+        Arc::new(attrs.finish()),
+    ];
+    columns.extend(base.columns().iter().skip(2).cloned());
+    RecordBatch::try_new(wide_schema(), columns).unwrap()
 }
 
 /// Asserts that `actual` equals `expected` bitwise: the type, the length, the validity of

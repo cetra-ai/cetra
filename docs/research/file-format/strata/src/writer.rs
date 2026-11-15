@@ -34,8 +34,8 @@ pub struct StrataWriter {
 pub struct ColumnSummary {
     /// The column name.
     pub name: String,
-    /// Chunks per encoding, indexed by the encoding's value.
-    pub encoding_counts: [u32; 11],
+    /// Chunks per encoding, indexed by the encoding's value (0 to 11).
+    pub encoding_counts: [u32; 12],
     /// Bytes of the column's segments, block-table pages included.
     pub bytes: u64,
     /// Number of chunks.
@@ -199,7 +199,7 @@ impl StrataWriter {
                 dict.is_some(),
             )?;
             let mut entries = Vec::with_capacity(ranges.len());
-            let mut counts = [0u32; 11];
+            let mut counts = [0u32; 12];
             let mut bytes = u64::from(dict_len);
             for range in ranges {
                 let slice = array.slice(range.start, range.len());
@@ -402,7 +402,8 @@ fn check_schema(expected: &Schema, actual: &Schema) -> Result<()> {
 mod tests {
     use super::*;
     use crate::file::StrataFile;
-    use crate::testgen::{batch, schema};
+    use crate::narrow::Encoding;
+    use crate::testgen::{batch, schema, wide_batch, wide_schema};
     use arrow::array::{FixedSizeBinaryArray, new_null_array};
     use arrow::datatypes::Field;
     use object_store::memory::InMemory;
@@ -465,6 +466,18 @@ mod tests {
         let rows = RecordBatch::try_new(Arc::clone(&nullable), vec![Arc::new(ids)]).unwrap();
         let mut w = StrataWriter::new(nullable, &["trace_id"], Config::default()).unwrap();
         assert!(matches!(w.write(&rows), Err(StrataError::Schema { .. })));
+    }
+
+    #[test]
+    fn map_column_counts_its_map_chunks() {
+        let rows = wide_batch(10_000);
+        let mut w = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        let (_, summary) = w.finish().unwrap();
+        let attrs = &summary.columns[6];
+        assert_eq!(attrs.name, "attrs");
+        assert!(attrs.chunks > 0);
+        assert_eq!(attrs.encoding_counts[Encoding::Map as usize], attrs.chunks);
     }
 
     #[tokio::test]
