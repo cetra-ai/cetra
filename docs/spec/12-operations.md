@@ -28,6 +28,7 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 | `orgs.create_url` | | unset: where "New organization" links when `orgs.user_create` is false (D-P-31) |
 | `entitlements.upgrade_url` | | unset: no Upgrade button. `{org}` is replaced by the org id (D-P-15) |
 | `entitlements.control_plane_provider` | | `"oidc:cloud"`: the identity provider whose subjects the control plane uses (D-P-39) |
+| `entitlements.control_plane` | | `false`; `true` on a cloud cell only: the cell accepts org tokens and control-plane requests. When false, `/api/internal/v1/*` answers 404, stored org tokens are ignored and only licence keys are trusted (D-P-50) |
 | `smtp_url`, `email_from` | `LLMOBS_SMTP_URL`, `LLMOBS_EMAIL_FROM` | unset (email off) |
 | `auth.*` | see 08 | |
 | `init.admin_email` | `LLMOBS_INIT_ADMIN_EMAIL` | unset |
@@ -94,13 +95,13 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 
 **Entitlements.** One value per org, resolved in memory at every check: instance defaults (`[entitlements.defaults]`, from track P's M2), replaced by the org's valid token, plus the licence's features (D-P-10). Features: `retention_management`, `project_roles`, `sso_enforcement`, `org_sso`. Limits: `units_included`, `units_cap`, `ingest_spans_per_sec`, `ingest_burst`, `data_access_days`, `max_seats`, `max_projects`, `max_alert_rules`, `max_active_online_rules`; none means unlimited (D-P-12, D-P-13). There is no org judge-spend limit.
 
-**Org tokens (cloud).** The control plane owns the plan catalog and per-org overrides and `PUT`s a signed `kind: "org"` token, whose `audience` is the cell's `public_url`, to `/api/internal/v1/orgs/{org_id}/entitlements` on the org's cell; the newest `issued_at` wins, an expired token falls back to the instance defaults, and every shrink of the data window is recorded so retention uses the largest window of the last 30 days (D-P-9, D-P-11, D-P-30). The control plane creates orgs on a cell with `POST /api/internal/v1/orgs` (D-P-29).
+**Org tokens (cloud).** Only on a cell with `entitlements.control_plane = true` (D-P-50). The control plane owns the plan catalog and per-org overrides and `PUT`s a signed `kind: "org"` token, whose `audience` is the cell's `public_url`, to `/api/internal/v1/orgs/{org_id}/entitlements` on the org's cell; the newest `issued_at` wins, an expired token falls back to the instance defaults, and every shrink of the data window is recorded so retention uses the largest window of the last 30 days (D-P-9, D-P-11, D-P-30). The control plane creates orgs on a cell with `POST /api/internal/v1/orgs` (D-P-29).
 
 **Enforcement.**
 - Monthly units (spans + scores, judge-trace spans excluded) per UTC calendar month, from `usage_daily` plus unflushed counts. At `units_cap`, OTLP HTTP, score writes and feedback answer `402 quota_exceeded` (gRPC `RESOURCE_EXHAUSTED` without `RetryInfo`; score deletions are never refused); warnings at 80 % and 100 % of `units_included` (banner, one email to owners, D-P-38); the 402 carries `Retry-After` until the reset, and the SDKs pause for at most one hour at a time (D-P-16–D-P-18, D-P-34, D-P-37).
 - Ingest rate: a per-org token bucket over accepted spans; `429 rate_limited` with `Retry-After`, gRPC `UNAVAILABLE` (D-P-19, D-P-35).
 - Seats (owner, admin and member memberships plus pending invites with those roles) and active projects: `403 plan_limit` on invite, role change, accept and project create (D-P-20).
-- Data older than `data_access_days` is hidden from every read by `QueryOptions::visible_from` in the storage query (media blobs too); deletion scope reads are exempt; retention and the ingest age check use the window plus 30 days (D175, D-P-21, D-P-22).
+- Data older than `data_access_days` is hidden from every read by `QueryOptions::visible_from`, applied in the base query views (media blobs too); deletion reads are exempt; retention uses the largest window of the last 30 days plus 30 days, and the ingest age check the current window plus 30 days (D175, D-P-21, D-P-22, D-P-45, D-P-47).
 - Feature gates answer `403 plan_required`; count limits (alert rules, active online rules) answer `403 plan_limit` (D-P-14, D-P-23).
 
 **Metering.** `usage_daily` (spans, bytes, scores, judge tokens and cost) per org, project and day is the billing source. It is exposed on the org's Plan page (track P's M3), through `GET /api/v1/orgs/{org}/usage`, and to the control plane through `GET /api/internal/v1/usage` with a `kind: "control_plane"` bearer token (D-P-24).
