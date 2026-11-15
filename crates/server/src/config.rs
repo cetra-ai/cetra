@@ -1146,35 +1146,29 @@ fn oidc_name_ok(name: &str) -> bool {
 }
 
 fn validate_issuer(key: String, issuer: &str) -> Result<(), ConfigError> {
-    let url = match url::Url::parse(issuer) {
-        Ok(url) => url,
-        Err(_) => {
-            return Err(ConfigError::Provider {
-                key,
-                reason: "invalid issuer",
-            });
-        }
+    match issuer_problem(issuer) {
+        None => Ok(()),
+        Some(reason) => Err(ConfigError::Provider { key, reason }),
+    }
+}
+
+/// Why `issuer` cannot be an OIDC issuer: not a URL, user info, not `https` (or `http` on a
+/// loopback host), or a multi-tenant Microsoft issuer. `None` when it can.
+pub(crate) fn issuer_problem(issuer: &str) -> Option<&'static str> {
+    let Ok(url) = url::Url::parse(issuer) else {
+        return Some("invalid issuer");
     };
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "invalid issuer",
-        });
+        return Some("invalid issuer");
     }
     let loopback = loopback_host(&url);
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "issuer must be https, or http on a loopback host",
-        });
+        return Some("issuer must be https, or http on a loopback host");
     }
     if multi_tenant_entra(&url) {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "multi-tenant Microsoft issuers are not allowed",
-        });
+        return Some("multi-tenant Microsoft issuers are not allowed");
     }
-    Ok(())
+    None
 }
 
 fn loopback_host(url: &url::Url) -> bool {
@@ -1720,12 +1714,31 @@ mod tests {
 
     use super::{
         ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
-        SmtpUrl, Tls, load_from,
+        SmtpUrl, Tls, issuer_problem, load_from,
     };
     use crate::api::account::SignupPolicy;
 
     fn socket(raw: &str) -> SocketAddr {
         raw.parse().unwrap()
+    }
+
+    #[test]
+    fn issuer_problem_names_each_reason() {
+        assert_eq!(issuer_problem("https://idp.example/realm"), None);
+        assert_eq!(issuer_problem("http://localhost:8080"), None);
+        assert_eq!(issuer_problem("not a url"), Some("invalid issuer"));
+        assert_eq!(
+            issuer_problem("https://user:pw@idp.example"),
+            Some("invalid issuer")
+        );
+        assert_eq!(
+            issuer_problem("http://idp.example"),
+            Some("issuer must be https, or http on a loopback host")
+        );
+        assert_eq!(
+            issuer_problem("https://login.microsoftonline.com/common/v2.0"),
+            Some("multi-tenant Microsoft issuers are not allowed")
+        );
     }
 
     #[test]
