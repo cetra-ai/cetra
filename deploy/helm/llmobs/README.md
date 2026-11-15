@@ -34,6 +34,8 @@ The chart version is the llmobs version.
 | `persistence.storageClassName` | `""` | empty: the default StorageClass |
 | `resources` | `{}` | container resources |
 | `extraVolumes`, `extraVolumeMounts` | `[]`, `[]` | more pod volumes and llmobs container mounts, e.g. a backup volume |
+| `metrics.enabled` | `false` | Prometheus `/metrics` on port 9464 (`LLMOBS_METRICS_ADDR`), a `metrics` container port; no authentication, no Service port ([monitoring.md](../../../docs/self-hosting/monitoring.md)) |
+| `metrics.podAnnotations` | `prometheus.io/scrape`, `port` (9464), `path` (`/metrics`) | added to the pod when `metrics.enabled`; `podAnnotations` wins on a shared key |
 | `service.type` | `ClusterIP` | Service type (ports 8080, 4317, 4318) |
 | `service.annotations` | `{}` | |
 | `ingress.enabled` | `false` | Ingress for port 8080 (UI, API, OTLP/HTTP, MCP) |

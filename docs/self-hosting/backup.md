@@ -298,6 +298,59 @@ and data volume, with the server stopped:
    load their traces and are pruned after 7 days.
 8. Start llmobs with `llmobs serve`.
 
+To verify a restore in place, start the restored copy in restore mode, as [below](#restore-mode-restore-drills)
+describes: the copy then cannot send anything.
+
+## Restore mode (restore drills)
+
+`restore_mode = true` (or `LLMOBS_RESTORE_MODE=true`) starts a server that makes no outbound call. Use it
+for a copy of an installation that you start to check a restore, for example a drill that runs a copy of a
+cell.
+
+With restore mode on, the server:
+
+- evaluates and delivers no alert;
+- runs no judge, webhook evaluator or backfill (their jobs stay queued in `meta.db`);
+- sends no email (each one is logged as `email not sent: restore mode` and dropped);
+- builds no identity provider: no SSO buttons, password login and API keys only;
+- makes no org-SSO domain check and no DNS lookup;
+- sends no usage notices.
+
+User-triggered outbound calls answer `503` with code `restore_mode`: the channel and connection tests, evaluator
+test runs, manual evaluation runs, backfills, the org-SSO provider check and domain verification, the SMTP
+test, and the OAuth, OIDC and org-SSO sign-in.
+
+Reads, ingestion, deletions, retention, compaction and backups keep working.
+
+**How to check it is on:**
+
+- the startup log has one `warn` line: `restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)`;
+- `/readyz` answers `{"status":"ready","restore_mode":true}`;
+- the metric `llmobs_restore_mode` is `1` ([monitoring.md](monitoring.md)).
+
+**What does not work in restore mode:**
+
+- The outbound calls listed above, and the sending of email and usage notices.
+- Object deletion. The server deletes no object: GC, media collection and project drops remove nothing, and
+  `gc-orphans` still deletes. A project that has media never completes its drop in restore mode: its blob
+  deletes are refused, so the project stays `dropping` and the deletion worker retries and logs until the
+  server runs without restore mode.
+- Sign-in with an identity provider. Members of orgs that enforce SSO, and every user when
+  `auth.disable_password = true`, sign in with an API key.
+
+**What it does not do:**
+
+- It does not make the copy read-only. Writes that are not outbound calls still happen.
+- It does not stop a copy from reaching the live bucket if it is configured to. Point the copy at a copy of the
+  bucket, as the restore procedure says. Because it deletes no object, a copy pointed at the live bucket by
+  mistake can only add objects; the live server's staged-object GC removes them after an hour.
+
+**Known limitation.** A forgot-password or an invite request answers as if the mail was sent, but no mail is
+sent in restore mode.
+
+Use an API key, not a password, when `auth.disable_password = true` or the user's org enforces SSO: external
+sign-in is off.
+
 ## Retention and privacy
 
 Data deleted in llmobs (GDPR erasure, retention) stays in older backups until they expire. Keep
