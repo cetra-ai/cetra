@@ -1,7 +1,8 @@
 //! Parquet vs Vortex on LLM-shaped spans, through DataFusion.
 //!
 //! fmtbench gen <dir> <traces> <files>
-//! fmtbench query <dir> [runs]
+//! fmtbench query <dir|s3://bucket/key> [runs]
+//! fmtbench profile <dir|s3://bucket/key> [runs]
 
 mod counting;
 mod payload;
@@ -17,6 +18,13 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::prelude::{SessionConfig, SessionContext};
+use futures::TryStreamExt;
+use futures::future::try_join_all;
+use object_store::aws::AmazonS3Builder;
+use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjPath;
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
+use strata::{Config, StrataFile, StrataTable, StrataWriter};
 use fmt_testdata::datagen;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::enums::SpanKind;
@@ -67,17 +75,15 @@ async fn main() -> R<()> {
             generate(&dir, traces, files, swe).await
         }
         Some("query") => {
-            let dir = PathBuf::from(&args[2]);
             let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(5);
             let only = args.get(4).cloned();
-            query(&dir, runs, only).await
+            query(&args[2], runs, only).await
         }
         Some("profile") => {
-            let dir = std::fs::canonicalize(&args[2])?;
+            let loc = location(&args[2])?;
             let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(30);
-            let d2 = dir.clone();
-            profile::profile(&dir, runs, async move |ctx: &SessionContext, variant: &str| {
-                table(ctx, "t", &format!("file://{}/{variant}/", d2.display()), variant.starts_with("vx")).await
+            profile::profile(&loc, runs, async |ctx: &SessionContext, variant: &str| {
+                table(ctx, &loc, variant).await.map(drop)
             })
             .await
         }
@@ -93,7 +99,7 @@ async fn main() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir> [runs] [only]";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs]\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -254,7 +260,61 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &
         println!("{variant:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, el, raw as f64 / 1048576.0 / el.as_secs_f64());
     }
 
-    column_sizes_parquet(&dir.join("pq_tuned"))?;
+    let st_dir = dir.join("st");
+    std::fs::create_dir_all(&st_dir)?;
+    let t = Instant::now();
+    let mut bytes = 0u64;
+    let mut summaries = Vec::new();
+    for (i, b) in slices.iter().enumerate() {
+        let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
+        for off in (0..b.num_rows()).step_by(8192) {
+            w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+        }
+        let (file, summary) = w.finish()?;
+        std::fs::write(st_dir.join(format!("{i:03}.strata")), &file)?;
+        bytes += file.len() as u64;
+        summaries.push(summary);
+    }
+    let el = t.elapsed();
+    println!("{:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", "st", bytes >> 20, el, raw as f64 / 1048576.0 / el.as_secs_f64());
+
+    payload_table(dir, &summaries)?;
+    Ok(())
+}
+
+/// Payload columns: Strata bytes and frame counts beside the Parquet column bytes.
+fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
+    let names = ["input", "output", "system_instructions", "tool_definitions"];
+    let mut pq = Vec::new();
+    for v in PQ_VARIANTS {
+        pq.push((*v, column_sizes_parquet(&dir.join(v), v)?));
+    }
+    println!("payload columns (KiB; st frames: total, without filter, percent with filter):");
+    for n in names {
+        let (mut st_bytes, mut frames, mut no_filter, mut has_payload) = (0u64, 0u64, 0u64, false);
+        for s in summaries {
+            if let Some(c) = s.columns.iter().find(|c| c.name == n) {
+                st_bytes += c.bytes;
+                if let Some(p) = &c.payload {
+                    has_payload = true;
+                    frames += u64::from(p.frames);
+                    no_filter += u64::from(p.frames_without_filter);
+                }
+            }
+        }
+        let (fr, nf, pct) = if has_payload {
+            let pct = 100.0 * (frames - no_filter) as f64 / frames.max(1) as f64;
+            (frames.to_string(), no_filter.to_string(), format!("{pct:.1}"))
+        } else {
+            ("-".into(), "-".into(), "-".into())
+        };
+        let mut line = format!("  {n:22} st {:>9}  frames {fr:>8}  without filter {nf:>8}  filtered {pct:>5}%", st_bytes >> 10);
+        for (v, sizes) in &pq {
+            let b = sizes.iter().find(|(c, _)| c == n).map_or(0, |(_, b)| *b);
+            line.push_str(&format!("  {v} {:>9}", b >> 10));
+        }
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -390,7 +450,9 @@ fn for_vortex(b: &RecordBatch) -> R<RecordBatch> {
     Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)?)
 }
 
-fn column_sizes_parquet(dir: &Path) -> R<()> {
+/// Compressed bytes per top-level column of one Parquet variant, largest first.
+/// Prints the top 20 for `pq_tuned`.
+fn column_sizes_parquet(dir: &Path, variant: &str) -> R<Vec<(String, u64)>> {
     use std::collections::BTreeMap;
     let mut sizes: BTreeMap<String, (i64, i64)> = BTreeMap::new();
     for e in std::fs::read_dir(dir)? {
@@ -408,11 +470,13 @@ fn column_sizes_parquet(dir: &Path) -> R<()> {
     }
     let mut v: Vec<_> = sizes.into_iter().collect();
     v.sort_by_key(|(_, (c, _))| -c);
-    println!("parquet column sizes (compressed / uncompressed KiB):");
-    for (n, (c, u)) in v.iter().take(20) {
-        println!("  {n:24} {:>10} {:>10}  x{:.1}", c >> 10, u >> 10, *u as f64 / (*c).max(1) as f64);
+    if variant == "pq_tuned" {
+        println!("parquet column sizes (compressed / uncompressed KiB):");
+        for (n, (c, u)) in v.iter().take(20) {
+            println!("  {n:24} {:>10} {:>10}  x{:.1}", c >> 10, u >> 10, *u as f64 / (*c).max(1) as f64);
+        }
     }
-    Ok(())
+    Ok(v.into_iter().map(|(n, (c, _))| (n, c as u64)).collect())
 }
 
 fn hex(b: &[u8]) -> String {
@@ -421,22 +485,128 @@ fn hex(b: &[u8]) -> String {
 
 // ------------------------------------------------------------------ query
 
-async fn table(ctx: &SessionContext, name: &str, url: &str, vortex: bool) -> R<()> {
-    let url = ListingTableUrl::parse(url)?;
-    let opts = if vortex {
-        let s = VortexSession::default().with_tokio();
-        ListingOptions::new(Arc::new(vortex_datafusion::VortexFormat::new(s))).with_file_extension(".vortex")
-    } else {
-        ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet")
-    };
-    let cfg = ListingTableConfig::new(url).with_listing_options(opts).infer_schema(&ctx.state()).await?;
-    ctx.register_table(name, Arc::new(ListingTable::try_new(cfg)?))?;
-    Ok(())
+// ------------------------------------------------------------------ storage
+
+/// A dataset: its store (local or S3), the root URL DataFusion knows that store by, and
+/// the dataset's path under that root. Local: root `file:///`, path = the absolute
+/// directory. S3: root `s3://bucket/`, path = the key.
+struct Location {
+    store: Arc<counting::Counting>,
+    url: url::Url,
+    prefix: ObjPath,
 }
 
-async fn query(dir: &Path, runs: usize, only: Option<String>) -> R<()> {
-    let dir = std::fs::canonicalize(dir)?;
-    let ids: Vec<String> = std::fs::read_to_string(dir.join("trace_ids.txt"))?.lines().map(str::to_owned).collect();
+/// `dir` is a local directory, or `s3://bucket/key` (AWS settings: see USAGE).
+fn location(dir: &str) -> R<Location> {
+    if let Some(rest) = dir.strip_prefix("s3://") {
+        let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
+        let inner: Arc<dyn ObjectStore> = Arc::new(
+            AmazonS3Builder::from_env()
+                .with_bucket_name(bucket)
+                .with_virtual_hosted_style_request(false)
+                .build()?,
+        );
+        return Ok(Location {
+            store: Arc::new(counting::Counting::new(inner)),
+            url: url::Url::parse(&format!("s3://{bucket}/"))?,
+            prefix: ObjPath::parse(key.trim_matches('/'))?,
+        });
+    }
+    let abs = std::fs::canonicalize(dir)?;
+    let inner: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new());
+    Ok(Location {
+        store: Arc::new(counting::Counting::new(inner)),
+        url: url::Url::parse("file:///")?,
+        prefix: ObjPath::from_filesystem_path(&abs)?,
+    })
+}
+
+/// A session context with the Parquet pushdown settings, reading `loc`'s store.
+fn new_ctx(loc: &Location, partitions: Option<usize>) -> R<SessionContext> {
+    let mut cfg = SessionConfig::new()
+        .set_bool("datafusion.execution.parquet.pushdown_filters", true)
+        .set_bool("datafusion.execution.parquet.reorder_filters", true);
+    if let Some(n) = partitions {
+        cfg = cfg.with_target_partitions(n);
+    }
+    let ctx = SessionContext::new_with_config(cfg);
+    ctx.register_object_store(&loc.url, loc.store.clone());
+    Ok(ctx)
+}
+
+/// The text of `name` in the dataset directory, or None when there is no such object.
+async fn read_text(loc: &Location, name: &str) -> R<Option<String>> {
+    match loc.store.get(&loc.prefix.clone().join(name)).await {
+        Ok(r) => Ok(Some(String::from_utf8(r.bytes().await?.to_vec())?)),
+        Err(object_store::Error::NotFound { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Whether the variant directory holds at least one object.
+async fn has_files(loc: &Location, variant: &str) -> R<bool> {
+    let mut objects = loc.store.list(Some(&loc.prefix.clone().join(variant)));
+    Ok(objects.try_next().await?.is_some())
+}
+
+/// The `.strata` files of a variant, sorted by path, opened concurrently.
+async fn open_strata(loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
+    let mut metas: Vec<ObjectMeta> = loc.store.list(Some(&loc.prefix.clone().join(variant))).try_collect().await?;
+    metas.retain(|m| m.location.to_string().ends_with(".strata"));
+    metas.sort_by(|a, b| a.location.cmp(&b.location));
+    let cfg = Config::default();
+    let store: Arc<dyn ObjectStore> = loc.store.clone();
+    let files = try_join_all(metas.into_iter().map(|m| StrataFile::open(store.clone(), m.location, None, &cfg))).await?;
+    Ok(files.into_iter().map(Arc::new).collect())
+}
+
+/// The on-disk format of a directory variant (`pq_*`, `vx_*`, `st`).
+enum Format {
+    Parquet,
+    Vortex,
+    Strata,
+}
+
+impl Format {
+    fn of(variant: &str) -> R<Self> {
+        match variant.split('_').next() {
+            Some("pq") => Ok(Self::Parquet),
+            Some("vx") => Ok(Self::Vortex),
+            Some("st") => Ok(Self::Strata),
+            _ => Err(format!("unknown directory variant {variant}").into()),
+        }
+    }
+}
+
+/// Registers the variant's directory as table `t`. Returns the Strata files (empty for
+/// the other formats).
+async fn table(ctx: &SessionContext, loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
+    match Format::of(variant)? {
+        Format::Strata => {
+            let files = open_strata(loc, variant).await?;
+            ctx.register_table("t", Arc::new(StrataTable::new(files.clone())?))?;
+            Ok(files)
+        }
+        format => {
+            let url = ListingTableUrl::parse(&format!("{}{}/", loc.url, loc.prefix.clone().join(variant)))?;
+            let opts = if matches!(format, Format::Vortex) {
+                let s = VortexSession::default().with_tokio();
+                ListingOptions::new(Arc::new(vortex_datafusion::VortexFormat::new(s))).with_file_extension(".vortex")
+            } else {
+                ListingOptions::new(Arc::new(ParquetFormat::default())).with_file_extension(".parquet")
+            };
+            let cfg = ListingTableConfig::new(url).with_listing_options(opts).infer_schema(&ctx.state()).await?;
+            ctx.register_table("t", Arc::new(ListingTable::try_new(cfg)?))?;
+            Ok(Vec::new())
+        }
+    }
+}
+
+// ------------------------------------------------------------------ query
+
+async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
+    let loc = location(dir)?;
+    let ids: Vec<String> = read_text(&loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().map(str::to_owned).collect();
     let t0 = datagen::DAY_START;
     let h = 3_600 * datagen::NS;
     let ts = |ns: i64| format!("to_timestamp_nanos({ns})");
@@ -453,15 +623,14 @@ async fn query(dir: &Path, runs: usize, only: Option<String>) -> R<()> {
         ("substring_input", "SELECT count(*) FROM t WHERE input LIKE '%zqxjneedle%'".to_owned()),
         ("scan_all_payload", "SELECT sum(length(input)) + sum(length(output)) FROM t".to_owned()),
     ];
-    for format in PQ_VARIANTS.iter().chain(VX_VARIANTS) {
-        let vortex = format.starts_with("vx");
-        let store = Arc::new(counting::Counting::new());
-        let cfg = SessionConfig::new()
-            .set_bool("datafusion.execution.parquet.pushdown_filters", true)
-            .set_bool("datafusion.execution.parquet.reorder_filters", true);
-        let ctx = SessionContext::new_with_config(cfg);
-        ctx.register_object_store(&url::Url::parse("file://")?, store.clone());
-        table(&ctx, "t", &format!("file://{}/{format}/", dir.display()), vortex).await?;
+    let variants: Vec<&str> = PQ_VARIANTS.iter().chain(VX_VARIANTS).chain(&["st"]).copied().collect();
+    for format in variants {
+        if !has_files(&loc, format).await? {
+            continue;
+        }
+        let store = loc.store.clone();
+        let ctx = new_ctx(&loc, None)?;
+        table(&ctx, &loc, format).await?;
         for (name, sql) in &queries {
             if only.as_deref().is_some_and(|o| o != *name) {
                 continue;

@@ -12,7 +12,7 @@ fmt-testdata = { path = "../testdata" }
 arrow = { version = "59.2", default-features = false, features = ["ipc", "prettyprint"] }
 parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd"] }
 datafusion = { version = "55.2", default-features = false, features = ["nested_expressions", "parquet", "sql", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }
-object_store = "0.13"
+object_store = { version = "0.13", features = ["aws"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs"] }
 futures = "0.3.34"
 async-trait = "0.1.92"
@@ -27,6 +27,7 @@ zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
 cpu-time = "1.0.0"
+strata = { path = "../strata" }
 
 [profile.release]
 debug = 1

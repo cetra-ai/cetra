@@ -1,25 +1,21 @@
 //! Where does the time of a trace lookup / trace list go?
 //!
 //! Phases through DataFusion (sql → logical plan, physical planning,
-//! execution) with per-operator and Parquet-scan metrics, plus a direct
-//! arrow-rs read (cached metadata + page-index pruning, no DataFusion) as the
-//! "format only" floor. Built to resist a loaded machine: each figure is the
+//! execution) with per-operator and Parquet-scan metrics. Built to resist a
+//! loaded machine: each figure is the
 //! minimum wall time over N runs, process CPU time is reported next to it, and
 //! the load average is printed before and after.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arrow::array::{Array, AsArray, RecordBatch};
+use arrow::array::RecordBatch;
 use cpu_time::ProcessTime;
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::SessionContext;
-use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::{ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelection, RowSelector};
-use parquet::file::page_index::column_index::ColumnIndexMetaData;
-use parquet::file::metadata::PageIndexPolicy;
+
+use crate::{Location, has_files, new_ctx, read_text};
 
 type R<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -119,110 +115,37 @@ fn print_phase(label: &str, p: &Phase) {
             line.push_str(&format!("{k}={v:.3} "));
         }
     }
+    if line.is_empty() {
+        line.push('-');
+    }
     println!("      metrics/query (ms, KiB, rows): {line}");
 }
 
-/// Direct arrow-rs: cached metadata with page index; prune row groups by
-/// stats and pages by the trace_id column index; read the projection with a
-/// RowSelection; keep rows equal to the key.
-struct Direct {
-    files: Vec<(std::path::PathBuf, ArrowReaderMetadata, usize)>, // path, metadata, trace_id leaf
-}
-
-impl Direct {
-    fn open(dir: &Path) -> R<Self> {
-        let mut files = Vec::new();
-        let mut paths: Vec<_> = std::fs::read_dir(dir)?.map(|e| e.map(|e| e.path())).collect::<Result<_, _>>()?;
-        paths.sort();
-        for p in paths {
-            let f = std::fs::File::open(&p)?;
-            let md = ArrowReaderMetadata::load(&f, ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required))?;
-            let leaf = (0..md.metadata().file_metadata().schema_descr().num_columns())
-                .find(|&i| md.metadata().file_metadata().schema_descr().column(i).name() == "trace_id")
-                .ok_or("no trace_id")?;
-            files.push((p, md, leaf));
-        }
-        Ok(Self { files })
-    }
-
-    fn lookup(&self, key: &[u8], columns: Option<&[&str]>) -> R<usize> {
-        let mut rows = 0;
-        for (path, md, leaf) in &self.files {
-            let meta = md.metadata();
-            let ci = meta.column_index().ok_or("no column index")?;
-            let oi = meta.offset_index().ok_or("no offset index")?;
-            let mut rgs = Vec::new();
-            let mut selectors = Vec::new();
-            for (rg_i, rg) in meta.row_groups().iter().enumerate() {
-                let n = rg.num_rows() as usize;
-                let idx = &ci[rg_i][*leaf];
-                let ColumnIndexMetaData::FIXED_LEN_BYTE_ARRAY(ix) = idx else { return Err("trace_id index type".into()) };
-                let locs = oi[rg_i][*leaf].page_locations();
-                let mut any = false;
-                let mut sel = Vec::new();
-                for p in 0..locs.len() {
-                    let start = locs[p].first_row_index as usize;
-                    let end = locs.get(p + 1).map_or(n, |l| l.first_row_index as usize);
-                    let hit = matches!((ix.min_value(p), ix.max_value(p)), (Some(lo), Some(hi)) if lo <= key && key <= hi);
-                    sel.push(if hit { RowSelector::select(end - start) } else { RowSelector::skip(end - start) });
-                    any |= hit;
-                }
-                if any {
-                    rgs.push(rg_i);
-                    selectors.extend(sel);
-                }
-            }
-            if rgs.is_empty() {
-                continue;
-            }
-            let schema = meta.file_metadata().schema_descr();
-            let mask = match columns {
-                Some(cols) => ProjectionMask::roots(schema, (0..md.schema().fields().len()).filter(|&i| cols.contains(&md.schema().field(i).name().as_str()) || md.schema().field(i).name() == "trace_id")),
-                None => ProjectionMask::all(),
-            };
-            let reader = ParquetRecordBatchReaderBuilder::new_with_metadata(std::fs::File::open(path)?, md.clone())
-                .with_row_groups(rgs)
-                .with_row_selection(RowSelection::from(selectors))
-                .with_projection(mask)
-                .with_batch_size(8192)
-                .build()?;
-            for b in reader {
-                let b = b?;
-                let t = b.column_by_name("trace_id").ok_or("trace_id")?.as_fixed_size_binary();
-                rows += (0..t.len()).filter(|&i| t.value(i) == key).count();
-            }
-        }
-        Ok(rows)
-    }
-}
-
+/// Unused until the M7.2b runners convert trace ids.
+#[allow(dead_code)]
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0)).collect()
 }
 
-pub async fn profile(dir: &Path, runs: usize, register: impl AsyncFn(&SessionContext, &str) -> R<()>) -> R<()> {
-    let ids: Vec<String> = std::fs::read_to_string(dir.join("trace_ids.txt"))?.lines().take(20).map(str::to_owned).collect();
+pub async fn profile(loc: &Location, runs: usize, register: impl AsyncFn(&SessionContext, &str) -> R<()>) -> R<()> {
+    let ids: Vec<String> = read_text(loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().take(20).map(str::to_owned).collect();
     let light = "span_id, parent_span_id, name, start_time, end_time, status, model, total_tokens, cost_total";
     let t0 = fmt_testdata::datagen::DAY_START;
     let h = 3_600 * fmt_testdata::datagen::NS;
     let list = format!(
-        "SELECT trace_id, span_id, name, start_time, duration_ns, status, model, total_tokens, cost_total, input_preview FROM t WHERE span_kind = 'llm' AND start_time >= to_timestamp_nanos({}) AND start_time < to_timestamp_nanos({}) ORDER BY start_time DESC LIMIT 50",
+        "SELECT trace_id, span_id, name, start_time, duration_ns, status, model, total_tokens, cost_total, input_preview FROM t WHERE span_kind = 'llm' AND start_time >= to_timestamp_nanos({}) AND start_time < to_timestamp_nanos({}) ORDER BY start_time DESC, trace_id DESC, span_id DESC LIMIT 50",
         t0 + 14 * h,
         t0 + 15 * h
     );
     println!("loadavg before: {}   runs per figure: {runs}", loadavg());
-    let variants: Vec<String> = std::env::var("FMT_VARIANTS").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_else(|_| vec!["pq_llmobs".into(), "pq_tuned".into(), "pq_default".into(), "vx_compact".into()]);
+    let variants: Vec<String> = std::env::var("FMT_VARIANTS").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_else(|_| vec!["pq_llmobs".into(), "pq_tuned".into(), "pq_default".into(), "vx_compact".into(), "st".into()]);
     for variant in variants.iter().map(String::as_str) {
-        if !dir.join(variant).exists() {
+        if !has_files(loc, variant).await? {
             continue;
         }
         println!("== {variant}");
         for partitions in [32usize, 1] {
-            let cfg = datafusion::prelude::SessionConfig::new()
-                .with_target_partitions(partitions)
-                .set_bool("datafusion.execution.parquet.pushdown_filters", true)
-                .set_bool("datafusion.execution.parquet.reorder_filters", true);
-            let ctx = SessionContext::new_with_config(cfg);
+            let ctx = new_ctx(loc, Some(partitions))?;
             register(&ctx, variant).await?;
             // Warm: metadata caches, page cache.
             for id in &ids {
@@ -236,29 +159,6 @@ pub async fn profile(dir: &Path, runs: usize, register: impl AsyncFn(&SessionCon
             print_phase("trace lookup, 9 light columns", &run_df(&ctx, &lightq, runs).await?);
             print_phase("trace list (top 50 in 1 h)", &run_df(&ctx, &[list.clone()], runs).await?);
             print_phase("SELECT 1 (engine floor)", &run_df(&ctx, &trivial, runs).await?);
-        }
-        // The direct arrow-rs floor is disabled: the synchronous reader fetches
-        // whole column chunks, so it is not a valid lower bound (see plan).
-        if variant.starts_with("pq") && std::env::var_os("FMT_DIRECT").is_some() {
-            let d = Direct::open(&dir.join(variant))?;
-            let keys: Vec<Vec<u8>> = ids.iter().map(|s| unhex(s)).collect();
-            let cols: Vec<&str> = light.split(", ").collect();
-            for (label, proj) in [("direct arrow-rs, all columns", None), ("direct arrow-rs, 9 light columns", Some(cols.as_slice()))] {
-                let mut walls = Vec::new();
-                let mut cpus = Vec::new();
-                let mut rows = 0;
-                for _ in 0..runs {
-                    let c = ProcessTime::now();
-                    let t = Instant::now();
-                    rows = 0;
-                    for k in &keys {
-                        rows += d.lookup(k, proj)?;
-                    }
-                    walls.push(t.elapsed().as_secs_f64() * 1e3 / keys.len() as f64);
-                    cpus.push(c.elapsed().as_secs_f64() * 1e3 / keys.len() as f64);
-                }
-                println!("  {label:34} total min {:>7.3} ms (med {:>7.3})  cpu med {:>7.3} ms | rows/20 lookups {rows}", min(&walls), med(&walls), med(&cpus));
-            }
         }
     }
     println!("loadavg after: {}", loadavg());

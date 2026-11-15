@@ -2,13 +2,13 @@
 //! shape (what an S3 backend would pay per query).
 
 use std::fmt;
+use std::sync::Arc;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -17,14 +17,14 @@ use object_store::{
 
 #[derive(Debug)]
 pub struct Counting {
-    inner: LocalFileSystem,
+    inner: Arc<dyn ObjectStore>,
     reqs: AtomicU64,
     bytes: AtomicU64,
 }
 
 impl Counting {
-    pub fn new() -> Self {
-        Self { inner: LocalFileSystem::new(), reqs: AtomicU64::new(0), bytes: AtomicU64::new(0) }
+    pub fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self { inner, reqs: AtomicU64::new(0), bytes: AtomicU64::new(0) }
     }
     pub fn reset(&self) {
         self.reqs.store(0, Ordering::Relaxed);
