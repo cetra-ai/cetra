@@ -107,6 +107,7 @@ async fn callback(
                     .get(header::USER_AGENT)
                     .and_then(|value| value.to_str().ok()),
                 Some(ip),
+                None,
             )
             .await
             {

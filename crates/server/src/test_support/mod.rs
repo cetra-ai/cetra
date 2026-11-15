@@ -454,7 +454,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        let cookie = session_cookie(self, user_id).await;
+        let cookie = session_cookie_via(self, user_id, None).await;
         Seeded {
             user_id,
             org_id,
@@ -549,7 +549,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        let cookie = session_cookie(self, id).await;
+        let cookie = session_cookie_via(self, id, None).await;
         Member { id, cookie }
     }
 
@@ -633,7 +633,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        session_cookie(self, user_id).await
+        session_cookie_via(self, user_id, None).await
     }
 }
 
@@ -756,8 +756,14 @@ async fn insert_key(
     Ok(())
 }
 
-async fn session_cookie(app: &TestApp, user_id: Uuid) -> String {
-    let header = start_session(&app.state, user_id, None, None)
+/// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
+/// header value (`llmobs_session=<token>`): the `Set-Cookie` value up to its first `;`.
+pub(crate) async fn session_cookie_via(
+    app: &TestApp,
+    user_id: Uuid,
+    sso_org: Option<OrgId>,
+) -> String {
+    let header = start_session(&app.state, user_id, None, None, sso_org)
         .await
         .unwrap();
     header

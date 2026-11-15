@@ -55,6 +55,8 @@ pub(crate) enum Principal {
         user: AuthUser,
         /// SHA-256 hex of the cookie. Not the cookie value.
         session_hash: String,
+        /// The org whose provider started this session, D-P-59.
+        sso_org: Option<llmobs_core::ids::OrgId>,
     },
     /// A project API key. `Debug` omits the hash.
     ApiKey {
@@ -199,6 +201,7 @@ pub(crate) async fn authenticate(
                     email: row.user.email,
                 },
                 session_hash: row.hash,
+                sso_org: row.sso_org_id,
             }),
             refresh,
         ),
@@ -404,13 +407,20 @@ mod tests {
                 email: "ada@example.com".to_owned(),
             },
             session_hash: "not-a-cookie".to_owned(),
+            sso_org: None,
         };
         let text = format!("{principal:?}");
-        let Principal::Session { user, session_hash } = &principal else {
+        let Principal::Session {
+            user,
+            session_hash,
+            sso_org,
+        } = &principal
+        else {
             panic!("expected a session");
         };
         assert_eq!(user.email, "ada@example.com");
         assert_eq!(session_hash, "not-a-cookie");
+        assert_eq!(*sso_org, None);
         assert!(!text.contains(&user.email), "{text}");
         assert!(!text.contains(session_hash), "{text}");
     }

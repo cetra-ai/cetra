@@ -183,6 +183,7 @@ async fn setup(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         Some(ip),
+        None,
     )
     .await?;
     let response = SetupResponse {
@@ -735,6 +736,7 @@ async fn session_cookie(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         ip,
+        None,
     )
     .await
 }
@@ -2026,7 +2028,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user_id, None, None)
+        let cookie = start_session(&app.state, user_id, None, None, None)
             .await
             .unwrap();
         let pair = cookie

@@ -71,7 +71,9 @@ async fn change_password(
     error::Json(body): error::Json<ChangePasswordRequest>,
 ) -> Result<Response, ApiError> {
     let (user, session_hash) = match &principal {
-        Principal::Session { user, session_hash } => (user, session_hash),
+        Principal::Session {
+            user, session_hash, ..
+        } => (user, session_hash),
         Principal::ApiKey { .. } | Principal::Pat { .. } | Principal::ControlPlane { .. } => {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::Forbidden,
@@ -315,7 +317,7 @@ mod tests {
         let user_id = insert_account(&app, "ada@example.com", Some(PASSWORD)).await;
         let logged_in = login(&app, "ada@example.com", PASSWORD).await;
         let cookie = session_cookie(&logged_in);
-        let other = start_session(&app.state, user_id, None, None)
+        let other = start_session(&app.state, user_id, None, None, None)
             .await
             .unwrap();
         let other_cookie = cookie_pair(&other);
@@ -380,7 +382,7 @@ mod tests {
         let app = TestApp::new().await;
         let user_id = insert_account(&app, "ada@example.com", None).await;
         let cookie = cookie_pair(
-            &start_session(&app.state, user_id, None, None)
+            &start_session(&app.state, user_id, None, None, None)
                 .await
                 .unwrap(),
         );
@@ -454,7 +456,7 @@ mod tests {
         let disabled = TestApp::with_config(|config| config.auth.disable_password = true).await;
         let user_id = insert_account(&disabled, "ada@example.com", Some(PASSWORD)).await;
         let cookie = cookie_pair(
-            &start_session(&disabled.state, user_id, None, None)
+            &start_session(&disabled.state, user_id, None, None, None)
                 .await
                 .unwrap(),
         );
