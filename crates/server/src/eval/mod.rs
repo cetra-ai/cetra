@@ -97,8 +97,6 @@ impl EvalQueue {
     }
 
     /// Wakes the backfill runner.
-    // I6.5 calls it.
-    #[allow(dead_code)]
     pub(crate) fn wake_backfills(&self) {
         self.backfill_wake.notify_one();
     }
