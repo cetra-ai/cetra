@@ -69,6 +69,28 @@ fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::
         .add_service(grpc::service(state))
 }
 
+/// The Prometheus listener's router: `GET /metrics` and nothing else (N M3, D-N-28). Any other
+/// path is axum's 404. There is no authentication, so the docs say to bind it privately.
+fn metrics_router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/metrics", axum::routing::get(metrics))
+        .with_state(state)
+}
+
+/// The OpenMetrics document, refreshed on each scrape (`telemetry::Telemetry::render`).
+async fn metrics(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl axum::response::IntoResponse {
+    let body = state.telemetry.render(&state).await;
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        body,
+    )
+}
+
 /// How often idle rate-limit keys are dropped (D143).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
@@ -170,12 +192,16 @@ pub struct Running {
     pub otlp_local_addr: Option<SocketAddr>,
     /// The OTLP/gRPC listener's address, when `grpc_addr` is set (D-G-21).
     pub grpc_local_addr: Option<SocketAddr>,
+    /// The Prometheus listener's address, when `metrics_addr` is set (N M3, D-N-28).
+    pub metrics_local_addr: Option<SocketAddr>,
     serve: Option<JoinHandle<io::Result<()>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     otlp_serve: Option<JoinHandle<io::Result<()>>>,
     otlp_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
+    metrics_serve: Option<JoinHandle<io::Result<()>>>,
+    metrics_shutdown_tx: Option<oneshot::Sender<()>>,
     usage_stop_tx: Option<oneshot::Sender<()>>,
     usage_task: Option<JoinHandle<()>>,
     state: Option<AppState>,
@@ -208,6 +234,9 @@ impl Drop for Running {
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
         }
+        if let Some(serve) = self.metrics_serve.take() {
+            serve.abort();
+        }
         if let Some(task) = &self.usage_task {
             task.abort();
         }
@@ -235,7 +264,8 @@ pub async fn run(
     ui: Option<axum::Router>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
-    let running = bind(config, ui).await?;
+    // Boxed: `bind`'s future is large, and the CLI awaits this one (clippy's `large_futures`).
+    let running = Box::pin(bind(config, ui)).await?;
     shutdown.await;
     running.shutdown().await
 }
@@ -252,6 +282,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let http_addr = config.http_addr;
     let otlp_http_addr = config.otlp_http_addr;
     let grpc_addr = config.grpc_addr;
+    let metrics_addr = config.metrics_addr;
     if let Err(source) = tokio::fs::create_dir_all(&data_dir).await {
         return Err(directory_error(&data_dir, &source));
     }
@@ -391,6 +422,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
+    let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
     let state = AppState::new(AppInner {
         config,
         meta,
@@ -423,6 +455,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         backup_slot: tokio::sync::Mutex::new(()),
         eval,
         pending: crate::eval::pending::PendingTraces::default(),
+        telemetry,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -466,6 +499,16 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         },
     };
     let grpc = match grpc_addr {
+        None => None,
+        Some(addr) => match bind_listener(addr).await {
+            Ok(bound) => Some(bound),
+            Err(error) => {
+                release_state(state).await;
+                return Err(error);
+            }
+        },
+    };
+    let metrics = match metrics_addr {
         None => None,
         Some(addr) => match bind_listener(addr).await {
             Ok(bound) => Some(bound),
@@ -546,16 +589,35 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             (Some(addr), Some(serve), Some(tx))
         }
     };
+    let (metrics_local_addr, metrics_serve, metrics_shutdown_tx) = match metrics {
+        None => (None, None, None),
+        Some((listener, addr)) => {
+            tracing::info!(metrics_local_addr = %addr, "listening");
+            let (tx, rx) = oneshot::channel();
+            let app = metrics_router(state.clone());
+            let serve = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.await;
+                    })
+                    .await
+            });
+            (Some(addr), Some(serve), Some(tx))
+        }
+    };
     Ok(Running {
         local_addr,
         otlp_local_addr,
         grpc_local_addr,
+        metrics_local_addr,
         serve: Some(serve),
         shutdown_tx: Some(shutdown_tx),
         otlp_serve,
         otlp_shutdown_tx,
         grpc_serve,
         grpc_shutdown_tx,
+        metrics_serve,
+        metrics_shutdown_tx,
         usage_stop_tx: Some(usage_stop_tx),
         usage_task: Some(usage_task),
         state: Some(state),
@@ -796,7 +858,9 @@ impl Running {
     /// tasks, wait for detached commits, flush the pending traces, the last-used stamps and the
     /// usage counters, flush storage, close `meta.db`.
     ///
-    /// The control socket goes first: a backup in progress is cancelled, and no
+    /// The metrics listener is told to stop first, before the control socket. It drains with the
+    /// HTTP listeners, under the same bound, so a scrape during the drain does not add time. The
+    /// control socket goes next: a backup in progress is cancelled, and no
     /// new one starts during the drain. A storage flush error is logged. The lock
     /// is released inside `Storage::shutdown` before that error, and this method
     /// still closes `meta.db`.
@@ -805,6 +869,9 @@ impl Running {
     ///
     /// Returns the accept loop's error when it failed before the drain finished.
     pub async fn shutdown(mut self) -> Result<(), ServeError> {
+        if let Some(sender) = self.metrics_shutdown_tx.take() {
+            let _ = sender.send(());
+        }
         if let Some(state) = &self.state {
             state.live.close();
         }
@@ -826,12 +893,16 @@ impl Running {
         if let Some(sender) = self.grpc_shutdown_tx.take() {
             let _ = sender.send(());
         }
-        let (serve_result, otlp_result, grpc_result) = tokio::join!(
+        let (serve_result, otlp_result, grpc_result, metrics_result) = tokio::join!(
             drain_optional(self.serve.take()),
             drain_optional(self.otlp_serve.take()),
             drain_optional(self.grpc_serve.take()),
+            drain_optional(self.metrics_serve.take()),
         );
-        let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        let serve_error = serve_result
+            .or(otlp_result)
+            .or(grpc_result)
+            .or(metrics_result);
         // The usage loop stops cooperatively, so an in-flight flush commits before the final one.
         if let Some(sender) = self.usage_stop_tx.take() {
             let _ = sender.send(());
@@ -1777,6 +1848,39 @@ mod tests {
         let running = bind(config, None).await.unwrap();
         assert!(running.grpc_local_addr.is_none());
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_listener_serves_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metrics = config(dir.path());
+        metrics.metrics_addr = Some(SocketAddr::from(([127, 0, 0, 1], 0)));
+        let running = bind(metrics, None).await.unwrap();
+        let addr = running.metrics_local_addr.expect("metrics listener");
+
+        let scrape = http_get(addr, "/metrics", "close").await;
+        let text = String::from_utf8_lossy(&scrape);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        assert!(
+            text.to_ascii_lowercase().contains(
+                "content-type: application/openmetrics-text; version=1.0.0; charset=utf-8"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("llmobs_build_info"), "{text}");
+
+        let other = http_get(addr, "/", "close").await;
+        assert!(
+            String::from_utf8_lossy(&other).starts_with("HTTP/1.1 404"),
+            "the metrics listener serves only /metrics"
+        );
+
+        let main = http_get(running.local_addr, "/metrics", "close").await;
+        let main_text = String::from_utf8_lossy(&main);
+        assert!(!main_text.contains("llmobs_build_info"), "{main_text}");
+
+        running.shutdown().await.unwrap();
+        assert!(TcpStream::connect(addr).await.is_err());
     }
 
     #[tokio::test]

@@ -94,6 +94,8 @@ pub(crate) struct AppInner {
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
     /// Per-org SSO routing (track P M5).
     pub(crate) org_sso: crate::ee::org_sso::OrgSso,
+    /// The Prometheus registry served on `metrics_addr` (N M3, D-N-28).
+    pub(crate) telemetry: crate::telemetry::Telemetry,
 }
 
 impl AppState {
