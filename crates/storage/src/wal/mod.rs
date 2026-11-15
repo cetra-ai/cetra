@@ -11,6 +11,11 @@ pub(crate) mod writer;
 pub(crate) use replay::replay;
 pub(crate) use segment::SegmentWriter;
 
+#[cfg(test)]
+pub(crate) use record::HEADER_LEN;
+#[cfg(any(test, fuzzing))]
+pub(crate) use record::{Decoded, decode_next, encode, push_framed, read_batch};
+
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};

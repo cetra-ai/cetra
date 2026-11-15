@@ -236,9 +236,11 @@ fn write_stream(
 /// Appends one framed record whose payload is not necessarily IPC.
 ///
 /// Replay tests use this to build a checksum-valid record that `read_batch` rejects.
-#[cfg(test)]
+/// The fuzz entries use it to frame segments with a real checksum.
+#[cfg(any(test, fuzzing))]
 pub(crate) fn push_framed(buf: &mut Vec<u8>, seq: u64, payload: &[u8]) {
-    let len = u32::try_from(payload.len()).unwrap();
+    // A capped length fails the length check on decode; it never panics.
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(&checksum(seq, KIND_BATCH, payload).to_le_bytes());
     buf.extend_from_slice(&seq.to_le_bytes());

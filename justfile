@@ -27,6 +27,10 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
 
+# Write the fuzz seed corpus from the test fixtures (track R M3)
+fuzz-seed:
+    cargo test --workspace --all-features -- --ignored --exact fuzz_entry::tests::write_seed_corpus
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1

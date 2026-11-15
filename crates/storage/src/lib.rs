@@ -102,6 +102,11 @@ pub(crate) mod memtable;
 pub(crate) mod read_state;
 pub(crate) mod wal;
 
+/// Fuzz entry points (track R M3). Not part of the API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
+
 #[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
@@ -1339,13 +1344,7 @@ fn recover_table(
 ) -> Result<ReplayTable, OpenError> {
     let mut memtable = Memtable::new(table);
     let outcome = replay(dir, table, after_seq, skip_corrupt, &mut |seq, batch| {
-        if batch.num_rows() == 0 {
-            return Ok(());
-        }
-        let project = project_of(&batch)?;
-        memtable
-            .insert(project, batch, seq)
-            .map_err(|err| memtable_to_wal(&err))
+        replay_batch(&mut memtable, seq, batch)
     })
     .map_err(replay_error)?;
     tracing::info!(
@@ -1366,6 +1365,17 @@ fn recover_table(
             next_seq: outcome.next_seq,
         },
     })
+}
+
+/// Inserts one replayed batch into `memtable`, as WAL recovery does. An empty batch is skipped.
+fn replay_batch(memtable: &mut Memtable, seq: u64, batch: RecordBatch) -> Result<(), WalError> {
+    if batch.num_rows() == 0 {
+        return Ok(());
+    }
+    let project = project_of(&batch)?;
+    memtable
+        .insert(project, batch, seq)
+        .map_err(|err| memtable_to_wal(&err))
 }
 
 async fn open_objects(
