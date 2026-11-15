@@ -2,7 +2,7 @@
 
 Implementation plan for phase 4 of [the prototype design](../prototype-plan.md), § S5 and S6. Three sub-phases, each done by one Haiku agent in one go, in order, each ending with the checks green and one commit.
 
-**Revision 2** applies the Sonnet cold review of revision 1: 7 blockers, 12 majors and the minors.
+**Revision 3.** Revision 2 applied the first Sonnet cold review (7 blockers, 12 majors and the minors). Revision 3 applies the second (3 blockers, 9 majors and minors). Per the review convention, there is no third round.
 
 **Prerequisites:** M2.3 is committed.
 
@@ -82,7 +82,7 @@ These conditions keep xorf's `contains` in bounds: `h0 ≤ scl − 1`, `h1 ≤ s
 ```rust
 pub(crate) enum KeyFilter { Empty, One(Vec<u8>), Fuse(BinaryFuse8), Unknown }
 impl KeyFilter {
-    pub(crate) fn build(values: &[Vec<u8>]) -> KeyFilter;   // key_bytes of every non-null row, any order, may repeat
+    pub(crate) fn build(values: &[Vec<u8>]) -> KeyFilter;   // the flattened `Some`s of key_bytes, any order, may repeat
     pub(crate) fn encode(&self, out: &mut Vec<u8>);
     pub(crate) fn decode(bytes: &[u8], offset: u64) -> Result<KeyFilter>;
     pub(crate) fn may_contain(&self, value: &[u8]) -> Option<bool>;
@@ -111,7 +111,7 @@ impl KeyFilter {
    |---|---|
    | FixedSizeBinary | the value |
    | Utf8 | the UTF-8 bytes |
-   | Int8–Int64, UInt8–UInt32, Timestamp, Date32, Date64 | `arrow::compute::cast(array, &DataType::Int64)`, then each value's 8 little-endian bytes |
+   | Int8–Int64, UInt8–UInt32, Timestamp, Date32, Date64 | `arrow::compute::cast(array, &DataType::Int64)`, then `as_primitive_opt::<Int64Type>()` and each value's 8 little-endian bytes. A cast error or a failed downcast returns `None`; never use `as_primitive`, which panics. |
 
    Any other type, UInt64 included, returns `None`, and the column gets no filter. Document on `StrataFile::may_contain` that integer and timestamp values are passed as 8-byte little-endian `i64`.
 
@@ -143,6 +143,7 @@ impl KeyFilter {
      - `key_bytes` supports its type.
 
      Write its body as a `Kind::KeyFilter` segment (`Codec::Zstd`, through `codec`), and push `(column_id, SegmentRef)`. A duplicate name in the config is harmless.
+   - Build the section-6 filter inside the existing column loop, after the column has been written, using the same `array`; never concatenate again. Filters are built by the caller of the column-writing code. M3.2b's `write_narrow` never builds one, so map children and residuals never get a filter.
    - `ColumnSummary` gains `/// Bytes of the column's key filter (section-4 body or key-filter segment), not included in `bytes`.` `pub filter_bytes: u64` (0 when none). Update both `ColumnSummary { .. }` literals.
 
 6. **Open and validation** (`file.rs`). `StrataFile` gains:
@@ -154,7 +155,7 @@ impl KeyFilter {
    key_filters: Mutex<HashMap<u32, Arc<KeyFilter>>>,
    ```
 
-   `open` validates:
+   `open` validates the following **after** the existing directory loop, so `directory_ids_layers_and_dictionary_flags_are_checked` still sees `directory column id` and `directory layer` first (M3.2b's layer and layout checks also run after that loop's id check):
    - `sort_key_column` is `u32::MAX` or below `schema.fields().len()`, and that column's directory layer is `Narrow`. Otherwise `Corrupt { what: "sort key column" }`.
    - Section 4, when non-empty, through `KeyFilter::decode(bytes, postscript.hot_offset)`.
    - Section 3, when `sort_key` is set:
@@ -174,7 +175,7 @@ impl KeyFilter {
    ```
 
    - An unknown column name gives `Schema`.
-   - The sort-key column uses `sort_key_filter`.
+   - The sort-key column uses `sort_key_filter`, and gives `Ok(None)` when it is `None` (an unsupported type).
    - A column listed in section 6 reads its segment on first use (`read_segment(.., Kind::KeyFilter)`, `KeyFilter::decode(.., ref.offset)`) and caches it.
    - Any other column gives `Ok(None)`.
 
@@ -231,16 +232,16 @@ impl KeyFilter {
 - Random-bytes proptests on sections 5 and 6 never panic.
 
 **`file.rs`**, through `StrataWriter`, `InMemory` and `open`, with `testgen::batch(20_000)`: 4,000 distinct trace ids of five rows each; FSB16 chunks hold 2,048 rows, so an id spans at most 2 chunks.
-- **Present ids.** `lookup` of every 97th distinct trace id returns exactly its rows, compared with a scan of the decoded `trace_id` column.
+- **Present ids.** `lookup` of `(k as u128).to_be_bytes()` for `k in (0..4000).step_by(97)` returns exactly its rows, compared with a scan of the decoded `trace_id` column.
 - **Absent ids.** `lookup` of 1,000 absent ids (*i*-th = `xxh3_128(&(1_000_000 + i as u64).to_le_bytes())`) returns empty. At least 980 of them get `may_contain("trace_id", ..) == Some(false)`.
 - **Reads.** Take `before = counting.gets()` after `open`. A present-id `lookup` costs at most 2 more `get`s.
 - **Unsupported.** `lookup` with a 15-byte key gives `Unsupported`, and so does `lookup` on a file whose only sort key is `start_time`.
-- **`user_id` filter.** A test schema in the `file.rs` tests module: `trace_id` FSB16 + `user_id` Utf8, nullable, `format!("user-{}", i % 500)`, null when `i % 3 == 0`. Every present value gives `Some(true)`; at least 980 of 1,000 `format!("other-{i}")` give `Some(false)`.
+- **`user_id` filter.** A test schema in the `file.rs` tests module, 5,000 rows: `trace_id` FSB16 = `((i / 5) as u128).to_be_bytes()`, and `user_id` Utf8 nullable = `format!("user-{}", i % 500)`, null when `i % 3 == 0`. Every present value gives `Some(true)`; at least 980 of 1,000 `format!("other-{i}")` give `Some(false)`.
 - **No filter.** `may_contain` on a column with no filter gives `Ok(None)`; an unknown name gives `Schema`.
 - **Zero rows.** On a zero-row file, `lookup` returns empty and `may_contain("trace_id", ..)` is `Some(false)`.
-- **Corruption** (with the existing `refresh_hot_checksum`-style helpers in the `file.rs` tests):
-  - flip one byte in the `user_id` key-filter segment body: `may_contain("user_id", ..)` gives `Corrupt` (the segment checksum);
-  - patch section 4 into a tag-2 body with bad geometry, then refresh the hot checksum: `open` gives `Corrupt { what: "key filter" }`;
+- **Corruption.** Add `fn section_bounds(hot: &[u8]) -> [Range<usize>; 7]` to the `file.rs` tests. It walks the seven `u32`-prefixed sections, starting from `hot_offset_of(bytes)`; use it with the existing `refresh_hot_checksum`-style helpers. Every patch is length-preserving:
+  - **Segment checksum:** open the file, take `file.hot.key_filters[0].1` (a `SegmentRef`), flip the byte at `offset + SEGMENT_HEADER_LEN`, write the file back, reopen it, and call `may_contain("user_id", ..)`: it gives `Corrupt`;
+  - **Bad geometry:** in the `batch(20_000)` file, overwrite the 4 bytes at `section4.start + 1 + 8` (`segment_length`) with `3u32.to_le_bytes()`, then refresh the hot checksum: `open` gives `Corrupt { what: "key filter" }`;
   - patch the postscript's `sort_key_column` (not checksummed) to `u32::MAX`: `lookup` gives `Unsupported`; to `n_fields`: `open` gives `Corrupt`.
 
 **`golden_columns_round_trip`** (new, permanent, `writer.rs`): every column of `wide_batch(20_000)` written and read back equals the input.
@@ -413,7 +414,7 @@ The M3.1 commands pass.
      pub(crate) struct MapKey { pub child: u32, pub residual_hits: u32, pub key: Vec<u8> }
      ```
 
-   - `encode` and `decode` own the layout. `decode` checks:
+   - `encode` and `decode` own the layout. `decode` never calls `Vec::with_capacity(n)` from a decoded count without first checking `n × min_entry_len ≤ remaining` (12 bytes per map, 10 per key). It also checks:
      - `n_keys ≤ MAX_PROMOTED_KEYS`;
      - `key_len ≤ 1024`;
      - keys strictly increasing bytewise and valid UTF-8;
@@ -442,12 +443,13 @@ The M3.1 commands pass.
    - **Extract the narrow branch** of `finish`'s column loop into:
 
      ```rust
-     fn write_narrow(&self, array: &ArrayRef, column_id: u32, layer: Layer, parent: u32,
-                     codec: &mut SegmentCodec, out: &mut Out, pages: &mut Out)
+     fn write_narrow(&self, array: &ArrayRef, column_id: u32, codec: &mut SegmentCodec,
+                     out: &mut Out, pages: &mut Out)
          -> Result<(DirectoryRecord, ColumnSummary, Vec<BlockEntry>)>
      ```
 
-     The top-level narrow path calls it with `layer = Narrow`, `parent = u32::MAX`. The golden hash must not change from this refactor alone: check it before the next bullet.
+     - It returns a `Narrow` record with `parent = u32::MAX`. For children and residuals, the caller overwrites `record.layer` (`Layer::MapChild` or `Layer::Residual`) and `record.parent` (the map's id) before pushing it. This keeps the function within clippy's `too_many_arguments` limit.
+     - The top-level narrow path calls it unchanged. The golden hash must not change from this refactor alone: check it before the next bullet.
    - **Shredded maps.** For a column that `is_utf8_map`:
      - call `shred`;
      - push the parent record (as in § Layout);
@@ -473,26 +475,27 @@ The M3.1 commands pass.
      - accepts only `column < schema.fields().len()`; anything else is `Schema`;
      - on a `MapParent`, finds its `MapLayout`, reads every child (`field_of`) and the residual concurrently with `read_narrow`, and calls `unshred(field.data_type(), keys, children, residual)`.
 
-5. **`lib.rs`:**
+5. **`lib.rs` and docs:**
    - Remove the `#[allow(dead_code)]` on `mod shred;`.
+   - Update the `Layer::Residual` doc in `hot.rs` ("`IPC` encoding" becomes "`MAP` encoding"), the `hot.rs` module doc, and the `file.rs` test comment "which a schema column may not have in M1".
    - Update the crate doc: "maps are shredded (M3.2)".
 
 6. **Existing tests to update:**
    - `file.rs::empty_file_opens` asserts `directory().len() == spans_schema().fields().len() + 3`. `spans_schema` has three `Map<Utf8, Utf8>` columns, each with a residual and no key on an empty file.
-   - `writer.rs::map_column_counts_its_map_chunks` becomes `map_column_is_shredded`. It asserts that `attrs.shredded_keys == 4` and `encoding_counts[Encoding::Map as usize] > 0`. The `k0`–`k3` keys of `wide_batch` are all promoted, since each appears in more than 5% of rows.
+   - `writer.rs::map_column_counts_its_map_chunks` becomes `map_column_is_shredded`. It asserts that `attrs.shredded_keys == 3` and `encoding_counts[Encoding::Map as usize] > 0`. `wide_batch` writes `for j in 0..i % 4`, so its keys are `k0`, `k1` and `k2` (`k3` does not exist), and each appears in at least 19% of rows, so all three are promoted.
    - `golden_columns_round_trip` must pass. `wide_batch`'s `attrs` entries are already sorted, so `assert_same` works directly. Then update `GOLDEN`, and say why in the commit body.
 
 ### Tests
 
-**`file.rs` unit tests** (they have the patch helpers; add `fn section_bounds(hot: &[u8]) -> [Range<usize>; 7]`, which walks the seven `u32`-prefixed sections):
+**`file.rs` unit tests** (they have the patch helpers and M3.1's `section_bounds`):
 - **Layout of `wide_batch(20_000)`.**
-  - `wide_schema` has 15 fields, and `attrs` is field 6. The directory has 20 records: 15 top-level, children 15–18 for keys `k0`–`k3`, and the residual 19.
-  - Section 5 lists map 6 with residual 19 and children 15–18.
+  - `wide_schema` has 15 fields, and `attrs` is field 6. The directory has 19 records: 15 top-level, children 15, 16 and 17 for keys `k0`, `k1` and `k2`, and the residual 18.
+  - Section 5 lists map 6 with residual 18 and children 15–17.
   - `read_column(.., 6)` equals the input.
 - **Length-preserving patches.** Refresh the hot checksum after each; each gives `Corrupt { what: "map layout" }`:
   - a section-5 `map_column_id` set to 0;
   - a child's directory `parent` changed;
-  - a key byte flipped so that the keys are out of order.
+  - the last byte of key `k0` in section 5 set to `b'9'`, so that the keys are out of order.
 - **Wrong column.** `read_column` with column 15 gives `Schema`.
 
 **`reader.rs`:** the shredded round trip of a map column with a null-valued promoted key, a duplicated key, null maps and empty maps (built in the test), compared with stable-sorted entries.
