@@ -692,7 +692,7 @@ The M4.1 commands pass.
 **Datagen tests** (`tests/scan_datagen.rs`, `#[ignore]`, release). They build the 3,000-trace file as `roundtrip_payload.rs` does, and look columns up with `schema.index_of`.
 - **`scan_datagen_lookup`:**
   - **Cold:** `lookup_scan` of the trace id of row 5,000, every column projected: `waves == 3`.
-  - **Warm:** `lookup_scan` of the trace id of row 20,000, same projection: `waves == 2`.
+  - **Warm:** `lookup_scan` of the trace id of row 12,000, same projection: `waves == 2`.
   - **Absent:** `[0u8; 16]` gives `waves == 0`.
   - **Results:** each equals the oracle: `read_column` of every column, filtered on `trace_id`.
   - **Printed:** the cold and warm `waves`, `requests` and `bytes`, plus `file.size()`, as the first G1 data point.
@@ -700,7 +700,7 @@ The M4.1 commands pass.
   - **Payload projection:** `projection = [trace_id, input, output]` with `start_time` in a 10-minute window starting at row 0's `start_time` equals the oracle.
   - **`Contains`:** 20 present needles (substrings of 8 to 32 bytes of random non-null `input` values) and 10 absent ones, each equal to brute force.
   - **Combined:** `And(Contains(input, needle), Cmp(span_kind, Eq, Utf8(<row 0's span_kind>)))` equals the oracle.
-- **Preconditions** for both tests: `assert!(file.row_count() > 20_000)`. The lookup rows (5,000 and 20,000) must have a non-null `input`: assert it, and if one does not, take the next row whose `input` is non-null and say so in the report.
+- **Preconditions** for both tests: `assert!(file.row_count() > 12_000)`. The lookup rows (5,000 and 12,000) must have a non-null `input`: assert it, and if one does not, take the next row whose `input` is non-null and say so in the report.
 - **Map pruning** is an in-crate test, because `hot.maps` is `pub(crate)`. It is `#[ignore]` test `scan_datagen_map_pruning` in `src/scan.rs`, built on `fmt_testdata` (a dev-dependency) the same way.
   - On `resource_attributes`, take its `MapLayout` from `file.hot.maps`.
   - Assert `layout.keys` is not empty, and that the first key's child record has `flags & 1 != 0` (a dictionary). If no promoted key has a dictionary, stop and report.

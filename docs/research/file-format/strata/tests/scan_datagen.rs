@@ -229,6 +229,7 @@ async fn scan_datagen_scan() {
     // Contains: 20 needles taken from random inputs, and 10 that no input holds.
     let mut rng = datagen::Rng::new(9);
     let mut needles: Vec<Vec<u8>> = Vec::new();
+    let mut first_row = 0;
     while needles.len() < 20 {
         let row = rng.below(inputs.len());
         if !inputs.is_valid(row) {
@@ -240,6 +241,9 @@ async fn scan_datagen_scan() {
             continue;
         }
         let start = rng.below(value.len() - len + 1);
+        if needles.is_empty() {
+            first_row = row;
+        }
         needles.push(value[start..start + len].to_vec());
     }
     let first_present = needles[0].clone();
@@ -265,8 +269,9 @@ async fn scan_datagen_scan() {
         assert_rows(&got, &picked(&columns, &keep, &[trace_id]));
     }
 
-    // Combined: `Contains` and an equality on the narrow `span_kind` of row 0.
-    let kind0 = kinds.value(0).to_string();
+    // Combined: `Contains` and an equality on the narrow `span_kind` of the row the first
+    // needle comes from, so the result holds at least that row.
+    let kind0 = kinds.value(first_row).to_string();
     let contains = brute_contains(inputs, &first_present);
     let keep: BooleanArray = contains
         .iter()
@@ -274,6 +279,7 @@ async fn scan_datagen_scan() {
         .map(|(r, &m)| Some(m && kinds.is_valid(r) && kinds.value(r) == kind0))
         .collect();
     println!("combined predicate: {} rows", keep.true_count());
+    assert!(keep.true_count() > 0);
     let got = file
         .scan(&ScanRequest {
             projection: projection.to_vec(),
