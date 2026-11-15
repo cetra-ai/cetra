@@ -11,6 +11,9 @@ mod db;
 pub(crate) use committer::{
     CatalogEdit, Committer, ObsoleteRemoval, Registered, StagedRemoval, now_ns,
 };
+/// The loaders `Committer::open` and `Storage::open` run, for the catalog fuzz entry (track R M3).
+#[cfg(any(test, fuzzing))]
+pub(crate) use db::{check_file_sources, load, load_project_states, load_tombstones};
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;

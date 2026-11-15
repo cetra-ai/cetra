@@ -37,7 +37,12 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+# Fuzz entry points (track R M3): cargo-fuzz sets `--cfg fuzzing`.
+[target.'cfg(fuzzing)'.dependencies]
+arbitrary.workspace = true
+
 [dev-dependencies]
+arbitrary.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 toml.workspace = true
