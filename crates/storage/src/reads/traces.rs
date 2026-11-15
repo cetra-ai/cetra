@@ -29,6 +29,9 @@ const TRACE_TIES: &[&str] = &[traces::TRACE_ID];
 const SPAN_TIES: &[&str] = &[spans::SPAN_ID, spans::TRACE_ID];
 /// The columns that name one span in a list: copies agree on all three.
 const SPAN_KEY: &[&str] = &[spans::START_TIME, spans::SPAN_ID, spans::TRACE_ID];
+/// Most rows one list attempt reads, 64 × [`super::MAX_PAGE`]. A span stored many times, or a
+/// filter matching many copies, can't make the refetch read more than this.
+const MAX_FETCH: usize = 64 * super::MAX_PAGE;
 
 /// Most spans `trace_detail` returns for one trace.
 pub const MAX_TRACE_SPANS: usize = 20_000;
@@ -204,7 +207,7 @@ pub async fn trace_list(
     ctx: &QueryContext,
     request: TraceListRequest<'_>,
 ) -> Result<Page, RunError> {
-    run_list(ctx, ListPlan::traces(&request), request.timeout).await
+    run_list(ctx, ListPlan::traces(&request), request.timeout, MAX_FETCH).await
 }
 
 /// One page of spans. Exclusions use the span's own environment and metadata.
@@ -215,8 +218,24 @@ pub async fn trace_list(
 /// # Errors
 ///
 /// Same as [`trace_list`].
+///
+/// A page reads at most [`MAX_FETCH`] rows to find `limit` distinct spans. When that cap comes
+/// first, the page holds the distinct spans read so far: fewer than `limit` is possible, and the
+/// cursor is still set, so paging goes on from the last span returned.
+///
+/// The filter, the search and the default exclusions apply before de-duplication. If the newest
+/// copy of a span fails them and an older copy passes, the older copy is listed.
 pub async fn span_list(ctx: &QueryContext, request: SpanListRequest<'_>) -> Result<Page, RunError> {
-    run_list(ctx, ListPlan::spans(&request), request.timeout).await
+    span_list_capped(ctx, request, MAX_FETCH).await
+}
+
+/// [`span_list`] with a caller-chosen read cap. Tests pass a small one.
+async fn span_list_capped(
+    ctx: &QueryContext,
+    request: SpanListRequest<'_>,
+    cap: usize,
+) -> Result<Page, RunError> {
+    run_list(ctx, ListPlan::spans(&request), request.timeout, cap).await
 }
 
 /// The trace and its spans. Default exclusions do not apply.
@@ -522,15 +541,17 @@ async fn run_list(
     ctx: &QueryContext,
     plan: ListPlan<'_>,
     timeout: Duration,
+    cap: usize,
 ) -> Result<Page, RunError> {
     run_timed(plan.limit, timeout, async {
         // A de-duplicating list reads a margin for the copies it drops. When the rows left after
         // de-duplication don't fill the page and the read stopped at its own limit, read again
-        // with a doubled limit. Without de-duplication the first read always settles it.
+        // with a doubled limit, up to `cap`. Without de-duplication the first read always settles it.
         let mut fetch = plan.limit + 1;
         if plan.dedup.is_some() {
             fetch *= 2;
         }
+        fetch = fetch.min(cap);
         loop {
             let frame = list_frame(ctx, &plan, fetch).await?;
             let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
@@ -546,10 +567,36 @@ async fn run_list(
                     batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
                 );
             }
-            fetch = fetch.saturating_mul(2);
+            if fetch >= cap {
+                return capped_page(batches, &plan);
+            }
+            fetch = fetch.saturating_mul(2).min(cap);
         }
     })
     .await
+}
+
+/// The page when the read cap comes first: the distinct rows read, at most `limit`. When fewer
+/// than `limit` rows came back, the page has a cursor anyway, taken from its last row. The
+/// cursor's strict `after` skips the rest of that row's copies, and copies that were read but
+/// dropped share its key.
+fn capped_page(batches: Vec<RecordBatch>, plan: &ListPlan<'_>) -> Result<Page, RunError> {
+    let distinct: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    if distinct > plan.limit {
+        return assemble(
+            batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
+        );
+    }
+    // One more row than the page: `assemble` then cuts the page at `distinct` rows and cursors
+    // from its last row, which is the last distinct row.
+    let mut batches = batches;
+    if let Some(last) = batches.iter().rev().find(|batch| batch.num_rows() > 0) {
+        let tail = last.slice(last.num_rows() - 1, 1);
+        batches.push(tail);
+    }
+    assemble(
+        batches, distinct, plan.list, plan.sort, plan.order, plan.ties,
+    )
 }
 
 /// Drops each row whose `key` columns equal the previous row's. The rows arrive in sort order,
@@ -840,9 +887,10 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        MAX_REFRESH_IDS, SPAN_LIST_COLUMNS, SpanListRequest, SpanSort, TraceListRequest,
-        TraceRefreshRequest, TraceSort, TraceSpansRequest, span_detail, span_list, trace_detail,
-        trace_detail_limited, trace_frame, trace_list, trace_refresh, trace_spans,
+        MAX_FETCH, MAX_REFRESH_IDS, SPAN_LIST_COLUMNS, SpanListRequest, SpanSort, TraceListRequest,
+        TraceRefreshRequest, TraceSort, TraceSpansRequest, span_detail, span_list,
+        span_list_capped, trace_detail, trace_detail_limited, trace_frame, trace_list,
+        trace_refresh, trace_spans,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};
@@ -1612,8 +1660,8 @@ mod tests {
             .collect()
     }
 
-    /// Every row of the span list read in pages of `limit`, in order.
-    async fn walk_spans(ctx: &QueryContext, limit: usize) -> Vec<Value> {
+    /// Every row of the span list read in pages of `limit`, with a read cap of `cap`, in order.
+    async fn walk_spans(ctx: &QueryContext, limit: usize, cap: usize) -> Vec<Value> {
         let mut walked = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -1624,7 +1672,7 @@ mod tests {
                 limit,
             );
             request.cursor = cursor.as_deref();
-            let page = span_list(ctx, request).await.expect("page");
+            let page = span_list_capped(ctx, request, cap).await.expect("page");
             assert!(row_count(&page.batches) <= limit);
             walked.extend(rows(&page));
             match page.next_cursor {
@@ -1669,14 +1717,14 @@ mod tests {
             }
         }
         let ctx = context_for(&spans);
-        let single = listed_triples(&walk_spans(&ctx, 1000).await);
+        let single = listed_triples(&walk_spans(&ctx, 1000, MAX_FETCH).await);
         let mut sorted = single.clone();
         sorted.sort();
         expected.sort();
         assert_eq!(sorted, expected, "one row per span, the newest copy");
         for limit in [1, 2, 3, 1000] {
             assert_eq!(
-                listed_triples(&walk_spans(&ctx, limit).await),
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
                 single,
                 "pages of {limit}"
             );
@@ -1698,11 +1746,46 @@ mod tests {
         ];
         for limit in [1, 2, 3, 1000] {
             assert_eq!(
-                listed_triples(&walk_spans(&ctx, limit).await),
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
                 expected,
                 "pages of {limit}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn span_list_bounds_the_refetch_and_keeps_paging() {
+        // Newest first: Z (one copy), X (five copies), Y (one copy). With a read cap of 4, a page
+        // reads Z and the first three copies of X, so it stops with two distinct spans.
+        let mut spans = copies_of(2, 0, 3_000, 1);
+        spans.extend(copies_of(1, 0, 2_000, 5));
+        spans.extend(copies_of(0, 0, 1_000, 1));
+        let ctx = context_for(&spans);
+        let expected = vec![
+            expected_row(2, 0, "copy 1"),
+            expected_row(1, 0, "copy 5"),
+            expected_row(0, 0, "copy 1"),
+        ];
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                expected,
+                "pages of {limit}, no cap"
+            );
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, 4).await),
+                expected,
+                "pages of {limit}, a read cap of 4"
+            );
+        }
+        let request = span_request(scope(None, true), SpanSort::StartTime, SortOrder::Desc, 3);
+        let page = span_list_capped(&ctx, request, 4).await.expect("page");
+        assert_eq!(
+            listed_triples(&rows(&page)),
+            vec![expected[0].clone(), expected[1].clone()],
+            "the short page at the cap"
+        );
+        assert!(page.next_cursor.is_some(), "the capped page still pages on");
     }
 
     #[tokio::test]

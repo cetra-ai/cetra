@@ -15,4 +15,4 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
-- The span list no longer shows a re-sent span twice, and its pages no longer depend on the page size.
+- The span list no longer shows a re-sent span twice, and its pages no longer depend on the page size. A re-send that changed its `start_time` is still listed twice until compaction merges them.

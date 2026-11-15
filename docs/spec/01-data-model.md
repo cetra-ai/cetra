@@ -96,7 +96,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `ingest_time` | Timestamp(ns, UTC) | | Server receive time. Used by deletion cut-offs. |
 | `schema_version` | UInt16 | | Row-level normalization version. |
 
-Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`. Known limit: `span_list` de-duplicates adjacent copies of a span (same `start_time`, `span_id`, `trace_id`), keeping the newest `ingest_time`; a re-send that changed `start_time` stays a duplicate until compaction, which keeps such copies (spec 03 §5).
+Uniqueness: `(project_id, trace_id, span_id)`. Duplicate re-sends are tolerated at write time and removed at compaction (keep the row with greatest `ingest_time`); queries over not-yet-compacted data may briefly see duplicates — list views de-duplicate by `span_id`. Known limit: `span_list` de-duplicates adjacent copies of a span (same `start_time`, `span_id`, `trace_id`), keeping the newest `ingest_time`. Under the other sorts (`duration`, `cost_total`, `total_tokens`) copies are de-duplicated only when their sort value is also equal. The filter, search and exclusions run before de-duplication, so an older copy that matches is listed when the newest one does not. A re-send that changed `start_time` stays a duplicate until compaction, which keeps copies whose `start_time`s fall in different slices (spec 03 §5, "During a merge").
 
 ### Payloads (`input` / `output`)
 
