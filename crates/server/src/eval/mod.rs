@@ -1,5 +1,6 @@
 //! Online evaluation in the server: connections, test runs, the queue and its loops (track I).
 
+pub(crate) mod backfill;
 pub(crate) mod breaker;
 pub(crate) mod budget;
 pub(crate) mod connection;
@@ -37,6 +38,8 @@ const SHUTDOWN_MARGIN: Duration = Duration::from_secs(5);
 pub(crate) struct EvalQueue {
     /// Wakes the dispatcher: a job was queued, or a worker finished.
     wake: Notify,
+    /// Wakes the backfill runner: a backfill was created (D-I-39).
+    backfill_wake: Notify,
     /// Set by `stop`; every loop waits on a receiver of it.
     stop: watch::Sender<bool>,
     /// `eval.workers` slots (D-I-6).
@@ -72,6 +75,7 @@ impl EvalQueue {
     pub(crate) fn new(workers: u32) -> Self {
         Self {
             wake: Notify::new(),
+            backfill_wake: Notify::new(),
             stop: watch::channel(false).0,
             workers: Arc::new(Semaphore::new(
                 usize::try_from(workers).unwrap_or(usize::MAX),
@@ -89,6 +93,13 @@ impl EvalQueue {
     /// Wakes the dispatcher.
     pub(crate) fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Wakes the backfill runner.
+    // I6.5 calls it.
+    #[allow(dead_code)]
+    pub(crate) fn wake_backfills(&self) {
+        self.backfill_wake.notify_one();
     }
 
     /// Tells every eval loop to stop.
