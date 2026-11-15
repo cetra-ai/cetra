@@ -10,6 +10,7 @@ import itemsFixture from "../../../../../../fixtures/api/responses/datasets/0190
 import itemsV1Fixture from "../../../../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items-v1.json";
 import versionsFixture from "../../../../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
 import datasetFixture from "../../../../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
+import experimentsFixture from "../../../../../../fixtures/api/static/experiments.json";
 
 const DATASET_ID = "01900000-0000-7000-8000-000000000c01";
 const DATASET_URL = `/acme/support-bot/datasets/${DATASET_ID}`;
@@ -194,4 +195,21 @@ it("shows the new latest version, editable, after an item is added", async () =>
   expect(await screen.findByText(/version 3/)).toBeInTheDocument();
   expect(screen.queryByText(/Items are read-only/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Add item" })).toBeEnabled();
+});
+
+it("lists the dataset's experiments on the Experiments tab", async () => {
+  const requested: (string | null)[] = [];
+  server.use(
+    http.get("/api/v1/projects/:project/experiments", ({ request }) => {
+      requested.push(new URL(request.url).searchParams.get("dataset"));
+      return HttpResponse.json(experimentsFixture);
+    }),
+  );
+
+  await renderApp(`${DATASET_URL}?tab=experiments`);
+
+  const table = await screen.findByRole("table", { name: "Experiments" });
+  expect(requested).toContain(DATASET_ID);
+  expect(within(table).queryByRole("columnheader", { name: "Dataset" })).toBeNull();
+  expect(within(table).getAllByRole("row").slice(1)).toHaveLength(experimentsFixture.data.length);
 });

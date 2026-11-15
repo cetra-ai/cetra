@@ -161,3 +161,23 @@ export function scoreValueText(value: Schema<"ResultScore">): string {
 export function expectedRuns(experiment: Schema<"Experiment">): number {
   return experiment.item_count * experiment.repetitions;
 }
+
+/**
+ * Why the selected experiments cannot be compared, or undefined when they can: 2 to 4 of one
+ * dataset (the same `dataset_id`), or of one deleted dataset (no `dataset_id`, the same name),
+ * as the server accepts them (D-J-13).
+ */
+export function compareBlockReason(
+  experiments: readonly Schema<"Experiment">[],
+): string | undefined {
+  if (experiments.length < 2 || experiments.length > MAX_COMPARE_IDS) {
+    return "Pick 2 to 4 experiments";
+  }
+  const [first] = experiments;
+  const sameDataset = experiments.every((experiment) =>
+    first?.dataset_id !== undefined
+      ? experiment.dataset_id === first.dataset_id
+      : experiment.dataset_id === undefined && experiment.dataset_name === first?.dataset_name,
+  );
+  return sameDataset ? undefined : "Pick experiments of the same dataset";
+}

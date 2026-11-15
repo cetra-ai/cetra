@@ -118,6 +118,7 @@ describe("sameJson", () => {
 describe("parseDatasetSearch", () => {
   it("keeps a known tab and drops an unknown one", () => {
     expect(parseDatasetSearch({ tab: "versions" })).toEqual({ tab: "versions" });
+    expect(parseDatasetSearch({ tab: "experiments" })).toEqual({ tab: "experiments" });
     expect(parseDatasetSearch({ tab: "x" })).toEqual({});
   });
 

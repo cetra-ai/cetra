@@ -1,6 +1,7 @@
 import {
   BellRing,
   Database,
+  FlaskConical,
   Gauge,
   LayoutDashboard,
   ListChecks,
@@ -23,4 +24,5 @@ export const projectNav = [
   { to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
   { to: "/$org/$project/online-rules", label: "Online rules", icon: ListChecks },
   { to: "/$org/$project/datasets", label: "Datasets", icon: Table2 },
+  { to: "/$org/$project/experiments", label: "Experiments", icon: FlaskConical },
 ] as const;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import {
+  compareBlockReason,
   deltaDirection,
   deltaText,
   expectedRuns,
@@ -122,5 +123,40 @@ describe("expectedRuns", () => {
       repetitions: 4,
     } as Schema<"Experiment">;
     expect(expectedRuns(experiment)).toBe(12);
+  });
+});
+
+describe("compareBlockReason", () => {
+  const base = {
+    dataset_id: "01900000-0000-7000-8000-000000000c01",
+    dataset_name: "faq",
+  };
+  const experiment = (id: string, extra: Record<string, unknown> = {}) =>
+    ({ ...base, id, ...extra }) as Schema<"Experiment">;
+  const deleted = { dataset_id: undefined, dataset_name: "faq" };
+
+  it("needs two to four experiments", () => {
+    expect(compareBlockReason([])).toBe("Pick 2 to 4 experiments");
+    expect(compareBlockReason([experiment("a")])).toBe("Pick 2 to 4 experiments");
+    const five = ["a", "b", "c", "d", "e"].map((id) => experiment(id));
+    expect(compareBlockReason(five)).toBe("Pick 2 to 4 experiments");
+  });
+
+  it("needs one dataset", () => {
+    expect(compareBlockReason([experiment("a"), experiment("b")])).toBeUndefined();
+    const other = experiment("c", { dataset_id: "01900000-0000-7000-8000-000000000c02" });
+    expect(compareBlockReason([experiment("a"), other])).toBe(
+      "Pick experiments of the same dataset",
+    );
+  });
+
+  it("accepts experiments of one deleted dataset by name", () => {
+    const gone = experiment("a", deleted);
+    expect(compareBlockReason([gone, experiment("b", deleted)])).toBeUndefined();
+    const renamed = experiment("b", { ...deleted, dataset_name: "other" });
+    expect(compareBlockReason([gone, renamed])).toBe("Pick experiments of the same dataset");
+    expect(compareBlockReason([gone, experiment("c")])).toBe(
+      "Pick experiments of the same dataset",
+    );
   });
 });

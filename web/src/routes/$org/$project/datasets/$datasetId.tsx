@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { FlaskConical, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
+import { experimentsInit } from "@/api/queries-experiments";
+import type { Schema } from "@/api/types";
 import { AddItemDialog } from "@/components/datasets/add-item-dialog";
 import { DatasetSettings } from "@/components/datasets/dataset-settings";
 import { ExportMenu } from "@/components/datasets/export-menu";
@@ -11,6 +14,9 @@ import { ImportDialog } from "@/components/datasets/import-dialog";
 import { ItemsTable } from "@/components/datasets/items-table";
 import { VersionsTable } from "@/components/datasets/versions-table";
 import { DisabledReason } from "@/components/disabled-reason";
+import { EmptyState } from "@/components/empty-state";
+import { EvaluateSnippet } from "@/components/experiments/evaluate-snippet";
+import { CompareSelection, ExperimentsTable } from "@/components/experiments/experiments-table";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +26,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { type DatasetTab, parseDatasetSearch } from "@/lib/datasets";
 import { canManageDatasets } from "@/lib/roles";
@@ -232,6 +239,7 @@ function DatasetPage() {
         <TabsList>
           <TabsTrigger value="items">Items</TabsTrigger>
           <TabsTrigger value="versions">Versions</TabsTrigger>
+          <TabsTrigger value="experiments">Experiments</TabsTrigger>
           <TabsTrigger value="settings">Settings</TabsTrigger>
         </TabsList>
         <TabsContent value="items">
@@ -240,6 +248,13 @@ function DatasetPage() {
         <TabsContent value="versions">
           <VersionsTable datasetId={datasetId} />
         </TabsContent>
+        <TabsContent value="experiments">
+          <ExperimentsTab
+            datasetId={datasetId}
+            datasetName={dataset.name}
+            open={tab === "experiments"}
+          />
+        </TabsContent>
         <TabsContent value="settings">
           <DatasetSettings dataset={dataset} />
         </TabsContent>
@@ -247,6 +262,91 @@ function DatasetPage() {
 
       <AddItemDialog datasetId={datasetId} open={adding} onOpenChange={setAdding} />
       <ImportDialog datasetId={datasetId} open={importing} onOpenChange={setImporting} />
+    </div>
+  );
+}
+
+/** The dataset's experiments: the list (no dataset column), the comparison pick and a link to the list. */
+function ExperimentsTab({
+  datasetId,
+  datasetName,
+  open,
+}: {
+  datasetId: string;
+  datasetName: string;
+  /** The tab is open; the list is requested only then. */
+  open: boolean;
+}) {
+  const { org, project } = useProject();
+  // Picked ids in the order they were picked; the first is the baseline.
+  const [selected, setSelected] = useState<string[]>([]);
+  const query = $api.useInfiniteQuery(
+    "get",
+    "/api/v1/projects/{project}/experiments",
+    experimentsInit(org, project, datasetId),
+    {
+      pageParamName: "cursor",
+      initialPageParam: null,
+      getNextPageParam: (page) => page.next_cursor ?? undefined,
+      enabled: open,
+    },
+  );
+
+  if (query.error) {
+    throw query.error;
+  }
+
+  const rows = query.data?.pages.flatMap((page) => page.data) ?? [];
+  const selectedRows = selected
+    .map((id) => rows.find((row) => row.id === id))
+    .filter((row): row is Schema<"Experiment"> => row !== undefined);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Link
+          to="/$org/$project/experiments"
+          params={{ org, project }}
+          search={{ dataset: datasetId }}
+          className="w-fit rounded-sm text-xs text-muted-foreground underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+        >
+          Open in Experiments
+        </Link>
+      </div>
+      <CompareSelection experiments={selectedRows} />
+      {query.isPending ? (
+        <Skeleton className="h-8 w-full" />
+      ) : rows.length === 0 ? (
+        <div className="flex flex-col gap-4">
+          <EmptyState
+            icon={FlaskConical}
+            title="No experiments"
+            description="Run one from your code with evaluate():"
+          />
+          <EvaluateSnippet datasetName={datasetName} />
+        </div>
+      ) : (
+        <ExperimentsTable
+          rows={rows}
+          selected={selected}
+          onSelectedChange={setSelected}
+          hideDataset
+        />
+      )}
+      {query.hasNextPage ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-fit"
+          disabled={query.isFetchingNextPage}
+          onClick={() => {
+            void query.fetchNextPage();
+          }}
+        >
+          {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
+          Load more
+        </Button>
+      ) : null}
     </div>
   );
 }

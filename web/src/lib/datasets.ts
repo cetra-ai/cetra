@@ -116,9 +116,9 @@ function boundedJson(value: unknown, limit: number): string {
 }
 
 /** The tabs of the dataset page. M6 adds "experiments". */
-export type DatasetTab = "items" | "versions" | "settings";
+export type DatasetTab = "items" | "versions" | "experiments" | "settings";
 
-const DATASET_TABS: readonly DatasetTab[] = ["items", "versions", "settings"];
+const DATASET_TABS: readonly DatasetTab[] = ["items", "versions", "experiments", "settings"];
 
 /**
  * The dataset page's search params. An unknown `tab` is dropped; `version` is a non-negative
