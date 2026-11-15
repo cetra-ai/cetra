@@ -8,6 +8,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import deletionProjectFixture from "../../../../../../fixtures/api/static/deletion-project.json";
 import meFixture from "../../../../../../fixtures/api/static/me.json";
+import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const projectNav = () => within(screen.getByRole("list", { name: "Project settings" }));
@@ -335,7 +336,7 @@ it("does not let a member change the timeout", async () => {
   expect(screen.getByRole("button", { name: "Save timeout" })).toBeDisabled();
 });
 
-it("shows the Pro plan message when retention is refused by the plan", async () => {
+it("shows the Pro plan message and an Upgrade link when retention is refused by the plan", async () => {
   server.use(
     http.patch("/api/v1/projects/:project", () =>
       problemResponse(403, "plan_required", {
@@ -351,4 +352,60 @@ it("shows the Pro plan message when retention is refused by the plan", async () 
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Data retention management is part of the Pro plan.",
   );
+  expect(await screen.findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+});
+
+it("states the plan's data window under the retention field", async () => {
+  await renderApp("/acme/support-bot/settings/general");
+
+  const days = await screen.findByLabelText("Retention (days)");
+  await waitFor(() =>
+    expect(days).toHaveAccessibleDescription(/Your plan shows the last 1825 days/),
+  );
+  expect(screen.queryByRole("note", { name: "Locked feature" })).toBeNull();
+});
+
+it("locks the retention days without retention_management and keeps Keep data forever", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () =>
+      HttpResponse.json({ ...entitlementsFixture, features: ["project_roles"] }),
+    ),
+  );
+
+  await renderApp("/acme/support-bot/settings/general");
+
+  const lock = await screen.findByRole("note", { name: "Locked feature" });
+  expect(lock).toHaveTextContent("Available on the Pro plan.");
+  expect(within(lock).getByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+  expect(screen.getByLabelText("Retention (days)")).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "Keep data forever" })).toBeEnabled();
+});
+
+it("renames a project without sending retention when it is locked and already set", async () => {
+  let body: unknown;
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () =>
+      HttpResponse.json({ ...entitlementsFixture, features: ["project_roles"] }),
+    ),
+    http.patch("/api/v1/projects/:project", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ...projectFixture, name: "Support" });
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  await screen.findByRole("note", { name: "Locked feature" });
+  const name = screen.getByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "Support");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  expect(body).toEqual({ name: "Support" });
 });

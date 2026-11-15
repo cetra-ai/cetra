@@ -498,6 +498,8 @@ pub(crate) async fn rule_ids_of_connection(
 pub(crate) struct TriggerRule {
     pub(crate) id: Uuid,
     pub(crate) project_id: ProjectId,
+    /// The project's org: the sweeper's reads see that org's data window (D-P-44).
+    pub(crate) org_id: OrgId,
     pub(crate) evaluator_id: Uuid,
     /// `"trace"` or `"span"`.
     pub(crate) target: String,
@@ -514,8 +516,9 @@ pub(crate) struct TriggerRule {
 /// Returns [`MetaError`] when the query fails, or `MetaError::Corrupt` for a stored `target`
 /// outside the list or a stored id that does not parse.
 pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>, MetaError> {
-    /// `id, project_id, evaluator_id, target, filter, sample_rate, completion_timeout_s`.
+    /// `id, project_id, org_id, evaluator_id, target, filter, sample_rate, completion_timeout_s`.
     type TriggerRecord = (
+        String,
         String,
         String,
         String,
@@ -525,7 +528,7 @@ pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>,
         Option<i64>,
     );
     let records: Vec<TriggerRecord> = sqlx::query_as(
-        "SELECT r.id, r.project_id, r.evaluator_id, r.target, r.filter, r.sample_rate, \
+        "SELECT r.id, r.project_id, p.org_id, r.evaluator_id, r.target, r.filter, r.sample_rate, \
          CAST(CASE WHEN json_valid(p.settings) AND json_type(p.settings) = 'object' \
               THEN json_extract(p.settings, '$.trace_completion_timeout_s') END AS INTEGER) \
            AS completion_timeout_s \
@@ -540,10 +543,20 @@ pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>,
     records
         .into_iter()
         .map(
-            |(id, project_id, evaluator_id, target, filter, sample_rate, completion_timeout_s)| {
+            |(
+                id,
+                project_id,
+                org_id,
+                evaluator_id,
+                target,
+                filter,
+                sample_rate,
+                completion_timeout_s,
+            )| {
                 Ok(TriggerRule {
                     id: parse_uuid(&id, "id")?,
                     project_id: ProjectId::from_uuid(parse_uuid(&project_id, "project_id")?),
+                    org_id: OrgId::from_uuid(parse_uuid(&org_id, "org_id")?),
                     evaluator_id: parse_uuid(&evaluator_id, "evaluator_id")?,
                     target: one_of(target, &TARGETS, "target")?,
                     filter,

@@ -497,7 +497,7 @@ async fn preview_online_rules(
         RuleTarget::Trace => ViewName::Traces,
         RuleTarget::Span => ViewName::Spans,
     };
-    let ctx = open_query(&state, project, None).await?;
+    let ctx = open_query(&state, access.project.org_id, project, None).await?;
     let count = match_count(
         &ctx,
         MatchCountRequest {
@@ -641,7 +641,7 @@ async fn validate(
             RuleTarget::Trace => ViewName::Traces,
             RuleTarget::Span => ViewName::Spans,
         };
-        let ctx = open_query(state, project, None).await?;
+        let ctx = open_query(state, org, project, None).await?;
         llmobs_storage::validate_filter(&ctx, view, text)?;
     }
     Ok(())

@@ -239,7 +239,13 @@ async fn run_json(
     body: SqlQueryRequest,
 ) -> Result<SqlQueryResult, ApiError> {
     let checked = check_request(body)?;
-    let ctx = open_query_windowed(state, access.project.id, checked.window).await?;
+    let ctx = open_query_windowed(
+        state,
+        access.project.org_id,
+        access.project.id,
+        checked.window,
+    )
+    .await?;
     let json = ctx
         .sql_json(SqlRequest {
             query: &checked.query,
@@ -280,7 +286,13 @@ async fn start_export(
         });
     }
     let checked = check_request(body)?;
-    let ctx = open_query_windowed(state, access.project.id, checked.window).await?;
+    let ctx = open_query_windowed(
+        state,
+        access.project.org_id,
+        access.project.id,
+        checked.window,
+    )
+    .await?;
     let prepared = tokio::time::timeout(checked.timeout, async {
         let stream = ctx
             .sql_export(
@@ -662,7 +674,7 @@ mod tests {
     use super::*;
     use crate::auth::roles::{OrgRole, ProjectOverride};
     use crate::meta::members::set_project_override;
-    use crate::test_support::{Seeded, TestApp, TestResponse};
+    use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
     /// The example request and its answer, checked against the real handler.
     const EXAMPLE_REQUEST: &str = include_str!("../../../../fixtures/api/requests/sql-query.json");
@@ -1779,5 +1791,46 @@ mod tests {
         assert!(!success.contains("kind="), "{success}");
         assert!(!logs.contains("secret_marker_text"), "{logs}");
         assert!(!logs.contains("CAST("), "{logs}");
+    }
+
+    /// D-P-21: the SQL console reads through the org's data window, JSON and CSV alike.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_applies_to_sql() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let old: llmobs_core::ids::TraceId = "a5000000000000000000000000000001".parse().unwrap();
+        let new: llmobs_core::ids::TraceId = "a5000000000000000000000000000002".parse().unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, now - DAY)
+            .await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+
+        let query = json!({"query": "SELECT count(*) AS n FROM traces"});
+        let (status, body) = post_sql(&app, &seeded, &query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rows"], json!([{"n": 1}]));
+
+        let response = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/sql", seeded.project.id),
+            )
+            .header("cookie", &seeded.cookie)
+            .header("accept", "text/csv")
+            .json(&query)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        assert_eq!(text.lines().count(), 2, "a header and one data row: {text}");
+        assert!(text.lines().nth(1).unwrap().ends_with('1'), "{text}");
     }
 }

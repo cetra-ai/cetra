@@ -91,7 +91,7 @@ async fn list_traces(
         params.include_experiments,
     )?;
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::trace_list(
         &ctx,
         storage::TraceListRequest {
@@ -127,7 +127,7 @@ async fn list_spans(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::span_list(
         &ctx,
         storage::SpanListRequest {
@@ -157,7 +157,7 @@ async fn get_trace(
 ) -> Result<error::Json<TraceDetail>, ApiError> {
     let around = params.around.map(TimeParam::ns);
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.id, around).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, around).await?;
     let data = storage::trace_detail(&ctx, &path.trace_id, deadline.remaining()?)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -178,7 +178,7 @@ async fn get_span(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<SpanPath>,
 ) -> Result<error::Json<SpanDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let batch = storage::span_detail(&ctx, &path.trace_id, &path.span_id, READ_TIMEOUT)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -207,6 +207,7 @@ fn span_sort(sort: SpanSort) -> storage::SpanSort {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
+    use llmobs_core::ids::TraceId;
     use llmobs_core::message::Part;
     use llmobs_core::score::ScoreValue;
     use serde_json::Value as Json;
@@ -214,7 +215,7 @@ mod tests {
     use super::*;
     use crate::api::common::Problem;
     use crate::api::payload::Payload;
-    use crate::test_support::{Seeded, TestApp, assert_logs_clean};
+    use crate::test_support::{Seeded, TestApp, assert_logs_clean, set_limits};
 
     const TRACE_1: &str = "a1000000000000000000000000000001";
     const TRACE_2: &str = "a1000000000000000000000000000002";
@@ -597,6 +598,46 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK);
         let page: Json = response.json();
         assert_eq!(page["data"], serde_json::json!([]));
+    }
+
+    /// One day, in nanoseconds.
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// D-P-21: a trace before the org's data window is hidden from the list and the detail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_hides_old_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let old: TraceId = "a4000000000000000000000000000001".parse().unwrap();
+        let new: TraceId = "a4000000000000000000000000000002".parse().unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, now - DAY)
+            .await;
+        let range = format!(
+            "?from={}&to={}",
+            (now - 60 * DAY) / 1_000_000,
+            now / 1_000_000
+        );
+
+        let before = trace_ids(&app, &seeded, &range).await;
+        assert_eq!(before.len(), 2, "both traces are listed without a limit");
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        assert_eq!(
+            trace_ids(&app, &seeded, &range).await,
+            [new.to_string()].to_vec()
+        );
+        let (status, _) = get_json(&app, &seeded, &format!("/traces/{old}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get_json(&app, &seeded, &format!("/traces/{new}")).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test(flavor = "multi_thread")]

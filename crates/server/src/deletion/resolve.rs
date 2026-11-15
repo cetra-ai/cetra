@@ -5,11 +5,12 @@ use std::collections::HashSet;
 
 use llmobs_core::ids::{ProjectId, TraceId};
 use llmobs_storage::{
-    FilterDeletionRequest, QueryContext, QueryOptions, TimeWindow, eval_trace_ids,
-    filter_trace_ids, user_deletion_scope,
+    FilterDeletionRequest, QueryContext, TimeWindow, eval_trace_ids, filter_trace_ids,
+    user_deletion_scope,
 };
 
 use super::{RESOLVE_TIMEOUT, Step};
+use crate::entitlements::{Visibility, query_options};
 use crate::http::AppState;
 use crate::meta::deletions::{
     DeletionKind, DeletionRow, FailReason, insert_sessions, insert_traces, scope_traces,
@@ -29,7 +30,7 @@ pub(super) async fn resolve(
 ) -> Result<bool, Step> {
     let source = state
         .storage
-        .query(project, QueryOptions { around: None })
+        .query(project, query_options(Visibility::exempt(), None))
         .await
         .map_err(|error| super::from_query(&error))?;
     let ctx = QueryContext::new(source, None).map_err(|error| super::from_run(&error, row.kind))?;

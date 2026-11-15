@@ -248,6 +248,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/deletions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List applied org and project drops
+         * @description Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.
+         */
+        get: operations["list_internal_deletions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/memberships/lookup": {
         parameters: {
             query?: never;
@@ -279,10 +299,30 @@ export interface paths {
         put?: never;
         /**
          * Create an org
-         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.
          */
         post: operations["post_internal_org"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/internal/v1/orgs/{org_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Drop an org
+         * @description Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.
+         */
+        delete: operations["delete_internal_org"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2665,17 +2705,17 @@ export interface components {
         DeletionActor: {
             /**
              * Format: uuid
-             * @description The user id or the API key id.
+             * @description The user, API key or control-plane token id.
              */
             id: string;
-            /** @description `user` or `api_key`. */
+            /** @description `user`, `api_key` or `control_plane`. */
             kind: components["schemas"]["DeletionActorKind"];
         };
         /**
          * @description Who requested a deletion.
          * @enum {string}
          */
-        DeletionActorKind: "user" | "api_key";
+        DeletionActorKind: "user" | "api_key" | "control_plane";
         /**
          * @description Why a deletion failed.
          * @enum {string}
@@ -3114,6 +3154,39 @@ export interface components {
             name: string;
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
+        };
+        /** @description One applied drop in the feed (D-P-49). */
+        InternalDrop: {
+            /**
+             * Format: date-time
+             * @description When the drop was applied.
+             */
+            applied_at: string;
+            /**
+             * Format: uuid
+             * @description The deletion id.
+             */
+            id: string;
+            kind: components["schemas"]["InternalDropKind"];
+            /** Format: uuid */
+            org_id: string;
+            /**
+             * Format: uuid
+             * @description Project drops only.
+             */
+            project_id?: string;
+        };
+        /**
+         * @description A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).
+         * @enum {string}
+         */
+        InternalDropKind: "project" | "org";
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        InternalDropPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["InternalDrop"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
         };
         /** @description One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it. */
         InternalMember: {
@@ -6225,6 +6298,69 @@ export interface operations {
             };
         };
     };
+    list_internal_deletions: {
+        parameters: {
+            query?: {
+                /** @description `project` or `org`; both when omitted. */
+                kind?: components["schemas"]["InternalDropKind"];
+                /** @description Rows per page, 1–10 000. Default 1 000. */
+                limit?: number;
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of applied drops, oldest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalDropPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     post_internal_membership_lookup: {
         parameters: {
             query?: never;
@@ -6343,8 +6479,85 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_internal_org: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org drop is applied. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Deletion"];
+                };
+            };
+            /** @description The org drop, in status pending or resolving. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Deletion"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

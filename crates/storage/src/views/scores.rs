@@ -12,10 +12,12 @@ use llmobs_core::schema::{scores, scores_schema};
 pub(crate) fn scores_view(
     raw: Arc<dyn TableProvider>,
     window: Option<TimeWindow>,
+    visible_from: Option<i64>,
 ) -> Result<LogicalPlan, RunError> {
     map_plan(view_plan(
         raw,
         window,
+        visible_from,
         super::ViewProjection {
             raw_name: "raw_scores",
             schema: scores_schema().as_ref(),

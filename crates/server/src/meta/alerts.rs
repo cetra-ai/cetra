@@ -147,6 +147,14 @@ struct ChannelRecord {
     updated_at: i64,
 }
 
+/// A due rule's row and the org that owns its project (D-P-21: the window is the org's).
+#[derive(Debug, sqlx::FromRow)]
+struct DueRuleRecord {
+    org_id: String,
+    #[sqlx(flatten)]
+    rule: RuleRecord,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct RuleRecord {
     id: String,
@@ -794,12 +802,12 @@ pub(crate) async fn due_rules(
     pool: &SqlitePool,
     now: i64,
     slack_ns: i64,
-) -> Result<Vec<RuleRow>, MetaError> {
-    let records: Vec<RuleRecord> = sqlx::query_as(
-        "SELECT r.id, r.project_id, r.name, r.metric, r.config, r.enabled, r.cooldown_s, \
-         r.notify_while_firing, r.state, r.clear_streak, r.last_value, r.last_count, \
-         r.last_evaluated_at, r.last_fired_at, r.last_notified_at, r.last_error, r.created_by, \
-         r.created_at, r.updated_at \
+) -> Result<Vec<(OrgId, RuleRow)>, MetaError> {
+    let records: Vec<DueRuleRecord> = sqlx::query_as(
+        "SELECT p.org_id AS org_id, r.id, r.project_id, r.name, r.metric, r.config, r.enabled, \
+         r.cooldown_s, r.notify_while_firing, r.state, r.clear_streak, r.last_value, \
+         r.last_count, r.last_evaluated_at, r.last_fired_at, r.last_notified_at, r.last_error, \
+         r.created_by, r.created_at, r.updated_at \
          FROM alert_rules r \
          JOIN projects p ON p.id = r.project_id \
          JOIN orgs o ON o.id = p.org_id \
@@ -807,20 +815,24 @@ pub(crate) async fn due_rules(
     )
     .fetch_all(pool)
     .await?;
-    let mut due = Vec::new();
+    let mut due: Vec<(OrgId, RuleRow)> = Vec::new();
     for record in records {
-        let rule = rule_from(record, Vec::new())?;
+        let org: OrgId = record
+            .org_id
+            .parse()
+            .map_err(|_| corrupt("projects", "org_id"))?;
+        let rule = rule_from(record.rule, Vec::new())?;
         let is_due = rule.last_evaluated_at.is_none_or(|at| {
             at.saturating_add(rule.condition.window.interval_ns())
                 .saturating_sub(slack_ns)
                 <= now
         });
         if is_due {
-            due.push(rule);
+            due.push((org, rule));
         }
     }
-    due.sort_by_key(|rule| (rule.last_evaluated_at, rule.id));
-    for rule in &mut due {
+    due.sort_by_key(|(_, rule)| (rule.last_evaluated_at, rule.id));
+    for (_, rule) in &mut due {
         rule.channel_ids = rule_channel_ids(pool, rule.id).await?;
     }
     Ok(due)
@@ -2156,7 +2168,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|rule| rule.id)
+            .map(|(_, rule)| rule.id)
             .collect();
         ids.sort();
         ids

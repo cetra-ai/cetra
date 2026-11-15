@@ -1047,6 +1047,7 @@ mod tests {
             sha256: Sha256::digest(&bytes).into(),
             mime_type: "image/png".to_owned(),
             bytes,
+            newest_span_start: 0,
         }
     }
 

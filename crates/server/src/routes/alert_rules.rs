@@ -124,7 +124,7 @@ async fn create_rule(
     let project_id = access.project.id;
     let org_id = access.project.org_id;
     let name = checked_name(&body.name)?;
-    let condition = checked_condition(&state, project_id, body.condition).await?;
+    let condition = checked_condition(&state, org_id, project_id, body.condition).await?;
     let channel_ids = checked_channels(&state, project_id, &body.channel_ids).await?;
     let cooldown_s = checked_cooldown(body.cooldown_s.unwrap_or(DEFAULT_COOLDOWN_S))?;
     let enabled = body.enabled.unwrap_or(true);
@@ -189,7 +189,7 @@ async fn update_rule(
     let org_id = access.project.org_id;
     let name = body.name.as_deref().map(checked_name).transpose()?;
     let condition = match body.condition {
-        Some(condition) => Some(checked_condition(&state, project_id, condition).await?),
+        Some(condition) => Some(checked_condition(&state, org_id, project_id, condition).await?),
         None => None,
     };
     let channel_ids = match &body.channel_ids {
@@ -365,6 +365,7 @@ async fn checked_channels(
 /// `400 invalid_filter` on the `filter` field.
 async fn checked_condition(
     state: &AppState,
+    org: OrgId,
     project: llmobs_core::ids::ProjectId,
     condition: AlertCondition,
 ) -> Result<AlertCondition, ApiError> {
@@ -373,7 +374,7 @@ async fn checked_condition(
         errors,
     })?;
     if let Some(text) = &condition.filter {
-        let ctx = open_query(state, project, None).await?;
+        let ctx = open_query(state, org, project, None).await?;
         llmobs_storage::validate_filter(&ctx, llmobs_storage::ViewName::Traces, text)?;
     }
     Ok(condition)
@@ -450,9 +451,10 @@ mod tests {
 
     use super::*;
     use crate::api::alerts::{AlertState, ChannelKind};
+    use crate::api::common::ProblemCode;
     use crate::auth::roles::OrgRole;
     use crate::meta::alerts::NewChannel;
-    use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean};
+    use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean, set_limits};
 
     fn rules(seeded: &Seeded) -> String {
         format!("/api/v1/projects/{}/alert-rules", seeded.project.id)
@@ -716,7 +718,7 @@ mod tests {
         .await;
         assert_eq!(refused.status, 400);
         let problem = refused.problem();
-        assert_eq!(problem.code, crate::api::common::ProblemCode::InvalidFilter);
+        assert_eq!(problem.code, ProblemCode::InvalidFilter);
         assert_eq!(problem.errors[0].field, "filter");
         assert!(problem.errors[0].position.is_some());
 
@@ -741,10 +743,7 @@ mod tests {
         )
         .await;
         assert_eq!(patched.status, 400);
-        assert_eq!(
-            patched.problem().code,
-            crate::api::common::ProblemCode::InvalidFilter
-        );
+        assert_eq!(patched.problem().code, ProblemCode::InvalidFilter);
     }
 
     #[tokio::test]
@@ -1233,6 +1232,78 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn the_plan_limits_enabled_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_alert_rules": 1}),
+        );
+        let first = create_ok(&app, &seeded, rule_body("First")).await;
+
+        let second = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(rule_body("Second")),
+        )
+        .await;
+        assert_eq!(second.status, 403);
+        let problem = second.problem();
+        assert_eq!(problem.code, ProblemCode::PlanLimit);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("Your plan allows 1 enabled alert rule.")
+        );
+
+        let disabled = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(with(rule_body("Parked"), json!({"enabled": false}))),
+        )
+        .await;
+        assert_eq!(disabled.status, 201);
+        let parked: AlertRule = disabled.json();
+
+        let path = format!("{}/{}", rules(&seeded), parked.id);
+        let enable = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(enable.status, 403);
+        assert_eq!(enable.problem().code, ProblemCode::PlanLimit);
+
+        let first_path = format!("{}/{}", rules(&seeded), first.id);
+        let off = send(
+            &app,
+            Method::PATCH,
+            &first_path,
+            &seeded.cookie,
+            Some(json!({"enabled": false})),
+        )
+        .await;
+        assert_eq!(off.status, 200);
+        let enable = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(enable.status, 200);
     }
 
     #[tokio::test]

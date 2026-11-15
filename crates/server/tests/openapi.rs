@@ -76,7 +76,17 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "put_org_entitlements_token",
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
+    (
+        "delete",
+        "/api/internal/v1/orgs/{org_id}",
+        "delete_internal_org",
+    ),
     ("get", "/api/internal/v1/usage", "list_internal_usage"),
+    (
+        "get",
+        "/api/internal/v1/deletions",
+        "list_internal_deletions",
+    ),
     (
         "post",
         "/api/internal/v1/users/revoke",
@@ -453,6 +463,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 const QUERY_OR_BODY: &[&str] = &[
     "get_org_usage",
     "list_internal_usage",
+    "list_internal_deletions",
     "post_internal_user_revoke",
     "post_internal_user_disable",
     "post_internal_membership_lookup",
@@ -587,7 +598,9 @@ fn document_lint() {
             "create_key_scores"
                 | "post_feedback"
                 | "post_internal_org"
+                | "delete_internal_org"
                 | "list_internal_usage"
+                | "list_internal_deletions"
                 | "post_internal_user_revoke"
                 | "post_internal_user_disable"
                 | "post_internal_user_delete"
@@ -669,8 +682,9 @@ fn document_lint() {
         } else if *id == "put_org_entitlements_token" {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
-            expected_errors.extend(["400", "401", "403", "422", "429"]);
+            expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
         } else if *id == "list_internal_usage"
+            || *id == "list_internal_deletions"
             || *id == "post_internal_user_delete"
             || *id == "post_internal_membership_lookup"
         {
@@ -1138,6 +1152,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "OnlineRulePage",
         "EvalJobPage",
         "InternalUsagePage",
+        "InternalDropPage",
     ];
     let expected: BTreeSet<String> = pages
         .iter()

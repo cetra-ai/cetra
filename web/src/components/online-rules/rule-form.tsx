@@ -18,6 +18,8 @@ import {
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import { MatchCounter } from "@/components/online-rules/match-counter";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -58,6 +60,8 @@ const PERIOD_LABELS: Record<Period, string> = { day: "Per day", month: "Per mont
 interface FormProblem {
   message: string;
   hint?: string;
+  /** A plan limit: the alert also links to the upgrade page (D-P-15). */
+  upgrade?: boolean;
 }
 
 /** Every value the form edits. The request is built from it on save. */
@@ -291,6 +295,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
   const [values, setValues] = useState<FormValues>(() => initialValues(rule));
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<FormProblem | undefined>();
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
   const evaluators = $api.useQuery(
     "get",
     "/api/v1/projects/{project}/evaluators",
@@ -358,7 +363,7 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
     const problem = problemOf(caught);
     if (problem?.code === "plan_limit") {
       setErrors({});
-      setFormError({ message: problem.detail ?? problem.title, hint: PLAN_HINT });
+      setFormError({ message: problem.detail ?? problem.title, hint: PLAN_HINT, upgrade: true });
       return;
     }
     const { placed, unplaced } = placeErrors(caught);
@@ -631,6 +636,11 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
           <div role="alert" className="flex flex-col gap-1 text-sm text-destructive">
             <p>{formError.message}</p>
             {formError.hint ? <p>{formError.hint}</p> : null}
+            {formError.upgrade ? (
+              <div>
+                <UpgradeButton url={upgradeUrl} />
+              </div>
+            ) : null}
           </div>
         ) : null}
         <div className="flex items-center justify-end gap-2">

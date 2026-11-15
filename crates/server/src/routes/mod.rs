@@ -12,6 +12,7 @@ pub(crate) mod entitlements;
 pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
 pub(crate) mod feedback;
+pub(crate) mod internal_deletions;
 pub(crate) mod internal_members;
 pub(crate) mod internal_orgs;
 pub(crate) mod internal_usage;

@@ -499,17 +499,15 @@ async fn write_manifest(dir: &Path, manifest: &Value) -> Result<(), BackupError>
 
 #[cfg(test)]
 mod tests {
-    use datafusion::prelude::{SessionConfig, SessionContext};
     use llmobs_core::batch::spans_to_record_batch;
     use llmobs_core::ids::ProjectId;
     use llmobs_core::span::Span;
-    use llmobs_storage::{QueryOptions, Storage};
 
     use super::*;
     use crate::config::Secret;
     use crate::crypto::{encode_key, random_key};
     use crate::serve::{Running, bind};
-    use crate::test_support::{config, dataset_span};
+    use crate::test_support::{config, dataset_span, raw_span_count};
 
     /// Appends `count` example spans to `project`.
     async fn append(running: &Running, project: ProjectId, count: usize) {
@@ -527,24 +525,6 @@ mod tests {
             .append_spans(project, batch)
             .await
             .unwrap();
-    }
-
-    /// How many span rows `project` reads back.
-    async fn stored_rows(storage: &Storage, project: ProjectId) -> usize {
-        let query = storage
-            .query(project, QueryOptions::default())
-            .await
-            .unwrap();
-        let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
-        ctx.register_table("raw_spans", query.spans).unwrap();
-        let batches = ctx
-            .sql("SELECT span_id FROM raw_spans")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap();
-        batches.iter().map(|batch| batch.num_rows()).sum()
     }
 
     fn copy_tree(from: &Path, to: &Path) {
@@ -637,7 +617,7 @@ mod tests {
         copy_tree(&target.join("objects"), &restored.join("objects"));
 
         let again = bind(config(&restored), None).await.unwrap();
-        assert_eq!(stored_rows(&again.state().storage, project).await, 3);
+        assert_eq!(raw_span_count(&again.state().storage, project).await, 3);
         again.shutdown().await.unwrap();
     }
 

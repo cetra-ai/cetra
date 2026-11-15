@@ -2,15 +2,15 @@
 
 use std::time::{Duration, Instant};
 
+use llmobs_core::ids::OrgId;
 use llmobs_core::ids::ProjectId;
-use llmobs_storage::{
-    ListScope, QueryContext, QueryOptions, RunError, ScoreTargets, Storage, TimeWindow,
-};
+use llmobs_storage::{ListScope, QueryContext, RunError, ScoreTargets, Storage, TimeWindow};
 
 use crate::api::common::{Limit, SortOrder, TimeParam};
 use crate::api::convert;
 use crate::api::sessions::SessionSummary;
 use crate::api::traces::TraceSummary;
+use crate::entitlements::{Visibility, query_options};
 use crate::http::AppState;
 use crate::http::error::ApiError;
 
@@ -61,34 +61,55 @@ pub(crate) fn check_search(search: Option<&str>) -> Result<(), ApiError> {
     }
 }
 
-/// Admits a query on `project` and builds A2's context, without a window (D101).
+/// Admits a query on `project` of `org` under the org's data window (D175), without D101's
+/// window. `around` is the single-trace time hint (D154).
 pub(crate) async fn open_query(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     around: Option<i64>,
 ) -> Result<QueryContext, ApiError> {
-    open_query_on(&state.storage, project, around, None).await
+    open_query_on(
+        &state.storage,
+        project,
+        Visibility::window(state, org),
+        around,
+        None,
+    )
+    .await
 }
 
 /// [`open_query`] for a caller that holds the storage but not the whole state, such as a
-/// stream task (the task must not keep an `AppState` alive). `window` is D101's.
+/// stream task (the task must not keep an `AppState` alive), or that needs another
+/// visibility (only the deletion reads take the exempt one). `window` is D101's.
 pub(crate) async fn open_query_on(
     storage: &Storage,
     project: ProjectId,
+    visibility: Visibility,
     around: Option<i64>,
     window: Option<TimeWindow>,
 ) -> Result<QueryContext, ApiError> {
-    let source = storage.query(project, QueryOptions { around }).await?;
+    let source = storage
+        .query(project, query_options(visibility, around))
+        .await?;
     Ok(QueryContext::new(source, window)?)
 }
 
 /// [`open_query`] with D101's window written into the views. The SQL console uses it.
 pub(crate) async fn open_query_windowed(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     window: Option<TimeWindow>,
 ) -> Result<QueryContext, ApiError> {
-    open_query_on(&state.storage, project, None, window).await
+    open_query_on(
+        &state.storage,
+        project,
+        Visibility::window(state, org),
+        None,
+        window,
+    )
+    .await
 }
 
 /// `[from, to)`. One bound alone leaves the other side open (`i64::MIN` / `i64::MAX`). Neither: `None`.
@@ -263,7 +284,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         app.load_example_dataset(seeded.project.id).await;
-        let ctx = open_query(&app.state, seeded.project.id, None)
+        let ctx = open_query(&app.state, seeded.org_id, seeded.project.id, None)
             .await
             .unwrap();
         let scope = list_scope(None, None, false, false).unwrap();

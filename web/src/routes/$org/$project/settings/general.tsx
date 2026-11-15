@@ -11,6 +11,9 @@ import { FormError } from "@/components/form/form-error";
 import { FormSuccess } from "@/components/form/form-success";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { LockedFeature } from "@/components/plan/locked-feature";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { SettingsPage } from "@/components/settings/settings-page";
 import { useProject } from "@/components/shell/project-context";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
@@ -27,8 +30,14 @@ export const Route = createFileRoute("/$org/$project/settings/general")({
 
 type ProjectPatch = Schema<"UpdateProjectRequest">;
 
-/** `retention_days: null` keeps data forever. */
-function projectPatch(name: string, retentionDays: number | null): ProjectPatch {
+/**
+ * `retention_days: null` keeps data forever. `undefined` leaves retention alone: a rename must
+ * not send it.
+ */
+function projectPatch(name: string, retentionDays: number | null | undefined): ProjectPatch {
+  if (retentionDays === undefined) {
+    return { name };
+  }
   return { name, retention_days: retentionDays };
 }
 
@@ -36,6 +45,10 @@ function ProjectGeneralPage() {
   const { org, project, ref, data } = useProject();
   const canEdit = atLeast(data.role, "admin");
   const reason = "Only project admins can change these settings";
+  const entitlements = useOrgEntitlements(org);
+  const retentionLocked = entitlements.locked("retention_management");
+  const windowDays = entitlements.query.data?.limits.data_access_days;
+  const [planRefused, setPlanRefused] = useState(false);
   const [name, setName] = useState(data.name);
   const [forever, setForever] = useState(data.retention_days === undefined);
   const [days, setDays] = useState(
@@ -104,10 +117,20 @@ function ProjectGeneralPage() {
     );
   }
 
+  /** The retention to send: nothing when it is unchanged, or locked and not being cleared. */
+  function retentionChange(next: number | null): number | null | undefined {
+    const stored = data.retention_days ?? null;
+    if (next === stored || (retentionLocked && next !== null)) {
+      return undefined;
+    }
+    return next;
+  }
+
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     setSaved(false);
     setError(undefined);
+    setPlanRefused(false);
     setNameError(undefined);
     setDaysError(undefined);
     mutation.reset();
@@ -131,7 +154,7 @@ function ProjectGeneralPage() {
     mutation.mutate(
       {
         params: { path: { project: ref } },
-        body: projectPatch(trimmed, forever ? null : Number(days.trim())),
+        body: projectPatch(trimmed, retentionChange(forever ? null : Number(days.trim()))),
       },
       {
         onSuccess: () => {
@@ -148,6 +171,7 @@ function ProjectGeneralPage() {
           }
           if (problemOf(caught)?.code === "plan_required") {
             setError("Data retention management is part of the Pro plan.");
+            setPlanRefused(true);
             return;
           }
           if (problemOf(caught)?.status === 403) {
@@ -212,14 +236,21 @@ function ProjectGeneralPage() {
           onChange={() => {}}
           description="The slug is part of every URL of this project and cannot be changed."
         />
+        {retentionLocked ? (
+          <LockedFeature feature="retention_management" upgradeUrl={entitlements.upgradeUrl} />
+        ) : null}
         <TextField
           id="project-retention"
           type="number"
           label="Retention (days)"
           value={days}
           error={daysError}
-          disabled={forever || !canEdit || mutation.isPending}
-          description="Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score."
+          disabled={forever || retentionLocked || !canEdit || mutation.isPending}
+          description={
+            windowDays === undefined
+              ? "Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score."
+              : `Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score. Your plan shows the last ${windowDays} days; older data is hidden, then deleted 30 days later.`
+          }
           onChange={(value) => {
             setDays(value);
             setSaved(false);
@@ -238,6 +269,7 @@ function ProjectGeneralPage() {
           <Label htmlFor="project-retention-forever">Keep data forever</Label>
         </div>
         <FormError message={error} />
+        {planRefused ? <UpgradeButton url={entitlements.upgradeUrl} /> : null}
         <FormSuccess message={saved ? "Saved" : undefined} />
         <DisabledReason reason={canEdit ? undefined : reason}>
           <SubmitButton pending={mutation.isPending} disabled={!canEdit}>

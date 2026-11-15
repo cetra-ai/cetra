@@ -208,6 +208,7 @@ async fn export_request(
     let size = message.encoded_len();
     state.ingest.fit(&mut reservation, size)?;
     let bytes = u64::try_from(size).unwrap_or(u64::MAX);
+    let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
         normalized,
         rewritten,
@@ -215,7 +216,15 @@ async fn export_request(
         ..
     } = state
         .ingest
-        .accept_request(message, reservation, bytes, bytes, &project, now)
+        .accept_request(
+            message,
+            reservation,
+            bytes,
+            bytes,
+            &project,
+            retention_cap,
+            now,
+        )
         .await?;
     check_rate(state, project.org_id, normalized.spans.len(), now)?;
     let rejected = normalized.rejections.total();
@@ -359,11 +368,11 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::raw_query;
     use bytes::Bytes;
     use datafusion::prelude::SessionContext;
     use http_body_util::{BodyExt, Full};
     use llmobs_otel::decode_json;
-    use llmobs_storage::QueryOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
     use tower::ServiceExt;
@@ -434,12 +443,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: llmobs_core::ids::ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");

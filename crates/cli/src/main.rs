@@ -763,6 +763,7 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     for (name, limit) in limit_rows(&report.limits) {
         writeln!(out, "{name}: {}", limit_text(limit))?;
     }
+    writeln!(out, "units this month: {}", report.month_units)?;
     let window = report
         .retention_window_days
         .map_or_else(|| "unlimited".to_owned(), |days| format!("{days} days"));
@@ -1063,6 +1064,7 @@ mod tests {
                 ..OrgLimits::default()
             },
             retention_window_days: None,
+            month_units: 1240,
         };
         let mut out = Vec::new();
         super::write_entitlements(&mut out, &report).unwrap();
@@ -1079,6 +1081,7 @@ mod tests {
         assert!(text.contains("units_included: 200000\n"), "{text}");
         assert!(text.contains("units_cap: unlimited\n"), "{text}");
         assert!(text.contains("retention window: unlimited\n"), "{text}");
+        assert!(text.contains("units this month: 1240\n"), "{text}");
     }
 
     #[test]

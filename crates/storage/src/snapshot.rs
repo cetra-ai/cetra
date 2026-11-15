@@ -300,6 +300,7 @@ mod tests {
             sha256: Sha256::digest(bytes.as_ref()).into(),
             mime_type: "image/png".to_owned(),
             bytes,
+            newest_span_start: 0,
         }
     }
 
@@ -705,7 +706,7 @@ mod tests {
     /// Rows of the spans table that `project` sees through a query.
     async fn span_count(storage: &Storage) -> i64 {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
@@ -731,7 +732,7 @@ mod tests {
     /// Rows of the scores table that `project` sees through a query.
     async fn score_count(storage: &Storage) -> i64 {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(

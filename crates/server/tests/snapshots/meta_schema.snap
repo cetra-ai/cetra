@@ -120,6 +120,10 @@ CREATE TABLE deletions (
     error TEXT
 )
 
+index deletions_applied_drops
+CREATE INDEX deletions_applied_drops ON deletions(applied_at, id)
+  WHERE kind IN ('project', 'org') AND status = 'applied'
+
 index deletions_open
 CREATE INDEX deletions_open ON deletions(created_at, id) WHERE status IN ('resolving', 'pending')
 

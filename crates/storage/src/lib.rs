@@ -234,14 +234,39 @@ struct QueryMemory {
     wait: std::time::Duration,
 }
 
-/// Optional hints for one [`Storage::query`] call.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options of one [`Storage::query`] call. Built only with [`QueryOptions::new`], so a caller
+/// always states the data window it reads under (D-P-44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryOptions {
     /// Time hint for a single-trace lookup (`?around=`), ns.
     ///
     /// When a lookup has no `start_time` bound, only files overlapping
     /// `[around - 1 day, around + 1 day]` are read (D154).
-    pub around: Option<i64>,
+    around: Option<i64>,
+    /// Rows before this instant (ns) are hidden from the views: spans and traces by
+    /// `start_time`, scores by `created_at`. `None` hides nothing (D175, D-P-21).
+    visible_from: Option<i64>,
+}
+
+impl QueryOptions {
+    /// `around`: the single-trace time hint (D154), ns. `visible_from`: the org's data-window
+    /// bound (D175, D-P-21), ns; `None` hides nothing.
+    pub fn new(around: Option<i64>, visible_from: Option<i64>) -> Self {
+        Self {
+            around,
+            visible_from,
+        }
+    }
+
+    /// The `around` hint.
+    pub fn around(&self) -> Option<i64> {
+        self.around
+    }
+
+    /// The data-window bound.
+    pub fn visible_from(&self) -> Option<i64> {
+        self.visible_from
+    }
 }
 
 impl Storage {
@@ -728,7 +753,11 @@ impl Storage {
             return Err(MediaError::HashMismatch);
         }
         let sha = hex::encode(blob.sha256);
-        if self.committer.touch_media(project, &sha, now).await? {
+        if self
+            .committer
+            .touch_media(project, &sha, now, blob.newest_span_start)
+            .await?
+        {
             return Ok(());
         }
         let path = Objects::media_path(project, &sha);
@@ -743,7 +772,15 @@ impl Storage {
         // caught here (spec 03 §7); the staged row stays for GC.
         if !self
             .committer
-            .insert_media(project, &sha, &blob.mime_type, size, &path, now)
+            .insert_media(
+                project,
+                &sha,
+                &blob.mime_type,
+                size,
+                &path,
+                now,
+                blob.newest_span_start,
+            )
             .await?
         {
             return Err(MediaError::ProjectDropped);
@@ -753,20 +790,27 @@ impl Storage {
 
     /// The blob of `sha256`, whole or `range` of it (end exclusive), with its
     /// MIME type and the whole blob's size (spec 03 §9). A dropped project has
-    /// nothing to read (spec 03 §7).
+    /// nothing to read (spec 03 §7). `visible_from` hides a blob whose newest
+    /// span is older (D-P-21).
     pub async fn get_media(
         &self,
         project: ProjectId,
         sha256: &[u8; 32],
         range: Option<Range<u64>>,
+        visible_from: Option<i64>,
     ) -> Result<MediaRead, MediaError> {
         if self.published.load().projects.is_dropped(project) {
             return Err(MediaError::NotFound);
         }
         let sha = hex::encode(sha256);
-        let Some((mime_type, size)) = self.committer.media_row(project, &sha).await? else {
+        let Some((mime_type, size, newest_span_start)) =
+            self.committer.media_row(project, &sha).await?
+        else {
             return Err(MediaError::NotFound);
         };
+        if visible_from.is_some_and(|from| newest_span_start < from) {
+            return Err(MediaError::NotFound);
+        }
         if let Some(range) = &range
             && (range.start >= range.end || range.end > size)
         {
@@ -1276,7 +1320,7 @@ pub(crate) fn project_query(
                 Arc::clone(&spans_snapshot),
                 Arc::clone(&catalog),
                 partitions,
-                options.around,
+                options.around(),
                 Arc::clone(&no_deletions),
                 suspects.clone(),
             )),
@@ -1302,6 +1346,7 @@ pub(crate) fn project_query(
             target_partitions,
             optimizer_rules: vec![Arc::new(query::TraceListRule)],
             suspects,
+            visible_from: options.visible_from(),
         });
     }
     let deletions = state.tombstones.for_project(project);
@@ -1336,7 +1381,7 @@ pub(crate) fn project_query(
         Arc::clone(&spans_snapshot),
         Arc::clone(&state.catalog),
         partitions,
-        options.around,
+        options.around(),
         Arc::clone(&deletions),
         suspects.clone(),
     ));
@@ -1368,6 +1413,7 @@ pub(crate) fn project_query(
         target_partitions,
         optimizer_rules: vec![Arc::new(query::TraceListRule)],
         suspects,
+        visible_from: options.visible_from(),
     })
 }
 
@@ -2247,11 +2293,17 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
-        let during = storage.query(project(), Default::default()).await.unwrap();
+        let during = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert!(span_names(Arc::clone(&during.spans)).await.is_empty());
         storage.hooks().release(HookPoint::AfterWalSync);
         append.await.unwrap().unwrap();
-        let after = storage.query(project(), Default::default()).await.unwrap();
+        let after = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert_eq!(span_names(after.spans).await.len(), 1);
         assert!(span_names(during.spans).await.is_empty());
         storage.shutdown().await.unwrap();
@@ -2279,6 +2331,7 @@ mod tests {
             sha256: Sha256::digest(&bytes).into(),
             mime_type: "text/plain".to_owned(),
             bytes,
+            newest_span_start: 0,
         };
 
         storage.disk().set_free_for_test(Some(10));
@@ -2349,11 +2402,19 @@ mod tests {
         let storage = Storage::open(config_with_query_memory(dir.path(), 2))
             .await
             .unwrap();
-        let held = storage.query(project(), Default::default()).await.unwrap();
-        let busy = storage.query(project(), Default::default()).await;
+        let held = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let busy = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await;
         assert!(matches!(busy, Err(QueryError::Busy)), "a second query fits");
         drop(held);
-        storage.query(project(), Default::default()).await.unwrap();
+        storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         storage.shutdown().await.unwrap();
     }
 
@@ -2381,7 +2442,10 @@ mod tests {
 
         let storage = Storage::open(config).await.unwrap();
         let ctx = QueryContext::new(
-            storage.query(project(), Default::default()).await.unwrap(),
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
             None,
         )
         .unwrap();
@@ -2440,7 +2504,7 @@ mod tests {
         while !append.is_finished() {
             let names = span_names(
                 storage
-                    .query(project(), Default::default())
+                    .query(project(), QueryOptions::new(None, None))
                     .await
                     .unwrap()
                     .spans,
@@ -2452,7 +2516,7 @@ mod tests {
         assert_eq!(append.await.unwrap().unwrap_err(), AppendError::WalFailed);
         let names = span_names(
             storage
-                .query(project(), Default::default())
+                .query(project(), QueryOptions::new(None, None))
                 .await
                 .unwrap()
                 .spans,
@@ -2522,8 +2586,14 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         let storage = Storage::open(config.clone()).await.unwrap();
-        let first = storage.query(project(), Default::default()).await.unwrap();
-        let second = storage.query(project(), Default::default()).await.unwrap();
+        let first = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let second = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         // Each query has a runtime of its own (spec 03 §6).
         assert!(!Arc::ptr_eq(&first.runtime, &second.runtime));
         let receipt = storage
@@ -2865,7 +2935,10 @@ mod tests {
         assert!(storage.read_cache_stats().unwrap().blocks > 0);
 
         // The file is read through the query's runtime, which has the store.
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
             datafusion::prelude::SessionConfig::new(),
             Arc::clone(&query.runtime),
@@ -2943,7 +3016,7 @@ mod tests {
     /// Spans rows that `project` sees through a query.
     async fn span_count(storage: &Storage) -> i64 {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(

@@ -78,6 +78,10 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// When dropped orgs' usage is first pruned, then how often (D-P-46).
+const USAGE_PRUNE_FIRST: Duration = Duration::from_secs(60);
+const USAGE_PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How often the 80 % and 100 % usage notices are checked (D-P-38).
 const NOTICES_EVERY: Duration = Duration::from_secs(60);
 
@@ -339,6 +343,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         license,
         defaults,
         config.public_url.origin(),
+        config.entitlements.control_plane,
     )
     .await
     {
@@ -448,6 +453,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     tasks.push(spawn_retention(state.clone()));
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
+    tasks.push(spawn_usage_prune(state.clone()));
     tasks.push(spawn_notices(state.clone()));
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
@@ -641,6 +647,20 @@ fn spawn_usage(state: AppState, mut stop: oneshot::Receiver<()>) -> JoinHandle<(
                 }
                 _ = &mut stop => break,
             }
+        }
+    })
+}
+
+fn spawn_usage_prune(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(USAGE_PRUNE_FIRST).await;
+        loop {
+            match crate::usage::prune_dropped_orgs(&state.meta, state.clock.now_ns()).await {
+                Ok(0) => {}
+                Ok(rows) => tracing::info!(rows, "dropped orgs' usage pruned"),
+                Err(error) => tracing::warn!(error = %error, "usage prune failed"),
+            }
+            tokio::time::sleep(USAGE_PRUNE_EVERY).await;
         }
     })
 }

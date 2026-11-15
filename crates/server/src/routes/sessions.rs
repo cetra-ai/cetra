@@ -63,7 +63,7 @@ async fn list_sessions(
         params.include_experiments,
     )?;
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::session_list(
         &ctx,
         storage::SessionListRequest {
@@ -92,7 +92,7 @@ async fn get_session(
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<SessionDetail>, ApiError> {
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::session_detail(
         &ctx,
         &path.session_id,

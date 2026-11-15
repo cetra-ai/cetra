@@ -735,6 +735,7 @@ fn log_truncate(table: Table, error: &std::io::Error) {
 
 #[cfg(test)]
 mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
     use std::sync::Arc;
@@ -1154,7 +1155,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // The tombstones still hide the row: the file is gated at query time.
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
             datafusion::execution::context::SessionConfig::new(),
             Arc::clone(&query.runtime),

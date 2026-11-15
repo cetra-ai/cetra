@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::online_rules::BudgetPeriod;
 use crate::api::scores::ScoreCreate;
-use crate::entitlements::units;
+use crate::entitlements::{Visibility, units};
 use crate::eval::budget::{self, Reservation, Reserve};
 use crate::eval::definitions::fits_definition;
 use crate::eval::evaluator;
@@ -91,7 +91,8 @@ pub(crate) async fn run_evaluator(
         judge_trace_id,
         now,
     } = args;
-    let ingest = state.ingest.context(project, now);
+    // A judge trace is written now, so the D85 age bound never applies (D-P-22).
+    let ingest = state.ingest.context(project, None, now);
     let prices = state.ingest.prices();
     if matches!(evaluator.config, EvaluatorConfig::Check(_)) {
         // Checks are CPU work: they run off the async workers (D-I-23).
@@ -432,6 +433,7 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
     let loaded = match trace_load::load_trace(
         state,
         project.id,
+        Visibility::window(state, project.org_id),
         row.trace_id,
         row.span_id,
         Some(row.trace_start_ns),

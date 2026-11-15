@@ -643,6 +643,7 @@ fn kind_label(kind: JobKind) -> &'static str {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
     use std::sync::Arc;
@@ -760,7 +761,10 @@ pub(crate) mod tests {
     }
 
     async fn view_rows(storage: &Storage, sql: &str) -> Vec<Vec<String>> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();
         text_rows(&rows(&ctx, sql).await)
     }
@@ -791,7 +795,10 @@ pub(crate) mod tests {
 
     /// Rows of the raw provider behind the `traces` view, read with SQL.
     async fn raw_traces(storage: &Storage, columns: &str) -> Vec<RecordBatch> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx =
             SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
         ctx.register_table("traces", Arc::clone(&query.traces))
@@ -1366,10 +1373,16 @@ pub(crate) mod tests {
             )
             .await;
         }
-        let pinned = storage.query(project(), Default::default()).await.unwrap();
+        let pinned = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let before = {
             let ctx = QueryContext::new(
-                storage.query(project(), Default::default()).await.unwrap(),
+                storage
+                    .query(project(), QueryOptions::new(None, None))
+                    .await
+                    .unwrap(),
                 None,
             )
             .unwrap();

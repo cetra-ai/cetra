@@ -4,14 +4,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use llmobs_core::ids::{ProjectId, TraceId};
+use llmobs_core::ids::{OrgId, ProjectId, TraceId};
 use llmobs_storage::{
-    MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, QueryContext, QueryOptions, RunError,
-    SpanRefreshRequest, TraceRefreshRequest,
+    MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, QueryContext, RunError, SpanRefreshRequest,
+    TraceRefreshRequest,
 };
 use uuid::Uuid;
 
 use crate::api::convert::{MatchRow, match_rows};
+use crate::entitlements::{Visibility, query_options};
 use crate::eval::hourly::HourlyCaps;
 use crate::eval::pending::{Changes, Completed, Entry};
 use crate::eval::sampling;
@@ -31,6 +32,8 @@ const NANOS_PER_SECOND: i64 = 1_000_000_000;
 /// The enabled, unpaused rules of one tracked project, and its completion timeout.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProjectRules {
+    /// The project's org, whose data window the reads see (D-P-44).
+    pub(crate) org: OrgId,
     pub(crate) timeout_ns: i64,
     pub(crate) rules: Vec<TriggerRule>,
 }
@@ -63,6 +66,7 @@ pub(crate) async fn refresh_rules(
         projects
             .entry(rule.project_id)
             .or_insert_with(|| ProjectRules {
+                org: rule.org_id,
                 timeout_ns,
                 rules: Vec::new(),
             })
@@ -262,6 +266,7 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
         report.completed += completed.len();
         let ctx = SweepCtx {
             state,
+            org: project_rules.org,
             project: *project,
             rules: &project_rules.rules,
             now,
@@ -285,6 +290,7 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
 /// What one sweep works with for one project: its state, the rules, and the sweep's clock.
 struct SweepCtx<'a> {
     state: &'a AppState,
+    org: OrgId,
     project: ProjectId,
     rules: &'a [TriggerRule],
     now: i64,
@@ -350,6 +356,7 @@ async fn read_candidates<'a>(
 ) -> Result<Candidates<'a>, ()> {
     let SweepCtx {
         state,
+        org,
         project,
         rules,
         now,
@@ -358,9 +365,7 @@ async fn read_candidates<'a>(
         .storage
         .query(
             project,
-            QueryOptions {
-                around: Some(around),
-            },
+            query_options(Visibility::window(state, org), Some(around)),
         )
         .await
         .ok()
@@ -1129,6 +1134,7 @@ mod tests {
             TriggerRule {
                 id: Uuid::from_u128(n),
                 project_id: ProjectId::new_v7(),
+                org_id: OrgId::new_v7(),
                 evaluator_id: Uuid::from_u128(100),
                 target: "trace".to_owned(),
                 filter: None,

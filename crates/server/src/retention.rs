@@ -1,9 +1,10 @@
-//! Per-project retention (spec 03 § 8, D-M-10, D-M-15).
+//! Per-project retention (spec 03 § 8, D-M-10, D-M-15, D-P-45).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Days, NaiveDate};
-use llmobs_core::ids::ProjectId;
+use llmobs_core::ids::{OrgId, ProjectId};
 
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -53,12 +54,35 @@ pub(crate) struct RetentionRun {
 pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, MetaError> {
     let now = state.clock.now_ns();
     let mut run = RetentionRun::default();
-    for (_org, project, own) in
+    // The cap of each org, read once per run. A failed read counts once and skips only
+    // the cap: a project's own retention still applies (D-P-45).
+    let mut caps: HashMap<OrgId, Result<Option<u32>, ()>> = HashMap::new();
+    for (org, project, own) in
         crate::meta::projects::projects_for_retention(state.meta.reader()).await?
     {
-        // D175, D-M-15: track P replaces `None` with the org's cap
-        // (`state.entitlements.of(_org).retention_cap_days()`: data-access window + 30 days).
-        let cap: Option<u32> = None;
+        let cap = match caps.get(&org) {
+            Some(cap) => *cap,
+            None => {
+                let cap = match state
+                    .entitlements
+                    .retention_window_at(&state.meta, org, now)
+                    .await
+                {
+                    Ok(window) => Ok(crate::entitlements::retention_cap(window)),
+                    Err(error) => {
+                        run.failures += 1;
+                        tracing::warn!(org_id = %org, error = %error, "retention window unavailable");
+                        Err(())
+                    }
+                };
+                caps.insert(org, cap);
+                cap
+            }
+        };
+        // D-P-45: the largest window of the last 30 days, plus 30 days (D175). When the org's
+        // window read failed there is no cap: the project's own retention still applies and a
+        // project that relies on the cap is skipped (deleting nothing is the safe side).
+        let cap = cap.unwrap_or(None);
         let Some(days) = effective_days(own, cap) else {
             continue;
         };
@@ -93,12 +117,14 @@ pub(crate) async fn apply_now(state: &AppState, project: ProjectId, days: u32) {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use llmobs_core::span::Span;
 
     use super::*;
-    use crate::meta::projects::ProjectRow;
-    use crate::test_support::{Seeded, TestApp, dataset_span};
+    use crate::meta::entitlements::record_window_end;
+    use crate::meta::orgs::insert_org;
+    use crate::meta::projects::{ProjectRow, insert_project};
+    use crate::test_support::{Seeded, TestApp, dataset_span, raw_span_count, set_limits};
 
     /// 2026-01-01T00:00:00Z, the manual clock's start.
     const NOW: i64 = 1_767_225_600_000_000_000;
@@ -240,5 +266,123 @@ mod tests {
             .unwrap();
         let run = retention_once(&app.state).await.unwrap();
         assert_eq!(run.projects, 0);
+    }
+
+    /// D-P-45: a plan's window caps retention at its window plus 30 days, so a span 70 days old
+    /// goes and one 50 days old stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_plan_caps_retention() {
+        let app = TestApp::new().await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let project = seeded.project.id;
+        commit_at(&app, &seeded.project, &trace_id(1), NOW - 70 * DAY).await;
+        commit_at(&app, &seeded.project, &trace_id(2), NOW - 50 * DAY).await;
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 2);
+
+        let run = retention_once(&app.state).await.unwrap();
+        assert_eq!(run.failures, 0);
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 1);
+    }
+
+    /// D-P-45: a downgrade keeps the old window for 30 days: the largest window of the last 30
+    /// days, here 1 825 days, plus 30.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_downgrade_waits_30_days() {
+        let app = TestApp::new().await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    record_window_end(conn, org, NOW - DAY, Some(1_825)).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        set_limits(
+            &app,
+            org,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let project = seeded.project.id;
+        commit_at(&app, &seeded.project, &trace_id(1), NOW - 70 * DAY).await;
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 1);
+
+        retention_once(&app.state).await.unwrap();
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 1);
+    }
+
+    /// D-P-45: a window that cannot be read skips only the cap (counted once for the org):
+    /// a project's own retention still applies, one relying on the cap is skipped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_window_read_error_skips_only_the_cap() {
+        let app = TestApp::new().await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let now = NOW;
+        let (org_a, a1, a2): (OrgId, ProjectRow, ProjectRow) = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org = OrgId::new_v7();
+                    insert_org(conn, org, "A", "org-a", now).await?;
+                    let p1 = insert_project(conn, org, "A1", "a1", Some(7), now).await?;
+                    let p2 = insert_project(conn, org, "A2", "a2", None, now).await?;
+                    Ok((org, p1, p2))
+                })
+            })
+            .await
+            .unwrap();
+        set_limits(
+            &app,
+            org_a,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        commit_at(&app, &a1, &trace_id(1), NOW - 70 * DAY).await;
+        commit_at(&app, &a2, &trace_id(2), NOW - 70 * DAY).await;
+        // A corrupt window end of org A: its window history cannot be decoded.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO org_window_ends (org_id, ended_at, data_access_days) \
+                         VALUES (?, ?, -1)",
+                    )
+                    .bind(org_a.to_string())
+                    .bind(NOW - DAY)
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+        commit_at(&app, &short, &trace_id(3), NOW - 3 * DAY).await;
+
+        let run = retention_once(&app.state).await.unwrap();
+        assert_eq!(
+            run.failures, 1,
+            "one failure for the org, not one per project"
+        );
+        // A1's own 7 days still apply; A2 relies on the cap and is skipped.
+        assert_eq!(raw_span_count(&app.state.storage, a1.id).await, 0);
+        assert_eq!(raw_span_count(&app.state.storage, a2.id).await, 1);
+        assert_eq!(raw_span_count(&app.state.storage, short.id).await, 0);
     }
 }

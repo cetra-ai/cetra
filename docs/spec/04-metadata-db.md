@@ -544,7 +544,7 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 `instance_settings` is created by track I (migration `0004`, D156).
 
-Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add). A dropped org's rows stay 40 days after its org deletion is applied, then a daily task deletes them (D-P-46).
 
 `spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 

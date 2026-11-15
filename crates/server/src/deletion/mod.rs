@@ -20,11 +20,11 @@ use uuid::Uuid;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::deletions::{
-    DeletionKind, DeletionRow, DeletionState, FailReason, clear_handover, log_undecodable,
-    mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions, scope_projects,
-    scope_sessions, scope_traces,
+    ActorKind, DeletionKind, DeletionRow, DeletionState, FailReason, NewDeletion, RequestDetails,
+    clear_handover, insert_deletion, insert_projects, log_undecodable, mark_applied, mark_dropped,
+    mark_failed, mark_handed_over, open_deletions, scope_projects, scope_sessions, scope_traces,
 };
-use crate::meta::orgs::{delete_org, org_by_id};
+use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id};
 use crate::meta::projects::{delete_project, project_by_id, project_ids_of_org};
 
 /// Time between two runs when nothing wakes the worker.
@@ -541,8 +541,70 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     Ok(())
 }
 
-/// Drops every project of the org (including any created after the request), its usage
-/// and the org row.
+/// Starts the drop of `org` (D-M-7): marks it `deleting`, records the deletion and its
+/// projects in one write, wakes the worker and logs the audit event. `Ok(None)` when the
+/// org is no longer active (another drop started first).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the write fails.
+pub(crate) async fn request_org_drop(
+    state: &AppState,
+    org: &OrgRow,
+    actor: (ActorKind, Uuid),
+) -> Result<Option<DeletionRow>, MetaError> {
+    let (actor_kind, actor_id) = actor;
+    let id = Uuid::now_v7();
+    let now = state.clock.now_ns();
+    let org_id = org.id;
+    let new = NewDeletion {
+        id,
+        org_id,
+        project_id: None,
+        kind: DeletionKind::Org,
+        user_id: None,
+        request: RequestDetails {
+            name: Some(org.name.clone()),
+            slug: Some(org.slug.clone()),
+            ..RequestDetails::default()
+        },
+        actor_kind,
+        actor_id,
+        state: DeletionState::Pending,
+        created_at: now,
+    };
+    let row = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if !mark_org_deleting(conn, org_id, now).await? {
+                    return Ok(None);
+                }
+                let projects = project_ids_of_org(&mut *conn, org_id).await?;
+                let row = insert_deletion(conn, &new).await?;
+                insert_projects(conn, id, &projects).await?;
+                Ok(Some(row))
+            })
+        })
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    state.deletions.wake.notify_one();
+    tracing::info!(
+        target: "audit",
+        deletion_id = %id,
+        kind = DeletionKind::Org.as_str(),
+        org_id = %org_id,
+        actor_kind = actor_kind.as_str(),
+        actor_id = %actor_id,
+        "deletion requested"
+    );
+    Ok(Some(row))
+}
+
+/// Drops every project of the org (including any created after the request) and the org row.
+/// The org's `usage_daily` rows stay for the control plane's billing (D-P-46).
 async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), Step> {
     let reader = state.meta.reader();
     let mut projects = scope_projects(reader, row.id)
@@ -575,7 +637,6 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                crate::usage::delete_org_usage(conn, org).await?;
                 delete_org(conn, org).await?;
                 mark_dropped(conn, id, now).await
             })
@@ -1247,7 +1308,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn org_drop_removes_the_org_and_its_usage() {
+    async fn org_drop_keeps_the_usage() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -1313,14 +1374,14 @@ mod tests {
                     .is_none()
             );
         }
-        assert_eq!(
+        assert!(
             count_rows(
                 &app,
                 "SELECT COUNT(*) FROM usage_daily WHERE org_id = ?",
                 globex.to_string()
             )
-            .await,
-            0
+            .await
+                > 0
         );
         assert!(
             count_rows(

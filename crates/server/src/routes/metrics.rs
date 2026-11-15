@@ -46,6 +46,9 @@ struct MetricsKey {
     group_by: Option<MetricsGroupBy>,
     include_eval: bool,
     include_experiments: bool,
+    /// The org's data window in days (D-P-21): a plan change never serves an answer cached under
+    /// another window.
+    data_access_days: Option<u64>,
 }
 
 /// One key's answer. The cell is filled once, so concurrent misses of the same key share one
@@ -192,8 +195,11 @@ async fn get_metrics(
         group_by: params.group_by,
         include_eval: params.include_eval,
         include_experiments: params.include_experiments,
+        data_access_days: crate::entitlements::of(&state, access.project.org_id)
+            .limits
+            .data_access_days,
     };
-    let project = access.project.id;
+    let (org, project) = (access.project.org_id, access.project.id);
     let clock = &state.clock;
     let response = state
         .metrics_cache
@@ -202,7 +208,7 @@ async fn get_metrics(
             || clock.now_ns(),
             || async {
                 let window = storage::TimeWindow::new(from, to)?;
-                let ctx = open_query(&state, project, None).await?;
+                let ctx = open_query(&state, org, project, None).await?;
                 let data = storage::metrics(
                     &ctx,
                     storage::MetricsRequest {
@@ -264,7 +270,7 @@ mod tests {
 
     use super::*;
     use crate::api::metrics::KpiMetric;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, set_limits};
 
     const WINDOW: &str = "from=2026-01-01T10:00:00Z&to=2026-01-01T11:00:00Z&bucket=10m";
 
@@ -357,6 +363,7 @@ mod tests {
             group_by: None,
             include_eval: false,
             include_experiments: false,
+            data_access_days: None,
         }
     }
 
@@ -603,5 +610,37 @@ mod tests {
         let (_, body) = metrics(&app, &seeded, WINDOW).await;
         let fresh: MetricsResponse = serde_json::from_value(body).unwrap();
         assert_eq!(kpi_values(&fresh)[0], (KpiMetric::Traces, Some(6.0)));
+    }
+
+    /// D-P-21: a cached answer is keyed by the org's window, so a limit set within the TTL is
+    /// applied at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_cache_is_keyed_by_the_window() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let old = TraceId::from_str("a9000000000000000000000000000001").unwrap();
+        let fresh = TraceId::from_str("a9000000000000000000000000000002").unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, fresh, 2, now - DAY)
+            .await;
+        let query = "from=2025-11-01T00:00:00Z&to=2026-01-02T00:00:00Z";
+
+        let (status, body) = metrics(&app, &seeded, query).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let first: MetricsResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(kpi_values(&first)[0], (KpiMetric::Traces, Some(2.0)));
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let (_, body) = metrics(&app, &seeded, query).await;
+        let limited: MetricsResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(kpi_values(&limited)[0], (KpiMetric::Traces, Some(1.0)));
     }
 }

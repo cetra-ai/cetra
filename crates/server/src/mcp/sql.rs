@@ -98,7 +98,13 @@ pub(crate) async fn query_sql(
         })?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::Query).await?;
-    let ctx = open_query_windowed(state, access.project.id, Some(window)).await?;
+    let ctx = open_query_windowed(
+        state,
+        access.project.org_id,
+        access.project.id,
+        Some(window),
+    )
+    .await?;
     run_query(
         &ctx,
         &args.query,
@@ -950,7 +956,7 @@ mod tests {
     async fn run_query_times_out() {
         let (app, seeded, _) = with_dataset().await;
         let window = required_window(Some(t(FROM)), Some(t(TO))).unwrap();
-        let ctx = open_query_windowed(&app.state, seeded.project.id, Some(window))
+        let ctx = open_query_windowed(&app.state, seeded.org_id, seeded.project.id, Some(window))
             .await
             .unwrap();
         let result = run_query(

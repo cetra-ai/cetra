@@ -20,6 +20,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
+- Plans with a data-access window hide older traces, spans, scores and media from every read
+  (UI, API, SQL, MCP, alerts, evaluators); the time-range picker shows the limit.
+- Control-plane org deletion (`DELETE /api/internal/v1/orgs/{org_id}`) and an applied-drops feed
+  (`GET /api/internal/v1/deletions`) for cloud cells.
 - `email_verified` and `has_password` on the `User` returned by `GET /api/auth/me`, signup and
   setup.
 - `GET /api/v1/projects/{project}/saved-views/{id}` returns one saved view by id.
@@ -91,3 +95,12 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Promoted string columns (`session_id`, `user_id`, `environment`, `release`, `request_model`, `response_model`, `provider`, `operation`, `request_params`, service and scope names, `tags`, metadata values, event names and link attributes) are cut to `max_attribute_bytes` like other strings, and listed in `truncated`. Before, a multi-megabyte `session.id` was stored whole.
 - The built-in price table prices Gemini (Google AI and Vertex AI), Azure OpenAI, Azure AI Inference, xAI and Mistral spans. It keeps one row per model and provider, and the Google GenAI and OpenInference provider names are recognised (D-B1-11).
 - The Python SDK parses a score `Retry-After` header as the spec and the TypeScript SDK do: ASCII digits, surrounding whitespace ignored. `+5`, `1_0` and fullwidth digits now use the default backoff, and a value too large to convert is capped at 30 s instead of failing.
+
+### Changed
+
+- A dropped organization's daily usage is kept 40 days after the drop, for billing, then deleted.
+
+### Upgrade notes
+
+- Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*`
+  answers 404 and org and control-plane tokens are refused (D-P-50).

@@ -3,12 +3,13 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use llmobs_core::ids::ProjectId;
+use llmobs_core::ids::{OrgId, ProjectId};
 use llmobs_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value};
 use uuid::Uuid;
 
 use crate::alerts::condition::measure;
 use crate::api::alerts::{AlertCondition, AlertEventKind, AlertState};
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::MetaError;
@@ -141,7 +142,7 @@ pub(crate) struct EvaluateReport {
 pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<EvaluateReport, MetaError> {
     let due = due_rules(state.meta.reader(), now, DUE_SLACK_NS).await?;
     let results = futures::stream::iter(due)
-        .map(|rule| Box::pin(evaluate_rule(state, rule, now)))
+        .map(|(org, rule)| Box::pin(evaluate_rule(state, org, rule, now)))
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
@@ -168,6 +169,7 @@ pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<Evaluate
 /// Evaluates one rule. Returns its id, whether its query failed, and the write's result.
 async fn evaluate_rule(
     state: &AppState,
+    org: OrgId,
     rule: RuleRow,
     now: i64,
 ) -> (Uuid, bool, Result<Recorded, MetaError>) {
@@ -176,34 +178,35 @@ async fn evaluate_rule(
     let expected_updated_at = rule.updated_at;
     let window_from = now.saturating_sub(rule.condition.window.ns());
     let mut event_kind = None;
-    let evaluation = match measure_rule(state, project, &rule.condition, window_from, now).await {
-        Err(reason) => {
-            tracing::warn!(rule_id = %rule_id, reason, "alert evaluation failed");
-            Evaluation::Failed {
-                message: reason.to_owned(),
+    let evaluation =
+        match measure_rule(state, org, project, &rule.condition, window_from, now).await {
+            Err(reason) => {
+                tracing::warn!(rule_id = %rule_id, reason, "alert evaluation failed");
+                Evaluation::Failed {
+                    message: reason.to_owned(),
+                }
             }
-        }
-        Ok(measured) => {
-            let read = reading(&rule.condition, measured.count, measured.value);
-            let next = step(&rule, read, now);
-            event_kind = next.event;
-            Evaluation::Measured {
-                step: next,
-                count: measured.count,
-                value: measured.value,
-                threshold: rule.condition.threshold,
-                window_from,
-                window_to: now,
-                details: EventDetails {
-                    rule_name: rule.name,
-                    metric: rule.condition.metric,
-                    comparator: rule.condition.comparator,
-                    window: rule.condition.window,
-                    filter: rule.condition.filter,
-                },
+            Ok(measured) => {
+                let read = reading(&rule.condition, measured.count, measured.value);
+                let next = step(&rule, read, now);
+                event_kind = next.event;
+                Evaluation::Measured {
+                    step: next,
+                    count: measured.count,
+                    value: measured.value,
+                    threshold: rule.condition.threshold,
+                    window_from,
+                    window_to: now,
+                    details: EventDetails {
+                        rule_name: rule.name,
+                        metric: rule.condition.metric,
+                        comparator: rule.condition.comparator,
+                        window: rule.condition.window,
+                        filter: rule.condition.filter,
+                    },
+                }
             }
-        }
-    };
+        };
     let query_failed = matches!(evaluation, Evaluation::Failed { .. });
     let written = state
         .meta
@@ -233,18 +236,25 @@ async fn evaluate_rule(
 /// filter or a query message.
 async fn measure_rule(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     condition: &AlertCondition,
     from: i64,
     to: i64,
 ) -> Result<AlertValue, &'static str> {
     let window = TimeWindow::new(from, to).map_err(|_| "invalid window")?;
-    let ctx = crate::routes::read::open_query_on(&state.storage, project, None, None)
-        .await
-        .map_err(|error| match error {
-            ApiError::Unavailable { .. } => "storage is busy",
-            _ => "query failed",
-        })?;
+    let ctx = crate::routes::read::open_query_on(
+        &state.storage,
+        project,
+        Visibility::window(state, org),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        ApiError::Unavailable { .. } => "storage is busy",
+        _ => "query failed",
+    })?;
     let request = AlertValueRequest {
         window,
         filter: condition.filter.as_deref(),
@@ -280,7 +290,7 @@ mod tests {
         list_events, rule_by_id, update_rule,
     };
     use crate::test_support::hook_receiver::HookReceiver;
-    use crate::test_support::{TestApp, assert_logs_clean, dataset_span};
+    use crate::test_support::{TestApp, assert_logs_clean, dataset_span, set_limits};
 
     const MINUTE: Duration = Duration::from_secs(60);
     const MINUTE_NS: i64 = 60_000_000_000;
@@ -768,7 +778,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|rule| rule.id)
+            .map(|(_, rule)| rule.id)
             .collect();
         let mut never = [broken.id, quiet_rule.id];
         never.sort();
@@ -988,5 +998,40 @@ mod tests {
             task.abort();
             let _ = task.await;
         }
+    }
+
+    /// D-P-21: a rule's measurement counts only the rows the org's window shows. The rule window
+    /// (two days) reaches past the one-day window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn alerts_do_not_count_hidden_spans() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 1}),
+        );
+        let now = app.state.clock.now_ns();
+        let hidden = TraceId::from_bytes([0x91; 16]).expect("trace id");
+        let visible = TraceId::from_bytes([0x92; 16]).expect("trace id");
+        app.commit_trace_at(&seeded.project, hidden, 1, now - 30 * 3_600_000_000_000)
+            .await;
+        app.commit_trace_at(&seeded.project, visible, 2, now - 2 * 3_600_000_000_000)
+            .await;
+
+        let condition = error_rate(AlertWindow::M5, 0.1, None, None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            seeded.project.id,
+            &condition,
+            now - 2 * DAY,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 1);
     }
 }

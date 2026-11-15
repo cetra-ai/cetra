@@ -361,9 +361,9 @@ mod tests {
             target_partitions: std::num::NonZeroUsize::new(2).expect("two partitions"),
             optimizer_rules: Vec::new(),
             suspects: crate::verify::Suspects::detached(),
+            visible_from: None,
         }
     }
-
     fn session_span(
         template: &Span,
         nth: u8,
