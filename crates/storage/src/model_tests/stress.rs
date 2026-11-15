@@ -7,6 +7,7 @@
 //! checks the files and the engine's clean state. The op runners carry over between epochs, so
 //! every epoch draws new op lists.
 
+use std::sync::atomic::Ordering::SeqCst;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use proptest::strategy::{Strategy, ValueTree};
@@ -14,8 +15,8 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
 use super::check::check_full;
 use super::concurrent::{
-    ConcurrentOptions, Lane, LaneState, Stats, concurrent_remote_tweaks, is_barrier, run_segment,
-    settle_concurrent,
+    ConcurrentOptions, KINDS, Lane, LaneState, Stats, concurrent_remote_tweaks, is_barrier,
+    run_segment, settle_concurrent,
 };
 use super::harness::{Harness, HarnessOptions, concurrent_tweaks, memory_store};
 use super::ops::{MICRO_NS, Op, crashed, flushed, new_model, ops_for};
@@ -98,17 +99,32 @@ fn concurrent_lanes_match_the_model() {
     let lanes_count: usize = setting("LLMOBS_STRESS_LANES", 6);
     let readers: usize = setting("LLMOBS_STRESS_READERS", 8);
     let workers: usize = setting("LLMOBS_STRESS_WORKERS", 8);
-    let remote_flag: u8 = setting("LLMOBS_STRESS_REMOTE", 0);
+    let remote_flag: String = setting("LLMOBS_STRESS_REMOTE", "0".to_owned());
     let seed: u64 = setting("LLMOBS_STRESS_SEED", wall_clock_ns());
+    assert!(
+        secs > 0,
+        "LLMOBS_STRESS_SECS is {secs}; it must be at least 1"
+    );
+    assert!(
+        readers > 0,
+        "LLMOBS_STRESS_READERS is {readers}; it must be at least 1"
+    );
+    assert!(
+        workers > 0,
+        "LLMOBS_STRESS_WORKERS is {workers}; it must be at least 1"
+    );
     assert!(
         (1..=16).contains(&lanes_count),
         "LLMOBS_STRESS_LANES is {lanes_count}; it must be 1 to 16 (32 projects)"
     );
-    assert!(
-        remote_flag <= 1,
-        "LLMOBS_STRESS_REMOTE is {remote_flag}; it must be 0 or 1"
-    );
-    let remote = remote_flag == 1;
+    let remote = match remote_flag.as_str() {
+        "0" => false,
+        "1" => true,
+        other => panic!(
+            "LLMOBS_STRESS_REMOTE is {other:?}; it must be 0 (the local store) or 1 (the \
+             in-memory store)"
+        ),
+    };
     let duration = Duration::from_secs(secs);
     eprintln!(
         "stress: secs {secs}, lanes {lanes_count}, readers {readers}, workers {workers}, \
@@ -117,6 +133,7 @@ fn concurrent_lanes_match_the_model() {
     let options = ConcurrentOptions {
         readers,
         pace: Duration::ZERO,
+        step_hold: Duration::from_millis(2),
         gc_every: Duration::from_millis(20),
         history_keep: 512,
         remote,
@@ -219,30 +236,32 @@ fn concurrent_lanes_match_the_model() {
          seed {seed}"
     );
     if elapsed >= LONG_RUN {
-        for (kind, count) in stats.reads.iter().enumerate() {
+        for (kind, _) in KINDS {
             assert!(
-                count.load(std::sync::atomic::Ordering::SeqCst) > 0,
-                "read kind {kind} never matched in {elapsed:?}: the read mix is broken"
+                stats.reads[kind as usize].load(SeqCst) > 0,
+                "read kind {kind:?} never matched in {elapsed:?}: the read mix is broken"
             );
         }
     }
-    let stale = stats.stale.load(std::sync::atomic::Ordering::SeqCst);
+    let stale = stats.stale.load(SeqCst);
     assert!(
         stale * 100 <= total_reads,
         "{stale} reads fell out of the kept history of {} states: raise history_keep",
         options.history_keep
     );
-    let busy = stats.busy.load(std::sync::atomic::Ordering::SeqCst);
+    let busy = stats.busy.load(SeqCst);
     assert!(
         busy * 100 <= total_reads,
         "{busy} reads were refused as busy: report the query memory figures"
     );
     if elapsed >= LONG_RUN {
         assert!(
-            stats.gc_deleted.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            stats.gc_deleted.load(SeqCst) > 0,
             "GC deleted no obsolete file in {elapsed:?}"
         );
-        // `matched_later` is printed, not asserted: a read that overlaps a step is rare (0 to 2
-        // per run measured), so zero does not show the test is broken.
+        assert!(
+            stats.matched_later.load(SeqCst) > 0,
+            "no read matched a state after its lo in {elapsed:?}: the step hold does not overlap reads"
+        );
     }
 }

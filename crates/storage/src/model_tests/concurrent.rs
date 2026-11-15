@@ -77,6 +77,10 @@ pub(super) struct ConcurrentOptions {
     pub(super) readers: usize,
     /// Pause after each op of a lane, so background work overlaps the ops.
     pub(super) pace: Duration,
+    /// The most a lane's driver holds a step's state back after its storage call returned: a
+    /// random pause in `0..=step_hold`. While it holds, the step is in flight, so a read may
+    /// match the state the step published before it (§ The rule).
+    pub(super) step_hold: Duration,
     /// Sleep between two collections of the GC thread.
     pub(super) gc_every: Duration,
     /// States kept per lane; older ones are dropped (stress runs).
@@ -281,7 +285,7 @@ impl XorShift {
 
 /// The kinds of read a reader thread runs, with their weights (the order is `Kind as usize`).
 #[derive(Debug, Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Spans,
     Traces,
     TraceDetail,
@@ -299,7 +303,7 @@ enum Kind {
     DeletionStatus,
 }
 
-const KINDS: [(Kind, u64); 15] = [
+pub(super) const KINDS: [(Kind, u64); 15] = [
     (Kind::Spans, 3),
     (Kind::Traces, 3),
     (Kind::TraceDetail, 2),
@@ -370,11 +374,25 @@ impl Drop for Exit<'_> {
     }
 }
 
-/// Publishes one step event of a lane: `Begin` marks the call in flight, `Done` pushes the state.
-fn publish(lane: &Lane, event: StepEvent<'_>, keep: usize, stats: &Stats) {
+/// Publishes one step event of a lane: `Begin` marks the call in flight; `Done` holds the state
+/// back for a random pause in `0..=step_hold` (the call has returned and published, `in_flight`
+/// is still set and `published` is still the step before, so a read may match the state the
+/// step published), then pushes it.
+fn publish(
+    lane: &Lane,
+    event: StepEvent<'_>,
+    keep: usize,
+    stats: &Stats,
+    step_hold: Duration,
+    rng: &mut XorShift,
+) {
     match event {
         StepEvent::Begin => lane.in_flight.store(true, SeqCst),
         StepEvent::Done(model) => {
+            let max = u64::try_from(step_hold.as_nanos()).unwrap_or(u64::MAX);
+            if !step_hold.is_zero() {
+                thread::sleep(Duration::from_nanos(rng.below(max.saturating_add(1))));
+            }
             lane.push(model, keep);
             stats.steps.fetch_add(1, SeqCst);
         }
@@ -383,6 +401,7 @@ fn publish(lane: &Lane, event: StepEvent<'_>, keep: usize, stats: &Stats) {
 
 /// One lane's ops, on its driver thread: each op runs with the step callback of the lane, then
 /// the pause.
+#[allow(clippy::too_many_arguments)] // the run's shared flags, the exit counter and the hold's seed
 fn driver(
     h: &Harness,
     lane: &mut LaneState,
@@ -391,6 +410,7 @@ fn driver(
     run: Run<'_>,
     thread: &Thread,
     finished: &AtomicUsize,
+    rng_seed: u64,
 ) {
     let _exit = Exit {
         thread,
@@ -398,6 +418,7 @@ fn driver(
         lane: Some(Arc::clone(&lane.shared)),
         run,
     };
+    let mut rng = XorShift(rng_seed.max(1));
     for (index, op) in ops.iter().enumerate() {
         if run.stop.load(SeqCst) {
             return;
@@ -410,7 +431,16 @@ fn driver(
             &mut lane.model,
             &mut lane.clock,
             Concurrency::Concurrent,
-            &mut |event| publish(&lane.shared, event, options.history_keep, run.stats),
+            &mut |event| {
+                publish(
+                    &lane.shared,
+                    event,
+                    options.history_keep,
+                    run.stats,
+                    options.step_hold,
+                    &mut rng,
+                );
+            },
         );
         run.stats.add_passes(passes);
         thread.idle();
@@ -772,9 +802,11 @@ pub(super) fn run_segment(
         let handles: Vec<_> = drivers
             .into_iter()
             .zip(driver_threads)
-            .map(|((lane, lane_ops), thread)| {
+            .enumerate()
+            .map(|(lane_index, ((lane, lane_ops), thread))| {
+                let rng_seed = seed.wrapping_add(lane_index as u64);
                 scope.spawn(move || {
-                    driver(h, lane, lane_ops, options, run, thread, finished);
+                    driver(h, lane, lane_ops, options, run, thread, finished, rng_seed);
                 })
             })
             .collect();
@@ -1017,6 +1049,9 @@ pub(super) fn concurrent_remote_tweaks(config: &mut StorageConfig) {
     config.query.read_cache_bytes = Some(ByteSize::kib(64));
 }
 
+/// The step hold of the proptest cases (`ConcurrentOptions::step_hold`).
+const PROPTEST_STEP_HOLD: Duration = Duration::from_millis(1);
+
 /// Cases of the concurrent proptest: `LLMOBS_CONCURRENT_CASES`, else 4 (the budget of § R6.5).
 fn concurrent_cases() -> u32 {
     std::env::var("LLMOBS_CONCURRENT_CASES")
@@ -1056,6 +1091,7 @@ proptest! {
         run_concurrent_case(&ops, &ConcurrentOptions {
             readers: 2,
             pace: Duration::from_millis(20),
+            step_hold: PROPTEST_STEP_HOLD,
             gc_every: Duration::from_millis(50),
             history_keep: usize::MAX,
             remote: false,
@@ -1068,6 +1104,7 @@ proptest! {
         run_concurrent_case(&ops, &ConcurrentOptions {
             readers: 2,
             pace: Duration::from_millis(20),
+            step_hold: PROPTEST_STEP_HOLD,
             gc_every: Duration::from_millis(50),
             history_keep: usize::MAX,
             remote: true,
@@ -1209,13 +1246,16 @@ fn a_read_while_an_append_waits_after_its_publish_sees_the_state_after_it() {
     hooks.hold(HookPoint::AfterPublish);
     let (lo, hi, observed, matched) = thread::scope(|scope| {
         let append = scope.spawn(|| {
+            let mut rng = XorShift(1);
             apply_storage(
                 &op,
                 &harness,
                 &mut model,
                 &mut clock,
                 Concurrency::Concurrent,
-                &mut |event| publish(&lane, event, usize::MAX, &stats),
+                &mut |event| {
+                    publish(&lane, event, usize::MAX, &stats, Duration::ZERO, &mut rng);
+                },
             )
         });
         let started = Instant::now();
@@ -1308,6 +1348,7 @@ fn run_smoke(remote: bool) {
         &ConcurrentOptions {
             readers: 2,
             pace: Duration::from_millis(5),
+            step_hold: Duration::ZERO,
             gc_every: Duration::from_millis(20),
             history_keep: usize::MAX,
             remote,
