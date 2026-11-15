@@ -280,6 +280,38 @@ impl OrgSso {
     }
 }
 
+/// A domain as stored: trimmed, lowercase ASCII, one trailing dot removed; at most 253
+/// characters; at least two labels; each label 1–63 of `[a-z0-9-]`, not starting or ending
+/// with `-`; the last label not all digits (refuses IPv4). `None` otherwise.
+pub(crate) fn normalize_domain(raw: &str) -> Option<String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let domain = lower.strip_suffix('.').unwrap_or(&lower);
+    if domain.is_empty() || domain.len() > 253 || !domain.is_ascii() {
+        return None;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 {
+        return None;
+    }
+    for label in &labels {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return None;
+        }
+    }
+    let last = labels[labels.len() - 1];
+    if last.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(domain.to_owned())
+}
+
 /// Whether instance config owns `domain` (D-P-54): `enforce_sso_domains`, Google's
 /// `allowed_domains` or any `[[auth.oidc]].allowed_domains`.
 pub(crate) fn instance_claims(auth: &AuthSettings, domain: &str) -> bool {
@@ -548,6 +580,34 @@ mod tests {
         assert_eq!(renamed.oidc.display_name(), "Renamed SSO");
         assert_eq!(renamed.org_id, org);
         assert_eq!(renamed.jit_role, JitRole::Viewer);
+    }
+
+    #[test]
+    fn domains_are_normalized_and_refused_when_malformed() {
+        assert_eq!(normalize_domain("Acme.COM.").as_deref(), Some("acme.com"));
+        assert_eq!(
+            normalize_domain("xn--bcher-kva.example").as_deref(),
+            Some("xn--bcher-kva.example")
+        );
+        for refused in [
+            "",
+            "acme",
+            "-acme.com",
+            "acme-.com",
+            "a..com",
+            "1.2.3.4",
+            "acme.com/x",
+            "ädme.com",
+        ] {
+            assert_eq!(normalize_domain(refused), None, "{refused}");
+        }
+        let long_label = format!("{}.com", "a".repeat(64));
+        assert_eq!(normalize_domain(&long_label), None);
+        let long_domain = format!("{}.com", vec!["a".repeat(63); 3].join("."));
+        assert!(normalize_domain(&long_domain).is_some());
+        let too_long = format!("{}.{}", "a".repeat(63), vec!["b".repeat(63); 3].join("."));
+        assert!(too_long.len() > 253);
+        assert_eq!(normalize_domain(&too_long), None);
     }
 
     #[tokio::test]

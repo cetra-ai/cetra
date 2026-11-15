@@ -82,6 +82,21 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "delete_org_sso_provider",
     ),
     (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains",
+        "post_org_sso_domain",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+        "post_org_sso_domain_verify",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/domains/{id}",
+        "delete_org_sso_domain",
+    ),
+    (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
         "put_org_entitlements_token",
@@ -594,6 +609,9 @@ fn document_lint() {
                 | "get_org_sso"
                 | "put_org_sso_provider"
                 | "delete_org_sso_provider"
+                | "post_org_sso_domain"
+                | "post_org_sso_domain_verify"
+                | "delete_org_sso_domain"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -699,9 +717,10 @@ fn document_lint() {
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
             || *id == "put_org_sso_provider"
+            || *id == "post_org_sso_domain"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "delete_org_sso_provider" {
+        } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);

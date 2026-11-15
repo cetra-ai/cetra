@@ -4,16 +4,18 @@
 
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
-use axum::routing::{delete, get, put};
+use axum::routing::{delete, get, post, put};
 use llmobs_core::ids::OrgId;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use super::store::{DomainRow, ProviderRow, ProviderWrite};
-use super::{dns, store};
+use super::{dns, instance_claims, normalize_domain, store};
 use crate::api::common::FieldError;
 use crate::api::entitlements::Feature;
 use crate::api::org_sso::{
-    DomainStatus, JitRole, OrgSso as OrgSsoView, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider,
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso as OrgSsoView, OrgSsoDomain, OrgSsoProvider,
+    PutOrgSsoProvider,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
@@ -22,6 +24,7 @@ use crate::entitlements::require;
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::meta::MetaError;
 
 /// The org SSO settings routes. Owners only, session only (D-P-51).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -56,7 +59,45 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: delete(delete_org_sso_provider),
         },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/orgs/{org}/sso/domains",
+            access: Access::Org {
+                perm: OrgPerm::ManageSso,
+                session_only: true,
+            },
+            documented: true,
+            handler: post(post_org_sso_domain),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+            access: Access::Org {
+                perm: OrgPerm::ManageSso,
+                session_only: true,
+            },
+            documented: true,
+            handler: post(post_org_sso_domain_verify),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/orgs/{org}/sso/domains/{id}",
+            access: Access::Org {
+                perm: OrgPerm::ManageSso,
+                session_only: true,
+            },
+            documented: true,
+            handler: delete(delete_org_sso_domain),
+        },
     ]
+}
+
+/// At most this many domains per org (D-P-54).
+const MAX_DOMAINS: usize = 20;
+
+#[derive(Debug, Deserialize)]
+struct IdPath {
+    id: Uuid,
 }
 
 /// The settings view: provider (without secret), domains, callback URL.
@@ -242,6 +283,214 @@ async fn delete_org_sso_provider(
             Ok(StatusCode::NO_CONTENT)
         }
     }
+}
+
+async fn post_org_sso_domain(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<AddOrgSsoDomain>,
+) -> Result<(StatusCode, error::Json<OrgSsoView>), ApiError> {
+    let org = access.org.id;
+    let caller = principal::session_user(&principal)?.id;
+    require(&state, org, Feature::OrgSso)?;
+    let domain =
+        normalize_domain(&body.domain).ok_or_else(|| field_error("domain", "invalid domain"))?;
+    if instance_claims(&state.config.auth, &domain) {
+        return Err(field_error(
+            "domain",
+            "this domain is managed by the server configuration",
+        ));
+    }
+    let id = Uuid::now_v7();
+    let token = dns::new_token().map_err(|error| ApiError::Internal(Box::new(error)))?;
+    let now = state.clock.now_ns();
+    let row = DomainRow {
+        id,
+        org_id: org,
+        domain,
+        token,
+        verified_at: None,
+        last_checked_at: None,
+        created_at: now,
+    };
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if store::domains_tx(conn, org).await?.len() >= MAX_DOMAINS {
+                    return Ok(Add::TooMany);
+                }
+                match store::insert_domain(conn, &row).await {
+                    Ok(()) => Ok(Add::Added),
+                    Err(MetaError::Conflict(_)) => Ok(Add::Listed),
+                    Err(error) => Err(error),
+                }
+            })
+        })
+        .await?;
+    match outcome {
+        Add::TooMany => Err(field_error(
+            "domain",
+            "an organization can have at most 20 domains",
+        )),
+        Add::Listed => Err(ApiError::Conflict {
+            detail: "This domain is already listed.",
+        }),
+        Add::Added => {
+            tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain added");
+            Ok((StatusCode::CREATED, error::Json(view(&state, org).await?)))
+        }
+    }
+}
+
+async fn post_org_sso_domain_verify(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+) -> Result<error::Json<OrgSsoView>, ApiError> {
+    let org = access.org.id;
+    let caller = principal::session_user(&principal)?.id;
+    require(&state, org, Feature::OrgSso)?;
+    let row = store::domain(state.meta.reader(), org, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if row.verified_at.is_some() {
+        return Ok(error::Json(view(&state, org).await?));
+    }
+    let now = state.clock.now_ns();
+    state
+        .limits
+        .sso_dns_checks
+        .check(&org, now)
+        .map_err(|retry| ApiError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })?;
+    let values = match state.org_sso.dns.txt(&dns::record_name(&row.domain)).await {
+        Ok(values) => values,
+        Err(_) => {
+            state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move { store::mark_checked(conn, id, now).await })
+                })
+                .await?;
+            return Err(ApiError::Unavailable {
+                detail: "The DNS lookup failed. Try again later.",
+            });
+        }
+    };
+    let found = has(&values, &dns::record_value(&row.token));
+    let domain = row.domain.clone();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if !found {
+                    store::mark_checked(conn, id, now).await?;
+                    return Ok(Check::Missing);
+                }
+                match store::verified_row_tx(conn, &domain).await? {
+                    Some(holder) if holder.org_id == org => {
+                        store::mark_checked(conn, id, now).await?;
+                        Ok(Check::Verified { taken_from: None })
+                    }
+                    Some(holder) => {
+                        // D-P-54: the holder's record is gone from the same answer, so the
+                        // domain moves. An answer that still holds the holder's record keeps it.
+                        if has(&values, &dns::record_value(&holder.token)) {
+                            store::mark_checked(conn, id, now).await?;
+                            Ok(Check::Elsewhere)
+                        } else {
+                            store::mark_unverified(conn, holder.id).await?;
+                            store::mark_verified(conn, id, now).await?;
+                            Ok(Check::Verified {
+                                taken_from: Some(holder.org_id),
+                            })
+                        }
+                    }
+                    None => match store::mark_verified(conn, id, now).await {
+                        Ok(()) => Ok(Check::Verified { taken_from: None }),
+                        Err(MetaError::Conflict(_)) => {
+                            store::mark_checked(conn, id, now).await?;
+                            Ok(Check::Elsewhere)
+                        }
+                        Err(error) => Err(error),
+                    },
+                }
+            })
+        })
+        .await?;
+    match outcome {
+        Check::Missing => Err(ApiError::Conflict {
+            detail: "The TXT record was not found. DNS changes can take a while to appear; try again later.",
+        }),
+        Check::Elsewhere => Err(ApiError::Conflict {
+            detail: "This domain is verified by another organization.",
+        }),
+        Check::Verified { taken_from } => {
+            super::refresh(&state).await;
+            tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain verified");
+            if let Some(from) = taken_from {
+                tracing::info!(target: "audit", org_id = %org, from_org_id = %from, domain_id = %id, "org sso domain taken over");
+            }
+            Ok(error::Json(view(&state, org).await?))
+        }
+    }
+}
+
+async fn delete_org_sso_domain(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+) -> Result<StatusCode, ApiError> {
+    let org = access.org.id;
+    let caller = principal::session_user(&principal)?.id;
+    let removed = state
+        .meta
+        .write(move |conn| Box::pin(async move { store::delete_domain(conn, org, id).await }))
+        .await?;
+    if !removed {
+        return Err(ApiError::NotFound);
+    }
+    super::refresh(&state).await;
+    tracing::info!(target: "audit", org_id = %org, user_id = %caller, domain_id = %id, "org sso domain removed");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether one of the TXT strings is `expected`, ignoring surrounding whitespace and one
+/// pair of quotes.
+fn has(values: &[String], expected: &str) -> bool {
+    values.iter().any(|value| {
+        let value = value.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(value);
+        value == expected
+    })
+}
+
+/// What the add found and did.
+#[derive(Debug, PartialEq, Eq)]
+enum Add {
+    Added,
+    /// The org already lists the domain.
+    Listed,
+    TooMany,
+}
+
+/// What the verification found and did.
+#[derive(Debug, PartialEq, Eq)]
+enum Check {
+    /// The TXT record is not in the answer.
+    Missing,
+    /// Another org holds the domain and its record is still in the answer.
+    Elsewhere,
+    /// The domain is this org's now. `taken_from` is the org it moved from.
+    Verified { taken_from: Option<OrgId> },
 }
 
 /// What the write found and did.
@@ -695,6 +944,303 @@ mod tests {
         ));
         assert!(!unchanged(Some(&before), None));
         assert!(!unchanged(None, Some(&before)));
+    }
+
+    fn settings_path(slug: &str) -> String {
+        format!("/api/v1/orgs/{slug}/sso")
+    }
+
+    async fn add_domain(
+        app: &TestApp,
+        slug: &str,
+        cookie: &str,
+        domain: &str,
+    ) -> crate::test_support::TestResponse {
+        app.request(Method::POST, &format!("{}/domains", settings_path(slug)))
+            .header("cookie", cookie)
+            .json(&json!({ "domain": domain }))
+            .send()
+            .await
+    }
+
+    async fn verify(
+        app: &TestApp,
+        slug: &str,
+        cookie: &str,
+        id: Uuid,
+    ) -> crate::test_support::TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/domains/{id}/verify", settings_path(slug)),
+        )
+        .header("cookie", cookie)
+        .send()
+        .await
+    }
+
+    async fn view_of(app: &TestApp, slug: &str, cookie: &str) -> OrgSsoView {
+        app.request(Method::GET, &settings_path(slug))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .json()
+    }
+
+    async fn domain_of(app: &TestApp, slug: &str, cookie: &str, domain: &str) -> OrgSsoDomain {
+        view_of(app, slug, cookie)
+            .await
+            .domains
+            .into_iter()
+            .find(|row| row.domain == domain)
+            .expect("domain listed")
+    }
+
+    /// The TXT answer for one record value, quoted as DNS publishes it.
+    fn quoted(value: &str) -> String {
+        format!("\"{value}\"")
+    }
+
+    #[tokio::test]
+    async fn add_verify_and_route() {
+        let (app, seeded, owner) = org_sso_app().await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+
+        let added = add_domain(&app, "acme", &owner.cookie, "Acme.test.").await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let row = added.json::<OrgSsoView>().domains[0].clone();
+        assert_eq!(row.domain, "acme.test");
+        assert_eq!(row.status, DomainStatus::Pending);
+        assert_eq!(row.txt_name, "_llmobs-verify.acme.test");
+        let token = row.txt_value.strip_prefix("llmobs-verify=").expect("value");
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+        let missing = verify(&app, "acme", &owner.cookie, row.id).await;
+        assert_eq!(missing.status, StatusCode::CONFLICT);
+        assert!(
+            missing.json::<Value>()["detail"]
+                .as_str()
+                .expect("detail")
+                .contains("not found")
+        );
+        assert!(
+            domain_of(&app, "acme", &owner.cookie, "acme.test")
+                .await
+                .last_checked_at
+                .is_some()
+        );
+
+        app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
+        let verified = verify(&app, "acme", &owner.cookie, row.id).await;
+        assert_eq!(verified.status, StatusCode::OK);
+        assert_eq!(
+            verified.json::<OrgSsoView>().domains[0].status,
+            DomainStatus::Verified
+        );
+        assert_eq!(
+            app.state
+                .org_sso
+                .route("ada@acme.test")
+                .map(|route| route.org_id),
+            Some(seeded.org_id)
+        );
+
+        // Verified: no further lookup, so a changed answer changes nothing.
+        app.dns_txt(&row.txt_name, &["something else"]);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, row.id).await.status,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn one_org_per_domain_and_a_stale_domain_moves() {
+        let (app, seeded, owner) = org_sso_app().await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+        add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let acme = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+        app.dns_txt(&acme.txt_name, &[quoted(&acme.txt_value).as_str()]);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, acme.id).await.status,
+            StatusCode::OK
+        );
+
+        let (beta_org, beta) = second_org(&app, "beta", "b@beta.test").await;
+        seed_provider(&app, beta_org, "https://idp.example").await;
+        assert_eq!(
+            add_domain(&app, "beta", &beta.cookie, "acme.test")
+                .await
+                .status,
+            StatusCode::CREATED
+        );
+        let beta_row = domain_of(&app, "beta", &beta.cookie, "acme.test").await;
+        // Both records in one answer: acme keeps the domain.
+        app.dns_txt(
+            &acme.txt_name,
+            &[
+                quoted(&acme.txt_value).as_str(),
+                quoted(&beta_row.txt_value).as_str(),
+            ],
+        );
+        let refused = verify(&app, "beta", &beta.cookie, beta_row.id).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert!(
+            refused.json::<Value>()["detail"]
+                .as_str()
+                .expect("detail")
+                .contains("another organization")
+        );
+
+        // acme's record is gone: the domain moves to beta.
+        app.dns_txt(&acme.txt_name, &[quoted(&beta_row.txt_value).as_str()]);
+        let moved = verify(&app, "beta", &beta.cookie, beta_row.id).await;
+        assert_eq!(moved.status, StatusCode::OK);
+        assert_eq!(
+            domain_of(&app, "acme", &owner.cookie, "acme.test")
+                .await
+                .status,
+            DomainStatus::Pending
+        );
+        assert_eq!(
+            app.state
+                .org_sso
+                .route("x@acme.test")
+                .map(|route| route.org_id),
+            Some(beta_org)
+        );
+    }
+
+    #[tokio::test]
+    async fn instance_config_owns_some_domains() {
+        let (app, _seeded, owner) = org_sso_app_with(|config| {
+            config.auth.enforce_sso_domains = vec!["corp.test".to_owned()];
+        })
+        .await;
+        let refused = add_domain(&app, "acme", &owner.cookie, "corp.test").await;
+        assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused.json::<Value>()["errors"][0]["field"], "domain");
+    }
+
+    #[tokio::test]
+    async fn domain_limits_hold() {
+        let (app, _seeded, owner) = org_sso_app().await;
+        for index in 0..20 {
+            let added = add_domain(&app, "acme", &owner.cookie, &format!("d{index}.test")).await;
+            assert_eq!(added.status, StatusCode::CREATED, "{index}");
+        }
+        assert_eq!(
+            add_domain(&app, "acme", &owner.cookie, "d20.test")
+                .await
+                .status,
+            StatusCode::BAD_REQUEST
+        );
+
+        let (app, _seeded, owner) = org_sso_app().await;
+        add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let row = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+        for _ in 0..10 {
+            assert_eq!(
+                verify(&app, "acme", &owner.cookie, row.id).await.status,
+                StatusCode::CONFLICT
+            );
+        }
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, row.id).await.status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_failure_is_503() {
+        let (app, _seeded, owner) = org_sso_app().await;
+        add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let row = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+        app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
+
+        app.dns_fail(true);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, row.id).await.status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            domain_of(&app, "acme", &owner.cookie, "acme.test")
+                .await
+                .last_checked_at
+                .is_some()
+        );
+
+        app.dns_fail(false);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, row.id).await.status,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_works_without_the_feature() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let owner = app
+            .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+            .await;
+        let id = Uuid::now_v7();
+        let org = seeded.org_id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let row = DomainRow {
+                        id,
+                        org_id: org,
+                        domain: "acme.test".to_owned(),
+                        token: "0123456789abcdef0123456789abcdef".to_owned(),
+                        verified_at: None,
+                        last_checked_at: None,
+                        created_at: 1,
+                    };
+                    store::insert_domain(conn, &row).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let added = add_domain(&app, "acme", &owner.cookie, "other.test").await;
+        assert_eq!(added.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            added.json::<Value>()["detail"],
+            Feature::OrgSso.locked_detail()
+        );
+
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("{}/domains/{id}", settings_path("acme")),
+            )
+            .header("cookie", &owner.cookie)
+            .send()
+            .await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn logs_carry_no_domain() {
+        let (app, seeded, owner) = org_sso_app().await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+        assert_logs_clean(&["acme.test", "llmobs-verify="], async {
+            add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+            let row = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
+            app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
+            verify(&app, "acme", &owner.cookie, row.id).await;
+            app.request(
+                Method::DELETE,
+                &format!("{}/domains/{}", settings_path("acme"), row.id),
+            )
+            .header("cookie", &owner.cookie)
+            .send()
+            .await;
+        })
+        .await;
     }
 
     #[tokio::test]

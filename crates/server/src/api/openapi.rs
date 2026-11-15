@@ -70,7 +70,7 @@ use super::keys::{
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::org_sso::{
-    DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider,
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -174,6 +174,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OrgSsoDomain>();
     set.insert::<OrgSso>();
     set.insert::<PutOrgSsoProvider>();
+    set.insert::<AddOrgSsoDomain>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1117,12 +1118,81 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let mut provider = PathItem::new(HttpMethod::Put, put);
     provider.delete = Some(delete);
+    let add_domain = operation(
+        "post_org_sso_domain",
+        "orgs",
+        "Add an email domain to the org's SSO",
+    )
+    .description(Some(
+        "Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("AddOrgSsoDomain")))
+    .responses(responses(
+        "201",
+        json_of::<OrgSso>("The SSO settings, with the new domain pending."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let verify = operation(
+        "post_org_sso_domain_verify",
+        "orgs",
+        "Verify an email domain with its DNS TXT record",
+    )
+    .description(Some(
+        "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings, with the domain verified."),
+        &[401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let remove_domain = operation(
+        "delete_org_sso_domain",
+        "orgs",
+        "Remove an email domain from the org's SSO",
+    )
+    .description(Some(
+        "Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The domain is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
     paths
         .path(
             "/api/v1/orgs/{org}/sso",
             PathItem::new(HttpMethod::Get, get),
         )
         .path("/api/v1/orgs/{org}/sso/provider", provider)
+        .path(
+            "/api/v1/orgs/{org}/sso/domains",
+            PathItem::new(HttpMethod::Post, add_domain),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+            PathItem::new(HttpMethod::Post, verify),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}",
+            PathItem::new(HttpMethod::Delete, remove_domain),
+        )
 }
 
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -1140,7 +1210,10 @@ fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_org_invite", "orgs", "Invite a member by email")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param.clone()]))
         .request_body(Some(json_body("CreateInviteRequest")))
         .responses(responses(
@@ -1509,7 +1582,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let patch_org = operation("patch_org_member", "orgs", "Change an organization role")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param, user_param.clone()]))
         .request_body(Some(json_body("UpdateOrgMemberRequest")))
         .responses(responses(
@@ -1519,7 +1595,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete_org = operation("delete_org_member", "orgs", "Remove an organization member")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![
             path_string("org", "Org UUID or slug."),
             user_param.clone(),
@@ -1548,7 +1627,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         "projects",
         "Set a project role override",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(vec![project_param(), user_param.clone()]))
     .request_body(Some(json_body("SetProjectOverrideRequest")))
     .responses(responses(
@@ -1702,7 +1784,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
 fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let list = operation("list_api_keys", "projects", "List API keys")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<PageParams>(vec![project_param()])))
         .responses(responses(
             "200",
@@ -1714,7 +1799,10 @@ fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_api_key", "projects", "Create an API key")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateApiKeyRequest")))
         .responses(responses(
@@ -1751,7 +1839,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "List personal access tokens",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<PageParams>(Vec::new())))
     .responses(responses(
         "200",
@@ -1767,7 +1858,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "Create a personal access token",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .request_body(Some(json_body("CreatePersonalTokenRequest")))
     .responses(responses(
         "201",

@@ -137,6 +137,14 @@ pub struct OrgSso {
     pub domains: Vec<OrgSsoDomain>,
 }
 
+/// `POST /api/v1/orgs/{org}/sso/domains`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AddOrgSsoDomain {
+    /// The email domain, e.g. `acme.com`. Punycode for internationalized names.
+    pub domain: String,
+}
+
 /// `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.
 #[derive(Clone, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
