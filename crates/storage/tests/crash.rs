@@ -15,8 +15,9 @@ use llmobs_storage::QueryOptions;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -287,7 +288,7 @@ fn crash_recovery() {
             Err(error) => panic!("waiting for the crash child: {error}"),
         };
         assert!(
-            status.code().is_none(),
+            killed_by_harness(status),
             "crash child exited {status} at iteration {run}, seed {seed}"
         );
         if let Some((fifo, done)) = &clear_cache {
@@ -332,6 +333,45 @@ fn clear_lazyfs_cache(fifo: &Path, done: &Path) {
         Ok(Err(error)) => panic!("lazyfs clear-cache failed: {error}"),
         Err(_) => panic!("lazyfs did not acknowledge clear-cache within 30s"),
     }
+}
+
+/// `Child::kill` sends SIGKILL. Any other end, an exit code or a signal of
+/// the child's own (SIGABRT from a heap check, SIGSEGV), is a crash the
+/// harness must report rather than count as a kill.
+fn killed_by_harness(status: ExitStatus) -> bool {
+    const SIGKILL: i32 = 9;
+    status.signal() == Some(SIGKILL)
+}
+
+#[test]
+#[ignore = "run by a_child_that_aborts_is_not_a_kill as a child process"]
+fn aborting_child() {
+    if std::env::var_os("LLMOBS_CRASH_ABORT_CHILD").is_some() {
+        std::process::abort();
+    }
+}
+
+#[test]
+fn a_child_that_aborts_is_not_a_kill() {
+    let spawn = |abort: bool| {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "aborting_child", "--ignored", "--test-threads=1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if abort {
+            command.env("LLMOBS_CRASH_ABORT_CHILD", "1");
+        }
+        command.spawn().unwrap()
+    };
+    let aborted = spawn(true).wait().unwrap();
+    assert!(!killed_by_harness(aborted), "{aborted}");
+    let exited = spawn(false).wait().unwrap();
+    assert!(!killed_by_harness(exited), "{exited}");
+    let mut sleeper = Command::new("sleep").arg("30").spawn().unwrap();
+    sleeper.kill().unwrap();
+    let killed = sleeper.wait().unwrap();
+    assert!(killed_by_harness(killed), "{killed}");
 }
 
 fn xorshift(state: &mut u64) -> u64 {
