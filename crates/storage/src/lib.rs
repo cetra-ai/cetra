@@ -358,6 +358,15 @@ impl Storage {
         }
         objects.register(&runtime);
         let (query_memory, total_memory) = resolve_query_memory(&config.query);
+        let budget = memory::budget_bytes(&config, u64::try_from(total_memory).unwrap_or(u64::MAX));
+        let detected = memory::detected_memory();
+        if budget > detected {
+            tracing::warn!(
+                budget,
+                detected,
+                "the storage memory budgets exceed the memory limit; the process can be killed under load (spec 03 § Resource limits)"
+            );
+        }
         let memory = Arc::new(memory::SharedPool::new(total_memory));
         let spans_flushed = committer.flushed_seq(Table::Spans).await;
         let scores_flushed = committer.flushed_seq(Table::Scores).await;
@@ -1305,6 +1314,7 @@ fn resolve_query_memory(query: &QueryConfig) -> (QueryMemory, usize) {
         total = cap;
         tracing::info!(total, cap, "query memory reduced to the machine's memory");
     }
+    tracing::info!(total, "query memory pool");
     let to_usize = |bytes: u64| usize::try_from(bytes).unwrap_or(usize::MAX);
     (
         QueryMemory {

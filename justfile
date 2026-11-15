@@ -42,6 +42,14 @@ model cases="500":
 resources:
     cargo test --workspace --all-features -- --ignored --test-threads=1 model_tests::resources::small_fs:: model_tests::resources::disk_full:: model_tests::resources::descriptors::
 
+# Memory-limit runs (track R M5, D-R-9), release mode, under a systemd user scope.
+resources-memory:
+    cargo test --release --workspace --all-features -- --ignored --test-threads=1 --exact model_tests::resources::memory::defaults_at_the_documented_minimum model_tests::resources::memory::small_profile_at_its_minimum model_tests::resources::memory::child_sees_the_scope_limit
+
+# The smallest memory limit a profile survives (defaults or small). Takes tens of minutes.
+resources-memory-min profile="defaults":
+    LLMOBS_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
+
 # The storage model test on a remote store with injected S3 faults, in release mode (R4.5).
 model-s3 cases="200":
     LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3

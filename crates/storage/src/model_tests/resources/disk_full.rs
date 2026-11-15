@@ -54,7 +54,7 @@ const D7: &str = "model_tests::resources::disk_full::the_read_cache_never_fills_
 
 /// The query of D6: a sort over every span of the project, which spills when its memory pool is
 /// small.
-const SPILL_SQL: &str = "SELECT count(*) AS n FROM (SELECT row_number() OVER (ORDER BY input, span_id) AS r FROM spans) WHERE r > 0";
+pub(super) const SPILL_SQL: &str = "SELECT count(*) AS n FROM (SELECT row_number() OVER (ORDER BY input, span_id) AS r FROM spans) WHERE r > 0";
 
 /// A harness whose data directory is under `root`, with 1 MiB WAL segments (the minimum) and
 /// `adjust` applied.

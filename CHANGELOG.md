@@ -15,9 +15,11 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
+- Storage: a warning at start when the storage's memory budgets add up to more than the memory limit.
 
 ### Fixed
 
+- The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.
 - With S3, a multipart upload that fails is now aborted, so its parts no longer stay on the bucket (track R).

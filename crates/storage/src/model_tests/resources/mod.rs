@@ -4,6 +4,7 @@
 
 mod disk_full;
 mod fill;
+mod memory;
 mod small_fs;
 
 use super::check::{check_full, check_quick};
