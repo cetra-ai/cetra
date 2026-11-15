@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
@@ -98,4 +98,20 @@ it("disables New dataset for viewers, with the reason", async () => {
   const button = screen.getByRole("button", { name: "New dataset" });
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription("Only members can create datasets");
+});
+
+it("follows the search text when the URL changes", async () => {
+  const { router } = await renderApp("/acme/support-bot/datasets?q=faq");
+
+  const search = await screen.findByRole("textbox", { name: "Search datasets" });
+  expect(search).toHaveValue("faq");
+  await act(async () => {
+    await router.navigate({
+      to: "/$org/$project/datasets",
+      params: { org: "acme", project: "support-bot" },
+      search: { q: "golden" },
+    });
+  });
+
+  await waitFor(() => expect(search).toHaveValue("golden"));
 });

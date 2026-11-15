@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
+import { cn } from "cn";
 import { Loader2 } from "lucide-react";
-import { type ChangeEvent, useId, useState } from "react";
+import { type ChangeEvent, useState } from "react";
 import { api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -8,7 +9,7 @@ import { datasetWriteKeys } from "@/api/queries-datasets";
 import type { Schema } from "@/api/types";
 import { FormError } from "@/components/form/form-error";
 import { useProject } from "@/components/shell/project-context";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -18,7 +19,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -81,8 +81,8 @@ function targetOf(row: MappingRow): ImportTarget {
   return row.kind as ImportTarget;
 }
 
-/** A row error the wizard lists: the row number (or the field when it is not a row). */
-type ListedError = { row: string; message: string };
+/** A row error the wizard lists. `row` is undefined for an error that is not about a row (a mapping). */
+type ListedError = { row: number | undefined; message: string };
 
 const PREVIEW_ERRORS_SHOWN = 5;
 
@@ -97,17 +97,37 @@ export function ImportDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  // A chosen file is work the user would lose, so Escape and a click outside do not close it.
+  const [dirty, setDirty] = useState(false);
+  const keepOpen = busy || dirty;
+
+  function close() {
+    setDirty(false);
+    onOpenChange(false);
+  }
 
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
         if (!next && !busy) {
-          onOpenChange(false);
+          close();
         }
       }}
     >
-      <DialogContent className="sm:max-w-3xl">
+      <DialogContent
+        className="max-h-[90vh] overflow-y-auto sm:max-w-3xl"
+        onInteractOutside={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+        onEscapeKeyDown={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Import items</DialogTitle>
           <DialogDescription>Adds the valid rows of a file as a new version.</DialogDescription>
@@ -116,9 +136,8 @@ export function ImportDialog({
           <ImportWizard
             datasetId={datasetId}
             setBusy={setBusy}
-            onClose={() => {
-              onOpenChange(false);
-            }}
+            setDirty={setDirty}
+            onClose={close}
           />
         ) : null}
       </DialogContent>
@@ -129,15 +148,16 @@ export function ImportDialog({
 function ImportWizard({
   datasetId,
   setBusy,
+  setDirty,
   onClose,
 }: {
   datasetId: string;
   setBusy: (busy: boolean) => void;
+  setDirty: (dirty: boolean) => void;
   onClose: () => void;
 }) {
   const { org, project } = useProject();
   const queryClient = useQueryClient();
-  const inputId = useId();
   const [step, setStep] = useState<Step>("file");
   const [fileError, setFileError] = useState<string | undefined>();
   const [reading, setReading] = useState(false);
@@ -158,7 +178,8 @@ function ImportWizard({
       : [];
 
   async function choose(event: ChangeEvent<HTMLInputElement>) {
-    const chosen = event.target.files?.[0];
+    const input = event.target;
+    const chosen = input.files?.[0];
     if (!chosen) {
       return;
     }
@@ -196,11 +217,14 @@ function ImportWizard({
       setFormat(detected);
       setPreview(data);
       setMapping(detected === "csv" ? data.columns.map(rowOf) : []);
+      setDirty(true);
       setStep("preview");
     } catch {
       setFileError("The file could not be read");
     } finally {
       setReading(false);
+      // Clear the input so choosing the same file again fires a change.
+      input.value = "";
     }
   }
 
@@ -211,7 +235,7 @@ function ImportWizard({
   function listErrors(problem: ReturnType<typeof problemOf>): ListedError[] {
     return (problem?.errors ?? []).map((item) => {
       const match = /^rows\[(\d+)\]$/.exec(item.field);
-      return { row: match?.[1] ?? item.field, message: item.message };
+      return { row: match ? Number(match[1]) : undefined, message: item.message };
     });
   }
 
@@ -289,7 +313,7 @@ function ImportWizard({
             {`Showing the first ${result.errors.length} errors.`}
           </p>
         ) : null}
-        <DialogFooter>
+        <DialogFooter className="sticky bottom-0 bg-popover pt-2">
           <Button type="button" onClick={onClose}>
             Done
           </Button>
@@ -334,7 +358,7 @@ function ImportWizard({
                 <TableRow key={`row-${index}`}>
                   {(row as unknown[]).map((cell, at) => (
                     // biome-ignore lint/suspicious/noArrayIndexKey: a preview cell never reorders
-                    <TableCell key={`cell-${at}`}>{String(cell)}</TableCell>
+                    <TableCell key={`cell-${at}`}>{previewJson(cell, 200)}</TableCell>
                   ))}
                 </TableRow>
               ) : (
@@ -416,15 +440,15 @@ function ImportWizard({
             </TableHeader>
             <TableBody>
               {listed.map((item) => (
-                <TableRow key={`${item.row}-${item.message}`}>
-                  <TableCell>{item.row}</TableCell>
+                <TableRow key={`${item.row ?? "mapping"}-${item.message}`}>
+                  <TableCell>{item.row ?? "Mapping"}</TableCell>
                   <TableCell>{item.message}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         ) : null}
-        <DialogFooter>
+        <DialogFooter className="sticky bottom-0 bg-popover pt-2">
           <Button
             type="button"
             variant="outline"
@@ -435,6 +459,7 @@ function ImportWizard({
               setPreview(undefined);
               setImportError(undefined);
               setListed([]);
+              setDirty(false);
               setStep("file");
             }}
           >
@@ -457,18 +482,25 @@ function ImportWizard({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-2">
-        <Label htmlFor={inputId}>Choose a CSV or JSONL file</Label>
-        <input
-          id={inputId}
-          type="file"
-          accept=".csv,.jsonl,.ndjson"
-          className="sr-only"
-          disabled={reading}
-          onChange={(event) => {
-            void choose(event);
-          }}
-        />
+      <div className="flex flex-col items-start gap-2">
+        <label
+          className={cn(
+            buttonVariants({ variant: "outline" }),
+            "cursor-pointer focus-within:outline-2 focus-within:outline-ring focus-within:outline-offset-2 focus-within:outline-solid",
+            reading && "pointer-events-none opacity-50",
+          )}
+        >
+          <input
+            type="file"
+            accept=".csv,.jsonl,.ndjson"
+            className="sr-only"
+            disabled={reading}
+            onChange={(event) => {
+              void choose(event);
+            }}
+          />
+          Choose a CSV or JSONL file
+        </label>
         {reading ? <p className="text-xs text-muted-foreground">Reading the file…</p> : null}
       </div>
       <FormError message={fileError} />

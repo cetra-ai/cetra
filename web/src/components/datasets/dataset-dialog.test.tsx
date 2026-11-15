@@ -134,3 +134,15 @@ it("sends a cleared schema as null", async () => {
   await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
   expect(captured).toEqual({ input_schema: null });
 });
+
+it("keeps an edited form open on Escape, and the close button still closes it", async () => {
+  const user = userEvent.setup();
+  const { onOpenChange } = renderDialog();
+
+  await user.type(screen.getByLabelText("Name"), "golden");
+  await user.keyboard("{Escape}");
+  expect(onOpenChange).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "Close" }));
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});

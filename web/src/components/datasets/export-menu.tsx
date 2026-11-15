@@ -1,3 +1,4 @@
+import { Loader2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
@@ -21,9 +22,11 @@ const FALLBACK = "The export could not be downloaded";
 export function ExportMenu({ datasetId, version }: { datasetId: string; version: number }) {
   const { org, project } = useProject();
   const [error, setError] = useState<string | undefined>();
+  const [pending, setPending] = useState(false);
 
   async function download(format: DatasetExportFormat) {
     setError(undefined);
+    setPending(true);
     try {
       const {
         data,
@@ -47,6 +50,8 @@ export function ExportMenu({ datasetId, version }: { datasetId: string; version:
       saveBlob(data ?? new Blob([]), name);
     } catch {
       setError(FALLBACK);
+    } finally {
+      setPending(false);
     }
   }
 
@@ -54,8 +59,9 @@ export function ExportMenu({ datasetId, version }: { datasetId: string; version:
     <div className="flex flex-col items-start gap-1">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="outline">
-            Export
+          <Button type="button" variant="outline" disabled={pending}>
+            {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+            {pending ? "Exporting…" : "Export"}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent>

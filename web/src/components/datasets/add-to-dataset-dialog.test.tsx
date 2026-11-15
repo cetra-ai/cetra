@@ -3,7 +3,7 @@ import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { describe, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
-import { payloadJson, prettyJson } from "@/lib/datasets";
+import { prettyJson } from "@/lib/datasets";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
@@ -62,7 +62,7 @@ describe("add to dataset dialog", () => {
     const { bodies } = captureItems();
     const { user, dialog } = await openDialog(TRACE_URL);
 
-    const rootInput = prettyJson(payloadJson(rootSpanFixture.input as Schema<"Payload">));
+    const rootInput = prettyJson((rootSpanFixture.input as Schema<"Payload">).value);
     await waitFor(() =>
       expect(within(dialog).getByRole("textbox", { name: "Input" })).toHaveValue(rootInput),
     );
@@ -172,5 +172,25 @@ describe("add to dataset dialog", () => {
     const header = await screen.findByRole("region", { name: "Trace" });
 
     expect(within(header).getByRole("button", { name: "Add to dataset" })).toBeDisabled();
+  });
+
+  it("shows an item error that is not on a field in the form error", async () => {
+    server.use(
+      http.post(FROM_TRACE, () =>
+        problemResponse(400, "validation_failed", {
+          errors: [{ field: "trace_id", message: "the trace is too large to copy" }],
+        }),
+      ),
+    );
+    const { user, dialog } = await openDialog(TRACE_URL);
+    await waitFor(() =>
+      expect(within(dialog).getByRole("textbox", { name: "Input" })).not.toHaveValue(""),
+    );
+    await choose(user, dialog, "Dataset", "faq");
+    await user.click(within(dialog).getByRole("button", { name: "Add item" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "the trace is too large to copy",
+    );
   });
 });

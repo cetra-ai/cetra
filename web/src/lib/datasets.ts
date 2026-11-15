@@ -1,5 +1,3 @@
-import type { Schema } from "@/api/types";
-
 export type JsonParse = { ok: true; value: unknown } | { ok: false; message: string };
 
 /**
@@ -38,18 +36,83 @@ export function prettyJson(value: unknown): string {
   return value === undefined ? "" : JSON.stringify(value, null, 2);
 }
 
-/** Compact JSON of `value` cut to `max` characters (default 120) with "…"; a string shows as itself; `undefined` is "—". */
+/**
+ * Compact JSON of `value` cut to `max` characters (default 120) with "…"; a string shows as itself;
+ * `undefined` is "—". Serializing stops once the output is past `max`, so a huge value costs
+ * about `max` characters of work, not its full size.
+ */
 export function previewJson(value: unknown, max = 120): string {
   if (value === undefined) {
     return "—";
   }
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const text = typeof value === "string" ? value : boundedJson(value, max);
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-/** The JSON a span payload stands for (D-J-8): `messages` and `json` → their `value`, `text` → the string; none → `undefined`. */
-export function payloadJson(payload: Schema<"Payload"> | undefined): unknown {
-  return payload?.value;
+/**
+ * The compact JSON of `value`, stopped once it is longer than `limit` characters: the result has
+ * at least `limit + 1` characters when the full JSON is that long, and is the full JSON otherwise.
+ * Follows `JSON.stringify`: `toJSON` is honoured, undefined, functions and symbols are skipped in
+ * objects and written as `null` in arrays.
+ */
+function boundedJson(value: unknown, limit: number): string {
+  const parts: string[] = [];
+  let size = 0;
+  // Returns false once the output is past the limit, which stops every loop below.
+  function write(piece: string): boolean {
+    parts.push(piece);
+    size += piece.length;
+    return size <= limit;
+  }
+  function visit(input: unknown): boolean {
+    let current = input;
+    if (typeof current === "object" && current !== null && "toJSON" in current) {
+      const toJSON = (current as { toJSON: unknown }).toJSON;
+      if (typeof toJSON === "function") {
+        current = toJSON.call(current);
+      }
+    }
+    if (typeof current === "string") {
+      return write(JSON.stringify(current));
+    }
+    if (typeof current !== "object" || current === null) {
+      const piece = JSON.stringify(current);
+      return write(piece === undefined ? "null" : piece);
+    }
+    if (Array.isArray(current)) {
+      if (!write("[")) {
+        return false;
+      }
+      for (let index = 0; index < current.length; index++) {
+        if (index > 0 && !write(",")) {
+          return false;
+        }
+        if (!visit(current[index])) {
+          return false;
+        }
+      }
+      return write("]");
+    }
+    if (!write("{")) {
+      return false;
+    }
+    let first = true;
+    for (const [key, member] of Object.entries(current)) {
+      if (member === undefined || typeof member === "function" || typeof member === "symbol") {
+        continue;
+      }
+      if (!first && !write(",")) {
+        return false;
+      }
+      first = false;
+      if (!write(`${JSON.stringify(key)}:`) || !visit(member)) {
+        return false;
+      }
+    }
+    return write("}");
+  }
+  visit(value);
+  return parts.join("");
 }
 
 /** The tabs of the dataset page. M6 adds "experiments". */
@@ -82,6 +145,9 @@ function parseVersion(value: unknown): number | undefined {
   }
   return parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
+
+/** The longest key of a mapped target, in characters (the server's rule). */
+export const MAX_KEY_CHARS = 200;
 
 export type ImportFormat = "csv" | "jsonl";
 
@@ -134,7 +200,7 @@ export function defaultTarget(column: string): ImportTarget {
 /**
  * Problems with a mapping, in this order, each once: no column maps to the input; the whole
  * input and its keys both used; the same for the expected output; a target used by two columns;
- * a keyed target with an empty key.
+ * a keyed target whose key is blank or longer than 200 characters.
  */
 export function mappingProblems(rows: { column: string; target: ImportTarget }[]): string[] {
   const targets: string[] = rows.map((row) => row.target);
@@ -162,8 +228,15 @@ export function mappingProblems(rows: { column: string; target: ImportTarget }[]
     }
   }
   for (const row of rows) {
-    if (/^(input|expected|metadata)\.$/.test(row.target)) {
+    const keyed = /^(?:input|expected|metadata)\.(.*)$/s.exec(row.target);
+    if (keyed === null) {
+      continue;
+    }
+    const key = keyed[1] ?? "";
+    if (key.trim() === "") {
       problems.push(`${row.column}: the key is empty`);
+    } else if ([...key].length > MAX_KEY_CHARS) {
+      problems.push(`${row.column}: the key is longer than ${MAX_KEY_CHARS} characters`);
     }
   }
   return problems;

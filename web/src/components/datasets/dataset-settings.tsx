@@ -4,7 +4,12 @@ import { useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { datasetsKey } from "@/api/queries-datasets";
+import {
+  datasetItemsKey,
+  datasetKey,
+  datasetsKey,
+  datasetVersionsKey,
+} from "@/api/queries-datasets";
 import type { Schema } from "@/api/types";
 import { DatasetDialog } from "@/components/datasets/dataset-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -33,6 +38,14 @@ export function DatasetSettings({ dataset }: { dataset: Schema<"Dataset"> }) {
       {
         onSuccess: () => {
           void queryClient.invalidateQueries({ queryKey: datasetsKey(org, project) });
+          // The dataset is gone: drop its own cached reads rather than let them refetch.
+          for (const key of [
+            datasetKey(org, project, dataset.id),
+            datasetItemsKey(org, project, dataset.id),
+            datasetVersionsKey(org, project, dataset.id),
+          ]) {
+            queryClient.removeQueries({ queryKey: key });
+          }
           void navigate({
             to: "/$org/$project/datasets",
             params: { org, project },
@@ -81,15 +94,15 @@ export function DatasetSettings({ dataset }: { dataset: Schema<"Dataset"> }) {
           </Button>
         </DisabledReason>
       </div>
-      <DatasetDialog
-        open={editing}
-        onOpenChange={setEditing}
-        dataset={dataset}
-        onSaved={() => undefined}
-      />
+      <DatasetDialog open={editing} onOpenChange={setEditing} dataset={dataset} />
       <TypeToConfirmDialog
         open={deleting}
-        onOpenChange={setDeleting}
+        onOpenChange={(open) => {
+          setDeleting(open);
+          if (!open) {
+            remove.reset();
+          }
+        }}
         title="Delete dataset"
         description="Deletes the dataset and all its versions. Experiments keep their results and show the dataset as deleted."
         expected={dataset.name}

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
@@ -65,6 +65,20 @@ function DatasetPage() {
   );
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const latestVersion = detail.data?.current_version;
+  // A version at or above the latest one is the latest version, so the URL drops it.
+  const redundant =
+    search.version !== undefined && latestVersion !== undefined && search.version >= latestVersion;
+  useEffect(() => {
+    if (redundant) {
+      void navigate({
+        to: "/$org/$project/datasets/$datasetId",
+        params: { org, project, datasetId },
+        search: (prev) => withVersion(prev, undefined),
+        replace: true,
+      });
+    }
+  }, [redundant, navigate, org, project, datasetId]);
 
   if (detail.isPending) {
     return null;
@@ -78,7 +92,10 @@ function DatasetPage() {
 
   const dataset = detail.data;
   const latest = dataset.current_version;
-  const shown = search.version ?? latest;
+  // A version named in the URL below the latest one is read; otherwise the latest is shown.
+  const pinned =
+    search.version !== undefined && search.version < latest ? search.version : undefined;
+  const shown = pinned ?? latest;
   const atLatest = shown === latest;
   const tab = search.tab ?? "items";
   const editable = canManage && atLatest;
@@ -88,14 +105,11 @@ function DatasetPage() {
       ? "Switch to the latest version to edit"
       : undefined;
   const loadedVersions = versions.data?.pages.flatMap((page) => page.data) ?? [];
-  const pickerValue =
-    search.version === undefined || search.version === latest ? LATEST : String(search.version);
+  const pickerValue = pinned === undefined ? LATEST : String(pinned);
   // A version named in the URL but not loaded yet still shows in the picker.
   const unloadedVersion =
-    search.version !== undefined &&
-    search.version !== latest &&
-    !loadedVersions.some((version) => version.version === search.version)
-      ? search.version
+    pinned !== undefined && !loadedVersions.some((version) => version.version === pinned)
+      ? pinned
       : undefined;
 
   function chooseVersion(value: string) {

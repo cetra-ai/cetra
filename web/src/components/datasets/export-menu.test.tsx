@@ -77,3 +77,31 @@ it("exports a version as CSV under the server's file name", async () => {
   expect(requested?.get("format")).toBe("csv");
   expect(requested?.get("version")).toBe("3");
 });
+
+it("disables the export while a download runs", async () => {
+  const user = userEvent.setup();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get(EXPORT_PATH, async () => {
+      await gate;
+      return new HttpResponse("id\n", {
+        headers: {
+          "Content-Type": "text/csv",
+          "Content-Disposition": `attachment; filename="${DATASET_ID}-v3.csv"`,
+        },
+      });
+    }),
+  );
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+  renderMenu(3);
+
+  await user.click(screen.getByRole("button", { name: "Export" }));
+  await user.click(await screen.findByRole("menuitem", { name: "CSV" }));
+
+  expect(await screen.findByRole("button", { name: "Exporting…" })).toBeDisabled();
+  release();
+  expect(await screen.findByRole("button", { name: "Export" })).toBeEnabled();
+});

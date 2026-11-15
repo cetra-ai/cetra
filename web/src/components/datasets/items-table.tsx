@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { Loader2, Table2 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { $api } from "@/api/client";
 import { datasetItemsInit } from "@/api/queries-datasets";
 import type { Schema } from "@/api/types";
@@ -44,11 +44,21 @@ export function ItemsTable({
     },
   );
 
+  // The previews are built once per fetched page, not on every render of the open sheet.
+  const rows = useMemo(
+    () =>
+      (query.data?.pages.flatMap((page) => page.data) ?? []).map((item) => ({
+        item,
+        input: previewJson(item.input),
+        expected: previewJson(item.expected_output),
+        metadata: Object.keys(item.metadata).length === 0 ? "—" : previewJson(item.metadata),
+      })),
+    [query.data],
+  );
+
   if (query.error) {
     throw query.error;
   }
-
-  const rows = query.data?.pages.flatMap((page) => page.data) ?? [];
 
   return (
     <div className="flex flex-col gap-4">
@@ -77,7 +87,7 @@ export function ItemsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((item) => (
+            {rows.map(({ item, input, expected, metadata }) => (
               <TableRow key={item.revision_id}>
                 <TableCell>
                   <Button
@@ -93,15 +103,9 @@ export function ItemsTable({
                     {shortId(item.id)}
                   </Button>
                 </TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">
-                  {previewJson(item.input)}
-                </TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">
-                  {previewJson(item.expected_output)}
-                </TableCell>
-                <TableCell className="max-w-xs truncate font-mono text-xs">
-                  {Object.keys(item.metadata).length === 0 ? "—" : previewJson(item.metadata)}
-                </TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-xs">{input}</TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-xs">{expected}</TableCell>
+                <TableCell className="max-w-xs truncate font-mono text-xs">{metadata}</TableCell>
                 <TableCell>
                   {item.source_trace_id !== undefined ? (
                     <Link

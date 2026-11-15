@@ -1,7 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { History, Loader2 } from "lucide-react";
 import { $api } from "@/api/client";
-import { datasetVersionsInit } from "@/api/queries-datasets";
+import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
 import { EmptyState } from "@/components/empty-state";
 import { IdText } from "@/components/id-text";
 import { useProject } from "@/components/shell/project-context";
@@ -20,6 +21,8 @@ import {
 /** The version history of a dataset, newest first. A version opens the items of that version. */
 export function VersionsTable({ datasetId }: { datasetId: string }) {
   const { org, project } = useProject();
+  // The current version's link omits `version`, so the page keeps following the latest version.
+  const latest = useQuery(datasetQuery(org, project, datasetId)).data?.current_version;
   const query = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/datasets/{dataset}/versions",
@@ -67,7 +70,11 @@ export function VersionsTable({ datasetId }: { datasetId: string }) {
                 <Link
                   to="/$org/$project/datasets/$datasetId"
                   params={{ org, project, datasetId }}
-                  search={{ tab: "items", version: version.version }}
+                  search={
+                    version.version === latest
+                      ? { tab: "items" }
+                      : { tab: "items", version: version.version }
+                  }
                   className="font-mono underline-offset-4 hover:underline"
                 >
                   {`v${version.version}`}

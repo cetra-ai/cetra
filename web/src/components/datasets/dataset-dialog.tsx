@@ -57,16 +57,20 @@ export function DatasetDialog({
   /** Absent: create. Present: edit this dataset (J5.3 uses it in the settings tab). */
   dataset?: Schema<"Dataset">;
   /** Called with the saved dataset after a success. */
-  onSaved: (dataset: Schema<"Dataset">) => void;
+  onSaved?: (dataset: Schema<"Dataset">) => void;
 }) {
   const create = useCreateDataset();
   const patch = usePatchDataset();
   const pending = dataset === undefined ? create.isPending : patch.isPending;
+  // A form the user has typed in is not closed by Escape or a click outside (the X still closes it).
+  const [dirty, setDirty] = useState(false);
+  const keepOpen = pending || dirty;
 
   // Unmounting the form on close drops its state with it, so reopening starts clean.
   function close() {
     create.reset();
     patch.reset();
+    setDirty(false);
     onOpenChange(false);
   }
 
@@ -79,7 +83,19 @@ export function DatasetDialog({
         }
       }}
     >
-      <DialogContent>
+      <DialogContent
+        className="max-h-[90vh] overflow-y-auto"
+        onInteractOutside={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+        onEscapeKeyDown={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{dataset ? "Edit dataset" : "New dataset"}</DialogTitle>
           <DialogDescription>
@@ -92,6 +108,9 @@ export function DatasetDialog({
             create={create}
             patch={patch}
             onSaved={onSaved}
+            onDirty={() => {
+              setDirty(true);
+            }}
             onDone={close}
           />
         ) : null}
@@ -105,12 +124,14 @@ function DatasetForm({
   create,
   patch,
   onSaved,
+  onDirty,
   onDone,
 }: {
   dataset: Schema<"Dataset"> | undefined;
   create: ReturnType<typeof useCreateDataset>;
   patch: ReturnType<typeof usePatchDataset>;
-  onSaved: (dataset: Schema<"Dataset">) => void;
+  onSaved: ((dataset: Schema<"Dataset">) => void) | undefined;
+  onDirty: () => void;
   onDone: () => void;
 }) {
   const { org, project } = useProject();
@@ -195,7 +216,7 @@ function DatasetForm({
     if (dataset !== undefined) {
       void queryClient.invalidateQueries({ queryKey: datasetKey(org, project, dataset.id) });
     }
-    onSaved(result);
+    onSaved?.(result);
     onDone();
   }
 
@@ -231,7 +252,10 @@ function DatasetForm({
         id="dataset-name"
         label="Name"
         value={name}
-        onChange={setName}
+        onChange={(value) => {
+          setName(value);
+          onDirty();
+        }}
         error={errors.name}
         autoComplete="off"
         maxLength={200}
@@ -246,6 +270,7 @@ function DatasetForm({
           aria-invalid={errors.description ? true : undefined}
           onChange={(event) => {
             setDescription(event.target.value);
+            onDirty();
           }}
         />
         {errors.description ? (
@@ -264,6 +289,7 @@ function DatasetForm({
           aria-describedby="dataset-input-schema-hint"
           onChange={(event) => {
             setInputText(event.target.value);
+            onDirty();
           }}
         />
         <p id="dataset-input-schema-hint" className="text-xs text-muted-foreground">
@@ -285,6 +311,7 @@ function DatasetForm({
           aria-describedby="dataset-expected-schema-hint"
           onChange={(event) => {
             setExpectedText(event.target.value);
+            onDirty();
           }}
         />
         <p id="dataset-expected-schema-hint" className="text-xs text-muted-foreground">

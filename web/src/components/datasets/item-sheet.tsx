@@ -2,11 +2,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
-import { fieldErrors, problemMessage } from "@/api/problem";
+import { problemMessage } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { datasetWriteKeys } from "@/api/queries-datasets";
 import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { type ItemField, JsonField, splitItemErrors } from "@/components/datasets/item-fields";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { IdText } from "@/components/id-text";
@@ -14,15 +15,23 @@ import { JsonView } from "@/components/payload/json-view";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField, prettyJson, sameJson } from "@/lib/datasets";
 
 const FALLBACK_SAVE = "The item could not be saved";
 const FALLBACK_DELETE = "The item could not be deleted";
-const PLACED_FIELDS = ["input", "expected_output", "metadata"] as const;
 
-type ItemField = (typeof PLACED_FIELDS)[number];
 type Metadata = Schema<"UpdateItemRequest">["metadata"];
+
+function usePatchItem() {
+  return $api.useMutation("patch", "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}");
+}
+
+function useDeleteItem() {
+  return $api.useMutation(
+    "delete",
+    "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+  );
+}
 
 /**
  * Sends the item's changes, with only the changed fields. The item sheet shows one item
@@ -40,9 +49,43 @@ export function ItemSheet({
   editable: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const patch = usePatchItem();
+  const remove = useDeleteItem();
+  // A form the user has typed in, or a save or delete in flight, is not closed by Escape or a click
+  // outside. The sheet's own close button still closes an edited form.
+  const [dirty, setDirty] = useState(false);
+  const busy = patch.isPending || remove.isPending;
+  const keepOpen = busy || dirty;
+
+  function close() {
+    patch.reset();
+    remove.reset();
+    setDirty(false);
+    onOpenChange(false);
+  }
+
   return (
-    <Sheet open={item !== undefined} onOpenChange={onOpenChange}>
-      <SheetContent className="overflow-y-auto sm:max-w-2xl">
+    <Sheet
+      open={item !== undefined}
+      onOpenChange={(next) => {
+        if (!next && !busy) {
+          close();
+        }
+      }}
+    >
+      <SheetContent
+        className="overflow-y-auto sm:max-w-2xl"
+        onInteractOutside={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+        onEscapeKeyDown={(event) => {
+          if (keepOpen) {
+            event.preventDefault();
+          }
+        }}
+      >
         <SheetHeader>
           <SheetTitle>Item</SheetTitle>
           {item ? <IdText value={item.id} kind="item" /> : null}
@@ -53,7 +96,12 @@ export function ItemSheet({
             datasetId={datasetId}
             item={item}
             editable={editable}
-            onOpenChange={onOpenChange}
+            patch={patch}
+            remove={remove}
+            onDirty={() => {
+              setDirty(true);
+            }}
+            onClose={close}
           />
         ) : null}
       </SheetContent>
@@ -65,12 +113,18 @@ function ItemBody({
   datasetId,
   item,
   editable,
-  onOpenChange,
+  patch,
+  remove,
+  onDirty,
+  onClose,
 }: {
   datasetId: string;
   item: Schema<"DatasetItem">;
   editable: boolean;
-  onOpenChange: (open: boolean) => void;
+  patch: ReturnType<typeof usePatchItem>;
+  remove: ReturnType<typeof useDeleteItem>;
+  onDirty: () => void;
+  onClose: () => void;
 }) {
   const { org, project } = useProject();
   const queryClient = useQueryClient();
@@ -80,15 +134,6 @@ function ItemBody({
   const [errors, setErrors] = useState<Partial<Record<ItemField, string>>>({});
   const [formError, setFormError] = useState<string | undefined>();
   const [confirming, setConfirming] = useState(false);
-  const patch = $api.useMutation(
-    "patch",
-    "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
-  );
-  const remove = $api.useMutation(
-    "delete",
-    "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
-  );
-  const pending = patch.isPending || remove.isPending;
 
   function invalidate() {
     for (const key of datasetWriteKeys(org, project, datasetId)) {
@@ -130,7 +175,7 @@ function ItemBody({
       body.metadata = nextMetadata as Metadata;
     }
     if (Object.keys(body).length === 0) {
-      onOpenChange(false);
+      onClose();
       return;
     }
     patch.mutate(
@@ -143,7 +188,7 @@ function ItemBody({
       {
         onSuccess: () => {
           invalidate();
-          onOpenChange(false);
+          onClose();
         },
         onError: showSaveErrors,
       },
@@ -151,21 +196,7 @@ function ItemBody({
   }
 
   function showSaveErrors(caught: unknown) {
-    const placed: Partial<Record<ItemField, string>> = {};
-    const other: string[] = [];
-    for (const [field, message] of Object.entries(fieldErrors(caught))) {
-      const name = PLACED_FIELDS.find(
-        (candidate) =>
-          field === candidate ||
-          field.startsWith(`${candidate}.`) ||
-          field.startsWith(`${candidate}[`),
-      );
-      if (name) {
-        placed[name] = message;
-      } else {
-        other.push(message);
-      }
-    }
+    const { placed, other } = splitItemErrors(caught);
     setErrors(placed);
     if (Object.keys(placed).length === 0 || other.length > 0) {
       setFormError(other.length > 0 ? other.join(" ") : problemMessage(caught, FALLBACK_SAVE));
@@ -183,27 +214,46 @@ function ItemBody({
         onSuccess: () => {
           invalidate();
           setConfirming(false);
-          onOpenChange(false);
+          onClose();
         },
       },
     );
   }
 
+  const pending = patch.isPending || remove.isPending;
+
   return (
     <div className="flex flex-col gap-6">
       {editable ? (
         <form onSubmit={onSave} className="flex flex-col gap-4" noValidate>
-          <JsonArea label="Input" value={inputText} onChange={setInputText} error={errors.input} />
-          <JsonArea
+          <JsonField
+            label="Input"
+            value={inputText}
+            rows={6}
+            onChange={(value) => {
+              setInputText(value);
+              onDirty();
+            }}
+            error={errors.input}
+          />
+          <JsonField
             label="Expected output"
             value={expectedText}
-            onChange={setExpectedText}
+            rows={6}
+            onChange={(value) => {
+              setExpectedText(value);
+              onDirty();
+            }}
             error={errors.expected_output}
           />
-          <JsonArea
+          <JsonField
             label="Metadata"
             value={metadataText}
-            onChange={setMetadataText}
+            rows={6}
+            onChange={(value) => {
+              setMetadataText(value);
+              onDirty();
+            }}
             error={errors.metadata}
           />
           <FormError message={formError} />
@@ -253,7 +303,12 @@ function ItemBody({
       </dl>
       <ConfirmDialog
         open={confirming}
-        onOpenChange={setConfirming}
+        onOpenChange={(open) => {
+          setConfirming(open);
+          if (!open) {
+            remove.reset();
+          }
+        }}
         title="Delete item"
         description="The item leaves the dataset in a new version. Older versions keep it."
         confirmLabel="Delete item"
@@ -262,36 +317,6 @@ function ItemBody({
         error={remove.error ? problemMessage(remove.error, FALLBACK_DELETE) : undefined}
         onConfirm={onDelete}
       />
-    </div>
-  );
-}
-
-function JsonArea({
-  label,
-  value,
-  onChange,
-  error,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  error?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
-      <Textarea
-        aria-label={label}
-        className="font-mono text-xs"
-        spellCheck={false}
-        rows={6}
-        value={value}
-        aria-invalid={error ? true : undefined}
-        onChange={(event) => {
-          onChange(event.target.value);
-        }}
-      />
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
   );
 }

@@ -142,3 +142,56 @@ it("deletes the dataset after typing its name", async () => {
   await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/datasets"));
   expect(deleted).toBe(true);
 });
+
+it("keeps the latest version out of the URL", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp(`${DATASET_URL}?tab=versions`);
+
+  const table = await screen.findByRole("table", { name: "Versions" });
+  await user.click(within(table).getByRole("link", { name: "v2" }));
+
+  await waitFor(() => expect(router.state.location.href).toContain("tab=items"));
+  expect(router.state.location.href).not.toContain("version");
+});
+
+it("drops a version param that names the latest version", async () => {
+  const { router } = await renderApp(`${DATASET_URL}?version=2`);
+
+  await waitFor(() => expect(router.state.location.href).not.toContain("version"));
+  expect(await screen.findByRole("combobox", { name: "Version" })).toHaveTextContent("Latest (v2)");
+  expect(screen.queryByText(/Items are read-only/)).not.toBeInTheDocument();
+});
+
+it("treats a version above the latest one as the latest", async () => {
+  const { router } = await renderApp(`${DATASET_URL}?version=9`);
+
+  await waitFor(() => expect(router.state.location.href).not.toContain("version"));
+  expect(screen.queryByText(/Items are read-only/)).not.toBeInTheDocument();
+});
+
+it("shows the new latest version, editable, after an item is added", async () => {
+  const user = userEvent.setup();
+  let latest = 2;
+  server.use(
+    http.get("/api/v1/projects/:project/datasets/:dataset", () =>
+      HttpResponse.json({ ...datasetFixture, current_version: latest, item_count: latest + 1 }),
+    ),
+    http.post(ITEMS_PATH, () => {
+      latest = 3;
+      return HttpResponse.json({ version: 3, item_ids: [] }, { status: 201 });
+    }),
+  );
+  await renderApp(DATASET_URL);
+
+  expect(await screen.findByText(/version 2/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Add item" }));
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("textbox", { name: "Input" }));
+  await user.paste('{"question":"new"}');
+  await user.click(within(dialog).getByRole("button", { name: "Add item" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  expect(await screen.findByText(/version 3/)).toBeInTheDocument();
+  expect(screen.queryByText(/Items are read-only/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add item" })).toBeEnabled();
+});

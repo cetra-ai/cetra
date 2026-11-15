@@ -7,6 +7,7 @@ import { projectRef } from "@/api/project-ref";
 import { spanDetailQuery } from "@/api/queries";
 import { datasetsInit, datasetsKey, datasetWriteKeys } from "@/api/queries-datasets";
 import type { Schema } from "@/api/types";
+import { type ItemField, JsonField, splitItemErrors } from "@/components/datasets/item-fields";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
@@ -31,18 +32,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
-import { parseJsonField, payloadJson, prettyJson } from "@/lib/datasets";
+import { parseJsonField, prettyJson } from "@/lib/datasets";
 import { canManageDatasets } from "@/lib/roles";
 
 type From = "trace" | "span";
-type FormField = "dataset" | "name" | "input" | "expected_output" | "metadata";
+type FormField = "dataset" | "name" | ItemField;
 type Metadata = Schema<"FromTraceRequest">["metadata"];
 type DatasetRef = { id: string; name: string };
 
 /** Select value of the "New dataset…" option. Dataset ids are UUIDs, so it cannot clash. */
 const NEW_DATASET = "new";
-const ITEM_FIELDS = ["input", "expected_output", "metadata"] as const;
 const NOT_FOUND =
   "The trace was not found. It may have been deleted or be outside your plan's data window.";
 const DUPLICATE_NAME = "a dataset with this name already exists";
@@ -58,11 +57,32 @@ export interface AddToDatasetTarget {
   selectedIsRoot: boolean;
 }
 
+function useCreateDataset() {
+  return $api.useMutation("post", "/api/v1/projects/{project}/datasets");
+}
+
+function useAddFromTrace() {
+  return $api.useMutation("post", "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace");
+}
+
 /** Copies a trace or a span into a dataset as one new item (D-J-8). */
 export function AddToDatasetButton(props: AddToDatasetTarget) {
   const { data } = useProject();
   const [open, setOpen] = useState(false);
   const canAdd = canManageDatasets(data.role);
+  const createDataset = useCreateDataset();
+  const addFromTrace = useAddFromTrace();
+  // A form the user has typed in, or a request in flight, is not closed by Escape or a click outside.
+  const [dirty, setDirty] = useState(false);
+  const busy = createDataset.isPending || addFromTrace.isPending;
+  const keepOpen = busy || dirty;
+
+  function close() {
+    createDataset.reset();
+    addFromTrace.reset();
+    setDirty(false);
+    setOpen(false);
+  }
 
   return (
     <>
@@ -79,8 +99,29 @@ export function AddToDatasetButton(props: AddToDatasetTarget) {
           Add to dataset
         </Button>
       </DisabledReason>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (next) {
+            setOpen(true);
+          } else if (!busy) {
+            close();
+          }
+        }}
+      >
+        <DialogContent
+          className="max-h-[90vh] overflow-y-auto"
+          onInteractOutside={(event) => {
+            if (keepOpen) {
+              event.preventDefault();
+            }
+          }}
+          onEscapeKeyDown={(event) => {
+            if (keepOpen) {
+              event.preventDefault();
+            }
+          }}
+        >
           <DialogHeader>
             <DialogTitle>Add to dataset</DialogTitle>
             <DialogDescription>
@@ -90,9 +131,12 @@ export function AddToDatasetButton(props: AddToDatasetTarget) {
           {open ? (
             <AddToDatasetForm
               {...props}
-              onClose={() => {
-                setOpen(false);
+              createDataset={createDataset}
+              addFromTrace={addFromTrace}
+              onDirty={() => {
+                setDirty(true);
               }}
+              onClose={close}
             />
           ) : null}
         </DialogContent>
@@ -106,8 +150,16 @@ function AddToDatasetForm({
   rootSpanId,
   spanId,
   selectedIsRoot,
+  createDataset,
+  addFromTrace,
+  onDirty,
   onClose,
-}: AddToDatasetTarget & { onClose: () => void }) {
+}: AddToDatasetTarget & {
+  createDataset: ReturnType<typeof useCreateDataset>;
+  addFromTrace: ReturnType<typeof useAddFromTrace>;
+  onDirty: () => void;
+  onClose: () => void;
+}) {
   const { org, project } = useProject();
   const ref = projectRef(org, project);
   const queryClient = useQueryClient();
@@ -137,10 +189,10 @@ function AddToDatasetForm({
       return;
     }
     if (!edited.current.input) {
-      setInputText(prettyJson(payloadJson(sourceSpan?.input)));
+      setInputText(prettyJson(sourceSpan?.input?.value));
     }
     if (!edited.current.expected) {
-      setExpectedText(prettyJson(payloadJson(sourceSpan?.output)));
+      setExpectedText(prettyJson(sourceSpan?.output?.value));
     }
   }, [sourceSpanId, sourceSpan]);
 
@@ -169,11 +221,6 @@ function AddToDatasetForm({
       ? [...listed, picked]
       : listed;
 
-  const createDataset = $api.useMutation("post", "/api/v1/projects/{project}/datasets");
-  const addFromTrace = $api.useMutation(
-    "post",
-    "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
-  );
   const [errors, setErrors] = useState<Partial<Record<FormField, string>>>({});
   const [formError, setFormError] = useState<string | undefined>();
   const [added, setAdded] = useState<DatasetRef | undefined>();
@@ -181,6 +228,7 @@ function AddToDatasetForm({
   function pickDataset(value: string) {
     setErrors({});
     setFormError(undefined);
+    onDirty();
     if (value === NEW_DATASET) {
       setCreating(true);
       return;
@@ -210,20 +258,13 @@ function AddToDatasetForm({
       setFormError(NOT_FOUND);
       return;
     }
-    const placed: Partial<Record<FormField, string>> = {};
-    for (const [field, message] of Object.entries(fieldErrors(caught))) {
-      const known = ITEM_FIELDS.find((candidate) => candidate === field);
-      if (known) {
-        placed[known] = message;
-      }
+    const { placed, other } = splitItemErrors(caught);
+    setErrors(placed);
+    if (other.length > 0 || Object.keys(placed).length === 0) {
+      const fallback =
+        problem?.status === 409 ? "The dataset is full" : "The item could not be added";
+      setFormError(other.length > 0 ? other.join(" ") : problemMessage(caught, fallback));
     }
-    if (Object.keys(placed).length > 0) {
-      setErrors(placed);
-      return;
-    }
-    const fallback =
-      problem?.status === 409 ? "The dataset is full" : "The item could not be added";
-    setFormError(problemMessage(caught, fallback));
   }
 
   async function onSubmit(event: FormEvent) {
@@ -325,7 +366,6 @@ function AddToDatasetForm({
     from === "trace" && rootSpanId === undefined
       ? "This trace has no root span; type the input."
       : undefined;
-  const message = loadMessage ?? formError ?? errors.dataset;
 
   return (
     <form noValidate className="flex flex-col gap-4" onSubmit={onSubmit}>
@@ -359,6 +399,7 @@ function AddToDatasetForm({
           value={search}
           onChange={(event) => {
             setSearch(event.target.value);
+            onDirty();
           }}
         />
         <Select value={creating ? NEW_DATASET : (picked?.id ?? "")} onValueChange={pickDataset}>
@@ -386,7 +427,10 @@ function AddToDatasetForm({
             id="add-to-dataset-name"
             label="Name of the new dataset"
             value={name}
-            onChange={setName}
+            onChange={(value) => {
+              setName(value);
+              onDirty();
+            }}
             required
             maxLength={200}
             error={errors.name}
@@ -402,6 +446,7 @@ function AddToDatasetForm({
         onChange={(value) => {
           edited.current.input = true;
           setInputText(value);
+          onDirty();
         }}
         error={errors.input}
       />
@@ -412,6 +457,7 @@ function AddToDatasetForm({
         onChange={(value) => {
           edited.current.expected = true;
           setExpectedText(value);
+          onDirty();
         }}
         error={errors.expected_output}
       />
@@ -419,49 +465,20 @@ function AddToDatasetForm({
         label="Metadata"
         value={metadataText}
         disabled={loading}
-        onChange={setMetadataText}
+        onChange={(value) => {
+          setMetadataText(value);
+          onDirty();
+        }}
         error={errors.metadata}
       />
 
-      <FormError message={message} />
+      <FormError message={formError ?? errors.dataset} />
+      <FormError message={loadMessage} />
       <DialogFooter>
         <SubmitButton pending={busy} disabled={loading}>
           Add item
         </SubmitButton>
       </DialogFooter>
     </form>
-  );
-}
-
-function JsonField({
-  label,
-  value,
-  disabled,
-  onChange,
-  error,
-}: {
-  label: string;
-  value: string;
-  disabled: boolean;
-  onChange: (value: string) => void;
-  error?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-sm font-medium">{label}</span>
-      <Textarea
-        aria-label={label}
-        className="font-mono text-xs"
-        spellCheck={false}
-        rows={4}
-        disabled={disabled}
-        value={value}
-        aria-invalid={error ? true : undefined}
-        onChange={(event) => {
-          onChange(event.target.value);
-        }}
-      />
-      {error ? <p className="text-xs text-destructive">{error}</p> : null}
-    </div>
   );
 }

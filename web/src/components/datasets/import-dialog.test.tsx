@@ -242,3 +242,47 @@ it("lists the rows of a refused import", async () => {
   expect(within(row).getByText("1")).toBeInTheDocument();
   expect(within(row).getByText("the row has no input")).toBeInTheDocument();
 });
+
+it("labels an error that is not about a row as a mapping", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.post(PREVIEW_PATH, () => HttpResponse.json(CSV_PREVIEW)),
+    http.post(IMPORT_PATH, () =>
+      problemResponse(400, "invalid_request", {
+        detail: "the mapping is not valid",
+        errors: [{ field: "mapping.columns[1].target", message: "another column has this target" }],
+      }),
+    ),
+  );
+  renderDialog();
+
+  await choose(user, csvFile());
+  await user.click(await screen.findByRole("button", { name: "Import" }));
+
+  expect(await screen.findByText("another column has this target")).toBeInTheDocument();
+  const table = screen.getByRole("table", { name: "Row errors" });
+  const row = within(table).getAllByRole("row")[1] as HTMLElement;
+  expect(within(row).getByText("Mapping")).toBeInTheDocument();
+});
+
+it("previews the same file again after a refused one", async () => {
+  const user = userEvent.setup();
+  let previews = 0;
+  server.use(
+    http.post(PREVIEW_PATH, () => {
+      previews += 1;
+      return previews === 1
+        ? problemResponse(400, "invalid_request", { detail: "the file has no header" })
+        : HttpResponse.json(CSV_PREVIEW);
+    }),
+  );
+  renderDialog();
+  const file = csvFile();
+
+  await choose(user, file);
+  expect(await screen.findByText("the file has no header")).toBeInTheDocument();
+  await choose(user, file);
+
+  expect(await screen.findByRole("table", { name: "Preview" })).toBeInTheDocument();
+  expect(previews).toBe(2);
+});

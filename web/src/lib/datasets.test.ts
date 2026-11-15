@@ -5,7 +5,6 @@ import {
   mappingProblems,
   parseDatasetSearch,
   parseJsonField,
-  payloadJson,
   prettyJson,
   previewJson,
   sameJson,
@@ -64,17 +63,36 @@ describe("previewJson", () => {
   it("shows a missing value as a dash", () => {
     expect(previewJson(undefined)).toBe("—");
   });
-});
 
-describe("payloadJson", () => {
-  it("returns the value of each payload format", () => {
-    expect(payloadJson({ format: "messages", value: [] })).toEqual([]);
-    expect(payloadJson({ format: "json", value: { a: 1 } })).toEqual({ a: 1 });
-    expect(payloadJson({ format: "text", value: "ok" })).toBe("ok");
+  it("cuts a large object without serializing all of it", () => {
+    const large = { rows: Array.from({ length: 100_000 }, (_, index) => ({ index })) };
+    const preview = previewJson(large, 200);
+    expect(preview.length).toBeLessThanOrEqual(201);
+    expect(preview.endsWith("…")).toBe(true);
+    expect(preview.startsWith('{"rows":[{"index":0},{"index":1}')).toBe(true);
   });
 
-  it("returns undefined without a payload", () => {
-    expect(payloadJson(undefined)).toBeUndefined();
+  it("cuts a large array with an ellipsis", () => {
+    const preview = previewJson(
+      Array.from({ length: 10_000 }, () => "abcdef"),
+      50,
+    );
+    expect(preview.length).toBeLessThanOrEqual(51);
+    expect(preview.endsWith("…")).toBe(true);
+  });
+
+  it("shows a short object exactly as JSON.stringify does", () => {
+    const value = { a: [1, null, "two", true], b: { c: undefined, d: "e" } };
+    expect(previewJson(value, 1000)).toBe(JSON.stringify(value));
+  });
+
+  it("follows JSON.stringify for values JSON cannot hold", () => {
+    const value = { when: new Date(0), skipped: () => 1, list: [undefined, () => 1] };
+    expect(previewJson(value, 1000)).toBe(JSON.stringify(value));
+  });
+
+  it("does not stringify a long string", () => {
+    expect(previewJson("y".repeat(5000), 3)).toBe("yyy…");
   });
 });
 
@@ -184,5 +202,41 @@ describe("mappingProblems", () => {
         { column: "a", target: "expected" },
       ]),
     ).toEqual(["q: the key is empty"]);
+  });
+
+  it("flags a key that is only whitespace", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: "input.   " },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual(["q: the key is empty"]);
+  });
+
+  it("flags a key longer than 200 characters", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: `input.${"k".repeat(201)}` },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual(["q: the key is longer than 200 characters"]);
+  });
+
+  it("accepts a key of exactly 200 characters", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: `input.${"k".repeat(200)}` },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("counts characters, not UTF-16 units", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: `input.${"é".repeat(200)}` },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual([]);
   });
 });

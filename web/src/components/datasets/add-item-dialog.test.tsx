@@ -97,3 +97,27 @@ it("shows the item cap", async () => {
 
   expect(await screen.findByText("a dataset holds at most 50000 items")).toBeInTheDocument();
 });
+
+it("does not close while the item is being added", async () => {
+  const user = userEvent.setup();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.post(PATH, async () => {
+      await gate;
+      return HttpResponse.json({ version: 3, item_ids: [DATASET_ID] }, { status: 201 });
+    }),
+  );
+  const { onOpenChange } = renderDialog();
+
+  await setText(user, "Input", "{}");
+  await user.click(screen.getByRole("button", { name: "Add item" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Add item" })).toBeDisabled());
+  await user.keyboard("{Escape}");
+
+  expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  release();
+  await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+});

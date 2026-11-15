@@ -1,3 +1,4 @@
+import { keepPreviousData } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Loader2, Table2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -38,6 +39,11 @@ function DatasetsPage() {
   const [creating, setCreating] = useState(false);
   const [text, setText] = useState(q ?? "");
 
+  // The search text follows the URL when it changes from elsewhere (back, another link).
+  useEffect(() => {
+    setText((current) => (current.trim() === (q ?? "") ? current : (q ?? "")));
+  }, [q]);
+
   // The search text reaches the URL after a pause, so typing does not request on every key.
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -62,6 +68,7 @@ function DatasetsPage() {
       pageParamName: "cursor",
       initialPageParam: null,
       getNextPageParam: (page) => page.next_cursor ?? undefined,
+      placeholderData: keepPreviousData,
     },
   );
 
