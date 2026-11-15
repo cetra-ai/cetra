@@ -1,0 +1,31 @@
+{
+  "results": [
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d01",
+      "repetition": 0,
+      "trace_id": "e1000000000000000000000000000001",
+      "output": {
+        "answer": "Use the Forgot password link on the login page."
+      },
+      "latency_ns": 1000000000
+    },
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d02",
+      "repetition": 0,
+      "trace_id": "e1000000000000000000000000000002",
+      "output": {
+        "answer": "Yes, as JSONL."
+      },
+      "latency_ns": 2000000000
+    },
+    {
+      "dataset_item_id": "01900000-0000-7000-8000-000000000d03",
+      "repetition": 0,
+      "trace_id": "e1000000000000000000000000000003",
+      "output": {
+        "answer": "The Pro and Enterprise plans."
+      },
+      "latency_ns": 3000000000
+    }
+  ]
+}

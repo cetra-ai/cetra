@@ -246,6 +246,15 @@ async fn run_json(
         checked.window,
     )
     .await?;
+    crate::datasets::sql_views::register(
+        state,
+        &ctx,
+        access.project.org_id,
+        access.project.id,
+        &checked.query,
+        checked.window,
+    )
+    .await?;
     let json = ctx
         .sql_json(SqlRequest {
             query: &checked.query,
@@ -290,6 +299,15 @@ async fn start_export(
         state,
         access.project.org_id,
         access.project.id,
+        checked.window,
+    )
+    .await?;
+    crate::datasets::sql_views::register(
+        state,
+        &ctx,
+        access.project.org_id,
+        access.project.id,
+        &checked.query,
         checked.window,
     )
     .await?;

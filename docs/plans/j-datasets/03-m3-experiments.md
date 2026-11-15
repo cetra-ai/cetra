@@ -1316,6 +1316,8 @@ The sandbox accepts a registered name as a table (it reads `registered_view_name
 
 D-J-9 (D24, D-M-14). One statement block in the deletion's scope write.
 
+Note (from J3.1): the `Cascade` struct (`dataset_item_revisions`, `experiment_items` counts) was left out of `meta/experiments.rs` in J3.1, because nothing used it there and an unused type fails clippy's test build. Add it here, with `delete_copies_of_tx`, which returns it.
+
 ### Files
 
 | File | Change |

@@ -1652,6 +1652,134 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List experiments
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_experiments"];
+        put?: never;
+        /**
+         * Create an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.
+         */
+        post: operations["post_experiment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compare experiments
+         * @description Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.
+         */
+        get: operations["compare_experiments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an experiment
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.
+         */
+        delete: operations["delete_experiment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post results
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_results"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get results
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment_results"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -2883,6 +3011,51 @@ export interface components {
          * @enum {string}
          */
         Comparator: "gt" | "gte" | "lt" | "lte";
+        /** @description One experiment's answer for one item. */
+        CompareCell: {
+            /** @description The error of the item, from its lowest repetition or another one. Omitted when none. */
+            error?: string;
+            /**
+             * Format: uuid
+             * @description The experiment.
+             */
+            experiment_id: string;
+            /**
+             * Format: int64
+             * @description The latency of the item's lowest repetition, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * @description Whether this cell regressed against the baseline's cell of the same item. Always false
+             *     for the baseline.
+             */
+            regressed: boolean;
+            /** @description The mean over repetitions, per score name. */
+            scores: {
+                [key: string]: number;
+            };
+            /** @description The trace of the item's lowest repetition. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description One dataset item, with each experiment's cell. */
+        CompareRow: {
+            /**
+             * @description One cell per experiment that has a result for the item, in request order. Match cells by
+             *     `experiment_id`, never by position (D-J-13).
+             */
+            cells: components["schemas"]["CompareCell"][];
+            /**
+             * Format: uuid
+             * @description The dataset item.
+             */
+            dataset_item_id: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+        };
         /**
          * @description Whether the connection's last test reached the provider.
          * @enum {string}
@@ -3027,6 +3200,42 @@ export interface components {
             output_score: components["schemas"]["OutputScoreBody"];
             /** @description Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook. */
             webhook_secret?: string;
+        };
+        /** @description `POST /api/v1/projects/{project}/experiments` body. */
+        CreateExperimentRequest: {
+            /** @description The dataset, by id or by name. */
+            dataset: string;
+            /**
+             * Format: int64
+             * @description The version to pin. Defaults to the dataset's current version. 0 is refused.
+             */
+            dataset_version?: number;
+            /** @description Free text, at most 2 000 characters. */
+            description?: string;
+            /** @description A JSON object of at most 64 KiB. */
+            metadata?: Record<string, never>;
+            /** @description Experiment name, 1 to 200 characters after trimming. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20. Defaults to 1.
+             */
+            repetitions?: number;
+        };
+        /**
+         * @description The created experiment and the first page of its pinned items. The SDK pages the rest with
+         *     `GET …/datasets/{dataset}/items?version=` from `next_cursor`.
+         */
+        CreateExperimentResponse: {
+            /** @description The experiment, `running`. */
+            experiment: components["schemas"]["Experiment"];
+            /** @description The first 1 000 items of the pinned version, by item id. */
+            items: components["schemas"]["DatasetItem"][];
+            /**
+             * @description The item id to pass as `cursor` of `GET …/items` for the next page, or null on the last
+             *     page. Always present.
+             */
+            next_cursor: string | null;
         };
         /** @description `POST /api/internal/v1/orgs` (D-P-29). */
         CreateInternalOrgRequest: {
@@ -3781,6 +3990,177 @@ export interface components {
              */
             output_tokens?: number;
         };
+        /** @description One experiment: a run of a task over a pinned dataset version. */
+        Experiment: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The dataset. Omitted once the dataset is deleted.
+             */
+            dataset_id?: string;
+            /** @description The dataset's name when the experiment was created. */
+            dataset_name: string;
+            /**
+             * Format: int64
+             * @description The dataset version the experiment is pinned to.
+             */
+            dataset_version: number;
+            /** @description Free text. Omitted when unset. */
+            description?: string;
+            /** @description The error the experiment finished with. Omitted when none. */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description When the experiment finished. Omitted while it runs. JSON is RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Experiment id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Live items of the pinned version.
+             */
+            item_count: number;
+            /** @description A JSON object. */
+            metadata: Record<string, never>;
+            /** @description Not unique. 1 to 200 characters. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20.
+             */
+            repetitions: number;
+            /**
+             * Format: int64
+             * @description Results stored so far.
+             */
+            result_count: number;
+            /** @description `running`, `completed` or `failed`. */
+            status: components["schemas"]["ExperimentStatus"];
+        };
+        /** @description `GET …/experiments/compare`: two to four experiments of one dataset, the first the baseline. */
+        ExperimentComparison: {
+            /** @description The deltas of each candidate. */
+            deltas: components["schemas"]["ScoreDeltas"][];
+            /** @description The experiments in request order; the first is the baseline. */
+            experiments: components["schemas"]["ExperimentSummary"][];
+            /** @description The cursor of the next page, or null on the last page. Always present. */
+            next_cursor: string | null;
+            /** @description One page of items, by item id. */
+            rows: components["schemas"]["CompareRow"][];
+            /**
+             * @description Notes on the comparison, such as differing dataset versions or items left out of the
+             *     deltas.
+             */
+            warnings: string[];
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ExperimentPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Experiment"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One result: what the task answered for one item and repetition. */
+        ExperimentResult: {
+            /**
+             * Format: uuid
+             * @description The dataset item. Its input and expected output are copied from the pinned version.
+             */
+            dataset_item_id: string;
+            /** @description What went wrong, at most 4 096 characters. Omitted when none. */
+            error?: string;
+            /**
+             * Format: int64
+             * @description Time the task took, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * Format: int64
+             * @description 0 to `repetitions` − 1.
+             */
+            repetition: number;
+            /** @description The trace of the task run. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description `GET …/experiments/{id}/results`: the summary, and one page of rows. */
+        ExperimentResults: {
+            /** @description The cursor of the next page, or null on the last page. Always present. */
+            next_cursor: string | null;
+            /** @description One page of rows, by item id then repetition. */
+            rows: components["schemas"]["ResultRow"][];
+            /** @description The aggregated experiment. */
+            summary: components["schemas"]["ExperimentSummary"];
+        };
+        /** @description `POST …/experiments/{id}/items` body: 1 to 500 results. */
+        ExperimentResultsRequest: {
+            /** @description The results, 1 to 500 of them. One row per item and repetition: a later post replaces it. */
+            results: components["schemas"]["ExperimentResult"][];
+        };
+        /** @description What `POST …/items` stored. */
+        ExperimentResultsResponse: {
+            /**
+             * Format: int64
+             * @description Rows not stored because their trace is being deleted (D-J-9).
+             */
+            skipped: number;
+            /**
+             * Format: int64
+             * @description Rows written.
+             */
+            stored: number;
+        };
+        /**
+         * @description `running`, `completed` or `failed`.
+         * @enum {string}
+         */
+        ExperimentStatus: "running" | "completed" | "failed";
+        /** @description The results of one experiment, aggregated. */
+        ExperimentSummary: {
+            /**
+             * Format: double
+             * @description The sum of the traces' costs. Omitted when no trace has a cost.
+             */
+            cost_total?: number;
+            /**
+             * Format: int64
+             * @description Results with an error.
+             */
+            error_count: number;
+            /** @description The experiment. */
+            experiment: components["schemas"]["Experiment"];
+            /**
+             * Format: int64
+             * @description The mean latency. Omitted when no result has one.
+             */
+            latency_mean_ns?: number;
+            /**
+             * Format: int64
+             * @description The median latency, by nearest rank. Omitted when no result has one.
+             */
+            latency_p50_ns?: number;
+            /**
+             * Format: int64
+             * @description The 95th percentile latency, by nearest rank. Omitted when no result has one.
+             */
+            latency_p95_ns?: number;
+            /**
+             * Format: int64
+             * @description Results stored.
+             */
+            result_count: number;
+            /** @description One entry per score name, sorted by name. */
+            scores: components["schemas"]["ScoreSummary"][];
+        };
         /**
          * @description The format of an export (D-J-7).
          * @enum {string}
@@ -3826,6 +4206,11 @@ export interface components {
             message: string;
             /** @description Location inside the field value, for filter and SQL errors. */
             position?: components["schemas"]["TextPosition"];
+        };
+        /** @description `POST …/experiments/{id}/finish` body. */
+        FinishExperimentRequest: {
+            /** @description Why the run failed, at most 4 096 characters. Omitted for `completed`. */
+            error?: string;
         };
         /** @description `POST /api/auth/password/forgot`. */
         ForgotPasswordRequest: {
@@ -5094,6 +5479,55 @@ export interface components {
             /** @description The token from the reset link. */
             token: string;
         };
+        /** @description One result of an experiment, with its input and output. */
+        ResultRow: {
+            /**
+             * Format: double
+             * @description The cost of the trace. Omitted when unpriced.
+             */
+            cost_total?: number;
+            /**
+             * Format: uuid
+             * @description The dataset item.
+             */
+            dataset_item_id: string;
+            /** @description What went wrong. Omitted when none. */
+            error?: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+            /**
+             * Format: int64
+             * @description The time the task took, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * Format: int64
+             * @description The repetition, 0 to `repetitions` − 1.
+             */
+            repetition: number;
+            /** @description The row's scores by name. */
+            scores: {
+                [key: string]: components["schemas"]["ResultScore"];
+            };
+            /** @description The trace of the task run. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description One score of a result row. The design calls it `ScoreValue`; core already has that name. */
+        ResultScore: {
+            /** @description The kind of value the score carries. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /**
+             * Format: double
+             * @description The mean of the row's numeric values of this score. Omitted when none.
+             */
+            value_num?: number;
+            /** @description The label of a categorical score or the text of a text score. Omitted when none. */
+            value_str?: string;
+        };
         /** @description Spend of a rule budget in the current period. */
         RuleSpend: {
             /**
@@ -5301,6 +5735,17 @@ export interface components {
         };
         /** @description One score to write. Spec 06 § Scores, D-F-1, D-G-28. */
         ScoreCreate: {
+            /**
+             * Format: uuid
+             * @description Dataset item (stable id) the score is about; set together with `experiment_id`.
+             */
+            dataset_item_id?: string;
+            /**
+             * Format: uuid
+             * @description Experiment the score belongs to; set together with `dataset_item_id`, on a trace target
+             *     (D-J-12).
+             */
+            experiment_id?: string;
             /** @description String metadata stored with the score. */
             metadata?: {
                 [key: string]: string;
@@ -5390,6 +5835,31 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description One score's delta of a candidate to the baseline. */
+        ScoreDelta: {
+            /**
+             * Format: double
+             * @description The candidate's mean minus the baseline's, over the items both ran without error.
+             */
+            delta: number;
+            /**
+             * Format: int64
+             * @description The items that were compared.
+             */
+            n_compared: number;
+        };
+        /** @description The deltas of one candidate, per score name. */
+        ScoreDeltas: {
+            /**
+             * Format: uuid
+             * @description The candidate.
+             */
+            experiment_id: string;
+            /** @description One delta per score name with at least one compared item. */
+            scores: {
+                [key: string]: components["schemas"]["ScoreDelta"];
+            };
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         ScorePage: {
             /** @description Items in this page. */
@@ -5404,6 +5874,47 @@ export interface components {
          * @enum {string}
          */
         ScoreSource: "api" | "sdk" | "human" | "end_user" | "llm_judge" | "check" | "webhook";
+        /** @description One score of an experiment, over its rows. */
+        ScoreSummary: {
+            /**
+             * Format: int64
+             * @description Rows with at least one score of this name.
+             */
+            count: number;
+            /** @description The data type the experiment's scores of this name mostly carry. */
+            data_type: components["schemas"]["ScoreDataType"];
+            /** @description Categoricals only: the rows per label. */
+            labels: {
+                [key: string]: number;
+            };
+            /**
+             * Format: double
+             * @description The largest value. Omitted when none.
+             */
+            max?: number;
+            /**
+             * Format: double
+             * @description Numeric and categorical scores: the mean over the rows that have a value. Omitted when none.
+             */
+            mean?: number;
+            /**
+             * Format: double
+             * @description The median of the same values. Omitted when none.
+             */
+            median?: number;
+            /**
+             * Format: double
+             * @description The smallest value. Omitted when none.
+             */
+            min?: number;
+            /** @description The score's name. */
+            name: string;
+            /**
+             * Format: double
+             * @description Booleans only: the share of rows that passed (the mean of 0 and 1). Omitted otherwise.
+             */
+            pass_rate?: number;
+        };
         /**
          * @description What a score is attached to.
          *
@@ -14492,6 +15003,658 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_experiments: {
+        parameters: {
+            query?: {
+                /** @description Keep one dataset's experiments: its id or name. */
+                dataset?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of experiments, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment and the first page of its pinned items. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateExperimentResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    compare_experiments: {
+        parameters: {
+            query: {
+                /** @description Two to four distinct experiment ids, comma-separated; the first is the baseline. */
+                ids: string;
+                /** @description The regression threshold, absolute, 0 to 1000 (default 0.1). */
+                threshold?: number;
+                /** @description Keep only the items with a regressed cell. */
+                regressions_only?: boolean;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The comparison and one page of its items. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentComparison"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The experiment. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_finish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FinishExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment after the finish. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_results: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExperimentResultsRequest"];
+            };
+        };
+        responses: {
+            /** @description The rows stored and skipped. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentResultsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment_results: {
+        parameters: {
+            query?: {
+                /** @description Keep only the rows with an error. */
+                errors_only?: boolean;
+                /** @description Maximum number of rows to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The summary of the experiment and one page of its rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentResults"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -43,6 +43,7 @@ rand.workspace = true
 subtle.workspace = true
 sha2.workspace = true
 chrono.workspace = true
+datafusion.workspace = true
 base64.workspace = true
 csv.workspace = true
 openidconnect.workspace = true
@@ -63,7 +64,6 @@ hex.workspace = true
 rmcp.workspace = true
 
 [dev-dependencies]
-datafusion.workspace = true
 ed25519-dalek.workspace = true
 http-body.workspace = true
 tracing-subscriber.workspace = true

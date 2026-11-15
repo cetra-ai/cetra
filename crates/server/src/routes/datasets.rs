@@ -661,7 +661,7 @@ fn version_of(row: &DatasetRow, requested: Option<i64>) -> Result<i64, ApiError>
 }
 
 /// API form of one stored item revision.
-fn item_json(row: &ItemRow) -> DatasetItem {
+pub(crate) fn item_json(row: &ItemRow) -> DatasetItem {
     DatasetItem {
         id: row.item_id,
         revision_id: row.revision_id,

@@ -91,8 +91,9 @@ pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
 pub use reads::{
-    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
-    KpiName, LATEST_SCORE_COLUMNS, ListScope, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
+    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, ExperimentScore,
+    ExperimentTrace, FilterDeletionRequest, Kpi, KpiName, LATEST_SCORE_COLUMNS, ListScope,
+    MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
     MAX_PAGE, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TRACE_SPANS,
     MAX_USER_SESSIONS, MatchCountRequest, MetricsData, MetricsGroupBy, MetricsRequest,
     ModelUsageRow, Page, Point, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest,
@@ -100,10 +101,10 @@ pub use reads::{
     SortOrder, SpanListRequest, SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS,
     TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
     TraceSpansRequest, USER_COLUMNS, UserDeletionScope, UserDetailData, UserListRequest, UserSort,
-    alert_value, eval_trace_ids, filter_trace_ids, latest_scores, match_count, metrics::metrics,
-    score_list, scores_by_id, session_detail, session_list, span_detail, span_list, span_refresh,
-    trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans, user_deletion_scope,
-    user_detail, user_list, validate_filter,
+    alert_value, eval_trace_ids, experiment_scores, experiment_traces, filter_trace_ids,
+    latest_scores, match_count, metrics::metrics, score_list, scores_by_id, session_detail,
+    session_list, span_detail, span_list, span_refresh, trace_detail, trace_list, trace_list_plan,
+    trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list, validate_filter,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};

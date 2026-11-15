@@ -68,6 +68,13 @@ use super::evaluators::{
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
+use super::experiments::{
+    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
+    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
+    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
+    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
+    ScoreSummary,
+};
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
     InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
@@ -316,6 +323,25 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<ImportRowError>();
     set.insert::<ImportPreview>();
     set.insert::<ImportResult>();
+    set.insert::<Experiment>();
+    set.insert::<ExperimentStatus>();
+    set.insert::<CreateExperimentRequest>();
+    set.insert::<CreateExperimentResponse>();
+    set.insert::<ExperimentResult>();
+    set.insert::<ExperimentResultsRequest>();
+    set.insert::<ExperimentResultsResponse>();
+    set.insert::<FinishExperimentRequest>();
+    set.insert_page::<Experiment>("ExperimentPage");
+    set.insert::<ExperimentSummary>();
+    set.insert::<ScoreSummary>();
+    set.insert::<ResultScore>();
+    set.insert::<ResultRow>();
+    set.insert::<ExperimentResults>();
+    set.insert::<CompareCell>();
+    set.insert::<CompareRow>();
+    set.insert::<ScoreDelta>();
+    set.insert::<ScoreDeltas>();
+    set.insert::<ExperimentComparison>();
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -450,6 +476,10 @@ pub fn openapi() -> OpenApi {
                 "Named score shapes that score writes and evaluators must fit.",
             ),
             tag("datasets", "Versioned datasets and their items."),
+            tag(
+                "experiments",
+                "Experiments run by the SDK and their results.",
+            ),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
             tag("sql", "SQL console over the project's views."),
@@ -775,6 +805,7 @@ fn paths() -> Paths {
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = dataset_paths(paths);
+    let paths = experiment_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
@@ -3081,6 +3112,138 @@ fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
         ))
         .content("multipart/form-data", Content::new(Some(schema)))
         .build()
+}
+
+const EXPERIMENT_READ: &str = "Any project member, or an API key with `read`.";
+const EXPERIMENT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Experiment id.");
+    let list = operation("list_experiments", "experiments", "List experiments")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ExperimentListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named("ExperimentPage", "One page of experiments, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_experiment", "experiments", "Create an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateExperimentRequest")))
+        .responses(responses(
+            "201",
+            json_of::<CreateExperimentResponse>(
+                "The experiment and the first page of its pinned items.",
+            ),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let get = operation("get_experiment", "experiments", "Get an experiment")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Experiment>("The experiment."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let delete = operation("delete_experiment", "experiments", "Delete an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let results = operation("post_experiment_results", "experiments", "Post results")
+        .description(Some(EXPERIMENT_WRITE))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("ExperimentResultsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResultsResponse>("The rows stored and skipped."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let experiment_results = operation("get_experiment_results", "experiments", "Get results")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ResultsParams>(vec![
+            project_param(),
+            id.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResults>("The summary of the experiment and one page of its rows."),
+            READ_ERRORS,
+        ))
+        .build();
+    let compare = operation("compare_experiments", "experiments", "Compare experiments")
+        .description(Some(
+            "Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.",
+        ))
+        .parameters(Some(with_query::<CompareParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentComparison>("The comparison and one page of its items."),
+            READ_ERRORS,
+        ))
+        .build();
+    let finish = operation(
+        "post_experiment_finish",
+        "experiments",
+        "Finish an experiment",
+    )
+    .description(Some(EXPERIMENT_WRITE))
+    .parameters(Some(vec![project_param(), id]))
+    .request_body(Some(json_body("FinishExperimentRequest")))
+    .responses(responses(
+        "200",
+        json_of::<Experiment>("The experiment after the finish."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/items"),
+            PathItem::new(HttpMethod::Post, results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/finish"),
+            PathItem::new(HttpMethod::Post, finish),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/results"),
+            PathItem::new(HttpMethod::Get, experiment_results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/compare"),
+            PathItem::new(HttpMethod::Get, compare),
+        )
 }
 
 fn score_definition_paths(paths: PathsBuilder) -> PathsBuilder {

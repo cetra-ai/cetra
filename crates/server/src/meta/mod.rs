@@ -16,6 +16,7 @@ pub(crate) mod email_verifications;
 pub(crate) mod entitlements;
 pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
+pub(crate) mod experiments;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;

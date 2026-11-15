@@ -32,6 +32,10 @@ use llmobs_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult,
 };
+use llmobs_server::api::experiments::{
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
+    ExperimentResultsRequest,
+};
 use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use llmobs_server::api::members::{OrgMember, ProjectMember};
@@ -418,6 +422,11 @@ fn static_files_match_their_types() {
     roundtrip::<Evaluator>("static/evaluator.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
+    roundtrip::<Page<Experiment>>("static/experiments.json");
+    roundtrip::<Experiment>("static/experiment.json");
+    roundtrip::<CreateExperimentResponse>("static/experiment-created.json");
+    roundtrip::<ExperimentResults>("static/experiment-results.json");
+    roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
@@ -447,6 +456,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
+    roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
     let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
@@ -506,6 +516,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "post_dataset_item_from_trace",
             "requests/dataset-from-trace.json",
+        ),
+        (
+            "post_experiment_results",
+            "requests/experiment-results.json",
         ),
         ("post_backfill", "requests/backfill-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
@@ -632,6 +646,11 @@ fn generated_files_roundtrip() {
             "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
             "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
             "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
+            "list_experiments" => roundtrip::<Page<Experiment>>(&example.file),
+            "get_experiment" => roundtrip::<Experiment>(&example.file),
+            "post_experiment" => roundtrip::<CreateExperimentResponse>(&example.file),
+            "get_experiment_results" => roundtrip::<ExperimentResults>(&example.file),
+            "compare_experiments" => roundtrip::<ExperimentComparison>(&example.file),
             "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
             "post_backfill" => roundtrip::<Backfill>(&example.file),
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),

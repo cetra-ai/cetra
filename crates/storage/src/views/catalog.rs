@@ -868,7 +868,18 @@ mod tests {
     #[test]
     fn catalog_matches_the_schema_fixture() {
         let fixture = fixture();
-        let views = fixture["views"].as_array().expect("views");
+        // The server owns these two views' catalog (D93, D-J-15).
+        let views: Vec<&Value> = fixture["views"]
+            .as_array()
+            .expect("views")
+            .iter()
+            .filter(|view| {
+                !matches!(
+                    view["name"].as_str(),
+                    Some("experiment_items" | "dataset_items")
+                )
+            })
+            .collect();
         let catalog = view_catalog();
         assert_eq!(catalog.len(), views.len());
         for (view, expected) in catalog.iter().zip(views) {

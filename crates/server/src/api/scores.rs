@@ -42,6 +42,13 @@ pub struct ScoreCreate {
     /// String metadata stored with the score.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    /// Experiment the score belongs to; set together with `dataset_item_id`, on a trace target
+    /// (D-J-12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<Uuid>,
+    /// Dataset item (stable id) the score is about; set together with `experiment_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_item_id: Option<Uuid>,
 }
 
 /// `POST …/scores` and `POST /api/v1/scores` body.

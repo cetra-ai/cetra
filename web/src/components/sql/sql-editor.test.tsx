@@ -55,7 +55,14 @@ function Harness({
 
 it("builds the completion namespace from the schema views", () => {
   const namespace = sqlNamespace(schemaDocument);
-  expect(Object.keys(namespace)).toEqual(["traces", "spans", "sessions", "scores"]);
+  expect(Object.keys(namespace)).toEqual([
+    "traces",
+    "spans",
+    "sessions",
+    "scores",
+    "experiment_items",
+    "dataset_items",
+  ]);
   expect(namespace).toHaveProperty("traces.0", {
     label: "trace_id",
     type: "property",

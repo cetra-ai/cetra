@@ -1,6 +1,7 @@
 //! Dataset validation: names, sizes, JSON Schemas (D-J-2, D-J-4). No database access.
 
 pub(crate) mod import;
+pub(crate) mod sql_views;
 
 use std::fmt;
 

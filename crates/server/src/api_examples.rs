@@ -704,6 +704,42 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/score-definition.json",
         ),
         example(
+            "list_experiments",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/experiments.json",
+            "application/json",
+        ),
+        example(
+            "get_experiment",
+            params(&[("id", "01900000-0000-7000-8000-000000000e01")]),
+            BTreeMap::new(),
+            "static/experiment.json",
+            "application/json",
+        ),
+        example_created(
+            "post_experiment",
+            BTreeMap::new(),
+            "static/experiment-created.json",
+        ),
+        example(
+            "get_experiment_results",
+            params(&[("id", "01900000-0000-7000-8000-000000000e01")]),
+            BTreeMap::new(),
+            "static/experiment-results.json",
+            "application/json",
+        ),
+        example(
+            "compare_experiments",
+            BTreeMap::new(),
+            params(&[(
+                "ids",
+                "01900000-0000-7000-8000-000000000e01,01900000-0000-7000-8000-000000000e02",
+            )]),
+            "static/experiment-comparison.json",
+            "application/json",
+        ),
+        example(
             "list_personal_tokens",
             BTreeMap::new(),
             BTreeMap::new(),
