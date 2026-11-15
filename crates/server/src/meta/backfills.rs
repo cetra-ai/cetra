@@ -98,8 +98,27 @@ pub(crate) enum PageWrite {
     RuleGone,
     /// The rule is disabled; nothing was written.
     RuleDisabled,
-    /// The rule was edited since the run started (its `updated_at` changed); nothing was written.
+    /// A field the run depends on changed since the run started (see [`RuleSnapshot`]); nothing
+    /// was written.
     RuleChanged,
+}
+
+/// The rule fields a backfill run reads, as they were when the run started (D-I-41). A page write
+/// refuses the run when one of them changed; pauses, resumes and budget changes do not count.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RuleSnapshot {
+    /// The rule.
+    pub(crate) id: Uuid,
+    /// Filter DSL expression, when set.
+    pub(crate) filter: Option<String>,
+    /// JSON object text `{variable: path}`.
+    pub(crate) variable_mapping: String,
+    /// Fraction of matching traces that run.
+    pub(crate) sample_rate: f64,
+    /// `trace` or `span`.
+    pub(crate) target: String,
+    /// The evaluator the rule runs.
+    pub(crate) evaluator_id: Uuid,
 }
 
 /// How a backfill ends.
@@ -205,9 +224,9 @@ pub(crate) async fn running_backfills(pool: &SqlitePool) -> Result<Vec<BackfillR
 }
 
 /// Writes one page of a backfill in one transaction (D-I-40): the rule must still exist, be
-/// enabled and have the `rule_updated_at` the run started with, then every job is upserted (D-I-11)
-/// and the counters are updated. `matched` is the run's total so far, not a delta; `enqueued` grows
-/// by the jobs inserted or re-queued.
+/// enabled and have the fields of `rule` the run started with (D-I-41), then every job is upserted
+/// (D-I-11) and the counters are updated. `matched` is the run's total so far, not a delta;
+/// `enqueued` grows by the jobs inserted or re-queued.
 ///
 /// # Errors
 ///
@@ -216,24 +235,31 @@ pub(crate) async fn running_backfills(pool: &SqlitePool) -> Result<Vec<BackfillR
 pub(crate) async fn write_page(
     conn: &mut SqliteConnection,
     backfill: Uuid,
-    rule: Uuid,
-    rule_updated_at: i64,
+    rule: &RuleSnapshot,
     jobs: &[NewJob],
     matched: u64,
     now: i64,
 ) -> Result<PageWrite, MetaError> {
-    let stored: Option<(i64, i64)> =
-        sqlx::query_as("SELECT enabled, updated_at FROM online_rules WHERE id = ?")
-            .bind(rule.to_string())
-            .fetch_optional(&mut *conn)
-            .await?;
+    let stored: Option<(i64, Option<String>, String, f64, String, String)> = sqlx::query_as(
+        "SELECT enabled, filter, variable_mapping, sample_rate, target, evaluator_id \
+         FROM online_rules WHERE id = ?",
+    )
+    .bind(rule.id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
     match stored {
         None => return Ok(PageWrite::RuleGone),
-        Some((0, _)) => return Ok(PageWrite::RuleDisabled),
-        Some((_, updated_at)) if updated_at != rule_updated_at => {
-            return Ok(PageWrite::RuleChanged);
+        Some((0, ..)) => return Ok(PageWrite::RuleDisabled),
+        Some((_, filter, variable_mapping, sample_rate, target, evaluator_id)) => {
+            let unchanged = filter == rule.filter
+                && variable_mapping == rule.variable_mapping
+                && sample_rate == rule.sample_rate
+                && target == rule.target
+                && evaluator_id == rule.evaluator_id.to_string();
+            if !unchanged {
+                return Ok(PageWrite::RuleChanged);
+            }
         }
-        Some(_) => {}
     }
     let mut enqueued: u64 = 0;
     for job in jobs {
@@ -354,12 +380,14 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        BackfillEnd, BackfillRow, NewBackfill, PageWrite, fail_running, finish_backfill,
-        insert_backfill, list_backfills, running_backfills, write_page,
+        BackfillEnd, BackfillRow, NewBackfill, PageWrite, RuleSnapshot, fail_running,
+        finish_backfill, insert_backfill, list_backfills, running_backfills, write_page,
     };
     use crate::meta::eval_jobs::{KIND_BACKFILL, NewJob};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
-    use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+    use crate::meta::online_rules::{
+        NewRule, PAUSE_BUDGET, RuleFields, clear_budget_pauses, insert_rule, pause_rule,
+    };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::{MetaDb, MetaError};
@@ -509,20 +537,47 @@ mod tests {
         ]
     }
 
-    /// A page written for a rule whose `updated_at` is `NOW`, the value `seed` inserts.
+    /// The rule `seed` inserts, as a run starts with it.
+    fn snapshot(seeded: &Seed) -> RuleSnapshot {
+        RuleSnapshot {
+            id: seeded.rule,
+            filter: None,
+            variable_mapping: "{}".to_owned(),
+            sample_rate: 1.0,
+            target: "trace".to_owned(),
+            evaluator_id: seeded.evaluator,
+        }
+    }
+
+    /// Writes a page for the run that started with the rule `seed` inserts.
     async fn write_one_page(
         db: &MetaDb,
         backfill: Uuid,
-        rule: Uuid,
+        seeded: &Seed,
         jobs: Vec<NewJob>,
         matched: u64,
     ) -> Result<PageWrite, MetaError> {
+        let rule = snapshot(seeded);
         db.write(move |conn| {
-            Box::pin(
-                async move { write_page(conn, backfill, rule, NOW, &jobs, matched, NOW).await },
-            )
+            Box::pin(async move { write_page(conn, backfill, &rule, &jobs, matched, NOW).await })
         })
         .await
+    }
+
+    /// Runs one SQL statement on the rule `seed` inserts (one `?` bound to its id).
+    async fn update_rule(db: &MetaDb, rule: Uuid, sql: &'static str) {
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query(sql)
+                    .bind(rule.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map(|_| ())
+                    .map_err(MetaError::from)
+            })
+        })
+        .await
+        .unwrap();
     }
 
     async fn job_count(db: &MetaDb) -> i64 {
@@ -633,14 +688,14 @@ mod tests {
         let (_dir, db) = crate::meta::test_db().await;
         let seeded = seed(&db).await;
         let backfill = insert(&db, new_backfill(seeded.rule), NOW).await.unwrap();
-        let written = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 2)
+        let written = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 2)
             .await
             .unwrap();
         assert_eq!(written, PageWrite::Written { enqueued: 2 });
         let row = &list(&db, seeded.rule).await[0];
         assert_eq!((row.matched, row.enqueued), (2, 2));
 
-        let again = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 3)
+        let again = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 3)
             .await
             .unwrap();
         assert_eq!(again, PageWrite::Written { enqueued: 0 });
@@ -667,7 +722,7 @@ mod tests {
         .await
         .unwrap();
 
-        let disabled = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 1)
+        let disabled = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 1)
             .await
             .unwrap();
         assert_eq!(disabled, PageWrite::RuleDisabled);
@@ -686,7 +741,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let gone = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 1)
+        let gone = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 1)
             .await
             .unwrap();
         assert_eq!(gone, PageWrite::RuleGone);
@@ -698,26 +753,80 @@ mod tests {
         let (_dir, db) = crate::meta::test_db().await;
         let seeded = seed(&db).await;
         let backfill = insert(&db, new_backfill(seeded.rule), NOW).await.unwrap();
-        let rule = seeded.rule;
-        db.write(move |conn| {
-            Box::pin(async move {
-                sqlx::query("UPDATE online_rules SET updated_at = updated_at + 1 WHERE id = ?")
-                    .bind(rule.to_string())
-                    .execute(&mut *conn)
-                    .await?;
-                Ok::<(), MetaError>(())
-            })
-        })
-        .await
-        .unwrap();
+        update_rule(
+            &db,
+            seeded.rule,
+            "UPDATE online_rules SET filter = 'status = ''error''' WHERE id = ?",
+        )
+        .await;
 
-        let changed = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 1)
+        let changed = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 1)
             .await
             .unwrap();
         assert_eq!(changed, PageWrite::RuleChanged);
         assert_eq!(job_count(&db).await, 0);
         let row = &list(&db, seeded.rule).await[0];
         assert_eq!((row.matched, row.enqueued), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn write_page_refuses_each_run_field_that_changed() {
+        for sql in [
+            "UPDATE online_rules SET variable_mapping = '{\"input\":\"$.x\"}' WHERE id = ?",
+            "UPDATE online_rules SET sample_rate = 0.5 WHERE id = ?",
+            "UPDATE online_rules SET target = 'span' WHERE id = ?",
+        ] {
+            let (_dir, db) = crate::meta::test_db().await;
+            let seeded = seed(&db).await;
+            let backfill = insert(&db, new_backfill(seeded.rule), NOW).await.unwrap();
+            update_rule(&db, seeded.rule, sql).await;
+
+            let written = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 1)
+                .await
+                .unwrap();
+            assert_eq!(written, PageWrite::RuleChanged, "{sql}");
+            assert_eq!(job_count(&db).await, 0, "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn write_page_ignores_pauses_resumes_and_budget_changes() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let backfill = insert(&db, new_backfill(seeded.rule), NOW).await.unwrap();
+        let rule = seeded.rule;
+        db.write(move |conn| {
+            Box::pin(async move {
+                assert!(pause_rule(conn, rule, PAUSE_BUDGET, None, NOW + 1).await?);
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        let paused = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 1)
+            .await
+            .unwrap();
+        assert_eq!(paused, PageWrite::Written { enqueued: 2 });
+
+        // A budget with no budget left to clear: the pause goes, and the run still writes.
+        db.write(move |conn| {
+            Box::pin(async move {
+                clear_budget_pauses(conn, NOW + 2, NOW + 2, NOW + 2).await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        update_rule(
+            &db,
+            seeded.rule,
+            "UPDATE online_rules SET budget_usd = 5, budget_period = 'day' WHERE id = ?",
+        )
+        .await;
+        let again = write_one_page(&db, backfill.id, &seeded, page_jobs(&seeded), 2)
+            .await
+            .unwrap();
+        assert_eq!(again, PageWrite::Written { enqueued: 0 });
     }
 
     #[tokio::test]

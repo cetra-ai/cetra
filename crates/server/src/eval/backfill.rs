@@ -26,7 +26,7 @@ use crate::eval::sampling;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::backfills::{
-    self, BackfillEnd, BackfillRow, PageWrite, STATUS_DONE, STATUS_FAILED,
+    self, BackfillEnd, BackfillRow, PageWrite, RuleSnapshot, STATUS_DONE, STATUS_FAILED,
 };
 use crate::meta::eval_jobs::{KIND_BACKFILL, NewJob};
 use crate::meta::evaluators::EvaluatorRow;
@@ -49,7 +49,7 @@ const CHARS_PER_VARIABLE: usize = 2_000;
 
 /// A rule was disabled while its backfill ran (D-I-41).
 pub(crate) const ERROR_RULE_DISABLED: &str = "rule disabled";
-/// A rule was edited while its backfill ran (its `updated_at` changed) (D-I-41).
+/// A field the run reads changed while its backfill ran (D-I-41).
 pub(crate) const ERROR_RULE_CHANGED: &str = "rule changed";
 /// Storage was busy or a read timed out (D-I-41).
 pub(crate) const ERROR_STORAGE_UNAVAILABLE: &str = "storage unavailable";
@@ -568,8 +568,15 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
     if !rule_row.enabled {
         return finish(state, row, BackfillEnd::Failed(ERROR_RULE_DISABLED), 0, 0).await;
     }
-    // The rule as it was when the run started: a page write refuses it once `updated_at` moves.
-    let rule_updated_at = rule_row.updated_at;
+    // The fields the run reads, as they are now: a page write refuses the run once one of them moves.
+    let snapshot = RuleSnapshot {
+        id: rule_row.id,
+        filter: rule_row.filter.clone(),
+        variable_mapping: rule_row.variable_mapping.clone(),
+        sample_rate: rule_row.sample_rate,
+        target: rule_row.target.clone(),
+        evaluator_id: rule_row.evaluator_id,
+    };
     let rule = match decoded(BackfillRule::new(&rule_row, project.org_id), ERROR_RULE)? {
         Ok(rule) => rule,
         Err(text) => return finish(state, row, BackfillEnd::Failed(text), 0, 0).await,
@@ -628,21 +635,13 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
                 trace_start_ns: target.start_time,
             })
             .collect();
-        let (backfill, rule_id, now) = (row.id, rule.id, state.clock.now_ns());
+        let (backfill, now) = (row.id, state.clock.now_ns());
+        let snapshot = snapshot.clone();
         let written = state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    backfills::write_page(
-                        conn,
-                        backfill,
-                        rule_id,
-                        rule_updated_at,
-                        &jobs,
-                        matched,
-                        now,
-                    )
-                    .await
+                    backfills::write_page(conn, backfill, &snapshot, &jobs, matched, now).await
                 })
             })
             .await?;
@@ -738,11 +737,12 @@ async fn finish(
 mod faults {
     use std::cell::{Cell, RefCell};
 
+    use llmobs_core::ids::ProjectId;
     use llmobs_storage::RunError;
     use uuid::Uuid;
 
     use crate::http::AppState;
-    use crate::meta::MetaError;
+    use crate::meta::{MetaError, online_rules};
 
     /// What the armed hook does at its page boundary.
     pub(super) enum Action {
@@ -754,6 +754,12 @@ mod faults {
         Db,
         /// The run fails with a corrupt stored value.
         Corrupt,
+        /// Pauses the rule with a budget pause (`pause_rule`), as a tripped budget does.
+        Pause,
+        /// Clears every budget pause whose rule has no budget (`clear_budget_pauses`).
+        ClearBudget,
+        /// Resumes the rule of this project (`resume_rule`).
+        Resume(ProjectId),
     }
 
     struct Hook {
@@ -833,6 +839,51 @@ mod faults {
                                 .await
                                 .map(|_| ())
                                 .map_err(MetaError::from)
+                        })
+                    })
+                    .await
+            }
+            Some(Action::Pause) => {
+                let now = state.clock.now_ns();
+                state
+                    .meta
+                    .write(move |conn| {
+                        Box::pin(async move {
+                            online_rules::pause_rule(
+                                conn,
+                                rule,
+                                online_rules::PAUSE_BUDGET,
+                                None,
+                                now,
+                            )
+                            .await
+                            .map(|_| ())
+                        })
+                    })
+                    .await
+            }
+            Some(Action::ClearBudget) => {
+                let now = state.clock.now_ns();
+                state
+                    .meta
+                    .write(move |conn| {
+                        Box::pin(async move {
+                            online_rules::clear_budget_pauses(conn, i64::MAX, i64::MAX, now)
+                                .await
+                                .map(|_| ())
+                        })
+                    })
+                    .await
+            }
+            Some(Action::Resume(project)) => {
+                let now = state.clock.now_ns();
+                state
+                    .meta
+                    .write(move |conn| {
+                        Box::pin(async move {
+                            online_rules::resume_rule(conn, project, rule, now)
+                                .await
+                                .map(|_| ())
                         })
                     })
                     .await
@@ -1275,13 +1326,81 @@ mod tests {
         faults::arm(
             rule,
             1,
-            faults::Action::Sql("UPDATE online_rules SET updated_at = updated_at + 1 WHERE id = ?"),
+            faults::Action::Sql(
+                "UPDATE online_rules SET filter = 'status = ''error''' WHERE id = ?",
+            ),
         );
         backfill_once(&app.state).await.expect("pass");
         let row = backfill_row(&app, rule, id).await;
         assert_eq!(row.status, STATUS_FAILED);
         assert_eq!(row.error.as_deref(), Some("rule changed"));
         assert_eq!((row.matched, row.enqueued), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn a_pause_during_the_run_does_not_stop_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+
+        faults::set_page_size(2);
+        faults::arm(rule, 1, faults::Action::Pause);
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_DONE);
+        assert_eq!((row.matched, row.enqueued), (5, 5));
+        assert_eq!(
+            paused_reason(&app, rule).await.as_deref(),
+            Some(online_rules::PAUSE_BUDGET)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_budget_clear_during_the_run_does_not_stop_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+        execute(
+            &app,
+            "UPDATE online_rules SET paused_reason = 'budget', paused_at = 1 WHERE id = ?",
+            vec![rule.to_string()],
+        )
+        .await;
+
+        faults::set_page_size(2);
+        faults::arm(rule, 1, faults::Action::ClearBudget);
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_DONE);
+        assert_eq!((row.matched, row.enqueued), (5, 5));
+        assert_eq!(paused_reason(&app, rule).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_resume_during_the_run_does_not_stop_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+        execute(
+            &app,
+            "UPDATE online_rules SET paused_reason = 'errors', paused_at = 1 WHERE id = ?",
+            vec![rule.to_string()],
+        )
+        .await;
+
+        faults::set_page_size(2);
+        faults::arm(rule, 1, faults::Action::Resume(seeded.project.id));
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_DONE);
+        assert_eq!((row.matched, row.enqueued), (5, 5));
+        assert_eq!(paused_reason(&app, rule).await, None);
     }
 
     #[tokio::test]
@@ -1820,6 +1939,15 @@ mod tests {
             .into_iter()
             .find(|row| row.id == id)
             .expect("the backfill is listed")
+    }
+
+    /// The rule's pause reason, when it is paused.
+    async fn paused_reason(app: &TestApp, rule: Uuid) -> Option<String> {
+        sqlx::query_scalar("SELECT paused_reason FROM online_rules WHERE id = ?")
+            .bind(rule.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("paused reason")
     }
 
     /// The rule's jobs by dedup key: `(kind, priority, status, trace_start_ns)`.

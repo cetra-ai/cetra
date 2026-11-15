@@ -952,30 +952,39 @@ async fn online_rules_and_backfill_end_to_end() {
     let rule_id = rule["id"].as_str().unwrap().to_owned();
     let scores_path = format!("{project}/scores?rule_id={rule_id}");
 
-    // A live trace, sent until the rule scores it. The sweeper picks up the project within one
-    // tick, so an early send may miss it; resending is safe (D-I-11's dedup key).
+    // The sweeper tracks a project from its first tick after the rule exists, and a trace is
+    // tracked from its first span: a send before that tick is missed, and a resend restarts the
+    // trace's 5 s idle timer. So wait one tick and a margin, then send the live trace once.
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     let live = format!("{:032x}", 32);
-    let live_request = timed_request(&live, now_ns() - NANOS_PER_SECOND).encode_to_vec();
-    let mut live_scores = None;
-    let mut last = Value::Null;
-    for _ in 0..4 {
-        post_otlp_http(
-            &server.client,
-            format!("{}/v1/traces", server.http),
-            INIT_KEY,
-            "application/x-protobuf",
-            live_request.clone(),
-        )
-        .await;
-        let (body, done) = rows_until(&server.api, &scores_path, 1, Duration::from_secs(10)).await;
-        if done {
-            live_scores = Some(body);
-            break;
-        }
-        last = body;
-    }
-    let live_scores =
-        live_scores.unwrap_or_else(|| panic!("no live score after four sends: {last}"));
+    post_otlp_http(
+        &server.client,
+        format!("{}/v1/traces", server.http),
+        INIT_KEY,
+        "application/x-protobuf",
+        timed_request(&live, now_ns() - NANOS_PER_SECOND).encode_to_vec(),
+    )
+    .await;
+    let live_scores = poll_json(
+        &server.api,
+        &scores_path,
+        |body| body["data"].as_array().is_some_and(|rows| !rows.is_empty()),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    // Only the live trace is scored: the trace stored before the rule is not a live target.
+    let scored: std::collections::BTreeSet<&str> = live_scores["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["target"]["trace_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        scored,
+        std::collections::BTreeSet::from([live.as_str()]),
+        "the live trigger must score the live trace only: {live_scores}"
+    );
 
     // The live score: the rule's judge wrote it for the live trace.
     let row = &live_scores["data"][0];
