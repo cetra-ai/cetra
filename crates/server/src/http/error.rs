@@ -245,14 +245,22 @@ impl From<QueryError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.to_response()
+    }
+}
+
+impl ApiError {
+    /// The problem response for this error, logged as [`Self::log`] does. Takes a reference, so
+    /// one error can answer every request that shared it (the metrics cache, D-M-11).
+    pub(crate) fn to_response(&self) -> Response {
         self.log();
         let mut headers = HeaderMap::new();
         match self {
             Self::QuotaExceeded { retry_after_s, .. } => {
-                headers.insert(axum::http::header::RETRY_AFTER, header_u64(retry_after_s));
+                headers.insert(axum::http::header::RETRY_AFTER, header_u64(*retry_after_s));
             }
             Self::RateLimited { retry_after_s } => {
-                let seconds = header_u64(retry_after_s);
+                let seconds = header_u64(*retry_after_s);
                 headers.insert(axum::http::header::RETRY_AFTER, seconds.clone());
                 headers.insert(header("ratelimit-limit"), seconds.clone());
                 headers.insert(header("ratelimit-remaining"), header_u64(0));

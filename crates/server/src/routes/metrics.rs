@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{Extension, State};
 use axum::http::Method;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use llmobs_core::ids::ProjectId;
 use llmobs_storage as storage;
@@ -18,6 +19,9 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{READ_TIMEOUT, open_query};
+
+/// The in-flight marker of a slot's expiry: a computation that has not finished never expires.
+const IN_FLIGHT: i64 = i64::MAX;
 
 /// How long a `GET /metrics` answer is kept, in nanoseconds (spec 05).
 const TTL_NS: i64 = 10_000_000_000;
@@ -45,39 +49,58 @@ struct MetricsKey {
 }
 
 /// One key's answer. The cell is filled once, so concurrent misses of the same key share one
-/// query (single-flight); a failed query leaves it empty and nothing is cached.
+/// computation (single-flight), and a failure is shared by everyone waiting on it. A failed
+/// slot is removed as it settles, so the next request runs the query again.
 #[derive(Debug)]
 struct Slot {
+    /// `IN_FLIGHT` until the computation finishes, then `TTL_NS` after that finish.
     expires_at: i64,
-    answer: Arc<OnceCell<Arc<MetricsResponse>>>,
+    answer: Arc<OnceCell<Cached>>,
+}
+
+/// A computation's outcome. An error is shared, so it is an `Arc`: waiters each answer with it.
+type Cached = Result<Arc<MetricsResponse>, Arc<ApiError>>;
+
+/// The error of a metrics request. It answers with the same problem response as the error it
+/// wraps, whichever request it is sent to.
+pub(crate) struct SharedError(Arc<ApiError>);
+
+impl IntoResponse for SharedError {
+    fn into_response(self) -> Response {
+        self.0.to_response()
+    }
 }
 
 impl MetricsCache {
     /// The answer for `key`: the cached one, or `compute`'s, which runs once even when
-    /// identical requests miss together.
+    /// identical requests miss together. `now` is read when the request starts and again when
+    /// the computation finishes, which stamps the answer's expiry.
     ///
     /// # Errors
     ///
-    /// Returns the error of `compute`; nothing is cached for it.
+    /// Returns the error of `compute`, shared with every request that waited on it. Nothing
+    /// stays cached for it.
     async fn get_or_compute<F, Fut>(
         &self,
         key: MetricsKey,
-        now: i64,
+        now: impl Fn() -> i64,
         compute: F,
-    ) -> Result<Arc<MetricsResponse>, ApiError>
+    ) -> Result<Arc<MetricsResponse>, Arc<ApiError>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<MetricsResponse, ApiError>>,
     {
-        let answer = self.slot(key, now);
-        let response = answer
-            .get_or_try_init(|| async { compute().await.map(Arc::new) })
-            .await?;
-        Ok(Arc::clone(response))
+        let answer = self.slot(key.clone(), now());
+        let cached = answer
+            .get_or_init(|| async { compute().await.map(Arc::new).map_err(Arc::new) })
+            .await
+            .clone();
+        self.settle(&key, &answer, cached.is_err(), now());
+        cached
     }
 
     /// The cell of `key` while it is fresh at `now`. Otherwise a new empty one replaces it.
-    fn slot(&self, key: MetricsKey, now: i64) -> Arc<OnceCell<Arc<MetricsResponse>>> {
+    fn slot(&self, key: MetricsKey, now: i64) -> Arc<OnceCell<Cached>> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(slot) = entries.get(&key).filter(|slot| now < slot.expires_at) {
             return Arc::clone(&slot.answer);
@@ -89,11 +112,30 @@ impl MetricsCache {
         entries.insert(
             key,
             Slot {
-                expires_at: now.saturating_add(TTL_NS),
+                expires_at: IN_FLIGHT,
                 answer: Arc::clone(&answer),
             },
         );
         answer
+    }
+
+    /// Stamps the expiry of `answer` at `now`, the time its computation finished, or removes its
+    /// slot when the computation failed. Only the slot that holds `answer` is touched.
+    fn settle(&self, key: &MetricsKey, answer: &Arc<OnceCell<Cached>>, failed: bool, now: i64) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(slot) = entries.get_mut(key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&slot.answer, answer) {
+            return;
+        }
+        if !failed {
+            if slot.expires_at == IN_FLIGHT {
+                slot.expires_at = now.saturating_add(TTL_NS);
+            }
+            return;
+        }
+        entries.remove(key);
     }
 
     /// Drops every cached answer of `project` (D-M-11).
@@ -138,7 +180,7 @@ async fn get_metrics(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<MetricsParams>,
-) -> Result<error::Json<MetricsResponse>, ApiError> {
+) -> Result<error::Json<MetricsResponse>, SharedError> {
     let from = params.from.ns();
     let to = params.to.ns();
     let key = MetricsKey {
@@ -151,29 +193,34 @@ async fn get_metrics(
         include_eval: params.include_eval,
         include_experiments: params.include_experiments,
     };
-    let now = state.clock.now_ns();
     let project = access.project.id;
+    let clock = &state.clock;
     let response = state
         .metrics_cache
-        .get_or_compute(key, now, || async {
-            let window = storage::TimeWindow::new(from, to)?;
-            let ctx = open_query(&state, project, None).await?;
-            let data = storage::metrics(
-                &ctx,
-                storage::MetricsRequest {
-                    window,
-                    bucket: bucket(params.bucket),
-                    filter: params.filter.as_deref(),
-                    group_by: params.group_by.map(storage_group_by),
-                    include_eval: params.include_eval,
-                    include_experiments: params.include_experiments,
-                    timeout: READ_TIMEOUT,
-                },
-            )
-            .await?;
-            Ok(convert::metrics_response(data, from, to, params.group_by))
-        })
-        .await?;
+        .get_or_compute(
+            key,
+            || clock.now_ns(),
+            || async {
+                let window = storage::TimeWindow::new(from, to)?;
+                let ctx = open_query(&state, project, None).await?;
+                let data = storage::metrics(
+                    &ctx,
+                    storage::MetricsRequest {
+                        window,
+                        bucket: bucket(params.bucket),
+                        filter: params.filter.as_deref(),
+                        group_by: params.group_by.map(storage_group_by),
+                        include_eval: params.include_eval,
+                        include_experiments: params.include_experiments,
+                        timeout: READ_TIMEOUT,
+                    },
+                )
+                .await?;
+                Ok(convert::metrics_response(data, from, to, params.group_by))
+            },
+        )
+        .await
+        .map_err(SharedError)?;
     Ok(error::Json((*response).clone()))
 }
 
@@ -207,7 +254,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
     use axum::http::{Method, StatusCode};
     use llmobs_core::batch::spans_to_record_batch;
@@ -338,7 +385,7 @@ mod tests {
         let (p, q) = (ProjectId::new_v7(), ProjectId::new_v7());
         for key in [key_at(p, 0), key_at(q, 0)] {
             cache
-                .get_or_compute(key, 0, || async { Ok(empty_response()) })
+                .get_or_compute(key, || 0, || async { Ok(empty_response()) })
                 .await
                 .unwrap();
         }
@@ -357,12 +404,16 @@ mod tests {
             let (cache, runs, key) = (Arc::clone(&cache), Arc::clone(&runs), key.clone());
             tasks.push(tokio::spawn(async move {
                 cache
-                    .get_or_compute(key, 0, || async {
-                        runs.fetch_add(1, Ordering::SeqCst);
-                        // Long enough that the other requests arrive while this one runs.
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        Ok(empty_response())
-                    })
+                    .get_or_compute(
+                        key,
+                        || 0,
+                        || async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            // Long enough that the other requests arrive while this one runs.
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Ok(empty_response())
+                        },
+                    )
                     .await
             }));
         }
@@ -372,20 +423,91 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn a_failed_query_is_not_cached() {
-        let cache = MetricsCache::default();
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_waiters_share_one_failure_and_a_later_request_retries() {
+        let cache = Arc::new(MetricsCache::default());
+        let runs = Arc::new(AtomicUsize::new(0));
         let key = key_at(ProjectId::new_v7(), 0);
-        let failed = cache
-            .get_or_compute(key.clone(), 0, || async {
-                Err(ApiError::Query(storage::RunError::Timeout))
-            })
-            .await;
-        assert!(failed.is_err());
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (cache, runs, key) = (Arc::clone(&cache), Arc::clone(&runs), key.clone());
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_compute(
+                        key,
+                        || 0,
+                        || async {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Err(ApiError::Query(storage::RunError::Timeout))
+                        },
+                    )
+                    .await
+            }));
+        }
+        for task in tasks {
+            let error = task.await.unwrap().expect_err("the query failed");
+            assert!(
+                matches!(error.as_ref(), ApiError::Query(storage::RunError::Timeout)),
+                "{error:?}"
+            );
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the waiters share one run");
+
+        // The failed slot was removed: the next request runs the query again and is cached.
         let answered = cache
-            .get_or_compute(key, 0, || async { Ok(empty_response()) })
+            .get_or_compute(
+                key.clone(),
+                || 0,
+                || async {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(empty_response())
+                },
+            )
             .await;
         assert!(answered.is_ok());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(cached_keys(&cache), vec![key]);
+    }
+
+    #[tokio::test]
+    async fn expiry_is_stamped_when_the_computation_finishes() {
+        const SECOND: i64 = 1_000_000_000;
+        let cache = MetricsCache::default();
+        let key = key_at(ProjectId::new_v7(), 0);
+        let clock = Arc::new(AtomicI64::new(0));
+        let now = {
+            let clock = Arc::clone(&clock);
+            move || clock.load(Ordering::SeqCst)
+        };
+        let runs = AtomicUsize::new(0);
+        // The query runs from 0 to 20 s, so its answer lives until 30 s, not until TTL_NS.
+        cache
+            .get_or_compute(key.clone(), &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                clock.store(20 * SECOND, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        clock.store(25 * SECOND, Ordering::SeqCst);
+        cache
+            .get_or_compute(key.clone(), &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "still fresh at 25 s");
+        clock.store(31 * SECOND, Ordering::SeqCst);
+        cache
+            .get_or_compute(key, &now, || async {
+                runs.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "expired at 31 s");
     }
 
     #[tokio::test]
@@ -394,17 +516,21 @@ mod tests {
         let project = ProjectId::new_v7();
         for from in 0..MAX_ENTRIES as i64 {
             cache
-                .get_or_compute(key_at(project, from), from, || async {
-                    Ok(empty_response())
-                })
+                .get_or_compute(
+                    key_at(project, from),
+                    || from,
+                    || async { Ok(empty_response()) },
+                )
                 .await
                 .unwrap();
         }
         let newest = key_at(project, MAX_ENTRIES as i64);
         cache
-            .get_or_compute(newest.clone(), MAX_ENTRIES as i64, || async {
-                Ok(empty_response())
-            })
+            .get_or_compute(
+                newest.clone(),
+                || MAX_ENTRIES as i64,
+                || async { Ok(empty_response()) },
+            )
             .await
             .unwrap();
 
@@ -421,15 +547,21 @@ mod tests {
         let project = ProjectId::new_v7();
         for from in 0..MAX_ENTRIES as i64 {
             cache
-                .get_or_compute(key_at(project, from), 0, || async { Ok(empty_response()) })
+                .get_or_compute(
+                    key_at(project, from),
+                    || 0,
+                    || async { Ok(empty_response()) },
+                )
                 .await
                 .unwrap();
         }
         // Every answer above expires at TTL_NS, so none of them is live now.
         cache
-            .get_or_compute(key_at(project, -1), TTL_NS, || async {
-                Ok(empty_response())
-            })
+            .get_or_compute(
+                key_at(project, -1),
+                || TTL_NS,
+                || async { Ok(empty_response()) },
+            )
             .await
             .unwrap();
         assert_eq!(cached_keys(&cache), vec![key_at(project, -1)]);

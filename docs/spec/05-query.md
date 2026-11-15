@@ -141,7 +141,7 @@ The filter is a `traces`-view DSL expression. Span series keep spans whose trace
 
 KPIs cover `[from, to)` and the previous range of the same length; every KPI value is absent when its range has no traces.
 
-All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`.
+All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
 
 ## Trace and span APIs
 
