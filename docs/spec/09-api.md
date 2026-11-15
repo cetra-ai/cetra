@@ -111,7 +111,7 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET /datasets/{dataset}/items?version=` · `GET /datasets/{dataset}/items/{item_id}?version=` | ordered by item id; default the latest version |
 | `POST /datasets/{dataset}/items` | batch add, 1–1,000 items (one new version); `201 {version, item_ids}` |
 | `PATCH/DELETE /datasets/{dataset}/items/{item_id}` | new version; an unchanged PATCH makes none |
-| `POST /datasets/{dataset}/import/preview` | `application/octet-stream` head of the file (≤ 1 MiB), `?format=csv\|jsonl&partial=` → columns, ≤ 20 rows and their errors; writes nothing (D-J-6) |
+| `POST /datasets/{dataset}/import/preview` | `application/octet-stream` head of the file (≤ 1 MiB), `?format=csv\|jsonl&partial=` → columns, ≤ 20 rows and their errors; writes nothing; a `read` key or read-only PAT is refused, since only `Query` routes read by `POST` (D-H-4, D-J-5) (D-J-6) |
 | `POST /datasets/{dataset}/import` | `?format=csv\|jsonl`; multipart `file` (≤ 100 MiB, ≤ 50,000 rows) + `mapping` JSON; `201 {version, imported, error_count, errors}`; at most 2 imports at once (503) (D-J-6) |
 | `GET /datasets/{dataset}/export?version=&format=jsonl\|csv` | streamed attachment (D-J-7) |
 | `POST /datasets/{dataset}/items/from-trace` | `{trace_id, span_id?, input?, expected_output?, metadata?}`; window and deletion guard apply (D-J-8) |
