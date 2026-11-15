@@ -15,7 +15,7 @@ use crate::compaction::job::CompactionReport;
 use crate::compaction::rewrite::DeletionReport;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-use crate::error::DeletionError;
+use crate::error::{CatalogError, DeletionError};
 use crate::hooks::HookPoint;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
@@ -533,5 +533,11 @@ async fn a_stopped_store_runs_no_pass() {
     assert_eq!(deletions, DeletionReport::default());
     let compacted = storage.compact(INGEST + 1).await.unwrap();
     assert_eq!(compacted, CompactionReport::default());
+    // A status read goes through the stopped committer too, so it is refused.
+    let error = storage.deletion_status(Uuid::now_v7()).await.unwrap_err();
+    assert!(
+        matches!(error, DeletionError::Catalog(CatalogError::Stopped)),
+        "{error}"
+    );
     storage.shutdown().await.unwrap();
 }

@@ -58,6 +58,8 @@ pub(super) struct Harness {
     /// The data directory's lossy root (R2.2), registered before the first open.
     lossy: Lossy,
     life: Option<Life>,
+    /// What each `lossy_crash` of this case did, in order.
+    crashes: Vec<CrashReport>,
 }
 
 fn open_life(config: &StorageConfig) -> Life {
@@ -120,6 +122,7 @@ impl Harness {
             config,
             lossy,
             life,
+            crashes: Vec::new(),
         }
     }
 
@@ -160,14 +163,19 @@ impl Harness {
     }
 
     /// Drop without shutdown, apply a lossy crash with `seed` to the data directory, then a new
-    /// life. The storage is closed before the crash, as `Lossy::crash_with` requires.
-    pub(super) fn lossy_crash(&mut self, seed: u64) -> CrashReport {
+    /// life. The storage is closed before the crash, as `Lossy::crash_with` requires. The report
+    /// is kept for [`Self::crashes`].
+    pub(super) fn lossy_crash(&mut self, seed: u64) {
         let Life { storage, runtime } = self.life.take().expect("a life");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
-        let report = self.lossy.crash(seed);
+        self.crashes.push(self.lossy.crash(seed));
         self.life = Some(open_life(&self.config));
-        report
+    }
+
+    /// The reports of this case's lossy crashes, oldest first.
+    pub(super) fn crashes(&self) -> &[CrashReport] {
+        &self.crashes
     }
 }
 

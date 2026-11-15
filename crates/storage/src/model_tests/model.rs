@@ -67,6 +67,9 @@ pub(super) struct Model {
     pub(super) spans_wal: Wal<SpanPush>,
     /// The scores WAL, shared by both projects (R2.9).
     pub(super) scores_wal: Wal<ScorePush>,
+    /// Ops applied so far in this case. `ops::apply` counts each op before it runs, so during
+    /// an op the index of the op is `ops_applied - 1`.
+    pub(super) ops_applied: usize,
 }
 
 /// A span copy the model stored for one WAL record (R2.9).
@@ -180,15 +183,21 @@ impl<T> Wal<T> {
     /// records still in the WAL, then this life's surviving prefix. Panics unless every record
     /// known durable survived. Returns the rows of the records after the surviving prefix: the
     /// model forgets them. The records of this life become durable.
-    pub(super) fn lossy_crashed(&mut self, replayed: u64, segments: usize, wal: &str) -> Vec<T> {
+    pub(super) fn lossy_crashed(
+        &mut self,
+        replayed: u64,
+        segments: usize,
+        wal: &str,
+        op: usize,
+    ) -> Vec<T> {
         let survived = replayed
             .checked_sub(self.durable_unflushed)
             .expect("replayed fewer records than the earlier lives left durable");
         let survived = usize::try_from(survived).expect("a record count fits in usize");
         assert!(
             self.synced_floor <= survived && survived <= self.unsynced.len(),
-            "lossy crash lost a durable {wal} record: {survived} of this life's records replayed, \
-             {} were known durable, {} were appended",
+            "op {op}: lossy crash lost a durable {wal} record: {survived} of this life's records \
+             replayed, {} were known durable, {} were appended",
             self.synced_floor,
             self.unsynced.len(),
         );
@@ -215,6 +224,7 @@ impl Model {
             b: ProjectModel::new(P::B),
             spans_wal: Wal::new(spans_segments),
             scores_wal: Wal::new(scores_segments),
+            ops_applied: 0,
         }
     }
 

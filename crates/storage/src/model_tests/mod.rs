@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::config::{StorageConfig, WalSync};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
+use crate::fs::lossy::CrashMode;
 use crate::reads::MAX_PAGE;
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
@@ -68,7 +69,9 @@ fn run_case(ops: &[Op]) {
     run_case_with(ops, |_| {});
 }
 
-fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) {
+/// Runs `ops` and checks every read. Returns the harness, so a test can read what its lossy
+/// crashes did.
+fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness {
     let mut harness = Harness::with_config(change);
     let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
@@ -99,6 +102,7 @@ fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) {
     }
     settle(&mut harness, &mut model, &mut clock);
     check_full(&harness, &mut model, ops.len());
+    harness
 }
 
 /// `check_quick` on both projects.
@@ -513,7 +517,7 @@ fn regression_lossy_crash_after_gc() {
 /// (R2.9). `TearLast` keeps the names and cuts the last unsynced write.
 #[test]
 fn regression_lossy_crash_tears_the_wal_tail() {
-    run_case_with(
+    let harness = run_case_with(
         &[
             Op::Append {
                 project: P::A,
@@ -531,4 +535,12 @@ fn regression_lossy_crash_tears_the_wal_tail() {
         ],
         interval_mode,
     );
+    // Seed 2 is `TearLast`: the second append's write must have been cut, so the reopen
+    // replayed fewer records than were appended. Without this the test could pass on a crash
+    // that lost nothing.
+    let [crash] = harness.crashes() else {
+        panic!("expected one lossy crash, got {}", harness.crashes().len());
+    };
+    assert_eq!(crash.mode, CrashMode::TearLast);
+    assert!(crash.torn_writes > 0, "the crash tore no write: {crash:?}");
 }

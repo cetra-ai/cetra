@@ -271,6 +271,7 @@ fn resendable_trace() -> impl Strategy<Value = u8> {
 /// and by the op's own hours for `Compact`).
 pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &mut i64) {
     *clock += MICRO_NS;
+    model.ops_applied += 1;
     match *op {
         Op::Append {
             project,
@@ -951,12 +952,14 @@ fn crashed(harness: &Harness, model: &mut Model) {
 /// of earlier lives that were still in the WAL (R2.9).
 fn lossy_crash(harness: &mut Harness, model: &mut Model, seed: u64) {
     harness.lossy_crash(seed);
+    let op = model.ops_applied - 1;
     let spans_replayed = harness.storage().replayed(Table::Spans);
     let scores_replayed = harness.storage().replayed(Table::Scores);
     let lost_spans = model.spans_wal.lossy_crashed(
         spans_replayed,
         segment_count(harness, Table::Spans),
         "spans",
+        op,
     );
     for push in &lost_spans {
         model.project_mut(push.project).unstore_span(push);
@@ -965,6 +968,7 @@ fn lossy_crash(harness: &mut Harness, model: &mut Model, seed: u64) {
         scores_replayed,
         segment_count(harness, Table::Scores),
         "scores",
+        op,
     );
     for push in &lost_scores {
         model.project_mut(push.key.project).unstore_score(push);

@@ -1475,6 +1475,13 @@ async fn commit_inner(
             source: sqlx::Error::Io(source),
         });
     }
+    // This fault comes before the commit, so the transaction rolls back and the
+    // edit is not durable. It consumes an armed `CatalogFsync` first, so for a
+    // transaction `commit_point` never sees that fault. The after-commit case
+    // (durable, then a failed fsync) is covered by the statements outside a
+    // transaction. Keep the rollback: `a_catalog_fsync_error_makes_storage_unhealthy`
+    // (lib.rs) arms this fault and expects 2 rows after the reopen, with the
+    // flushed commit rolled back.
     #[cfg(test)]
     if hooks.fail(HookPoint::CatalogFsync).is_some() {
         let _ = transaction.rollback().await;

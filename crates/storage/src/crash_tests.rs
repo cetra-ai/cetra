@@ -297,10 +297,15 @@ fn seeds() -> u64 {
 
 /// With `LLMOBS_LOSSY_SHADOW` and `LLMOBS_LOSSY_SEED` set: registers `dir` in
 /// lossy mode and arms the crash before the hook abort (R2.2, R2.10). The
-/// registration lives until the abort.
+/// registration lives until the abort. Once `LLMOBS_LOSSY_SHADOW` is set, the
+/// seed must be too: a child that lost it would abort without its crash.
 fn lossy_from_env(dir: &Path) -> Option<crate::fs::lossy::Lossy> {
     let shadow = std::env::var_os("LLMOBS_LOSSY_SHADOW")?;
-    let seed: u64 = std::env::var("LLMOBS_LOSSY_SEED").ok()?.parse().ok()?;
+    let seed = std::env::var("LLMOBS_LOSSY_SEED")
+        .expect("LLMOBS_LOSSY_SEED is set whenever LLMOBS_LOSSY_SHADOW is");
+    let seed: u64 = seed
+        .parse()
+        .expect("LLMOBS_LOSSY_SEED is a u64, set by run_lossy_child");
     let lossy = crate::fs::lossy::Lossy::enable(dir, Path::new(&shadow));
     lossy.crash_on_abort(seed);
     Some(lossy)
@@ -999,7 +1004,9 @@ async fn every_drop_hook_survives_a_lossy_crash() {
     for (index, (name, _)) in DROP_POINTS.iter().enumerate() {
         for count in 0..seeds() {
             // Consecutive points get different seeds, so they cycle through the modes.
-            let seed = index as u64 * 1_000 + count;
+            // `1_000 % 3 == 1`, so the extra `index` moves the second point of the
+            // two-point table to `TearLast` (`seed % 3 == 2`) for the default one seed.
+            let seed = index as u64 * 1_000 + count + index as u64;
             let t = tempfile::tempdir().unwrap();
             let dir = t.path().join("data");
             let shadow = t.path().join("shadow");
