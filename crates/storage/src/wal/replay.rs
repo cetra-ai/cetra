@@ -28,6 +28,8 @@ pub(crate) struct ReplayOutcome {
     pub truncated_bytes: u64,
     /// Bytes left unread after a corrupt record when `skip_corrupt` is set.
     pub skipped_bytes: u64,
+    /// The last segment in seq order, if the directory has one.
+    pub last_segment: Option<std::path::PathBuf>,
 }
 
 /// Reads every segment in `dir`, in seq order, and calls `on_batch` for each
@@ -91,6 +93,7 @@ pub(crate) fn replay(
         records: progress.records,
         truncated_bytes: progress.truncated_bytes,
         skipped_bytes: progress.skipped_bytes,
+        last_segment: segments.last().map(|(_, path)| path.clone()),
     };
     tracing::info!(
         table = table.name(),

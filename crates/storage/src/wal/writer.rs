@@ -328,6 +328,16 @@ impl IoJob {
             }));
         }
         if self.segment.needs_rotation() {
+            // Only the last segment may have an unsynced tail (spec 03 § 1), so
+            // interval mode syncs the group before a newer segment exists. The
+            // sync makes the group durable, so `Written` reports it synced.
+            let rotation_synced = !self.sync_after;
+            if rotation_synced && let Err(error) = self.segment.sync() {
+                return Err(Box::new(KeptSegment {
+                    segment: self.segment,
+                    error,
+                }));
+            }
             let old_path = self.segment.path();
             match SegmentWriter::create(
                 &self.dir,
@@ -340,8 +350,8 @@ impl IoJob {
                         segment: next,
                         previous: Some(old_path),
                         mark,
-                        did_sync: self.sync_first || self.sync_after,
-                        group_synced: self.sync_after,
+                        did_sync: self.sync_first || self.sync_after || rotation_synced,
+                        group_synced: self.sync_after || rotation_synced,
                     });
                 }
                 Err(error) => {

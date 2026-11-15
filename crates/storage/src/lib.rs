@@ -1359,6 +1359,19 @@ fn recover_table(
         memtable_bytes = memtable.bytes(),
         "replayed WAL"
     );
+    // The replayed segment is no longer the last once the new one exists, so
+    // its unsynced tail must be durable first (spec 03 § 1).
+    if let Some(last) = &outcome.last_segment {
+        OpenOptions::new()
+            .write(true)
+            .open(last)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| OpenError::Io {
+                action: "syncing WAL segment",
+                path: last.clone(),
+                source,
+            })?;
+    }
     let segment = SegmentWriter::create(dir, outcome.next_seq, segment_bytes, share_hooks(hooks))?;
     Ok(ReplayTable {
         records: outcome.records,
@@ -2012,6 +2025,32 @@ mod tests {
         let storage = Arc::try_unwrap(storage).unwrap();
         assert_eq!(storage.published_rows(Table::Spans), 32);
         storage.shutdown().await.unwrap();
+    }
+
+    /// The `span_id`s of every stored span, as bytes.
+    async fn span_ids(storage: &Storage) -> Vec<Vec<u8>> {
+        let query = storage.query(project(), Default::default()).await.unwrap();
+        let ctx = datafusion::execution::context::SessionContext::new();
+        ctx.register_table("spans_t", query.spans).unwrap();
+        let batches = ctx
+            .sql("SELECT span_id FROM spans_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for batch in batches {
+            let column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+                .unwrap();
+            for index in 0..column.len() {
+                ids.push(column.value(index).to_vec());
+            }
+        }
+        ids
     }
 
     async fn span_names(spans: Arc<dyn datafusion::catalog::TableProvider>) -> Vec<String> {
@@ -2809,5 +2848,78 @@ mod tests {
             let orphans = test_support::orphan_objects(&data).await;
             assert!(orphans.is_empty(), "orphan objects after GC: {orphans:?}");
         });
+    }
+
+    /// WAL config of the R2.4 tests: interval sync of one hour, so the writer
+    /// syncs only when it must, and 1 MiB segments.
+    fn interval_wal_config(dir: &Path) -> StorageConfig {
+        let mut config = config_in(dir);
+        config.wal.sync = WalSync::Interval(Duration::from_secs(3_600));
+        config.wal.segment_bytes = ByteSize::mib(1);
+        config
+    }
+
+    #[test]
+    fn interval_rotation_syncs_the_old_segment() {
+        for seed in 0..8_u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+            let config = interval_wal_config(&data);
+            let big_id = span_row(1, 0, 1_000, 1_000).span_id.as_bytes().to_vec();
+
+            // The 1.5 MiB group rotates the WAL. Its segment is never synced
+            // by the writer in interval mode, so only the rotation can sync it.
+            test_support::crashed_life(&config, async |storage| {
+                storage
+                    .append_spans(project(), test_support::big_span_batch(1, 1_572_864))
+                    .await
+                    .unwrap();
+                assert_eq!(span_segments(&data).len(), 2, "the group rotated the WAL");
+                storage
+                    .append_spans(project(), span_rows(&[span_row(2, 0, 2_000, 2_000)]))
+                    .await
+                    .unwrap();
+            });
+            lossy.crash_with(fs::lossy::CrashMode::TearLast, seed);
+
+            test_support::clean_life(&config, async |storage| {
+                let ids = span_ids(storage).await;
+                assert!(
+                    ids.contains(&big_id),
+                    "seed {seed}: the big span is gone after the crash ({} spans stored)",
+                    ids.len()
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn reopen_syncs_the_replayed_segment() {
+        for seed in 0..8_u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+            let config = interval_wal_config(&data);
+
+            test_support::crashed_life(&config, async |storage| {
+                storage
+                    .append_spans(project(), span_rows(&[span_row(1, 0, 1_000, 1_000)]))
+                    .await
+                    .unwrap();
+            });
+            // The second open replays the segment and creates a newer one; it
+            // appends nothing, so the replayed segment is no longer the last.
+            test_support::crashed_life(&config, async |_storage| {});
+            lossy.crash_with(fs::lossy::CrashMode::TearLast, seed);
+
+            test_support::clean_life(&config, async |storage| {
+                assert_eq!(
+                    span_ids(storage).await.len(),
+                    1,
+                    "seed {seed}: the first span is gone after the crash"
+                );
+            });
+        }
     }
 }

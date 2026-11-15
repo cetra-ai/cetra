@@ -77,6 +77,8 @@ This gives one fsync per group, so throughput is bounded by disk bandwidth, not 
 
 The `wal/<table>/` directory is fsynced when a segment is created or deleted.
 
+A segment is fsynced before a newer one is created, at rotation and at open, so only the last segment can have a torn tail. In interval mode, a power loss therefore loses a suffix of each WAL: the records acknowledged since that WAL's last fsync.
+
 **Write errors are final.** If a write or `fdatasync` fails, the writer fails every pending ack (`WalFailed`), refuses further writes and reports the storage unhealthy; the operator restarts the process. The failed fsync is never retried, because the kernel may already have dropped the dirty pages. The write-and-sync step runs on a blocking thread and cannot be cancelled halfway.
 
 **Checkpoint.** The catalog stores `flushed_seq` per table (highest WAL seq whose rows are in Parquet files). WAL segments are deleted only after the catalog transaction that advanced `flushed_seq` has returned (§2). Segment `k` is deleted when a later segment exists and `first_seq(k + 1) - 1 <= flushed_seq`. The newest segment stays, because the writer may still be appending to it (D120). At low traffic that segment can hold flushed and unflushed records; replay skips the flushed ones. The extra bytes are at most one segment (`wal.segment_bytes`).

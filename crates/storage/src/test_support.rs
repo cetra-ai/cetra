@@ -209,6 +209,27 @@ pub(crate) fn span_rows(spans: &[Span]) -> RecordBatch {
     spans_to_record_batch(spans).unwrap_or_else(|error| panic!("spans batch: {error}"))
 }
 
+/// One span of `trace` whose `input` is `len` bytes of incompressible printable
+/// ASCII: SplitMix64 output, each byte mapped to `b'!' + b % 94`. Its WAL record
+/// is about `len` bytes, whatever the compression.
+pub(crate) fn big_span_batch(trace: u16, len: usize) -> RecordBatch {
+    let mut state = 0x5eed_u64;
+    let input: String = (0..len)
+        .map(|_| {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let offset = u8::try_from(z % 94).expect("a remainder of 94 fits in a byte");
+            char::from(b'!' + offset)
+        })
+        .collect();
+    let mut span = span_row(trace, 0, 1_000, 1_000);
+    span.input = Some(input);
+    span_rows(&[span])
+}
+
 /// One score of the fixed test project on the given trace, the score twin of
 /// [`span_row`]: `trace_id` is the 2 big-endian bytes of `trace + 1`, repeated.
 /// A test that needs `session_id`, `user_id` or another target sets it on the
