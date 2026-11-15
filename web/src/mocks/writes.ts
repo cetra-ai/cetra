@@ -40,6 +40,7 @@ export interface WriteOperation {
 export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "post_login", method: "post", path: "/api/auth/login" },
   { operationId: "post_logout", method: "post", path: "/api/auth/logout" },
+  { operationId: "post_sso_discover", method: "post", path: "/api/auth/sso/discover" },
   { operationId: "post_signup", method: "post", path: "/api/auth/signup" },
   { operationId: "post_setup", method: "post", path: "/api/auth/setup" },
   { operationId: "post_password_forgot", method: "post", path: "/api/auth/password/forgot" },
@@ -221,6 +222,7 @@ const PROJECT_OVERRIDES = ["admin", "member", "viewer", "none"] as const;
 const RESPONSES: Record<string, Respond> = {
   post_login: () => HttpResponse.json(meDocument),
   post_logout: () => noContent(),
+  post_sso_discover: () => HttpResponse.json({ sso: false }),
   post_signup: () => HttpResponse.json(signupResponseDocument, { status: 201 }),
   post_setup: () => HttpResponse.json(setupResponseDocument, { status: 201 }),
   post_password_forgot: () => noContent(),

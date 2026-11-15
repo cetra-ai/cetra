@@ -137,6 +137,28 @@ pub struct OrgSso {
     pub domains: Vec<OrgSsoDomain>,
 }
 
+/// `POST /api/auth/sso/discover`. `Debug` omits the email.
+#[derive(Clone, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SsoDiscoverRequest {
+    /// The address the person typed on the login page.
+    pub email: String,
+}
+
+impl fmt::Debug for SsoDiscoverRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SsoDiscoverRequest { .. }")
+    }
+}
+
+/// Whether the email's domain signs in through an org's provider (D-P-60). A function of the
+/// domain only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SsoDiscovery {
+    /// True when the domain's org has an enabled provider.
+    pub sso: bool,
+}
+
 /// `PATCH /api/v1/orgs/{org}/sso`: the flags, each optional.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

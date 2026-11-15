@@ -14,5 +14,6 @@
   ],
   "smtp_enabled": false,
   "email_verification_required": false,
-  "org_create_allowed": true
+  "org_create_allowed": true,
+  "sso_discovery": false
 }

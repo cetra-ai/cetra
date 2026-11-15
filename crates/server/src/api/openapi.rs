@@ -71,7 +71,7 @@ use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, Update
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
-    PutOrgSsoProvider,
+    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -177,6 +177,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<PutOrgSsoProvider>();
     set.insert::<AddOrgSsoDomain>();
     set.insert::<PatchOrgSso>();
+    set.insert::<SsoDiscoverRequest>();
+    set.insert::<SsoDiscovery>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1041,7 +1043,27 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         &[429],
     ))
     .build();
+    let sso_discover = operation(
+        "post_sso_discover",
+        "auth",
+        "Ask whether an email's domain signs in through an org",
+    )
+    .description(Some(
+        "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+    ))
+    .securities(Some(Vec::new()))
+    .request_body(Some(json_body("SsoDiscoverRequest")))
+    .responses(responses(
+        "200",
+        json_of::<SsoDiscovery>("Whether the domain signs in through an org."),
+        &[400, 429],
+    ))
+    .build();
     paths
+        .path(
+            "/api/auth/sso/discover",
+            PathItem::new(HttpMethod::Post, sso_discover),
+        )
         .path(
             "/api/auth/sso/authorize",
             PathItem::new(HttpMethod::Get, sso_authorize),

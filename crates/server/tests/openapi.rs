@@ -17,6 +17,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/auth/callback/{provider}", "get_oauth_callback"),
     ("get", "/api/auth/sso/authorize", "get_sso_authorize"),
+    ("post", "/api/auth/sso/discover", "post_sso_discover"),
     ("get", "/api/auth/config", "get_auth_config"),
     ("post", "/api/auth/setup", "post_setup"),
     ("post", "/api/auth/login", "post_login"),
@@ -572,6 +573,7 @@ fn document_lint() {
             "get_auth_config"
                 | "get_oauth_authorize"
                 | "get_sso_authorize"
+                | "post_sso_discover"
                 | "get_oauth_callback"
                 | "post_setup"
                 | "post_login"
@@ -639,6 +641,8 @@ fn document_lint() {
             expected_errors.extend(["404"]);
         } else if *id == "get_sso_authorize" {
             expected_errors.extend(["429"]);
+        } else if *id == "post_sso_discover" {
+            expected_errors.extend(["400", "429"]);
         } else if *id == "get_oauth_callback" {
             // Failure is a redirect, not a problem response.
         } else if *id == "post_setup" || *id == "post_signup" {

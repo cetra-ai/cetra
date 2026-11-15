@@ -268,6 +268,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/sso/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask whether an email's domain signs in through an org
+         * @description Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.
+         */
+        post: operations["post_sso_discover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/memberships/lookup": {
         parameters: {
             query?: never;
@@ -2180,6 +2200,11 @@ export interface components {
             signup: components["schemas"]["SignupPolicy"];
             /** @description SMTP is configured, so password reset and verification email can be sent. */
             smtp_enabled: boolean;
+            /**
+             * @description The login page asks for the email first: some domain signs in through an org's
+             *     provider (D-P-60).
+             */
+            sso_discovery: boolean;
         };
         /**
          * @description One OAuth or OIDC provider the UI can start a login with.
@@ -4808,6 +4833,19 @@ export interface components {
             /** @description More rows matched than `limit`; `rows` holds the first `limit`. */
             truncated: boolean;
         };
+        /** @description `POST /api/auth/sso/discover`. `Debug` omits the email. */
+        SsoDiscoverRequest: {
+            /** @description The address the person typed on the login page. */
+            email: string;
+        };
+        /**
+         * @description Whether the email's domain signs in through an org's provider (D-P-60). A function of the
+         *     domain only.
+         */
+        SsoDiscovery: {
+            /** @description True when the domain's org has an enabled provider. */
+            sso: boolean;
+        };
         /**
          * @description How the provider is asked to fill the answer schema.
          * @enum {string}
@@ -5944,6 +5982,48 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_sso_discover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SsoDiscoverRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the domain signs in through an org. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SsoDiscovery"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
             };
             /** @description Too many requests. */
             429: {

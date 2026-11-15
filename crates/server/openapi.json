@@ -765,6 +765,59 @@
         "security": []
       }
     },
+    "/api/auth/sso/discover": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Ask whether an email's domain signs in through an org",
+        "description": "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+        "operationId": "post_sso_discover",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoDiscoverRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Whether the domain signs in through an org.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDiscovery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/internal/v1/memberships/lookup": {
       "post": {
         "tags": [
@@ -12431,7 +12484,8 @@
           "providers",
           "smtp_enabled",
           "email_verification_required",
-          "org_create_allowed"
+          "org_create_allowed",
+          "sso_discovery"
         ],
         "properties": {
           "email_verification_required": {
@@ -12468,6 +12522,10 @@
           "smtp_enabled": {
             "type": "boolean",
             "description": "SMTP is configured, so password reset and verification email can be sent."
+          },
+          "sso_discovery": {
+            "type": "boolean",
+            "description": "The login page asks for the email first: some domain signs in through an org's\nprovider (D-P-60)."
           }
         }
       },
@@ -17633,6 +17691,33 @@
           "truncated": {
             "type": "boolean",
             "description": "More rows matched than `limit`; `rows` holds the first `limit`."
+          }
+        }
+      },
+      "SsoDiscoverRequest": {
+        "type": "object",
+        "description": "`POST /api/auth/sso/discover`. `Debug` omits the email.",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address the person typed on the login page."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SsoDiscovery": {
+        "type": "object",
+        "description": "Whether the email's domain signs in through an org's provider (D-P-60). A function of the\ndomain only.",
+        "required": [
+          "sso"
+        ],
+        "properties": {
+          "sso": {
+            "type": "boolean",
+            "description": "True when the domain's org has an enabled provider."
           }
         }
       },

@@ -122,6 +122,7 @@ async fn config(State(state): State<AppState>) -> Result<error::Json<AuthConfig>
         email_verification_required: state.config.auth.require_email_verification,
         org_create_allowed: state.config.orgs.user_create,
         org_create_url: state.config.orgs.create_url.clone(),
+        sso_discovery: state.org_sso.discovery_enabled(),
     }))
 }
 

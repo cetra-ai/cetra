@@ -7,7 +7,7 @@ use std::io;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use llmobs_core::ids::OrgId;
 use serde::Deserialize;
 use sqlx::SqliteConnection;
@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::{normalize_domain, store};
 use crate::api::account::SignupPolicy;
 use crate::api::entitlements::Feature;
+use crate::api::org_sso::{SsoDiscoverRequest, SsoDiscovery};
 use crate::auth::OrgRole;
 use crate::auth::oidc::ExchangeError;
 use crate::auth::oidc::flow::{self, LoggedIn, LoginError, display_name};
@@ -37,15 +38,48 @@ use crate::routes::oauth::redirect;
 /// The callback's provider segment and the state cookie's provider.
 pub(crate) const PROVIDER: &str = "sso";
 
-/// The org sign-in routes. P11 adds discovery.
+/// The org sign-in routes: authorize and discovery (D-P-60).
 pub(crate) fn routes() -> Vec<RouteDef> {
-    vec![RouteDef {
-        method: Method::GET,
-        path: "/api/auth/sso/authorize",
-        access: Access::Public,
-        documented: true,
-        handler: get(authorize),
-    }]
+    vec![
+        RouteDef {
+            method: Method::GET,
+            path: "/api/auth/sso/authorize",
+            access: Access::Public,
+            documented: true,
+            handler: get(authorize),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/auth/sso/discover",
+            access: Access::Public,
+            documented: true,
+            handler: post(discover),
+        },
+    ]
+}
+
+/// `POST /api/auth/sso/discover` (D-P-60). The answer depends only on the email's domain, and
+/// nothing is logged.
+async fn discover(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    error::Json(body): error::Json<SsoDiscoverRequest>,
+) -> Result<error::Json<SsoDiscovery>, ApiError> {
+    state
+        .limits
+        .sso_discover
+        .check(&ip, state.clock.now_ns())
+        .map_err(|retry| ApiError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })?;
+    let sso = match normalize_email(&body.email) {
+        Ok(email) => state
+            .org_sso
+            .route(&email)
+            .is_some_and(|route| route.enabled),
+        Err(_) => false,
+    };
+    Ok(error::Json(SsoDiscovery { sso }))
 }
 
 #[derive(Deserialize)]
@@ -1245,6 +1279,88 @@ mod tests {
             .send()
             .await;
         assert_eq!(location(&response), "/login?error=invalid_state");
+    }
+
+    async fn discover_for(
+        app: &TestApp,
+        email: &str,
+        ip: Option<std::net::IpAddr>,
+    ) -> TestResponse {
+        let mut request = app
+            .request(Method::POST, "/api/auth/sso/discover")
+            .json(&serde_json::json!({ "email": email }));
+        if let Some(ip) = ip {
+            request = request.peer(ip);
+        }
+        request.send().await
+    }
+
+    fn sso_flag(response: &TestResponse) -> bool {
+        response.json::<SsoDiscovery>().sso
+    }
+
+    #[tokio::test]
+    async fn discovery_depends_only_on_the_domain() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+
+        assert!(sso_flag(&discover_for(&app, "ada@acme.test", None).await));
+        // No account is needed: the answer is a function of the domain.
+        assert!(sso_flag(
+            &discover_for(&app, "nobody@acme.test", None).await
+        ));
+        assert!(!sso_flag(&discover_for(&app, "x@other.test", None).await));
+        assert!(!sso_flag(&discover_for(&app, "not-an-email", None).await));
+
+        let config = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json::<serde_json::Value>();
+        assert_eq!(config["sso_discovery"], true);
+
+        exec(&app, "UPDATE org_sso_providers SET enabled = 0").await;
+        reload(&app).await;
+        assert!(!sso_flag(&discover_for(&app, "ada@acme.test", None).await));
+        let config = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json::<serde_json::Value>();
+        assert_eq!(config["sso_discovery"], false);
+
+        exec(
+            &app,
+            "UPDATE org_sso_providers SET enabled = 1, enforced = 1",
+        )
+        .await;
+        reload(&app).await;
+        assert!(sso_flag(&discover_for(&app, "ada@acme.test", None).await));
+
+        // One bucket per IP: 300 pass, the 301st is refused, another address still passes.
+        let limited_ip = Some(std::net::IpAddr::from([203, 0, 113, 9]));
+        for _ in 0..300 {
+            assert_eq!(
+                discover_for(&app, "ada@acme.test", limited_ip).await.status,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            discover_for(&app, "ada@acme.test", limited_ip).await.status,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        let other_ip = Some(std::net::IpAddr::from([203, 0, 113, 10]));
+        assert_eq!(
+            discover_for(&app, "ada@acme.test", other_ip).await.status,
+            StatusCode::OK
+        );
+
+        let logged = assert_logs_clean(&["acme.test", "ada@"], async {
+            discover_for(&app, "ada@acme.test", None).await
+        })
+        .await;
+        assert_eq!(logged.status, StatusCode::OK);
     }
 
     #[tokio::test]

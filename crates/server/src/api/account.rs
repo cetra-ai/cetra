@@ -30,6 +30,9 @@ pub struct AuthConfig {
     /// Where "New organization" goes when users may not create orgs. Omitted when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_create_url: Option<String>,
+    /// The login page asks for the email first: some domain signs in through an org's
+    /// provider (D-P-60).
+    pub sso_discovery: bool,
 }
 
 /// Who may register after the first user exists.
@@ -398,6 +401,7 @@ mod tests {
             email_verification_required: false,
             org_create_allowed: true,
             org_create_url: None,
+            sso_discovery: false,
         };
         let me = Me {
             user: user(),
