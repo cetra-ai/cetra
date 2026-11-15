@@ -93,6 +93,9 @@ pub(crate) struct ReadCache {
     write_lock: Mutex<()>,
     hits: AtomicU64,
     misses: AtomicU64,
+    /// Test seam: runs in `write_blocks` after a block file is written and before it is indexed.
+    #[cfg(test)]
+    after_block_write: Mutex<Option<fn(&ReadCache)>>,
 }
 
 #[derive(Debug, Default)]
@@ -231,6 +234,8 @@ impl ReadCache {
             write_lock: Mutex::new(()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            #[cfg(test)]
+            after_block_write: Mutex::new(None),
         };
         let victims = {
             let mut state = cache.lock();
@@ -350,6 +355,14 @@ impl ReadCache {
             {
                 tracing::debug!(%error, index, "writing a read cache block failed");
                 continue;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &*self
+                .after_block_write
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                hook(self);
             }
             let victims = {
                 let mut state = self.lock();
@@ -1009,6 +1022,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_block_written_after_its_object_was_evicted_is_not_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill_dir = tempfile::tempdir().unwrap();
+        let disk = Arc::new(
+            Disk::open(
+                vec![dir.path().to_path_buf()],
+                MIB,
+                crate::disk::test_spill(spill_dir.path()),
+            )
+            .unwrap(),
+        );
+        disk.set_free_for_test(Some(10 * MIB));
+        let cache =
+            ReadCache::open(dir.path().join("cache"), 64 * MIB, Arc::clone(&disk), MIB).unwrap();
+        cache.set_size(NAME, 4_096).unwrap();
+
+        // The object is evicted between the block's write and its index insert.
+        let evict: fn(&ReadCache) = |cache| cache.evict_file(NAME);
+        *cache.after_block_write.lock().unwrap() = Some(evict);
+        cache.write_blocks(NAME, &[(0, Bytes::from(vec![7_u8; 4_096]))]);
+
+        assert_eq!(
+            cache.stats().bytes,
+            0,
+            "a block of an evicted object is indexed"
+        );
+        assert!(cache.read_blocks(NAME, &[0]).is_empty());
+    }
+
     #[tokio::test]
     async fn a_range_is_served_from_blocks_after_the_first_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1363,5 +1406,85 @@ mod tests {
         assert_eq!(block_len(7 * MIB / 2, 3), Some(MIB / 2));
         assert_eq!(block_len(7 * MIB / 2, 4), None);
         assert_eq!(block_len(MIB, 0), Some(MIB));
+    }
+
+    /// R6.8. Eight threads insert, read, evict and shed 32 objects at once. No
+    /// read returns other bytes, the capacity holds, and every block file on
+    /// disk is indexed. Evicted-and-rewritten blocks may be indexed without a
+    /// file for a moment, which is benign (see `hardening.md` § M6), so only the
+    /// file-to-index direction is asserted.
+    #[test]
+    fn concurrent_use_never_returns_wrong_bytes() {
+        /// Object `n`: byte `i` is `(n * 31 + i) mod 256`, so objects differ.
+        fn object(n: u64) -> Bytes {
+            (0..4_096_u64)
+                .map(|i| u8::try_from((n * 31 + i) % 256).unwrap_or(0))
+                .collect::<Vec<u8>>()
+                .into()
+        }
+
+        /// The block files under `dir`: every file but `size` files and temp files.
+        fn block_bytes_on_disk(dir: &Path) -> u64 {
+            let mut total = 0;
+            let mut pending = vec![dir.to_path_buf()];
+            while let Some(current) = pending.pop() {
+                for entry in fs::read_dir(&current).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name != SIZE_FILE && !is_temp_name(&name) {
+                        total += entry.metadata().unwrap().len();
+                    }
+                }
+            }
+            total
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let capacity = 8 * 4_100;
+        let fixture = fixture(dir.path(), capacity, 0);
+        let objects: Vec<(String, Bytes)> = (0..32_u64)
+            .map(|n| (format!("obj-{n}"), object(n)))
+            .collect();
+        std::thread::scope(|scope| {
+            for thread in 0..8_u64 {
+                let cache = Arc::clone(&fixture.cache);
+                let objects = &objects;
+                scope.spawn(move || {
+                    // A xorshift64 generator, seeded per thread.
+                    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (thread + 1);
+                    for _ in 0..2_000 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        let (name, bytes) = &objects[usize::try_from(state % 32).unwrap()];
+                        match (state >> 8) % 4 {
+                            0 => cache.insert_bytes(name, bytes),
+                            1 => {
+                                for (index, data) in cache.read_blocks(name, &[0]) {
+                                    assert_eq!(index, 0);
+                                    assert_eq!(&data, bytes, "{name} returned other bytes");
+                                }
+                            }
+                            2 => cache.evict_file(name),
+                            _ => cache.shed(4_100),
+                        }
+                    }
+                });
+            }
+        });
+
+        let stats = fixture.cache.stats();
+        assert!(stats.bytes <= capacity, "{stats:?}");
+        let on_disk = block_bytes_on_disk(&fixture.cache_dir);
+        assert!(
+            on_disk <= stats.bytes,
+            "{on_disk} bytes of block files, {} indexed",
+            stats.bytes
+        );
     }
 }

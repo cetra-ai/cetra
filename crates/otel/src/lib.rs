@@ -22,6 +22,11 @@ mod usage;
 mod value;
 mod warn;
 
+/// Fuzz entry points (track R M3). Not part of the API.
+#[cfg(any(test, fuzzing))]
+#[doc(hidden)]
+pub mod fuzz_entry;
+
 pub use cost::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows};
 pub use decode::{decode_json, decode_protobuf};
 pub use error::{DecodeError, JsonErrorCategory, PriceError};

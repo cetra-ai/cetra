@@ -84,6 +84,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- A WAL record with a corrupt compressed-buffer length is rejected as corrupt instead of aborting the server at startup.
+- The WAL now rejects a batch whose decoded size exceeds 1 GiB with an invalid-batch error (previously such a record could not be replayed).
+- A Parquet decoder panic on a corrupt data file no longer drops the request, stops compaction or
+  prevents startup: the read fails, and the file is verified and quarantined (track R).
 - Web UI: the sidebar opens on screens under 768 px (a trigger above the page); session ids show in full in the session header; the traces list refreshes after "Delete matching…" once storage hides the rows, and the deletion history says its trace count includes evaluation traces; Enter submits the Save view and Rename view dialogs.
 - Security review of the auth code: an invitation no longer counts as proof of an email address, so
   linking Google, GitHub or an org's identity provider clears the password of an account made with an

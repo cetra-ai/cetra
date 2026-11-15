@@ -15,6 +15,7 @@ use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
 
 use crate::catalog::FileMeta;
 use crate::error::CompactionError;
+use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 
 /// Rows with `lower <= time < upper`. `None` is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,14 +85,13 @@ pub(crate) async fn time_values(
         let reader =
             ParquetObjectReader::new(Arc::clone(&store), ObjectPath::from(file.path.as_str()))
                 .with_file_size(file.size);
-        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+        let builder = guard(ParquetRecordBatchStreamBuilder::new(reader))
             .await
             .map_err(parquet_error)?;
         let mask = ProjectionMask::columns(builder.parquet_schema(), [column]);
-        let mut stream = builder
-            .with_projection(mask)
-            .build()
-            .map_err(parquet_error)?;
+        let stream =
+            guard_sync(move || builder.with_projection(mask).build()).map_err(parquet_error)?;
+        let mut stream = GuardedStream::new(stream, || Err(decoder_panicked()));
         while let Some(batch) = stream.next().await {
             let batch = batch.map_err(parquet_error)?;
             let Some(times) = batch
