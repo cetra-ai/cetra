@@ -260,6 +260,8 @@ pub(crate) struct UploadRecord {
     pub(crate) state: UploadState,
     /// `DroppedOpen` only: dropped while a life was ending (`set_ending`).
     pub(crate) cancelled: bool,
+    /// The length of each part sent, in call order.
+    pub(crate) parts: Vec<usize>,
 }
 
 /// The error of an injected fault: `Generic`, with a source that names the simulated status.
@@ -510,9 +512,17 @@ impl ChaosStore {
                 path: path.to_owned(),
                 state: UploadState::Open,
                 cancelled: false,
+                parts: Vec::new(),
             },
         );
         id
+    }
+
+    /// Records a part of `len` bytes sent on upload `id`.
+    fn add_part(&self, id: u64, len: usize) {
+        if let Some(record) = self.lock().uploads.get_mut(&id) {
+            record.parts.push(len);
+        }
     }
 
     fn set_upload(&self, id: u64, next: UploadState) {
@@ -574,16 +584,18 @@ impl fmt::Debug for ChaosUpload {
 }
 
 impl Drop for ChaosUpload {
-    /// An upload dropped while open was dropped without an abort. It counts as cancelled when a
-    /// life is ending at that moment (R4.2).
+    /// An upload dropped while open, or after a failed `complete` and before an abort reported
+    /// back, was dropped without an abort. It counts as cancelled when a life is ending at that
+    /// moment (R4.2). The second case covers an abort future cancelled after a failed complete.
     fn drop(&mut self) {
         let mut state = self.store.lock();
         let cancelled = state.ending;
-        if let Some(record) = state
-            .uploads
-            .get_mut(&self.id)
-            .filter(|record| record.state == UploadState::Open)
-        {
+        if let Some(record) = state.uploads.get_mut(&self.id).filter(|record| {
+            matches!(
+                record.state,
+                UploadState::Open | UploadState::CompleteFailed
+            )
+        }) {
             record.state = UploadState::DroppedOpen;
             record.cancelled = cancelled;
         }
@@ -593,6 +605,7 @@ impl Drop for ChaosUpload {
 #[async_trait]
 impl MultipartUpload for ChaosUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        self.store.add_part(self.id, data.content_length());
         match self.store.next_fault(Call::PutPart, &self.path) {
             Some(Fault::Before(status)) => {
                 Box::pin(async move { Err(injected(status, Call::PutPart)) })
@@ -1019,6 +1032,51 @@ mod tests {
             .map(|record| record.path)
             .collect();
         assert_eq!(abandoned, vec!["ending".to_owned(), "orphan".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn a_drop_after_a_failed_complete_is_a_drop_open() {
+        let store = chaos();
+
+        // Dropped before its abort ran (an abort future cancelled after a failed complete):
+        // a leak outside a life's ending window.
+        let mut leaked = store.put_multipart(&path("leaked")).await.unwrap();
+        store.push(Call::Complete, Fault::Before(Status::SlowDown));
+        assert!(leaked.complete().await.is_err());
+        drop(leaked);
+
+        // The same drop while a life is ending is cancelled, so it is abandoned.
+        let mut cancelled = store.put_multipart(&path("cancelled")).await.unwrap();
+        store.push(Call::Complete, Fault::Before(Status::SlowDown));
+        assert!(cancelled.complete().await.is_err());
+        store.set_ending(true);
+        drop(cancelled);
+        store.set_ending(false);
+
+        let records = store.uploads();
+        let seen: Vec<(&str, UploadState, bool)> = records
+            .iter()
+            .map(|record| (record.path.as_str(), record.state, record.cancelled))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("leaked", UploadState::DroppedOpen, false),
+                ("cancelled", UploadState::DroppedOpen, true),
+            ]
+        );
+        let leaked: Vec<String> = store
+            .leaked_uploads()
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
+        assert_eq!(leaked, vec!["leaked".to_owned()]);
+        let abandoned: Vec<String> = store
+            .abandoned_uploads()
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
+        assert_eq!(abandoned, vec!["cancelled".to_owned()]);
     }
 
     #[tokio::test]

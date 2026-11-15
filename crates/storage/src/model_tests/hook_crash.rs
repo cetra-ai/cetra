@@ -147,11 +147,11 @@ fn primer(last: &Op) -> Vec<Op> {
 }
 
 /// Whether case `n` gets a lossy crash. The first `len` cases give a lossy crash to the odd pairs,
-/// the next `len` to the even ones (`(n + n / len) % 2`), so every pair gets both kinds over
+/// the next `len` to the even ones (`((n % len) + n / len) % 2`), so every pair gets both kinds over
 /// `2 * len` cases and the default run mixes lossy and plain crashes.
 fn is_lossy(n: u64) -> bool {
     let len = u64::try_from(last_ops().len()).expect("a small number of pairs");
-    (n + n / len) % 2 == 1
+    ((n % len) + n / len) % 2 == 1
 }
 
 /// Case `n`. The pair is `last_ops()[n % len]`, so every pair is covered; the prefix is drawn from

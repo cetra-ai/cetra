@@ -890,7 +890,9 @@ where
         // remove a completed object (S3 answers NoSuchUpload); it only frees the
         // parts when the upload really failed. The name stays staged either way,
         // and GC removes it (spec 03 §2).
-        let _ = upload.abort().await;
+        if upload.abort().await.is_err() {
+            tracing::warn!(key = %path, "aborting a failed multipart upload failed; the parts stay until the lifecycle rule removes them");
+        }
     }
     outcome
 }
@@ -1410,6 +1412,14 @@ mod tests {
             read_registered(&objects, "tables/spans/b.parquet").await,
             large
         );
+        assert_eq!(states(&fault), vec![UploadState::Completed]);
+        assert_eq!(fault.count(Call::Abort), 0);
+        // Every part but the last is one full part; the last holds the rest.
+        let parts = fault.uploads()[0].parts.clone();
+        assert_eq!(parts.iter().sum::<usize>(), SIZES.single_max + 1);
+        let (last, full) = parts.split_last().expect("the upload sent parts");
+        assert!(full.iter().all(|&len| len == SIZES.part), "{parts:?}");
+        assert!(*last >= 1 && *last <= SIZES.part, "{parts:?}");
 
         fault.push(Call::Put, Fault::Before(Status::SlowDown));
         let error = objects
@@ -1624,6 +1634,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
         assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        assert_eq!(chaos.count(Call::Abort), 1);
         assert!(chaos.leaked_uploads().is_empty());
     }
 
@@ -1639,6 +1650,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
         assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        assert_eq!(chaos.count(Call::Abort), 1);
         let missing = object_store::path::Path::parse("tables/spans/complete.parquet").unwrap();
         assert!(matches!(
             chaos.inner().head(&missing).await.unwrap_err(),
@@ -1658,6 +1670,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
         assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        assert_eq!(chaos.count(Call::Abort), 1);
         // Abort cannot remove an object that `complete` created (S3 answers NoSuchUpload).
         let landed = object_store::path::Path::parse("tables/spans/ambiguous.parquet").unwrap();
         assert_eq!(chaos.inner().head(&landed).await.unwrap().size, 3000);
@@ -1685,6 +1698,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ObjectError::InvalidPath), "{error}");
         assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        assert_eq!(chaos.count(Call::Abort), 1);
     }
 
     #[tokio::test]
@@ -1705,6 +1719,7 @@ mod tests {
             .map(|record| record.path)
             .collect();
         assert_eq!(abandoned, vec!["tables/spans/stuck.parquet".to_owned()]);
+        assert_eq!(chaos.count(Call::Abort), 1);
         assert!(chaos.leaked_uploads().is_empty());
     }
 
