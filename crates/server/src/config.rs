@@ -694,9 +694,13 @@ impl ServerConfig {
         load_from(toml.as_deref(), &pairs)
     }
 
-    /// The storage configuration, including the injected data directory.
+    /// The storage configuration, including the injected data directory. Object
+    /// deletion is off in restore mode (N M3, D-N-34).
     pub fn storage_config(&self) -> StorageConfig {
-        self.storage.clone()
+        StorageConfig {
+            delete_objects: !self.restore_mode,
+            ..self.storage.clone()
+        }
     }
 }
 
@@ -3103,6 +3107,15 @@ link_existing_by_email = true
 
         let env = load_from(None, &[("LLMOBS_RESTORE_MODE", "true")]).unwrap();
         assert!(env.restore_mode);
+    }
+
+    #[test]
+    fn restore_mode_turns_off_object_deletion_in_storage_config() {
+        let normal = load_from(None, &[]).unwrap();
+        assert!(normal.storage_config().delete_objects);
+
+        let restore = load_from(Some("restore_mode = true\n"), &[]).unwrap();
+        assert!(!restore.storage_config().delete_objects);
     }
 
     #[test]

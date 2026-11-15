@@ -368,6 +368,7 @@ impl TestApp {
             config,
             meta,
             storage: Arc::new(storage),
+            ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
             limits: Limits::new(),
             key_cache: crate::auth::principal::ApiKeyCache::new(),

@@ -432,6 +432,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         config,
         meta,
         storage,
+        ready: crate::http::health::ReadyCache::default(),
         clock: Clock::System,
         limits: Limits::new(),
         key_cache: crate::auth::principal::ApiKeyCache::new(),
@@ -1086,6 +1087,29 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_mode_opens_storage_without_object_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(
+            logs.contains("object deletion is off (restore mode)"),
+            "{logs}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(
+            !logs.contains("object deletion is off (restore mode)"),
+            "{logs}"
+        );
     }
 
     #[tokio::test]

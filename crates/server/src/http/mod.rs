@@ -9,7 +9,7 @@ pub(crate) mod access;
 pub(crate) mod client_ip;
 mod csrf;
 pub(crate) mod error;
-mod health;
+pub(crate) mod health;
 pub(crate) mod restore;
 
 use std::sync::Arc;
@@ -42,6 +42,8 @@ pub(crate) struct AppInner {
     pub(crate) config: ServerConfig,
     pub(crate) meta: MetaDb,
     pub(crate) storage: Arc<Storage>,
+    /// The last object-store probe behind `/readyz`, cached 10 s (D-N-36).
+    pub(crate) ready: health::ReadyCache,
     pub(crate) clock: Clock,
     pub(crate) limits: Limits,
     /// Successful API-key lookups, cached 60 s by hash.
