@@ -97,6 +97,8 @@ pub(super) struct Harness {
     /// The `list` calls the orphan audits made (S3 mode). `check_full` expects exactly these
     /// and no others: storage never lists the bucket (spec 03 §5).
     pub(super) audit_lists: u64,
+    /// The `FaultyRead` ops of this case that failed under an injected fault (S3 mode, R4.5).
+    pub(super) faulty_read_errors: u64,
 }
 
 /// Opens storage on `config`. In S3 mode the store is `remote`'s chaos store. Opening runs calm:
@@ -206,6 +208,7 @@ impl Harness {
             crashes: Vec::new(),
             remote,
             audit_lists: 0,
+            faulty_read_errors: 0,
         }
     }
 
@@ -284,6 +287,20 @@ impl Harness {
         self.remote.as_ref().map(|remote| &remote.chaos)
     }
 
+    /// Runs `run` with the fault schedule off, then restores its previous setting (R4.5): for
+    /// the reads that check a result against the model, which must not fail on a fault. Local
+    /// mode has no schedule, so `run` simply runs.
+    pub(super) fn calm<T>(&self, run: impl FnOnce(&Self) -> T) -> T {
+        let Some(chaos) = self.chaos() else {
+            return run(self);
+        };
+        let was_active = chaos.is_active();
+        chaos.set_active(false);
+        let result = run(self);
+        chaos.set_active(was_active);
+        result
+    }
+
     /// The bytes of `file`, read past the chaos store and the read cache: from
     /// `<dir>/objects/<path>` in local mode, from the inner store in S3 mode (R4.4).
     pub(super) fn object_bytes(&self, file: &FileMeta) -> Bytes {
@@ -313,6 +330,10 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(Life { storage, runtime }) = self.life.take() {
+            // Shutdown must not meet faults (R4.5): the schedule is off before the storage closes.
+            if let Some(chaos) = self.chaos() {
+                chaos.set_active(false);
+            }
             self.set_ending(true);
             let _ = runtime.block_on(storage.shutdown());
             drop(storage);

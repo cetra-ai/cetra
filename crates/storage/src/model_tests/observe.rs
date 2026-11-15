@@ -76,12 +76,19 @@ pub(super) fn observe_eval_trace_ids(
 
 /// A query context on `project`'s snapshot, as the server's read handlers build one.
 async fn context(harness: &Harness, project: P) -> QueryContext {
+    try_context(harness, project)
+        .await
+        .expect("a query context on a project")
+}
+
+/// [`context`], with a failure returned rather than panicking: a read under faults may fail.
+async fn try_context(harness: &Harness, project: P) -> Result<QueryContext, String> {
     let query = harness
         .storage()
         .query(project.id(), Default::default())
         .await
-        .expect("query on a project");
-    QueryContext::new(query, None).expect("query context on a project")
+        .map_err(|error| format!("query on a project: {error}"))?;
+    QueryContext::new(query, None).map_err(|error| format!("query context on a project: {error}"))
 }
 
 /// `(start_time, trace_id hex, span_id hex)` of every `span_list` row, duplicates kept, in list
@@ -139,8 +146,19 @@ pub(super) fn observe_traces(
     scope: ListScope,
     limit: usize,
 ) -> Vec<ExpectedTrace> {
+    try_observe_traces(harness, project, scope, limit).expect("trace_list on a project")
+}
+
+/// `observe_traces`, with a failed read returned as its message (R4.5: `FaultyRead` may fail
+/// under faults, and only then).
+pub(super) fn try_observe_traces(
+    harness: &Harness,
+    project: P,
+    scope: ListScope,
+    limit: usize,
+) -> Result<Vec<ExpectedTrace>, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
+        let ctx = try_context(harness, project).await?;
         let mut rows = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -158,7 +176,7 @@ pub(super) fn observe_traces(
                 },
             )
             .await
-            .expect("trace_list on a project");
+            .map_err(|error| format!("trace_list on a project: {error}"))?;
             for batch in &page.batches {
                 for row in 0..batch.num_rows() {
                     rows.push(trace_from_batch(batch, row));
@@ -169,7 +187,7 @@ pub(super) fn observe_traces(
                 None => break,
             }
         }
-        rows
+        Ok(rows)
     })
 }
 

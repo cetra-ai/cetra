@@ -10,22 +10,27 @@ use std::time::Duration;
 use proptest::prelude::*;
 use proptest::strategy::Union;
 
-use super::check::{check_s3_audit, check_settled_files};
+use super::check::{check_s3_audit, check_settled_files, compare_traces};
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
-use super::observe::{observe_eval_trace_ids, observe_user_scope};
+use super::observe::{ALL_ROWS, observe_eval_trace_ids, observe_user_scope, try_observe_traces};
 use super::shape::{
     HOUR_NS, P, ScoreKey, Target, day, deletion_id, hex, midnight, score, score_created_at, span,
     trace_id,
 };
+use crate::catalog::{self, FileMeta, FileTable};
 use crate::config::WalSync;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
-use crate::test_support::span_rows;
+use crate::read_cache::cached_name;
+use crate::reads::MAX_PAGE;
+use crate::test_support::{ChaosStore, span_rows};
 use crate::wal::{Table, parse_segment_name};
 use llmobs_core::batch::scores_to_record_batch;
 use llmobs_core::ids::TraceId;
 use llmobs_core::span::Span;
+use object_store::path::Path as ObjectPath;
+use std::sync::Arc;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
 pub(super) const MICRO_NS: i64 = 1_000;
@@ -130,6 +135,18 @@ pub(super) enum Op {
     LossyCrash {
         seed: u64,
     },
+    /// S3 mode only (R4.5). Puts one active file (`pick % len`, in path order over the three
+    /// tables) in the verify queue, then runs one verify pass under faults.
+    Verify {
+        pick: u8,
+    },
+    /// S3 mode only (R4.5). Drops every block of the read cache of the active files, so the next
+    /// reads go to the store.
+    EvictCache,
+    /// S3 mode only (R4.5). One trace list of `project`, under faults.
+    FaultyRead {
+        project: P,
+    },
 }
 
 impl Op {
@@ -143,7 +160,8 @@ impl Op {
             | Self::StaleScore { project, .. }
             | Self::DeleteTraces { project, .. }
             | Self::DeleteUser { project, .. }
-            | Self::Retention { project, .. } => Some(project),
+            | Self::Retention { project, .. }
+            | Self::FaultyRead { project } => Some(project),
             Self::Restart
             | Self::Crash
             | Self::Compact { .. }
@@ -151,25 +169,34 @@ impl Op {
             | Self::Settle
             | Self::ApplyDeletions { .. }
             | Self::DropB
-            | Self::LossyCrash { .. } => None,
+            | Self::LossyCrash { .. }
+            | Self::Verify { .. }
+            | Self::EvictCache => None,
         }
     }
 }
 
+/// Which ops a case draws (R4.5). `Local` has `LossyCrash`, which covers local files only (R4.4).
+/// `S3` has the three S3-only ops instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Mode {
+    Local,
+    S3,
+}
+
 /// A sequence of 1 to 24 ops.
 pub(super) fn ops() -> impl Strategy<Value = Vec<Op>> {
-    proptest::collection::vec(op(true), 1..=24)
+    proptest::collection::vec(op_strategy(Mode::Local), 1..=24)
 }
 
-/// A sequence of 1 to 24 ops for S3 mode: no `LossyCrash`, since a lossy crash covers local files
-/// only (R4.4).
+/// A sequence of 1 to 24 ops for S3 mode.
 pub(super) fn ops_s3() -> impl Strategy<Value = Vec<Op>> {
-    proptest::collection::vec(op(false), 1..=24)
+    proptest::collection::vec(op_strategy(Mode::S3), 1..=24)
 }
 
-/// Every op with its weight. One weighted union, since `prop_oneof!` takes at most ten arms.
-/// `lossy` adds `LossyCrash`.
-fn op(lossy: bool) -> impl Strategy<Value = Op> {
+/// Every op with its weight. One weighted union, since `prop_oneof!` takes at most ten arms and a
+/// zero weight panics. `Mode::Local` adds `LossyCrash`; `Mode::S3` adds the S3-only ops.
+fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
     let mut arms = vec![
         (
             30,
@@ -252,13 +279,23 @@ fn op(lossy: bool) -> impl Strategy<Value = Op> {
         ),
         (1, Just(Op::DropB).boxed()),
     ];
-    if lossy {
-        arms.push((
+    match mode {
+        Mode::Local => arms.push((
             3,
             any::<u64>()
                 .prop_map(|seed| Op::LossyCrash { seed })
                 .boxed(),
-        ));
+        )),
+        Mode::S3 => {
+            arms.push((2, any::<u8>().prop_map(|pick| Op::Verify { pick }).boxed()));
+            arms.push((2, Just(Op::EvictCache).boxed()));
+            arms.push((
+                4,
+                project()
+                    .prop_map(|project| Op::FaultyRead { project })
+                    .boxed(),
+            ));
+        }
     }
     Union::new_weighted(arms)
 }
@@ -303,6 +340,19 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             crashed(harness, model);
         }
         Op::LossyCrash { seed } => lossy_crash(harness, model, seed),
+        Op::Verify { pick } => {
+            require_s3(harness, op);
+            verify(harness, pick);
+        }
+        Op::EvictCache => {
+            require_s3(harness, op);
+            evict_cache(harness);
+        }
+        Op::FaultyRead { project } => {
+            require_s3(harness, op);
+            let index = model.ops_applied - 1;
+            faulty_read(harness, model, project, index);
+        }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
             compact(harness, *clock);
@@ -633,24 +683,134 @@ fn send_score(
         .appended(pushed, segments, always_synced(harness));
 }
 
+/// Whether an op that touches the store may fail (R4.5): only when the chaos store injected a
+/// fault during it, which `injected_before` (from `injected_so_far`, taken before the op) marks.
+/// Without a chaos store (local mode) nothing may fail.
+fn allow_failure(harness: &Harness, injected_before: u64) -> bool {
+    injected_so_far(harness) > injected_before
+}
+
+/// The faults the chaos store has injected so far; 0 in local mode.
+fn injected_so_far(harness: &Harness) -> u64 {
+    harness.chaos().map_or(0, ChaosStore::injected)
+}
+
 fn compact(harness: &Harness, clock: i64) {
-    let report = harness
-        .block_on(harness.storage().compact(clock))
-        .expect("compact at the model clock");
-    assert_eq!(report.failed, 0, "a compaction job failed");
+    let before = injected_so_far(harness);
+    match harness.block_on(harness.storage().compact(clock)) {
+        Ok(report) => assert!(
+            report.failed == 0 || allow_failure(harness, before),
+            "a compaction job failed without an injected fault"
+        ),
+        Err(error) => assert!(
+            allow_failure(harness, before),
+            "compact failed without an injected fault: {error:?}"
+        ),
+    }
 }
 
 fn apply_deletions(harness: &Harness, clock: i64) {
-    let report = harness
-        .block_on(harness.storage().apply_deletions(clock))
-        .expect("apply_deletions at the model clock");
-    assert_eq!(report.failed, 0, "a deletion job failed");
+    let before = injected_so_far(harness);
+    match harness.block_on(harness.storage().apply_deletions(clock)) {
+        Ok(report) => assert!(
+            report.failed == 0 || allow_failure(harness, before),
+            "a deletion job failed without an injected fault"
+        ),
+        Err(error) => assert!(
+            allow_failure(harness, before),
+            "apply_deletions failed without an injected fault: {error:?}"
+        ),
+    }
 }
 
 fn collect_obsolete(harness: &Harness) {
+    let before = injected_so_far(harness);
+    if let Err(error) = harness.block_on(harness.storage().collect_obsolete(Duration::ZERO)) {
+        assert!(
+            allow_failure(harness, before),
+            "collect_obsolete failed without an injected fault: {error:?}"
+        );
+    }
+}
+
+/// `require_s3` panics on an S3-only op in a local harness: the generator never makes one, so
+/// only a hand-written op list can reach it.
+fn require_s3(harness: &Harness, op: &Op) {
+    assert!(harness.chaos().is_some(), "S3-only op {op:?} in local mode");
+}
+
+/// Every active data file of the three tables, in path order.
+fn active_files(harness: &Harness) -> Vec<Arc<FileMeta>> {
+    let mut files: Vec<Arc<FileMeta>> = [FileTable::Spans, FileTable::Traces, FileTable::Scores]
+        .into_iter()
+        .flat_map(|table| harness.storage().catalog_files(table))
+        .collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    files
+}
+
+/// `Verify` (R4.5): queues one active file and runs one verify pass under faults. A healthy file
+/// is never quarantined or repaired, and a store error only leaves the file queued (spec 03 §10).
+fn verify(harness: &Harness, pick: u8) {
+    let files = active_files(harness);
+    if files.is_empty() {
+        return;
+    }
+    let file = &files[usize::from(pick) % files.len()];
     harness
-        .block_on(harness.storage().collect_obsolete(Duration::ZERO))
-        .expect("collect_obsolete with no grace");
+        .storage()
+        .verify_queue()
+        .suspect([file.id], catalog::now_ns());
+    let report = harness.block_on(harness.storage().verify_pass());
+    assert_eq!(
+        report.quarantined, 0,
+        "a healthy file was quarantined under faults: {}",
+        file.path
+    );
+    assert_eq!(
+        report.repaired, 0,
+        "a healthy file was repaired under faults: {}",
+        file.path
+    );
+    assert!(
+        harness
+            .storage()
+            .catalog_files(file.table)
+            .iter()
+            .any(|kept| kept.id == file.id),
+        "the verified file {} left the catalog",
+        file.path
+    );
+}
+
+/// `EvictCache` (R4.5): drops every block of each active file from the read cache.
+fn evict_cache(harness: &Harness) {
+    let cache = harness
+        .storage()
+        .objects
+        .read_cache()
+        .expect("S3 mode runs with the read cache on");
+    for file in active_files(harness) {
+        let name = cached_name(&ObjectPath::from(file.path.as_str()))
+            .expect("an active data file has a cache name");
+        cache.evict_file(&name);
+    }
+}
+
+/// `FaultyRead` (R4.5): one trace list of `project` under faults. A failed read is allowed only
+/// under an injected fault; a successful one must match the model as `check_quick` requires.
+fn faulty_read(harness: &mut Harness, model: &Model, project: P, index: usize) {
+    let before = injected_so_far(harness);
+    match try_observe_traces(harness, project, ALL_ROWS, MAX_PAGE) {
+        Ok(observed) => compare_traces(model.project(project), &observed, index, project),
+        Err(error) => {
+            assert!(
+                allow_failure(harness, before),
+                "a read failed without an injected fault: {error}"
+            );
+            harness.faulty_read_errors += 1;
+        }
+    }
 }
 
 /// The trace numbers `picks` names: each `% TRACES`, as a set.
@@ -701,7 +861,7 @@ fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8],
         return;
     }
     let targets = picked_traces(picks);
-    let evals = resolve_evals(harness, model.project(project), &targets);
+    let evals = harness.calm(|calm| resolve_evals(calm, model.project(project), &targets));
     let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
     let id = deletion_id(clock);
     register(
@@ -734,7 +894,7 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
     }
     let name = format!("u{}", user % 2);
     let (expected_traces, expected_sessions) = model.project(project).user_scope(&name);
-    let observed = observe_user_scope(harness, project, &name, clock);
+    let observed = harness.calm(|calm| observe_user_scope(calm, project, &name, clock));
     assert_eq!(
         hex_of(&observed.trace_ids),
         hex_numbers(&expected_traces),
@@ -745,7 +905,7 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
         expected_sessions.iter().cloned().collect::<Vec<String>>(),
         "user_deletion_scope of {name} in project {project:?}: sessions differ from the model"
     );
-    let evals = resolve_evals(harness, model.project(project), &expected_traces);
+    let evals = harness.calm(|calm| resolve_evals(calm, model.project(project), &expected_traces));
     let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
     let id = deletion_id(clock);
     register(

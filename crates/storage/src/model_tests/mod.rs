@@ -9,7 +9,8 @@ mod observe;
 mod ops;
 mod shape;
 
-use std::sync::Arc;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use proptest::prelude::*;
@@ -42,12 +43,13 @@ fn interval_cases() -> u32 {
     (cases() / 2).max(2)
 }
 
-/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 4 (R4.4).
+/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 8 (R4.5, the largest of 8, 4 or 2 that
+/// runs in under 60 s in debug: 32.7 s).
 fn s3_cases() -> u32 {
     std::env::var("LLMOBS_MODEL_S3_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(4)
+        .unwrap_or(8)
 }
 
 proptest! {
@@ -73,10 +75,12 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(s3_cases()))]
 
-    /// The model test on a remote store behind the read cache (R4.4).
+    /// The model test on a remote store behind the read cache, with injected S3 faults (R4.4,
+    /// R4.5). The seed is not shrunk: a failure is reported with its journal, and R4.10 scripts it.
     #[test]
-    fn storage_matches_the_model_on_s3(ops in ops::ops_s3()) {
-        run_case_s3(&ops, None);
+    fn storage_matches_the_model_on_s3(ops in ops::ops_s3(), seed in any::<u64>().no_shrink()) {
+        let harness = run_case_s3(&ops, Some((seed, Rates::MODEL)));
+        record_stats(&harness);
     }
 }
 
@@ -93,55 +97,130 @@ fn run_case(ops: &[Op]) {
 /// Runs `ops` and checks every read. Returns the harness, so a test can read what its lossy
 /// crashes did.
 fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness {
-    run_with(Harness::with_config(change), ops)
+    run_with(Harness::with_config(change), ops, None)
 }
 
 /// Runs `ops` in S3 mode (R4.4): the store is an in-memory bucket behind a chaos store, with
-/// `MODEL_PUT_SIZES`. `faults`: `Some((seed, rates))` sets the fault schedule (`set_schedule`),
-/// left inactive, so no fault fires until R4.5 activates it. Returns the harness.
+/// `MODEL_PUT_SIZES`. `faults`: `Some((seed, rates))` sets the fault schedule (`set_schedule`).
+/// The schedule is on during each op but `Settle`, and off during the checks (R4.5). Returns the
+/// harness, with the schedule off.
 fn run_case_s3(ops: &[Op], faults: Option<(u64, Rates)>) -> Harness {
     let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let seed = faults.map(|(seed, _)| seed);
     if let Some((seed, rates)) = faults {
         harness
             .chaos()
             .expect("an S3-mode harness has a chaos store")
             .set_schedule(seed, rates);
     }
-    run_with(harness, ops)
+    run_with(harness, ops, seed)
 }
 
-/// The loop shared by both modes: each op, then the checks its kind needs, then `settle`.
-fn run_with(mut harness: Harness, ops: &[Op]) -> Harness {
+/// Switches the chaos schedule of an S3-mode harness on or off. Local mode has none.
+fn set_faults(harness: &Harness, on: bool) {
+    if let Some(chaos) = harness.chaos() {
+        chaos.set_active(on);
+    }
+}
+
+/// The loop shared by both modes: each op, then the checks its kind needs, then `settle`. In S3
+/// mode the schedule is on during each op but `Settle`, and off during the checks and the final
+/// settle. A panic turns the schedule off, prints the journal and the seed, and resumes (R4.5).
+fn run_with(mut harness: Harness, ops: &[Op], seed: Option<u64>) -> Harness {
     let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
-    for (index, op) in ops.iter().enumerate() {
-        apply(op, &mut harness, &mut model, &mut clock);
-        match op {
-            Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle => {
-                check_full(&harness, &mut model, index);
+    let mut index = 0_usize;
+    let ran = catch_unwind(AssertUnwindSafe(|| {
+        for (number, op) in ops.iter().enumerate() {
+            index = number;
+            set_faults(&harness, !matches!(op, Op::Settle));
+            apply(op, &mut harness, &mut model, &mut clock);
+            set_faults(&harness, false);
+            match op {
+                Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle => {
+                    check_full(&harness, &mut model, number);
+                }
+                // The projects share trace ids, so these may hide rows of the other project too.
+                Op::DeleteTraces { .. } | Op::DeleteUser { .. } | Op::Retention { .. } => {
+                    check_both(&harness, &model, number);
+                }
+                Op::ApplyDeletions { .. } => {
+                    check_deletions(&harness, &mut model, number);
+                    check_both(&harness, &model, number);
+                }
+                Op::DropB => {
+                    check_deletions(&harness, &mut model, number);
+                    check_dropped(&harness, &model, number);
+                    check_both(&harness, &model, number);
+                }
+                _ => match op.project() {
+                    Some(project) => check_quick(&harness, &model, project, number),
+                    None => check_both(&harness, &model, number),
+                },
             }
-            // The projects share trace ids, so these may hide rows of the other project too.
-            Op::DeleteTraces { .. } | Op::DeleteUser { .. } | Op::Retention { .. } => {
-                check_both(&harness, &model, index);
-            }
-            Op::ApplyDeletions { .. } => {
-                check_deletions(&harness, &mut model, index);
-                check_both(&harness, &model, index);
-            }
-            Op::DropB => {
-                check_deletions(&harness, &mut model, index);
-                check_dropped(&harness, &model, index);
-                check_both(&harness, &model, index);
-            }
-            _ => match op.project() {
-                Some(project) => check_quick(&harness, &model, project, index),
-                None => check_both(&harness, &model, index),
-            },
         }
+        index = ops.len();
+        set_faults(&harness, false);
+        settle(&mut harness, &mut model, &mut clock);
+        check_full(&harness, &mut model, ops.len());
+    }));
+    if let Err(panic) = ran {
+        set_faults(&harness, false);
+        if let Some(chaos) = harness.chaos() {
+            eprintln!(
+                "S3 model case failed at op {index} with seed {seed:?}; the chaos journal \
+                 (last {} entries, oldest first):\n{}",
+                chaos.journal().len(),
+                chaos.journal().join("\n")
+            );
+        }
+        resume_unwind(panic);
     }
-    settle(&mut harness, &mut model, &mut clock);
-    check_full(&harness, &mut model, ops.len());
     harness
+}
+
+/// Process-wide S3-mode statistics, for `docs/research/storage/hardening.md` (R4.5).
+#[derive(Debug)]
+struct S3Stats {
+    cases: u64,
+    faults: u64,
+    puts: u64,
+    completes: u64,
+    aborts: u64,
+    abandoned_uploads: u64,
+    faulty_read_errors: u64,
+}
+
+static STATS: Mutex<S3Stats> = Mutex::new(S3Stats {
+    cases: 0,
+    faults: 0,
+    puts: 0,
+    completes: 0,
+    aborts: 0,
+    abandoned_uploads: 0,
+    faulty_read_errors: 0,
+});
+
+/// Adds one finished S3 case to `STATS`. With `LLMOBS_MODEL_S3_STATS=1`, prints them every 50
+/// cases.
+fn record_stats(harness: &Harness) {
+    let Some(chaos) = harness.chaos() else {
+        return;
+    };
+    let mut stats = STATS.lock().unwrap_or_else(PoisonError::into_inner);
+    stats.cases += 1;
+    stats.faults += chaos.injected();
+    stats.puts += chaos.count(Call::Put);
+    stats.completes += chaos.count(Call::Complete);
+    stats.aborts += chaos.count(Call::Abort);
+    stats.abandoned_uploads +=
+        u64::try_from(chaos.abandoned_uploads().len()).expect("a count of uploads fits in u64");
+    stats.faulty_read_errors += harness.faulty_read_errors;
+    if std::env::var("LLMOBS_MODEL_S3_STATS").is_ok_and(|value| value == "1")
+        && stats.cases.is_multiple_of(50)
+    {
+        eprintln!("S3 model statistics: {stats:?}");
+    }
 }
 
 /// `check_quick` on both projects.
@@ -584,9 +663,9 @@ fn regression_lossy_crash_tears_the_wal_tail() {
     assert!(crash.torn_writes > 0, "the crash tore no write: {crash:?}");
 }
 
-/// S3 mode without faults (R4.4): a schedule that is set but never activated changes nothing.
+/// S3 mode with a schedule (R4.5): the schedule is off once the run returns, whatever it injected.
 #[test]
-fn a_schedule_without_activation_changes_nothing() {
+fn a_run_leaves_the_schedule_off() {
     let harness = run_case_s3(
         &[
             Op::Append {
@@ -610,8 +689,7 @@ fn a_schedule_without_activation_changes_nothing() {
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store");
-    assert_eq!(chaos.injected(), 0, "an inactive schedule injected a fault");
-    assert!(!chaos.is_active(), "the schedule was activated");
+    assert!(!chaos.is_active(), "the schedule is still on after the run");
 }
 
 /// S3 mode uploads both ways (R4.4): a file of more than `single_max` is multipart, and a

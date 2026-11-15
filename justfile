@@ -37,6 +37,10 @@ test:
 model cases="500":
     LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 
+# The storage model test on a remote store with injected S3 faults, in release mode (R4.5).
+model-s3 cases="200":
+    LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
+
 # Cross-check the storage crash tests on LazyFS, which drops unsynced data at each crash (R2.12).
 # Needs FUSE 3 and `user_allow_other`: tools/lazyfs/README.md. Manual, not in `just test`.
 lazyfs:

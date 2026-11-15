@@ -74,6 +74,30 @@ Pending (external). The LazyFS cross-check (R2.12) needs FUSE and a real run of 
 - **M2-R2.5 (unverified): a WAL truncation whose directory fsync fails.** The flush task retries it on the next flush (spec 03 § Durability, why this is safe). No test covers the retry.
 - **M2 pre-fix assertion texts.** The findings above rest on the test-first runs recorded in their commits. The texts are not recorded, and R2.14 records them.
 
+## M4 — S3 fault injection
+
+The S3 fault milestone (plan `docs/plans/r-hardening/04-m4-s3-faults.md`, decision D-R-8). `ChaosStore` (`crates/storage/src/test_support/chaos.rs`) sits in front of an in-memory bucket and fails or delays the calls it forwards, as `object_store`'s S3 client does once its retries are exhausted. The model test has an S3 mode (`model_tests::storage_matches_the_model_on_s3`) that runs the same ops against it with the read cache on.
+
+What the S3 mode covers:
+- **Faults:** a seeded schedule (`Rates::MODEL`) injects delays and before and after failures on puts, multipart parts and completes, deletes, reads (errors and truncated bodies), and aborts. Faults are on during each op but `Settle`, and off during the checks and the final settle.
+- **Failure rule:** an op may fail only if the chaos store injected a fault during it. The model never changes on a failure.
+- **Calm checks:** every read that is compared with the model runs with the schedule off. `FaultyRead` is the one op that reads under faults.
+- **S3-only ops:** `Verify` (a verify pass on an active file, with no quarantine or repair allowed), `EvictCache`, and `FaultyRead`.
+- **Upload ledger:** every multipart upload is recorded. `leaked_uploads` must be empty at each check; `abandoned_uploads` (a failed abort, a lost create answer, a life cut short) is counted in the statistics only.
+- **Audit and never listed:** the orphan audit and the read-cache-equals-store check of R4.4, and the rule that storage never lists or copies the bucket outside the audit.
+
+### Runs
+
+| Date | Commit | Command | Mode | Duration | Result |
+|---|---|---|---|---|---|
+| 2026-11-15 | R4.5 | `LLMOBS_MODEL_S3_CASES=8 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 32.7 s | pass |
+| 2026-11-15 | R4.5 | `LLMOBS_MODEL_S3_CASES=50 LLMOBS_MODEL_S3_STATS=1 cargo test -p llmobs-storage --all-features --lib model_tests::storage_matches_the_model_on_s3` | debug, in-memory bucket | 279.5 s | pass: 50 cases, 51 injected faults, 446 puts, 325 multipart completes, 29 aborts, 11 abandoned uploads, 0 `FaultyRead` errors |
+| | | `just model-s3 200` (the first row planned) | release | | deferred (long run) |
+
+### Findings
+
+None yet. The S3 mode of R4.5 found no disagreement in the 50-case run above.
+
 ## Gaps toward deterministic simulation
 
 Counts from the plan's commands (D-R-13), run from the repository root. Each filter drops only lines that contain `test`, so some test code in production files is still counted; the counts are an upper bound for production code.

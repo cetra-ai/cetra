@@ -72,6 +72,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `just lazyfs` runs the crash children and a short ingest on a LazyFS mount, and drops unsynced data at each crash (D-R-5). It needs FUSE 3 and `user_allow_other` (`tools/lazyfs/README.md`).
 - `LLMOBS_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 25; the last of the 26 pairs is not in the default run).
 - `LLMOBS_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default 8); `just model N` runs it in release mode. `model_tests::storage_matches_the_model_in_interval_mode` (the `wal.sync` interval variant) runs `max(N/2, 2)` cases, and `just model` matches it too, since the filter is a substring. It is separate from `LLMOBS_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable.
+- `LLMOBS_MODEL_S3_CASES=N` sets the case count of the S3-mode model test (`model_tests::storage_matches_the_model_on_s3`, default 8, measured in R4.5); `just model-s3 N` runs it in release mode with the statistics on.
 - `LLMOBS_TEST_S3_ENDPOINT` (with `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage S3 test against a real S3-compatible server; `crates/storage/tests/s3.rs` shows how to start one (D119).
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
@@ -140,6 +141,7 @@ Run everything through `just`:
 | `just lint` | clippy, warnings as errors |
 | `just test` | all Rust tests |
 | `just model [cases]` | the storage model test with more cases, in release mode (D-R-14) |
+| `just model-s3 [cases]` | the storage model test on a remote store with injected S3 faults, in release mode (R M4) |
 | `just lazyfs` | the storage crash tests and a short ingest on a LazyFS mount, which drops unsynced data at each crash (R2.12, D-R-5); needs FUSE 3 (`tools/lazyfs/README.md`) |
 | `just eval-live` | opt-in live provider tests; ignored by `just check` (D167) |
 | `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3) |

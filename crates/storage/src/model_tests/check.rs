@@ -45,7 +45,10 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
     check_deletions(h, model, index);
     match h.chaos() {
         None => check_no_orphans(h, index),
-        Some(_) => check_never_listed(h, index),
+        Some(_) => {
+            check_never_listed(h, index);
+            check_no_leaked_uploads(h, index);
+        }
     }
     let model: &Model = model;
     for project in [P::A, P::B] {
@@ -83,6 +86,20 @@ fn check_never_listed(h: &Harness, index: usize) {
         chaos.count(Call::Copy),
         0,
         "op {index}: the store was copied"
+    );
+}
+
+/// S3 mode (R4.2, R4.3): storage left no multipart upload open that it could have closed. An
+/// upload that only a lifecycle rule removes (a failed abort, a lost create answer, a cancelled
+/// life) is abandoned, not leaked, and is counted in the statistics instead.
+fn check_no_leaked_uploads(h: &Harness, index: usize) {
+    let Some(chaos) = h.chaos() else {
+        return;
+    };
+    let leaked = chaos.leaked_uploads();
+    assert!(
+        leaked.is_empty(),
+        "op {index}: multipart uploads storage left open: {leaked:?}"
     );
 }
 
@@ -295,6 +312,17 @@ fn check_span_keys(h: &Harness, state: &ProjectModel, project: P, index: usize) 
 /// and each row matches its expected row.
 fn check_traces(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     let observed = observe_traces(h, project, ALL_ROWS, MAX_PAGE);
+    compare_traces(state, &observed, index, project);
+}
+
+/// The trace list `observed` against the model's expected traces of `project`: the ids in order,
+/// then each row. `check_quick` and the `FaultyRead` op share it (R4.5).
+pub(super) fn compare_traces(
+    state: &ProjectModel,
+    observed: &[ExpectedTrace],
+    index: usize,
+    project: P,
+) {
     let visible = state.visible_spans();
     let mut expected = state.expected_traces();
     expected.sort_by(|a, b| (b.start_time, &b.trace_id).cmp(&(a.start_time, &a.trace_id)));
@@ -305,7 +333,7 @@ fn check_traces(h: &Harness, state: &ProjectModel, project: P, index: usize) {
         observed_ids, expected_ids,
         "op {index}, project {project:?}: trace ids or their order differ"
     );
-    for (want, got) in expected.iter().zip(&observed) {
+    for (want, got) in expected.iter().zip(observed) {
         let trace = trace_number(&want.trace_id);
         if let Some(problem) = trace_mismatch(
             want,
