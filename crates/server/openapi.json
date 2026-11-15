@@ -9836,6 +9836,333 @@
         }
       }
     },
+    "/api/v1/projects/{project}/online-rules/{id}/backfills": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "List an online rule's backfills",
+        "description": "Any project member can read. The newest 50 backfills of the rule; the list is not paged.",
+        "operationId": "list_backfills",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule's latest 50 backfills, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Start an online rule backfill",
+        "description": "Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).",
+        "operationId": "post_backfill",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBackfillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The started backfill.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Backfill"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Estimate an online rule backfill",
+        "description": "Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).",
+        "operationId": "post_backfill_estimate",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBackfillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the backfill would read and cost.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillEstimate"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/online-rules/{id}/resume": {
       "post": {
         "tags": [
@@ -13899,6 +14226,179 @@
           }
         }
       },
+      "Backfill": {
+        "type": "object",
+        "description": "A backfill of one online rule (D-I-25).",
+        "required": [
+          "id",
+          "rule_id",
+          "status",
+          "from",
+          "to",
+          "max_targets",
+          "sample_rate",
+          "matched",
+          "enqueued",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start time. RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User who started the backfill. Omitted when that user is unknown."
+          },
+          "enqueued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs inserted or re-queued so far.",
+            "minimum": 0
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the backfill failed. Present exactly when `status` is `failed`."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End time. Omitted while the backfill runs. RFC 3339."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window start, inclusive. RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Backfill id."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets read so far, at most `max_targets`.",
+            "minimum": 0
+          },
+          "max_targets": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most targets the backfill reads.",
+            "minimum": 0
+          },
+          "rule_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The rule the backfill runs for."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Sample rate the backfill used."
+          },
+          "status": {
+            "$ref": "#/components/schemas/BackfillStatus",
+            "description": "Where the backfill stands."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window end, exclusive. RFC 3339."
+          }
+        }
+      },
+      "BackfillEstimate": {
+        "type": "object",
+        "description": "What a backfill would read and cost (D-I-42). The estimate is an upper bound: it does not\nsubtract targets the rule already scored.",
+        "required": [
+          "matched",
+          "capped",
+          "sampled",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "capped": {
+            "type": "boolean",
+            "description": "More than `max_targets` matched."
+          },
+          "estimated_cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Estimated cost in USD. Judges with a priced model only."
+          },
+          "estimated_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Input tokens the sampled targets would send. Judges only.",
+            "minimum": 0
+          },
+          "estimated_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Output tokens the sampled targets would ask for. Judges only.",
+            "minimum": 0
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window that was counted. RFC 3339."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets in the window, at most `max_targets`.",
+            "minimum": 0
+          },
+          "sampled": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets the sample rate keeps.",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The end of the window that was counted. RFC 3339."
+          }
+        }
+      },
+      "BackfillPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Backfill"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "BackfillStatus": {
+        "type": "string",
+        "description": "Where a backfill stands (D-I-39).",
+        "enum": [
+          "running",
+          "done",
+          "failed"
+        ]
+      },
       "BlobPart": {
         "type": "object",
         "description": "Inline base64 media, before extraction replaces it with a URI.",
@@ -14208,6 +14708,37 @@
               "$ref": "#/components/schemas/ApiKeyScope"
             },
             "description": "Secret keys default to ingest, read, and write. Public keys default to feedback."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateBackfillRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its\n`estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.",
+        "required": [
+          "from",
+          "to",
+          "max_targets"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window start, inclusive. RFC 3339 timestamp or epoch milliseconds."
+          },
+          "max_targets": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most targets the backfill reads, 1 to 10 000 (D-I-25).",
+            "minimum": 0
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Sample rate, above 0 and at most 1. Omitted: the rule's sample rate (D-I-40)."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window end, exclusive. At least 5 minutes ago; `to - from` at most 30 days. Same\nformats as `from`."
           }
         },
         "additionalProperties": false

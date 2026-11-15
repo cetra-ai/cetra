@@ -39,6 +39,7 @@ use super::alerts::{
     CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
@@ -327,6 +328,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<EvalJob>();
     set.insert_page::<EvalJob>("EvalJobPage");
     set.insert::<RunEvaluatorRequest>();
+    set.insert::<BackfillStatus>();
+    set.insert::<Backfill>();
+    set.insert_page::<Backfill>("BackfillPage");
+    set.insert::<CreateBackfillRequest>();
+    set.insert::<BackfillEstimate>();
     set
 }
 
@@ -735,6 +741,7 @@ fn paths() -> Paths {
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
     let paths = eval_job_paths(paths);
+    let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
@@ -2672,6 +2679,69 @@ fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/{{id}}/run"),
             PathItem::new(HttpMethod::Post, run),
+        )
+}
+
+fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation(
+        "list_backfills",
+        "evaluation",
+        "List an online rule's backfills",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 backfills of the rule; the list is not paged.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "BackfillPage",
+            "The rule's latest 50 backfills, newest first.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let estimate = operation(
+        "post_backfill_estimate",
+        "evaluation",
+        "Estimate an online rule backfill",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("CreateBackfillRequest")))
+    .responses(responses(
+        "200",
+        json_of::<BackfillEstimate>("What the backfill would read and cost."),
+        READ_ERRORS,
+    ))
+    .build();
+    let create = operation("post_backfill", "evaluation", "Start an online rule backfill")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .request_body(Some(json_body("CreateBackfillRequest")))
+        .responses(responses(
+            "202",
+            json_of::<Backfill>("The started backfill."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills/estimate"),
+            PathItem::new(HttpMethod::Post, estimate),
         )
 }
 

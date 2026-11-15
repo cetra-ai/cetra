@@ -39,6 +39,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Online rule | `01900000-0000-7000-8000-000000000700`, `Relevance on answers`, a trace rule on evaluator `…0500`, filter `status = 'ok'`, budget 5 USD a day, enabled. `online-rule.json`, `online-rules.json` and `requests/online-rule-create.json` use it |
 | Second online rule | `01900000-0000-7000-8000-000000000701`, `Relevance on spans`, a span rule on `…0500`, enabled and paused (`errors`). `online-rules.json` uses it |
 | Eval jobs | `01900000-0000-7000-8000-000000000800` (done rule job of `…0700`, judge trace `e1000000000000000000000000000002`, score `…0900`), `…0801` (failed rule job, `provider status 503`), `…0802` (queued manual run of `…0500`). `eval-job.json`, `eval-jobs.json` and `eval-job-queued.json` use them. They are not live jobs |
+| Backfills | `01900000-0000-7000-8000-000000000b00` (`done`), `…0b01` (`failed`, `interrupted`), `…0b02` (`running`, the `202` answer of `post_backfill`), all of rule `…0700`. `backfills.json`, `backfill.json` and the requests use them. They are not live backfills |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |
