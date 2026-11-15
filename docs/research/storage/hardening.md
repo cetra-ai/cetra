@@ -143,14 +143,20 @@ Environment:
 | 2026-11-15 | uncommitted: check per block, no lock | D7, same | debug, 64 MiB tmpfs | 6.7 s | fail: sampler minimum 3.7 MiB |
 | 2026-11-15 | 4c8fe6a | D7, same | debug, 64 MiB tmpfs | 9.9 s | sampler passes (minimum 15.8 MiB); fails in settle, see M5-6 |
 | 2026-11-15 | 4c8fe6a | D1 `appends_stop_at_min_free_before_the_disk_fills`, same | debug, 64 MiB tmpfs | 10.4 s | pass |
-| | | `just resources` (three runs), `LLMOBS_TEST_SMALL_FS` on an ext4 loop device | | | pending (long run, not run in this pass) |
-| | | `just resources-memory`, `just resources-memory-min defaults` and `small` | release | | pending (long run, needs free RAM and about 10 GiB of disk) |
-| | | `peak_at_the_default_limit` and the low-limit descriptor runs | debug | | pending: the run was refused by the sandbox's permission check, so it is not recorded here |
+| 2026-11-15 | a1f5ce5 | `just resources` (log `resources-3`) | debug | 53 s | 4 pass, 11 fail, before the fixes. Causes: triage §2 |
+| 2026-11-15 | a1f5ce5 + 16927ae | `just resources` | release | 372 s | 15/15 pass |
+| 2026-11-15 | a1f5ce5 + 16927ae | `resources-memory` small profile, a systemd scope per limit | release | | see Measured limits. The small profile ran in an instrumented copy (sampler thread), not the committed code |
+| earlier | a1f5ce5 | `resources-memory-min defaults` (vm-report-1) | release | 400.7 s | 8 GiB passes, peak RSS 7.40 GiB |
+| | | `just resources` three times, `LLMOBS_TEST_SMALL_FS` on an ext4 loop device, descriptor limits 1024 and 512 | | | pending: one `just resources` run only; the ext4 loop device and the 1024/512 limits were not run |
+| 2026-11-15 | a1f5ce5 + 16927ae | `peak_at_the_default_limit` (soft limit 65,536, 30 s, 4 appenders, 4 query loops) | | 30 s load | peak 189 (116 in the first run), baseline 16 to 17. Peak composition from an instrumented copy |
+| 2026-11-15 | a1f5ce5 + 16927ae | `a_low_limit_gives_errors_not_panics`, limits 256, 128, 64, 32 | | 20 s each | all run, no panic, no wedge |
+| 2026-11-15 | a1f5ce5 + 16927ae | `opening_under_a_low_limit_is_a_clean_error`, limits 64, 32, 16, 8 | | | 64, 32 and 16 open; 8 fails cleanly (`io`) |
 
 ### Measured limits
 
-- **Memory:** pending. The smallest passing limit and the documented minimum for the defaults and the small profile are not measured yet, so spec 03 § 10 gives them as provisional.
-- **Descriptors:** pending. The baseline and peak at the default limit, and the lowest limit that runs without errors, are not measured yet.
+- **Memory, defaults:** smallest passing limit 8 GiB, peak RSS 7.40 GiB at 8 GiB. The kill point is between 7.75 and 8 GiB (earlier run, before the fixes; not re-run).
+- **Memory, small profile (glibc, the test binary's allocator):** 4 GiB passes (VmHWM 4.02 GiB); 2 GiB is killed. With `MALLOC_ARENA_MAX=2` and 1 MiB trim and mmap thresholds: 2 GiB passes (VmHWM 1.56 GiB), 1.25 GiB is killed. With mimalloc, in an earlier build (`eabb4d1`): 4 GiB passes (VmHWM 3.21 GiB), 2 GiB is killed. The shipped binary uses mimalloc, so the glibc figures are not the shipped ones (M5-8). The documented minimum is 2 to 4 GiB until M5-7 and M5-8 are settled, and spec 03 § 10 says so.
+- **Descriptors:** baseline 16 to 17 at the soft limit 65,536. Peak 189 with a 128 MiB query cap, 166 of them spill files (116 in the first run). This is the "before" number for `with_max_spill_merge_fan_in(16)`, which is not applied: the test never nears 1024. Limits 256, 128, 64 and 32 all run, with clean errors (no lowest limit ran without errors). At 32 the WAL fails and a reopen recovers. Opening runs at 16 and above and fails cleanly at 8.
 
 ### Findings
 
@@ -160,11 +166,15 @@ Environment:
 
 **M5-3, D5 stops at its free-space assertion.** D5 (compaction that meets `ENOSPC`) fails at its free-space assertion, after catalog writes that follow the ballast. Cause unconfirmed. Not fixed in M5.
 
-**M5-4, a 16 MiB per-query cap refuses a trace list over a tiny project.** Found by R5.7's smoke run: with `query.max_memory` at 16 MiB, a trace list over a tiny project is refused, because spill shares can drop to about 98 KiB. Not fixed in M5; spec 03 § 10 notes it under Memory.
+**M5-4, a 16 MiB per-query cap refuses a trace list over a tiny project (open).** Found by R5.7's smoke run. Cause: DataFusion keeps `sort_spill_reservation_bytes` (10 MiB by default) per sort partition that cannot spill, so 8 partitions need about 80 MiB. The model's own trace read of the seed is refused before any load. The descriptor tests now use a 128 MiB cap (16927ae). Proposed engine change, not done: the session sets `sort_spill_reservation_bytes` to `min(10 MiB, max_memory / (4 × partitions))`, so small caps work. Spec 03 § 10 notes it under Memory.
 
 **M5-5, the read cache outran the monitor (D7).** `ReadCache::write_blocks` trusted the monitor's measurement, up to a second old, and several concurrent calls could each pass the check and then write, so the cache took the disk below `min_free_bytes`. The fix measures before each block and serializes the check with the writes (`read_cache.rs`, `write_lock`). The regression test is `read_cache::tests::writes_check_free_disk_now_not_the_last_measurement`, which fails before the change. Fixed in 4c8fe6a (R5.8). The lock was needed: a measurement per call alone still let concurrent calls overshoot.
 
-**M5-6, cache writes ignore compaction reservations (found by D7, open).** After M5-5, D7's sampler passes, and the case then fails in its settle step: a compaction job's Parquet write returns `ENOSPC` after the ballast is removed (the job's input reservation had passed). The read cache checks `free()`, not `free()` minus the outstanding reservations, so cache blocks can take space a compaction has reserved. The cause is suspected, not confirmed. Not fixed in M5: it is a rule question (whether the cache respects reservations) and the case's 64 MiB filesystem may be too small for its settle.
+**M5-6, cache writes ignore compaction reservations (found by D7, open).** After M5-5, D7's sampler passes, and the case then fails in its settle step: a compaction job's Parquet write returns `ENOSPC` after the ballast is removed (the job's input reservation had passed). The read cache checks `free()`, not `free()` minus the outstanding reservations, so cache blocks can take space a compaction has reserved. The cause is suspected, not confirmed. Not fixed in M5: it is a rule question (whether the cache respects reservations) and the case's 64 MiB filesystem may be too small for its settle. Seen again in `the_read_cache_never_fills_the_disk`: its settle compacts 42 MiB of filler on the same disk while the default read cache (about 48 MiB) holds blocks. The test now sets the read cache to 1 MiB before the settle (a test fix, not an engine fix), so the engine question stays open.
+
+**M5-7, most resident memory during ingest is outside the memory budgets (open).** In an ingest-only run the process grows about 70 MiB/s while the memtable stays at 50 to 130 MiB and is flushed. The accounted pools (memtable at most 130 MiB, query pool at most about 170 MiB) do not explain it. glibc arenas account for a large part (`MALLOC_ARENA_MAX=2` halves the peak). Not located. The next step is a heap profile (dhat or jemalloc profiling). Not fixed.
+
+**M5-8, the memory test measures glibc, the shipped binary uses mimalloc (D56, open).** The storage test binary uses glibc malloc, and `crates/cli/src/main.rs` sets mimalloc. The memory numbers above are glibc numbers. The earlier mimalloc build was no better (killed at 2 GiB, 3.0 GiB anon at 4 GiB). The fix is to set the same allocator in the memory test (a dev-dependency and `#[global_allocator]` in the test cfg, as the llmobs-m5 experiment did), then re-measure. Not done.
 
 ### Requests
 

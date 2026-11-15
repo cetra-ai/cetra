@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { authConfigQuery } from "@/api/auth";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
@@ -22,6 +22,9 @@ import { TextField } from "@/components/form/text-field";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { replaceExternal } from "@/lib/external-navigation";
+import { onlyProvider } from "@/lib/only-provider";
+import { authorizeHref } from "@/lib/redirect";
 import { roleLabel } from "@/lib/roles";
 
 export const Route = createFileRoute("/invite/$token")({
@@ -46,6 +49,23 @@ function InvitePage() {
   const config = useQuery(authConfigQuery);
   const [checkEmail, setCheckEmail] = useState(false);
   const back = `/invite/${token}`;
+  // Set once the visitor signs out of another account here: the provider would sign them
+  // straight back in, so the page shows its button instead (D-S-6).
+  const [signedOutHere, setSignedOutHere] = useState(false);
+  const signedOut = problemOf(me.error)?.status === 401;
+  const only = config.data === undefined ? undefined : onlyProvider(config.data);
+  // R7 (D-S-7): a visitor without a session goes straight to the only provider and back
+  // here, unless sign-up is disabled and the invited email has no account.
+  const closed = config.data?.signup === "disabled" && preview.data?.account_exists === false;
+  const startNow =
+    only !== undefined && preview.data !== undefined && signedOut && !closed && !signedOutHere;
+  const started = useRef(false);
+  useEffect(() => {
+    if (startNow && only !== undefined && !started.current) {
+      started.current = true;
+      replaceExternal(authorizeHref(only.id, { redirect: back }));
+    }
+  }, [startNow, only, back]);
 
   if (preview.isError) {
     const problem = problemOf(preview.error);
@@ -91,15 +111,28 @@ function InvitePage() {
   if (checkEmail) {
     return <CheckEmail email={preview.data.email} smtpEnabled={config.data.smtp_enabled} />;
   }
+  if (startNow && only !== undefined) {
+    return (
+      <AuthLayout
+        title={`Join ${preview.data.org.name}`}
+        description={`Redirecting to ${only.display_name}…`}
+      >
+        <ProviderButtons providers={[only]} redirect={back} />
+      </AuthLayout>
+    );
+  }
 
-  const signedOut = problemOf(me.error)?.status === 401;
   const invited = me.data !== undefined && sameEmail(me.data.user.email, preview.data.email);
   let children: ReactNode;
   if (me.data !== undefined) {
     children = invited ? (
       <JoinAsInvited token={token} orgName={preview.data.org.name} back={back} />
     ) : (
-      <SignedInAsOther signedInAs={me.data.user.email} invitedEmail={preview.data.email} />
+      <SignedInAsOther
+        signedInAs={me.data.user.email}
+        invitedEmail={preview.data.email}
+        onSignedOut={() => setSignedOutHere(true)}
+      />
     );
   } else if (signedOut && preview.data.account_exists) {
     children = (
@@ -138,7 +171,14 @@ function InvitePage() {
         </>
       }
     >
-      {children}
+      <>
+        {signedOutHere && signedOut && only !== undefined ? (
+          <p className="text-sm text-muted-foreground">
+            {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
+          </p>
+        ) : null}
+        {children}
+      </>
     </AuthLayout>
   );
 }
@@ -205,9 +245,11 @@ function JoinAsInvited({ token, orgName, back }: { token: string; orgName: strin
 function SignedInAsOther({
   signedInAs,
   invitedEmail,
+  onSignedOut,
 }: {
   signedInAs: string;
   invitedEmail: string;
+  onSignedOut: () => void;
 }) {
   const queryClient = useQueryClient();
   const logout = $api.useMutation("post", "/api/auth/logout");
@@ -227,6 +269,7 @@ function SignedInAsOther({
             {},
             {
               onSuccess: async () => {
+                onSignedOut();
                 // clearUserData (L3) without the three queries this page observes: removing an
                 // observed query would detach its observer instead of refetching it.
                 const kept = ["/api/auth/config", "/api/auth/me", "/api/auth/invites/{token}"];

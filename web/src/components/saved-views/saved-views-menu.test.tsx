@@ -74,6 +74,27 @@ it("saves the current search as a new view and selects it", async () => {
   expect(await screen.findByRole("button", { name: "Nightly" })).toBeInTheDocument();
 });
 
+it("submits the save dialog with Enter in the name field", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/traces?range=1h");
+  await user.click(await screen.findByRole("button", { name: "Default view" }));
+  await user.click(screen.getByRole("menuitem", { name: "Save as…" }));
+  await user.type(screen.getByRole("textbox", { name: "Name" }), "Enter view{Enter}");
+  expect(await screen.findByRole("button", { name: "Enter view" })).toBeInTheDocument();
+  expect(router.state.location.search.view).toEqual(expect.any(String));
+});
+
+it("submits the rename dialog with Enter in the name field", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces?range=1h");
+  await user.click(await screen.findByRole("button", { name: "Default view" }));
+  await user.click(screen.getByRole("menuitem", { name: /Errors/ }));
+  await user.click(await screen.findByRole("button", { name: "Errors" }));
+  await user.click(screen.getByRole("menuitem", { name: "Rename…" }));
+  const field = screen.getByRole("textbox", { name: "Name" });
+  await user.clear(field);
+  await user.type(field, "Renamed{Enter}");
+  expect(await screen.findByRole("button", { name: "Renamed" })).toBeInTheDocument();
+});
+
 it("deletes the loaded view", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces?range=1h");
   await user.click(await screen.findByRole("button", { name: "Default view" }));

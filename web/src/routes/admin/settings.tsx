@@ -71,7 +71,7 @@ function AdminSettingsPage() {
         <dt className="text-muted-foreground">Sign-up domains</dt>
         <dd>{data.signup_domains.length > 0 ? data.signup_domains.join(", ") : "Any domain"}</dd>
         <dt className="text-muted-foreground">Password sign-in</dt>
-        <dd>{data.password_enabled ? "Enabled" : "Disabled"}</dd>
+        <dd>{data.password_enabled ? "Enabled" : "Instance admins only"}</dd>
         <dt className="text-muted-foreground">Email verification</dt>
         <dd>{data.email_verification_required ? "Required" : "Not required"}</dd>
         <dt className="text-muted-foreground">Single sign-on required for</dt>
