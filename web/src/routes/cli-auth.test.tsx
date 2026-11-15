@@ -6,12 +6,21 @@ import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 let urls: string[] = [];
+let forms: { url: string; fields: Record<string, string> }[] = [];
 
 beforeEach(() => {
   urls = [];
-  setExternalNavigator((url) => {
-    urls.push(url);
+  forms = [];
+  setExternalNavigator({
+    navigate: (url) => {
+      urls.push(url);
+    },
+    submit: (url, fields) => {
+      forms.push({ url, fields });
+    },
   });
 });
 
@@ -46,24 +55,35 @@ it("asks the signed-in user to authorize", async () => {
   expect(screen.getByText("CLI on laptop")).toBeInTheDocument();
 });
 
-it("creates a token and returns it to the CLI", async () => {
-  let body: unknown;
+it("creates a token that expires in 90 days and posts it to the CLI", async () => {
+  let body: { name: string; scopes: string[]; expires_at: string } | undefined;
   server.use(
     http.post("/api/v1/me/tokens", async ({ request }) => {
-      body = await request.json();
+      body = (await request.json()) as typeof body;
       return tokenCreated("CLI on laptop");
     }),
   );
 
+  const before = Date.now();
   const { user, queryClient } = await renderApp("/cli-auth?port=54321&state=s1&host=laptop");
   await user.click(await screen.findByRole("button", { name: "Authorize" }));
 
-  await waitFor(() => expect(body).toEqual({ name: "CLI on laptop", scopes: ["read", "write"] }));
+  await waitFor(() => expect(body).toBeDefined());
+  expect(body).toMatchObject({ name: "CLI on laptop", scopes: ["read", "write"] });
+  const expiresAt = Date.parse(body?.expires_at ?? "");
+  expect(expiresAt).toBeGreaterThanOrEqual(before + 90 * DAY_MS);
+  expect(expiresAt).toBeLessThanOrEqual(Date.now() + 90 * DAY_MS);
+
+  // The secret travels in a form POST body, never in a navigated URL.
   await waitFor(() =>
-    expect(urls).toEqual([
-      "http://127.0.0.1:54321/callback?token=pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT&state=s1",
+    expect(forms).toEqual([
+      {
+        url: "http://127.0.0.1:54321/callback",
+        fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" },
+      },
     ]),
   );
+  expect(urls).toEqual([]);
   expect(
     await screen.findByRole("heading", { name: "You're signed in", level: 1 }),
   ).toBeInTheDocument();
@@ -90,7 +110,7 @@ it("names the token CLI without a host", async () => {
   );
 
   const { user } = await renderApp("/cli-auth?port=54321&state=s1");
-  expect(await screen.findByText("this computer")).toBeInTheDocument();
+  expect(await screen.findByText("not reported")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Authorize" }));
   await waitFor(() => expect(body).toMatchObject({ name: "CLI" }));
@@ -114,7 +134,9 @@ it("reads the host from the raw query string", async () => {
   expect(screen.getByText("CLI on 1e3")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Authorize" }));
-  await waitFor(() => expect(body).toEqual({ name: "CLI on 1e3", scopes: ["read", "write"] }));
+  await waitFor(() =>
+    expect(body).toMatchObject({ name: "CLI on 1e3", scopes: ["read", "write"] }),
+  );
 });
 
 it("cancels without creating a token", async () => {
@@ -130,6 +152,7 @@ it("cancels without creating a token", async () => {
   await user.click(await screen.findByRole("button", { name: "Cancel" }));
 
   expect(urls).toEqual(["http://127.0.0.1:54321/callback?error=access_denied&state=s1"]);
+  expect(forms).toEqual([]);
   expect(calls).toEqual([]);
   expect(
     await screen.findByRole("heading", { name: "Sign-in cancelled", level: 1 }),
@@ -200,9 +223,29 @@ it("returns a long state with digits byte for byte", async () => {
   await user.click(await screen.findByRole("button", { name: "Authorize" }));
 
   await waitFor(() =>
-    expect(urls).toEqual([
-      "http://127.0.0.1:54321/callback?token=pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT&state=s_12345678901234567890",
+    expect(forms).toEqual([
+      {
+        url: "http://127.0.0.1:54321/callback",
+        fields: {
+          token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT",
+          state: "s_12345678901234567890",
+        },
+      },
     ]),
+  );
+});
+
+it("warns before authorizing and shows the host as reported by the CLI", async () => {
+  await renderApp("/cli-auth?port=54321&state=s1&host=build-server");
+
+  expect(await screen.findByRole("note")).toHaveTextContent(
+    "Only continue if you just ran llmobs login on this computer.",
+  );
+  expect(screen.getByText("Computer name reported by the CLI:")).toHaveTextContent(
+    "Computer name reported by the CLI: build-server",
+  );
+  expect(screen.getByText("It expires", { exact: false })).toHaveTextContent(
+    "It expires in 90 days.",
   );
 });
 

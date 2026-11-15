@@ -7,5 +7,5 @@
     "02 § Mapping tables / Model, provider, usage",
     "02 § Cost computation"
   ],
-  "notes": "hand-written from openinference-instrumentation-openai; re-check against a B2 capture"
+  "notes": "hand-written from openinference-instrumentation-openai. The text and image parts are confirmed by openinference/google-genai-multimodal (message_content text and image). No capture puts finish_reason on an assistant message: openinference/google-genai-multimodal has only the span-level llm.finish_reason, so the message-level finish_reason is not covered."
 }

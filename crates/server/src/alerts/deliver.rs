@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use llmobs_core::ids::OrgId;
 use llmobs_eval::{EgressError, EgressRequest, SIGNATURE_HEADER, Secret, sign_payload};
 use reqwest::Url;
 use reqwest::header::{HeaderName, HeaderValue};
@@ -10,10 +11,12 @@ use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config};
 use crate::alerts::message::{self, MessageKind, Notice};
+use crate::api::account::SignupPolicy;
 use crate::email::MailError;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::alerts::{Attempt, DueDelivery, due_deliveries, finish_delivery, prune};
+use crate::meta::members::verified_member_emails;
 
 /// Deliveries sent at once (D-K-7).
 pub(crate) const CONCURRENCY: usize = 4;
@@ -64,9 +67,11 @@ fn retryable(message: &str) -> SendError {
     }
 }
 
-/// Sends `notice` once to the channel `config`. `delivery_id` goes into `X-Llmobs-Delivery`.
+/// Sends `notice` once to the channel `config` of org `org_id`. `delivery_id` goes into
+/// `X-Llmobs-Delivery`.
 pub(crate) async fn send_one(
     state: &AppState,
+    org_id: OrgId,
     config: &ChannelConfig,
     notice: &Notice,
     delivery_id: Uuid,
@@ -111,7 +116,9 @@ pub(crate) async fn send_one(
             }
             post(state, url, extra, body).await
         }
-        ChannelConfig::Email { recipients } => send_email(state, recipients, notice).await,
+        ChannelConfig::Email { recipients } => {
+            send_email(state, org_id, recipients, notice, now).await
+        }
     }
 }
 
@@ -169,17 +176,47 @@ fn egress_error(error: &EgressError) -> SendError {
 
 /// One email to each recipient, in order. SMTP connection, TLS and authentication failures
 /// are retryable (an admin may fix the credentials within the retry span, D-K-7).
+///
+/// Under open signup only verified members of the org get mail (D-K-19): the other recipients
+/// are skipped, and the delivery then fails with a count. Every message counts against the
+/// org's daily cap, reserved just before its send.
 async fn send_email(
     state: &AppState,
+    org_id: OrgId,
     recipients: &[String],
     notice: &Notice,
+    now: i64,
 ) -> Result<(), SendError> {
     let Some(mailer) = state.mailer.as_ref() else {
         return Err(permanent("email is not configured"));
     };
+    let (sendable, skipped) = if state.config.auth.signup == SignupPolicy::Open {
+        let members = verified_member_emails(state.meta.reader(), org_id)
+            .await
+            .map_err(|_| retryable("could not read the org members"))?;
+        let (members_ok, others): (Vec<&String>, Vec<&String>) = recipients
+            .iter()
+            .partition(|r| members.iter().any(|member| member.eq_ignore_ascii_case(r)));
+        (members_ok, others.len())
+    } else {
+        (recipients.iter().collect(), 0)
+    };
+    if sendable.is_empty() && skipped > 0 {
+        return Err(permanent(
+            "no recipient is a verified member of the organization",
+        ));
+    }
+    // Each message reserves one unit of the daily cap just before it is sent, so a retry counts
+    // only the messages it attempts: recipients a failed send never reached are not counted twice
+    // (D-K-19).
     let email = message::email(notice);
+    let mut capped = false;
     let sent = tokio::time::timeout(SEND_TIMEOUT, async {
-        for recipient in recipients {
+        for recipient in &sendable {
+            if !state.alert_email_count.reserve(org_id, 1, now) {
+                capped = true;
+                break;
+            }
             mailer.send_now(recipient, &email).await?;
         }
         Ok::<(), MailError>(())
@@ -187,6 +224,10 @@ async fn send_email(
     .await;
     match sent {
         Err(_elapsed) => Err(retryable("the request timed out")),
+        Ok(Ok(())) if capped => Err(permanent("daily alert email limit reached")),
+        Ok(Ok(())) if skipped > 0 => Err(permanent(&format!(
+            "{skipped} recipient(s) skipped: not verified members of the organization"
+        ))),
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(SendError {
             retryable: matches!(
@@ -289,7 +330,7 @@ async fn attempt_of(state: &AppState, due: &DueDelivery, now: i64) -> Attempt {
         };
     };
     let notice = notice_of(state, due);
-    match Box::pin(send_one(state, &config, &notice, due.id, now)).await {
+    match Box::pin(send_one(state, due.org_id, &config, &notice, due.id, now)).await {
         Ok(()) => Attempt::Sent,
         Err(error) if error.retryable && due.attempts + 1 < MAX_ATTEMPTS => Attempt::Retry {
             error: error.message,

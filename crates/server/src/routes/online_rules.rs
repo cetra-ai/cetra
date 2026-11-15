@@ -2,22 +2,24 @@
 //! D-I-32). Project members and above write; every project reader lists and reads.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
 use llmobs_core::ids::{OrgId, ProjectId};
 use llmobs_eval::{Adapter, VariableMapping};
-use llmobs_storage::ViewName;
+use llmobs_storage::{MAX_MATCH_COUNT, MatchCountRequest, TimeWindow, ViewName, match_count};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use crate::api::common::{FieldError, PageParams};
+use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::online_rules::{
     BudgetPeriod, CreateOnlineRuleRequest, JobCounts as ApiJobCounts, OnlineRule, OnlineRulePage,
-    PauseReason, RuleSpend, RuleTarget, UpdateOnlineRuleRequest,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
@@ -60,6 +62,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: post(create_online_rule),
+        },
+        RouteDef {
+            method: axum::http::Method::POST,
+            path: "/api/v1/projects/{project}/online-rules/preview",
+            access: Access::Project {
+                perm: ProjectPerm::ManageEvaluation,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(preview_online_rules),
         },
         RouteDef {
             method: axum::http::Method::GET,
@@ -450,6 +462,71 @@ async fn resume_online_rule(
     Ok(error::Json(rule_json(&state, &row, &jobs, now).await?))
 }
 
+/// Longest window the preview counts (D-I-9).
+const MAX_PREVIEW_WINDOW_NS: i64 = 30 * DAY_NS;
+
+/// Time allowed for the preview's count (D-I-9).
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `POST …/online-rules/preview`: counts what a filter matches in a window, with strict
+/// exclusions (D-I-9). The count stops at 10 001 rows, so the answer is at most 10 000.
+async fn preview_online_rules(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Json(body): error::Json<OnlineRulePreviewRequest>,
+) -> Result<error::Json<OnlineRulePreview>, ApiError> {
+    let project = access.project.id;
+    let now = state.clock.now_ns();
+    let to = body.to.map_or(now, TimeParam::ns);
+    let from = body
+        .from
+        .map_or_else(|| to.saturating_sub(DAY_NS), TimeParam::ns);
+    let mut errors = Vec::new();
+    if from >= to {
+        errors.push(field_error("from", "from must be before to"));
+    } else if to.saturating_sub(from) > MAX_PREVIEW_WINDOW_NS {
+        errors.push(field_error("from", "the window is at most 30 days"));
+    }
+    if body.filter.as_ref().is_some_and(|text| text.len() > 4096) {
+        errors.push(field_error("filter", "filter must be at most 4096 bytes"));
+    }
+    if !errors.is_empty() {
+        return Err(bad_request(errors));
+    }
+    let view = match body.target {
+        RuleTarget::Trace => ViewName::Traces,
+        RuleTarget::Span => ViewName::Spans,
+    };
+    let ctx = open_query(&state, access.project.org_id, project, None).await?;
+    let count = match_count(
+        &ctx,
+        MatchCountRequest {
+            view,
+            filter: body.filter.as_deref(),
+            window: TimeWindow::new(from, to)?,
+            cap: MAX_MATCH_COUNT,
+            strict_exclusions: true,
+            timeout: PREVIEW_TIMEOUT,
+        },
+    )
+    .await?;
+    let capped = count > MAX_MATCH_COUNT;
+    let matched = u64::try_from(count.min(MAX_MATCH_COUNT)).unwrap_or(u64::MAX);
+    tracing::debug!(
+        project_id = %project,
+        target = body.target.as_str(),
+        matched,
+        capped,
+        "online rule preview counted"
+    );
+    Ok(error::Json(OnlineRulePreview {
+        matched,
+        capped,
+        from,
+        to,
+    }))
+}
+
 /// The create's write: the evaluator is read again and must be the row the checks ran against,
 /// then the active-rule limit is checked before the insert (D-I-32).
 async fn insert_checked(
@@ -564,7 +641,7 @@ async fn validate(
             RuleTarget::Trace => ViewName::Traces,
             RuleTarget::Span => ViewName::Spans,
         };
-        let ctx = open_query(state, project, None).await?;
+        let ctx = open_query(state, org, project, None).await?;
         llmobs_storage::validate_filter(&ctx, view, text)?;
     }
     Ok(())
@@ -800,6 +877,9 @@ fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
+    use llmobs_core::enums::SpanStatus;
+    use llmobs_core::ids::{SpanId, TraceId};
+    use llmobs_core::span::Span;
     use serde_json::{Value, json};
 
     use super::*;
@@ -808,7 +888,9 @@ mod tests {
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
-    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, set_limits};
+    use crate::test_support::{
+        Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
+    };
 
     /// The judge's prompt maps `input` and `output`.
     const PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
@@ -1970,5 +2052,236 @@ mod tests {
             !app.state.eval.breakers.record(id, true),
             "the window is gone"
         );
+    }
+
+    /// The clock of the preview tests: 2026-01-02T12:00:00Z.
+    const PREVIEW_NOW: i64 = 1_767_355_200_000_000_000;
+    const HOUR_NS: i64 = 3_600_000_000_000;
+
+    /// A span of trace `trace` (span `span`) at `start`. Span 1 is the root.
+    fn preview_span(trace: u8, span: u8, start: i64, status: SpanStatus, env: &str) -> Span {
+        let mut row = dataset_span(0);
+        row.trace_id = TraceId::from_bytes([trace; 16]).expect("trace id");
+        row.span_id = SpanId::from_bytes([span; 8]).expect("span id");
+        row.parent_span_id = (span != 1).then(|| SpanId::from_bytes([1; 8]).expect("span id"));
+        row.start_time = start;
+        row.end_time = start + 1_000_000;
+        row.status = status;
+        row.environment = Some(env.to_owned());
+        row.metadata.clear();
+        row
+    }
+
+    /// Epoch milliseconds as a string, the form `TimeParam` takes in a body.
+    fn millis(ns: i64) -> String {
+        (ns / 1_000_000).to_string()
+    }
+
+    async fn preview(app: &TestApp, seeded: &Seeded, body: &Value) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/preview", path(seeded.project.id)),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .json(body)
+        .send()
+        .await
+    }
+
+    #[tokio::test]
+    async fn preview_counts_the_last_24_hours() {
+        let app = TestApp::new().await;
+        app.state.clock.set(PREVIEW_NOW);
+        let seeded = app.seed().await;
+        app.commit_spans(
+            &seeded.project,
+            vec![
+                preview_span(1, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "production"),
+                preview_span(
+                    2,
+                    1,
+                    PREVIEW_NOW - 6 * HOUR_NS,
+                    SpanStatus::Ok,
+                    "production",
+                ),
+                preview_span(3, 1, PREVIEW_NOW - 2 * DAY_NS, SpanStatus::Ok, "production"),
+                preview_span(
+                    4,
+                    1,
+                    PREVIEW_NOW - 2 * HOUR_NS,
+                    SpanStatus::Error,
+                    "production",
+                ),
+            ],
+        )
+        .await;
+        let response = preview(
+            &app,
+            &seeded,
+            &json!({"target": "trace", "filter": "status = 'ok'"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        assert_eq!(body["matched"], 2, "{body}");
+        assert_eq!(body["capped"], false);
+        assert_eq!(body["from"], "2026-01-01T12:00:00.000000000Z");
+        assert_eq!(body["to"], "2026-01-02T12:00:00.000000000Z");
+    }
+
+    #[tokio::test]
+    async fn preview_counts_spans_for_a_span_target() {
+        let app = TestApp::new().await;
+        app.state.clock.set(PREVIEW_NOW);
+        let seeded = app.seed().await;
+        app.commit_spans(
+            &seeded.project,
+            vec![
+                preview_span(1, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "production"),
+                preview_span(1, 2, PREVIEW_NOW - HOUR_NS, SpanStatus::Error, "production"),
+                preview_span(1, 3, PREVIEW_NOW - HOUR_NS, SpanStatus::Error, "production"),
+            ],
+        )
+        .await;
+        let errors = preview(
+            &app,
+            &seeded,
+            &json!({"target": "span", "filter": "status = 'error'"}),
+        )
+        .await;
+        assert_eq!(errors.status, 200, "{}", text(&errors));
+        assert_eq!(errors.json::<Value>()["matched"], 2);
+        let all = preview(&app, &seeded, &json!({"target": "span"})).await;
+        assert_eq!(all.json::<Value>()["matched"], 3);
+    }
+
+    #[tokio::test]
+    async fn preview_leaves_out_evaluation_traces() {
+        let app = TestApp::new().await;
+        app.state.clock.set(PREVIEW_NOW);
+        let seeded = app.seed().await;
+        app.commit_spans(
+            &seeded.project,
+            vec![
+                preview_span(1, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "production"),
+                preview_span(2, 1, PREVIEW_NOW - HOUR_NS, SpanStatus::Ok, "llmobs-eval"),
+            ],
+        )
+        .await;
+        // The filter cannot bring an evaluation trace back (D-I-17).
+        let named = preview(
+            &app,
+            &seeded,
+            &json!({"target": "trace", "filter": "environment = 'llmobs-eval'"}),
+        )
+        .await;
+        assert_eq!(named.status, 200, "{}", text(&named));
+        assert_eq!(named.json::<Value>()["matched"], 0);
+        let all = preview(&app, &seeded, &json!({"target": "trace"})).await;
+        assert_eq!(all.json::<Value>()["matched"], 1);
+    }
+
+    #[tokio::test]
+    async fn preview_validates_the_window() {
+        let app = TestApp::new().await;
+        app.state.clock.set(PREVIEW_NOW);
+        let seeded = app.seed().await;
+        let backwards = preview(
+            &app,
+            &seeded,
+            &json!({
+                "target": "trace",
+                "from": millis(PREVIEW_NOW),
+                "to": millis(PREVIEW_NOW - HOUR_NS)
+            }),
+        )
+        .await;
+        assert!(
+            field_errors(&backwards)
+                .contains(&("from".to_owned(), "from must be before to".to_owned()))
+        );
+        let long = preview(
+            &app,
+            &seeded,
+            &json!({"target": "trace", "from": millis(PREVIEW_NOW - 31 * DAY_NS)}),
+        )
+        .await;
+        assert!(field_errors(&long).contains(&(
+            "from".to_owned(),
+            "the window is at most 30 days".to_owned()
+        )));
+        let long_filter = preview(
+            &app,
+            &seeded,
+            &json!({"target": "trace", "filter": "x".repeat(4097)}),
+        )
+        .await;
+        assert!(field_errors(&long_filter).contains(&(
+            "filter".to_owned(),
+            "filter must be at most 4096 bytes".to_owned()
+        )));
+    }
+
+    #[tokio::test]
+    async fn an_invalid_filter_is_400_with_position() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = preview(
+            &app,
+            &seeded,
+            &json!({"target": "trace", "filter": "error_count >"}),
+        )
+        .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let problem = response.problem();
+        assert_eq!(problem.code, crate::api::common::ProblemCode::InvalidFilter);
+        assert_eq!(problem.errors[0].field, "filter");
+        assert!(problem.errors[0].position.is_some());
+    }
+
+    #[tokio::test]
+    async fn viewer_and_api_key_cannot_preview() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let refused = app
+            .request(
+                Method::POST,
+                &format!("{}/preview", path(seeded.project.id)),
+            )
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&json!({"target": "trace"}))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403, "{}", text(&refused));
+        let by_key = app
+            .request(
+                Method::POST,
+                &format!("{}/preview", path(seeded.project.id)),
+            )
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
+            .json(&json!({"target": "trace"}))
+            .send()
+            .await;
+        assert_eq!(by_key.status, 403, "{}", text(&by_key));
+    }
+
+    #[tokio::test]
+    async fn preview_is_not_a_rule_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let get = app
+            .request(Method::GET, &format!("{}/preview", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(get.status, 405, "{}", text(&get));
+        let post = preview(&app, &seeded, &json!({"target": "trace"})).await;
+        assert_eq!(post.status, 200, "{}", text(&post));
     }
 }

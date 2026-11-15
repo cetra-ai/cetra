@@ -154,7 +154,7 @@ For one tracked project with timeout `T` seconds, at time `now`:
 - every matched row is sampled (`sampling::sampled`). For a span rule, the sampled spans of one trace are kept in `start_time` order and cut at 50. The kept rows are the batch's **candidates**;
 - only when every rule's read of the batch has succeeded does each candidate ask `state.eval.hourly.admit(rule, now)`. `false` drops it (`admit` counts it as dropped). A batch whose read fails therefore takes no unit of any rule's hourly cap, and adds nothing to the report's `matched`, `sampled` or `capped`, however often it is retried;
 - the admitted targets are enqueued as rule jobs (`insert_rule_job`), in writes of at most 1 000 jobs;
-- when every read and write of the batch succeeded, the batch's entries whose `last_seen` did not change leave the map (`PendingTraces::finish`). Otherwise each entry's failed-read count grows by 1, and an entry at 5 leaves the map with a `warn`.
+- when every read and write of the batch succeeded, the batch's entries whose `last_seen` and `spans` did not change leave the map (`PendingTraces::finish`). Otherwise each entry's failed-read count grows by 1, and an entry at 5 leaves the map with a `warn`.
 
 ### Error outcomes of a batch read
 
@@ -568,6 +568,9 @@ pub(crate) struct Entry {
     pub(crate) root_ended: bool,
     /// Sweeps whose reads failed (memory only).
     pub(crate) failed_reads: u8,
+    /// Spans observed, wrapping (memory only, starts at 0 after a load). `finish` compares it
+    /// with `last_seen`: a span at an unchanged clock still counts as growth.
+    pub(crate) spans: u32,
 }
 
 /// A completed trace, as the sweeper saw it.
@@ -576,6 +579,7 @@ pub(crate) struct Completed {
     pub(crate) trace_id: TraceId,
     pub(crate) last_seen: i64,
     pub(crate) min_start: i64,
+    pub(crate) spans: u32,
 }
 
 /// What the flusher writes: entries changed since the last flush, and keys removed since.
@@ -606,11 +610,11 @@ Methods (each takes the lock once, briefly):
 | Method | What |
 |---|---|
 | `new(max: usize) -> Self` | an empty map holding at most `max` traces (tests pass small values) |
-| `observe(&self, project: ProjectId, spans: &[Span], now: i64)` | Nothing when `project` is not tracked. For each span: skip it when `span.environment.as_deref() == Some(environment::EVAL)` or `span.metadata.contains_key(metadata_key::EXPERIMENT_ID)` (D-I-17). Otherwise for `(project, span.trace_id)`: an existing entry gets `last_seen = max(last_seen, now)` (concurrent commits can call with an older `now`; `last_seen` must never move back, or `finish` could remove a trace that grew), `min_start = min(min_start, span.start_time)`, `root_ended |= span.parent_span_id.is_none()`; a new one, when `len < max`, is inserted with `first_seen = last_seen = now`, `min_start = span.start_time`, `root_ended = span.parent_span_id.is_none()`, `failed_reads = 0` (and `len += 1`); when `len >= max`, `dropped_full += 1` and nothing is inserted. Every inserted or updated key goes into `changed` and out of `removed`. The warning decision is made and recorded under the lock: the call dropped at least one trace, and `warned_at` is `None` or at least `WARN_EVERY_NS` before `now`. When it holds, set `warned_at` and copy `dropped_full` and `len` into locals. After the guard is dropped, `tracing::warn!(dropped = <dropped_full>, pending = <len>, "online-rule trigger map is full; new traces are not evaluated")`. |
+| `observe(&self, project: ProjectId, spans: &[Span], now: i64)` | Nothing when `project` is not tracked. For each span: skip it when `span.environment.as_deref() == Some(environment::EVAL)` or `span.metadata.contains_key(metadata_key::EXPERIMENT_ID)` (D-I-17). Otherwise for `(project, span.trace_id)`: an existing entry gets `last_seen = max(last_seen, now)` (concurrent commits can call with an older `now`; `last_seen` must never move back, or `finish` could remove a trace that grew), `min_start = min(min_start, span.start_time)`, `root_ended |= span.parent_span_id.is_none()`, `spans = spans.wrapping_add(1)` and `failed_reads = 0` (a new span restarts the failed-read count); a new one, when `len < max`, is inserted with `first_seen = last_seen = now`, `min_start = span.start_time`, `root_ended = span.parent_span_id.is_none()`, `failed_reads = 0`, `spans = 1` (and `len += 1`); when `len >= max`, `dropped_full += 1` and nothing is inserted. Every inserted or updated key goes into `changed` and out of `removed`. The warning decision is made and recorded under the lock: the call dropped at least one trace, and `warned_at` is `None` or at least `WARN_EVERY_NS` before `now`. When it holds, set `warned_at` and copy `dropped_full` and `len` into locals. After the guard is dropped, `tracing::warn!(dropped = <dropped_full>, pending = <len>, "online-rule trigger map is full; new traces are not evaluated")`. |
 | `set_tracked(&self, projects: HashSet<ProjectId>)` | Replaces the tracked set. Every entry of a project not in the new set is removed, its key put in `removed` and taken out of `changed`. |
-| `completed(&self, project, now, timeout_ns: i64, limit: usize) -> Vec<Completed>` | The project's entries with `root_ended && now − last_seen >= ROOT_IDLE_NS` or `now − last_seen >= timeout_ns` (saturating subtraction). **Under the lock**, one pass over the project's map that pushes each matching entry as a `Completed` (`trace_id`, `last_seen`, `min_start`: 40 bytes) into a `Vec` created with `Vec::with_capacity(limit * 4)`, and **stops once it holds `limit * 4`** (at most 8 000 entries, 320 KB, for `PER_PROJECT_TICK`). No sort under the lock. **After the guard is dropped**, sort by `(min_start, trace_id)` (`TraceId`'s bytes) and keep the first `limit` (`select_nth_unstable_by` then sort the first `limit`, when longer). Every `commit` takes this lock, so it must not be held across a sort or a 200 000-entry copy. Because the pass stops early in hash order, a tick does not always take the globally oldest completed traces; the rest are taken on the next ticks. That is accepted. |
-| `finish(&self, project, done: &[Completed])` | Removes each entry whose `last_seen` still equals the `Completed`'s (a trace that grew during the reads stays, D-I-9); removed keys go into `removed`. |
-| `read_failed(&self, project, failed: &[Completed]) -> usize` | For each entry still present: `failed_reads += 1`; at `MAX_FAILED_READS` the entry is removed (into `removed`). Returns how many were removed. It does not mark entries `changed` (the count is not stored). |
+| `completed(&self, project, now, timeout_ns: i64, limit: usize) -> Vec<Completed>` | The project's entries with `root_ended && now − last_seen >= ROOT_IDLE_NS` or `now − last_seen >= timeout_ns` (saturating subtraction). **Under the lock**, one pass over the project's map that pushes each matching entry as a `Completed` (`trace_id`, `last_seen`, `min_start`, `spans`: 40 bytes) into a `Vec` created with `Vec::with_capacity(scan_cap(limit))`, and **stops once it holds `scan_cap(limit)`**, which is `limit * 4` (a private fn `scan_cap`; at most 8 000 entries, 320 KB, for `PER_PROJECT_TICK`). No sort under the lock. **After the guard is dropped**, sort by `(min_start, trace_id)` (`TraceId`'s bytes) and keep the first `limit` (`select_nth_unstable_by` then sort the first `limit`, when longer). Every `commit` takes this lock, so it must not be held across a sort or a 200 000-entry copy. Because the pass stops early in hash order, a tick does not always take the globally oldest completed traces; the rest are taken on the next ticks. That is accepted. |
+| `finish(&self, project, done: &[Completed])` | Removes each entry whose `last_seen` and `spans` still equal the `Completed`'s (a trace that grew during the reads stays, D-I-9); removed keys go into `removed`. A project whose map is left empty is dropped from the map. |
+| `read_failed(&self, project, failed: &[Completed]) -> usize` | For each entry still present: `failed_reads += 1`; at `MAX_FAILED_READS` the entry is removed (into `removed`); a project whose map is left empty is dropped. Returns how many were removed. It does not mark entries `changed` (the count is not stored). |
 | `take_changes(&self) -> Changes` | **Under the lock:** take both sets out with `std::mem::take`. Build `upserts`, every key of `changed` whose entry exists, with a copy of the entry; `deletes` is every key of `removed`. **After the guard is dropped:** sort both lists by key (project id, then trace id bytes), so the flush order is deterministic. |
 | `restore(&self, changes: Changes)` | After a failed flush. It consumes `changes`: iterate `changes.upserts` and `changes.deletes` by value (`into_iter`). Each upsert key whose entry still exists goes back into `changed`; each delete key that has no entry now goes back into `removed`. |
 | `load(&self, rows: impl IntoIterator<Item = (ProjectId, TraceId, Entry)>)` | Startup. An entry of a tracked project is inserted while `len < max`, without marking it `changed`. An entry of a tracked project past `max`, and an entry of an untracked project, go into `removed` only, so the next flush deletes their rows instead of keeping them across restarts. |
@@ -631,8 +635,12 @@ Helpers: `span(trace: u8, parent: bool, start: i64) -> Span` built from `test_su
 - `observe_tracks_first_last_min_and_root`: two calls at `now` 10 and 20 with starts 500 and 300, the second with a root → `first_seen 10`, `last_seen 20`, `min_start 300`, `root_ended`.
 - `the_map_is_capped`: `new(2)`, three traces → `len() == 2`. A span of an existing trace still updates it. With `capture_logs`, the warning is logged once (`dropped=1`) for two overflowing calls within a minute, and again after a minute.
 - `completed_uses_root_idle_and_timeout`: a rooted trace at `last_seen` 0 is complete at 5 s, not at 4.9 s; an unrooted one only at the timeout; sorted by `min_start`; `limit` cuts.
-- `completed_collects_at_most_four_times_the_limit`: 50 completed traces, `limit` 5 → 5 returned, all from completed traces, sorted.
+- `scan_cap_is_four_times_the_limit`: `scan_cap(5) == 20`.
+- `completed_scans_at_most_scan_cap_and_returns_the_limit`: 50 completed traces, `limit` 5 → 5 returned, all from completed traces, sorted (the cap is below 50, so it binds).
 - `last_seen_never_moves_back`: observe at `now` 20, then at 10 → `last_seen` is 20.
+- `finish_keeps_a_trace_observed_at_the_same_clock`: `completed`, then observe the same trace at the same `now`, then `finish` → it stays, with `spans` 2 in the next `completed`.
+- `a_new_span_resets_failed_reads`: four failed reads, one observed span, four more failed reads → still held; the fifth removes it.
+- `a_project_without_traces_loses_its_map`: after `finish` or the fifth failed read empties a project, its map is gone (checked through the map's length under the lock).
 - `finish_keeps_a_trace_that_grew`: take `completed`, observe the trace again, `finish` → it stays; another trace leaves and appears in `deletes`.
 - `read_failed_drops_after_five`: four calls keep it, the fifth removes it and returns 1.
 - `set_tracked_drops_other_projects`.
@@ -738,7 +746,7 @@ pub(crate) async fn flush_once(state: &AppState) -> Result<FlushReport, MetaErro
 - `load_restores_tracked_entries_and_deletes_the_rest`: write two rows (A tracked, B untracked) with `write_pending`, `load` → `pending.len() == 1`; `flush_once` → B's row is gone.
 - `shutdown_flushes_the_map`, in `serve.rs`'s tests, next to `shutdown_flushes_usage`. It copies that test's setup: `bind(with_init(config(dir.path())), None)` and `running.state`.
   - Create a real rule, so the sweeper's per-tick refresh (I4.7) keeps the project tracked. In one `state.meta.write`, insert a check evaluator and an enabled trace rule in the init project, with M3's `meta::evaluators` and `meta::online_rules` functions. `with_init` creates exactly one project, "Support bot". Read its id and its org's with `SELECT id, org_id FROM projects` on `state.meta.reader()`.
-  - Call `crate::eval::trigger::refresh_rules(&state).await.unwrap()`. A sweeper tick of the running server (I4.7) that read the rules before the insert could still apply its stale tracked set after this call. Rule it out: sleep twice the `sweep_every` of the timing `bind` uses (once I4.7 exists; before it, no sweeper runs and one call is enough), then call `refresh_rules` again. Every tick that starts after the insert tracks the project too.
+  - Call `crate::eval::trigger::refresh_rules(&state).await.unwrap()`. A sweeper tick of the running server (I4.7) that read the rules before the insert could still apply its stale tracked set after this call. Rule it out: sleep twice the `sweep_every` of the timing `bind` uses, then call `refresh_rules` again. I4.5 writes the test without the sleep (no sweeper and no `sweep_every` exist yet); I4.7 adds it (its edit list names this test). Every tick that starts after the insert tracks the project too.
   - Then `state.pending.observe(project, &[span], state.clock.now_ns())` with one unrooted span (`test_support::dataset_span(0)` with `parent_span_id` set). An unrooted trace stays pending for 60 s, so no sweep takes it.
   - Run `running.shutdown().await.unwrap()`, reopen `MetaDb`, and assert that the `pending_traces` row exists.
 
@@ -752,7 +760,7 @@ pub(crate) async fn flush_once(state: &AppState) -> Result<FlushReport, MetaErro
 
 **Goal:** `POST …/online-rules/preview` counts what a rule's filter matches over a window (D-I-9), with its contract, fixtures and mock.
 
-**Edit only:** `crates/server/src/api/online_rules.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/routes/online_rules.rs`, `crates/server/openapi.json`, `fixtures/api/static/online-rule-preview.json` (new), `fixtures/api/requests/online-rule-preview.json` (new), `fixtures/api/manifest.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`. **Not** `web/src/mocks/writes.ts`. Its test, `writes.test.ts`, only covers write paths under a fixed list of prefixes, which does not include online rules, so adding the preview there would fail it. Web tests mock the preview with `server.use` (I4.8).
+**Edit only:** `crates/server/src/api/online_rules.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/routes/online_rules.rs`, `crates/server/openapi.json`, `fixtures/api/static/online-rule-preview.json` (new), `fixtures/api/requests/online-rule-preview.json` (new), `fixtures/api/manifest.json`, `web/src/api/schema.gen.ts`, `docs/spec/06-evaluation.md`, `docs/spec/09-api.md`. `web/src/mocks/writes.ts`: M3 added the `/online-rules` prefix to `writes.test.ts`'s covered list, so `post_online_rule_preview` must be in `WRITE_OPERATIONS`. Add it, with a response that answers `static/online-rule-preview.json`, so `writes.test.ts` passes and `just web-dev` shows a working counter. Web tests still override the preview with `server.use` (I4.8).
 
 **Commit:** `Add the online rule preview`
 
@@ -853,7 +861,7 @@ The `capped` case is covered by storage's cap test (I4.1); committing 10 001 tra
 
 **Goal:** `sweep_once` completes traces, matches each rule through storage, samples, caps, and enqueues rule jobs (§ Completion and sweeping in one place). It runs every 2 s. An in-process end-to-end test takes a committed trace to a rule's score.
 
-**Edit only:** `crates/server/src/eval/trigger.rs`, `crates/server/src/eval/mod.rs` (`EvalTiming.sweep_every`, the sweeper loop), `crates/server/src/eval/hourly.rs`, `crates/server/src/eval/sampling.rs`, `crates/server/src/eval/pending.rs`, `crates/server/src/meta/eval_jobs.rs` and `crates/server/src/meta/online_rules.rs` (remove the I4.7 `dead_code` attributes of § Conventions › Dead-code allows in M4, nothing else), `crates/server/src/api/convert.rs` (one converter), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`.
+**Edit only:** `crates/server/src/eval/trigger.rs`, `crates/server/src/eval/mod.rs` (`EvalTiming.sweep_every`, the sweeper loop), `crates/server/src/eval/hourly.rs`, `crates/server/src/eval/sampling.rs`, `crates/server/src/eval/pending.rs`, `crates/server/src/meta/eval_jobs.rs` and `crates/server/src/meta/online_rules.rs` (remove the I4.7 `dead_code` attributes of § Conventions › Dead-code allows in M4, nothing else), `crates/server/src/api/convert.rs` (one converter), `docs/spec/06-evaluation.md`, `docs/spec/12-operations.md`. Also `crates/server/src/serve.rs`, only the test `shutdown_flushes_the_map`: add the sleep of twice `sweep_every` and the second `refresh_rules` call described in I4.5's test list.
 
 **Commit:** `Enqueue rule jobs when traces complete`
 
@@ -917,19 +925,18 @@ fn batches(completed: &[Completed]) -> Vec<(i64, &[Completed])>;
 ```rust
 /// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for
 /// each and drops those at `MAX_FAILED_READS`. Returns the traces dropped.
-fn settle(state: &AppState, project: ProjectId, batch: &[Completed], outcome: Result<(), ()>, report: &mut SweepReport) -> usize
+fn settle(state: &AppState, project: ProjectId, batch: &[Completed], outcome: Result<(), ()>, report: &mut SweepReport)
 ```
 
-   - `Ok(())` → `state.pending.finish(project, batch)`; return 0.
-   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`; return `dropped`.
+   - `Ok(())` → `state.pending.finish(project, batch)`.
+   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`.
 
-   `settle` takes `&AppState` only for `state.pending`; its unit test builds a `TestApp`.
-3. `report.completed` is the sum of the `completed` lengths. When `report.enqueued > 0`, `state.eval.wake()`. Return the report.
+   `settle` returns nothing: tests read the report. It takes `&AppState` only for `state.pending`; its unit test builds a `TestApp`. Before `settle`, a test-only hook (`faults::run_before_settle`, `#[cfg(test)]`) runs, so a test can commit a span between the read and `finish`.
+3. `report.completed` is the sum of the `completed` lengths. When `report.enqueued > 0`, `state.eval.wake()`. Return the report. Before each project and each batch the sweep checks `state.eval.is_stopped()` and returns early when it is set, with the report so far.
 
-`sweep_batch(…) -> Result<(), ()>`. The error has already been logged inside; `()` keeps the signature honest about that. It has three steps in this order: read, then admit, then enqueue. Only the reads can fail before any hourly-cap unit is spent.
-1. **Read.** `let candidates = read_candidates(state, project, rules, around, batch).await?;`
-2. **Admit.** `report.matched += candidates.matched; report.sampled += candidates.targets.len();` then `let jobs = admit_targets(&state.eval.hourly, candidates.targets, now, report);`.
-3. **Enqueue.** For each chunk of `ENQUEUE_CHUNK` jobs, run one `MetaDb::write`. Its closure owns the chunk and calls `insert_rule_job` for each job; count the `true`s into `report.enqueued`. On a write error, log `error!(project_id, error = %error, "rule jobs could not be queued")` and return `Err(())`. The units the batch's admitted targets took stay spent; the retry admits them again. A write error is rare, so this is accepted.
+`sweep_batch(…) -> Result<(), ()>`. The error has already been logged inside; `()` keeps the signature honest about that. `SweepCtx` holds the state, the project, its rules and the sweep's `now`, in place of a long argument list. It has two phases: read, then, chunk by chunk, admit and enqueue. Only the reads can fail before any hourly-cap unit is spent.
+1. **Read.** `let candidates = read_candidates(ctx, around, batch).await?;`
+2. **Admit and enqueue, per chunk.** `report.matched += candidates.matched; report.sampled += candidates.targets.len();`. Then, for each chunk of `ENQUEUE_CHUNK` targets, `let jobs = admit_targets(&state.eval.hourly, chunk, now, report);`, and when `jobs` is not empty, one `MetaDb::write`. Its closure owns the chunk and calls `insert_rule_job` for each job; count the `true`s into `report.enqueued`. On a write error, log `error!(project_id, error = %error, "rule jobs could not be queued")` and return `Err(())`. The units the chunk's targets took stay spent; the retry admits them again. Later chunks are not admitted, so they keep their units. A write error is rare, so this is accepted.
 
 ```rust
 /// What the reads of one batch found, before the hourly cap.
@@ -999,7 +1006,7 @@ Remove the I4.7 rows of § Conventions › Dead-code allows in M4, `HourlyCaps::
 - `the_hourly_cap_drops_and_counts`: advance the clock 6 s, then call `state.eval.hourly.admit(rule, state.clock.now_ns())` 10 000 times. Sweep one trace at the same clock value → no job, `report.capped == 1`, and `GET /online-rules/{id}` answers `dropped_last_hour: 1`.
 - `admit_targets_caps_in_order` (pure, on a fresh `HourlyCaps`): call `admit` 9 999 times for rule A, then `admit_targets` with three candidates of A and one of B → two jobs (A's first and B's), `report.capped == 2`.
 
-That a failed read spends no cap unit is guaranteed by the types: `read_candidates` takes no `HourlyCaps` and no report. There is no separate test for it. Do not add a test-only failure hook to storage.
+That a failed read spends no cap unit is guaranteed by the types: `read_candidates` takes no `HourlyCaps` and no report. It is also tested: `a_failed_candidate_read_spends_no_cap_and_counts_nothing` injects a `RunError::Timeout` through a test-only fault in the trigger (not in storage). Further tests: `a_span_committed_before_the_finish_keeps_its_trace`, `a_stopped_sweep_takes_no_batch`, `an_unreadable_filter_is_warned_once_an_hour` and `a_failed_chunk_spends_only_its_own_cap`.
 
 - `a_trace_completed_twice_gets_one_job`: sweep, commit another span of the same trace, sweep again → still one job.
 - `a_rule_with_an_unreadable_filter_is_skipped`: rule A's filter set by SQL to `status = = 'x'`, rule B fine → B's job is queued, the trace leaves the map, and the log has the skip warning (`capture_logs`, plain `#[tokio::test]`).

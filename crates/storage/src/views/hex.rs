@@ -208,6 +208,7 @@ mod tests {
                 target_partitions: NonZeroUsize::new(2).expect("two partitions"),
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )

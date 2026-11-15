@@ -17,7 +17,8 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{
-    READ_TIMEOUT, attach_trace_scores, check_search, list_scope, open_query, page_limit, sort_order,
+    Deadline, READ_TIMEOUT, attach_trace_scores, check_search, list_scope, open_query, page_limit,
+    sort_order,
 };
 
 /// Trace and span read routes. All are documented and need project view.
@@ -89,7 +90,8 @@ async fn list_traces(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::trace_list(
         &ctx,
         storage::TraceListRequest {
@@ -101,12 +103,12 @@ async fn list_traces(
             order: sort_order(params.order),
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
     let mut data = convert::trace_summaries(&page.batches)?;
-    attach_trace_scores(&ctx, &mut data).await?;
+    attach_trace_scores(&ctx, &mut data, deadline).await?;
     Ok(error::Json(Page {
         data,
         next_cursor: page.next_cursor,
@@ -125,7 +127,7 @@ async fn list_spans(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::span_list(
         &ctx,
         storage::SpanListRequest {
@@ -154,14 +156,15 @@ async fn get_trace(
     error::Query(params): error::Query<TraceDetailParams>,
 ) -> Result<error::Json<TraceDetail>, ApiError> {
     let around = params.around.map(TimeParam::ns);
-    let ctx = open_query(&state, access.project.id, around).await?;
-    let data = storage::trace_detail(&ctx, &path.trace_id, READ_TIMEOUT)
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, around).await?;
+    let data = storage::trace_detail(&ctx, &path.trace_id, deadline.remaining()?)
         .await?
         .ok_or(ApiError::NotFound)?;
     let mut trace = convert::trace_summaries(std::slice::from_ref(&data.trace))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace)).await?;
+    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace), deadline).await?;
     let spans = build_tree(convert::span_summaries(&data.spans)?);
     Ok(error::Json(TraceDetail {
         trace,
@@ -175,7 +178,7 @@ async fn get_span(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<SpanPath>,
 ) -> Result<error::Json<SpanDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let batch = storage::span_detail(&ctx, &path.trace_id, &path.span_id, READ_TIMEOUT)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -204,6 +207,7 @@ fn span_sort(sort: SpanSort) -> storage::SpanSort {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
+    use llmobs_core::ids::TraceId;
     use llmobs_core::message::Part;
     use llmobs_core::score::ScoreValue;
     use serde_json::Value as Json;
@@ -211,7 +215,7 @@ mod tests {
     use super::*;
     use crate::api::common::Problem;
     use crate::api::payload::Payload;
-    use crate::test_support::{Seeded, TestApp, assert_logs_clean};
+    use crate::test_support::{Seeded, TestApp, assert_logs_clean, set_limits};
 
     const TRACE_1: &str = "a1000000000000000000000000000001";
     const TRACE_2: &str = "a1000000000000000000000000000002";
@@ -594,5 +598,97 @@ mod tests {
         assert_eq!(response.status, StatusCode::OK);
         let page: Json = response.json();
         assert_eq!(page["data"], serde_json::json!([]));
+    }
+
+    /// One day, in nanoseconds.
+    const DAY: i64 = 86_400_000_000_000;
+
+    /// D-P-21: a trace before the org's data window is hidden from the list and the detail.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_window_hides_old_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let old: TraceId = "a4000000000000000000000000000001".parse().unwrap();
+        let new: TraceId = "a4000000000000000000000000000002".parse().unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, now - DAY)
+            .await;
+        let range = format!(
+            "?from={}&to={}",
+            (now - 60 * DAY) / 1_000_000,
+            now / 1_000_000
+        );
+
+        let before = trace_ids(&app, &seeded, &range).await;
+        assert_eq!(before.len(), 2, "both traces are listed without a limit");
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        assert_eq!(
+            trace_ids(&app, &seeded, &range).await,
+            [new.to_string()].to_vec()
+        );
+        let (status, _) = get_json(&app, &seeded, &format!("/traces/{old}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = get_json(&app, &seeded, &format!("/traces/{new}")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_while_the_query_pool_is_full_is_503_busy() {
+        let app = TestApp::with_config(|config| {
+            // The export takes the whole pool; a trace list needs more than 64 MiB.
+            config.storage.query.max_memory_total = Some(bytesize::ByteSize::mib(256));
+            config.storage.query.max_memory = bytesize::ByteSize::mib(256);
+            config.storage.query.initial_memory = bytesize::ByteSize::mib(256);
+            config.storage.query.admission_wait = std::time::Duration::from_millis(200);
+        })
+        .await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let project = seeded.project.id;
+        let path = format!("/api/v1/projects/{project}/traces");
+        // An open SQL export holds the whole query pool until its stream is dropped.
+        let mut export = app
+            .request(Method::POST, &format!("/api/v1/projects/{project}/sql"))
+            .header("cookie", &seeded.cookie)
+            .header("accept", "text/csv")
+            .json(
+                &serde_json::from_str::<Json>(include_str!(
+                    "../../../../fixtures/api/requests/sql-query.json"
+                ))
+                .unwrap(),
+            )
+            .send_stream()
+            .await;
+        assert_eq!(export.status, StatusCode::OK);
+        assert!(
+            export
+                .next_frame(std::time::Duration::from_secs(10))
+                .await
+                .is_some()
+        );
+
+        let busy = app
+            .request(Method::GET, &path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.problem().code, crate::api::common::ProblemCode::Busy);
+
+        drop(export);
+        let free = app
+            .request(Method::GET, &path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(free.status, StatusCode::OK);
     }
 }

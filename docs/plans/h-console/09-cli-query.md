@@ -512,7 +512,7 @@ fn parameters(statement: &str, raw: &[String]) -> anyhow::Result<serde_json::Map
 - `"` or `` ` `` starts a quoted identifier that ends at the next same quote not followed by another one (doubling escapes it). Skip it whole: a quoted word is not a placeholder word for the server either.
 - `$$` starts a dollar-quoted string that ends at the next `$$`. `$` followed by a tag (an identifier start, then identifier parts other than `$`) and `$` starts `$tag$ … $tag$`, ending at the next `$tag$`. Skip either whole; an unterminated one ends the scan. Any other `$` is an ordinary character.
 - `--` starts a comment that ends after the next `\n` (or at the end); skip it.
-- `/*` starts a comment that ends after the next `*/` (no nesting; unterminated ends the scan); skip it.
+- `/*` starts a comment that nests like GenericDialect's: each further `/*` opens another level and each `*/` closes one; the comment ends after the `*/` that closes the outermost level (unterminated ends the scan); skip it whole. `/* a /* b */ c's */ {x:Int}` therefore has the placeholder `x`.
 - `{`: try to read, with **nothing** between the parts, a name, `:`, a type word, `}`. A name or type word is an identifier start (`char::is_alphabetic()`, `_`, `#` or `@`) followed by identifier parts (`char::is_alphabetic()`, an ASCII digit, `@`, `$`, `#` or `_`). The type word matches `string`, `int`, `float`, `bool`, `timestamp` ignoring ASCII case. When every part matches and the name is not yet in the map, insert it. Whether it matched or not, continue with the character after that `{`.
 - Any other character is skipped; remember whether it is an identifier part (for the `E'` rule).
 

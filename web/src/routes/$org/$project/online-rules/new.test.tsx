@@ -8,6 +8,7 @@ import { renderApp } from "@/test/render";
 import createFixture from "../../../../../../fixtures/api/requests/online-rule-create.json";
 import evaluatorsFixture from "../../../../../../fixtures/api/static/evaluators.json";
 import ruleFixture from "../../../../../../fixtures/api/static/online-rule.json";
+import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 
 const RELEVANCE = evaluatorsFixture.data[0];
 if (!RELEVANCE) {
@@ -182,7 +183,7 @@ it("shows an invalid filter with its position", async () => {
   expect(await screen.findByText("unknown column statusx (line 1, column 8)")).toBeInTheDocument();
 });
 
-it("shows the plan limit with its hint", async () => {
+it("shows the plan limit with its hint and an Upgrade link", async () => {
   captureCreate(() =>
     problemResponse(403, "plan_limit", {
       detail: "Your plan allows 1 active online rule.",
@@ -202,6 +203,10 @@ it("shows the plan limit with its hint", async () => {
       "A paused rule still counts as active: disable or delete a rule to free the slot.",
     ),
   ).toBeInTheDocument();
+  expect(await within(alert).findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
 });
 
 it("sends the sample rate as a fraction without float noise", async () => {

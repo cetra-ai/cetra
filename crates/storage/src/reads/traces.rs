@@ -17,7 +17,7 @@ use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present};
 use crate::filter::{Filter, FilterView, exclusions, search, strict_exclusions, time_window};
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow};
+use crate::views::{QueryContext, TimeWindow, ViewName};
 
 const LIST: &str = "traces";
 const SPANS: &str = "spans";
@@ -73,6 +73,29 @@ pub struct SpanRefreshRequest<'a> {
 
 /// The columns `span_refresh` returns, in this order.
 pub const SPAN_REFRESH_COLUMNS: &[&str] = &[spans::TRACE_ID, spans::SPAN_ID, spans::START_TIME];
+
+/// The columns `trace_refresh` returns with `strict_exclusions: true`, in this order.
+pub const TRACE_REFRESH_STRICT_COLUMNS: &[&str] = &[traces::TRACE_ID, traces::START_TIME];
+
+/// Most rows [`match_count`] counts (D-I-9's preview).
+pub const MAX_MATCH_COUNT: usize = 10_000;
+
+/// Rows of a view that match a filter in a window, for the online-rule preview (D-I-9).
+#[derive(Debug, Clone, Copy)]
+pub struct MatchCountRequest<'a> {
+    /// `ViewName::Traces` or `ViewName::Spans`.
+    pub view: ViewName,
+    /// Filter text over the view. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// `start_time ∈ [from, to)`.
+    pub window: TimeWindow,
+    /// The count stops at `cap + 1`. From 1 to [`MAX_MATCH_COUNT`].
+    pub cap: usize,
+    /// Apply [`strict_exclusions`] instead of the default exclusions.
+    pub strict_exclusions: bool,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
 
 /// Span list columns: [`llmobs_core::schema::SPANS_LIGHT_COLUMNS`] without
 /// `project_id`, with `duration_ms` after `duration_ns`.
@@ -408,7 +431,8 @@ async fn load_trace_spans(
 }
 
 /// The traces-view rows (every column, no order) of `trace_ids` that pass the default
-/// exclusions, the filter and the search. No time window applies to the traces: the query
+/// exclusions, the filter and the search. With `strict_exclusions`, only the
+/// [`TRACE_REFRESH_STRICT_COLUMNS`] are returned. No time window applies to the traces: the query
 /// scans the project's traces once per call.
 ///
 /// An empty `trace_ids` parses the filter and returns no batches without running a query:
@@ -480,6 +504,11 @@ async fn refresh(
     }
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    if request.strict_exclusions {
+        frame = frame
+            .select(TRACE_REFRESH_STRICT_COLUMNS.iter().copied().map(col))
+            .map_err(classify)?;
     }
     frame.collect().await.map_err(|error| ctx.fail(error))
 }
@@ -577,6 +606,78 @@ async fn refresh_spans(
         .select(SPAN_REFRESH_COLUMNS.iter().copied().map(col))
         .map_err(classify)?;
     frame.collect().await.map_err(|error| ctx.fail(error))
+}
+
+/// Counts the rows of the traces or spans view that match a filter in a window, at most
+/// `cap + 1` (D-I-9). A result above `cap` means "more than `cap`".
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] for another view or a `cap` outside `1..=`[`MAX_MATCH_COUNT`];
+/// [`RunError::Invalid`] for filter text; [`RunError::Timeout`]; DataFusion failures through
+/// [`classify`] and `ctx.fail`.
+pub async fn match_count(
+    ctx: &QueryContext,
+    request: MatchCountRequest<'_>,
+) -> Result<usize, RunError> {
+    let (table, view) = match request.view {
+        ViewName::Traces => (LIST, FilterView::Traces),
+        ViewName::Spans => (SPANS, FilterView::Spans),
+        _ => {
+            return Err(RunError::InvalidRequest(
+                "match counts are for traces and spans only".to_owned(),
+            ));
+        }
+    };
+    if !(1..=MAX_MATCH_COUNT).contains(&request.cap) {
+        return Err(RunError::InvalidRequest(format!(
+            "cap must be between 1 and {MAX_MATCH_COUNT}"
+        )));
+    }
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(view, text)?),
+        None => None,
+    };
+    match tokio::time::timeout(
+        request.timeout,
+        count_matches(ctx, &request, table, view, filter),
+    )
+    .await
+    {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn count_matches(
+    ctx: &QueryContext,
+    request: &MatchCountRequest<'_>,
+    table: &str,
+    view: FilterView,
+    filter: Option<Filter>,
+) -> Result<usize, RunError> {
+    let references_environment = filter
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let mut frame = ctx.session().table(table).await.map_err(classify)?;
+    let mut conjuncts = vec![time_window(request.window)];
+    if request.strict_exclusions {
+        conjuncts.push(strict_exclusions(ctx, view, None).await?);
+    } else if let Some(expr) = exclusions(ctx, view, false, false, references_environment)? {
+        conjuncts.push(expr);
+    }
+    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
+        frame = frame.filter(predicate).map_err(classify)?;
+    }
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    frame
+        .limit(0, Some(request.cap.saturating_add(1)))
+        .map_err(classify)?
+        .count()
+        .await
+        .map_err(|error| ctx.fail(error))
 }
 
 struct ListPlan<'a> {
@@ -887,6 +988,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::physical_plan::displayable;
+    use llmobs_core::enums::{SpanKind, SpanStatus};
     use llmobs_core::ids::{SpanId, TraceId};
     use llmobs_core::names::{environment, metadata_key};
     use llmobs_core::schema::{SPANS_LIGHT_COLUMNS, spans};
@@ -895,9 +997,10 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS,
-        SpanListRequest, SpanRefreshRequest, SpanSort, TraceListRequest, TraceRefreshRequest,
-        TraceSort, TraceSpansRequest, span_detail, span_list, span_refresh, trace_detail,
+        MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MatchCountRequest,
+        SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
+        TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest, TraceRefreshRequest, TraceSort,
+        TraceSpansRequest, match_count, span_detail, span_list, span_refresh, trace_detail,
         trace_detail_limited, trace_frame, trace_list, trace_refresh, trace_spans,
     };
     use crate::query_error::{Position, RunError};
@@ -906,7 +1009,7 @@ mod tests {
         dataset_scores, dataset_spans, example_query, live_scores_table, span_row, spans_table,
         traces_table,
     };
-    use crate::views::{ProjectQuery, QueryContext, TimeWindow};
+    use crate::views::{ProjectQuery, QueryContext, TimeWindow, ViewName};
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1488,6 +1591,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )
@@ -2275,5 +2379,210 @@ mod tests {
             .await
             .expect("no ids");
         assert!(batches.is_empty());
+    }
+
+    /// A `match_count` request over `view` and `window`.
+    fn count_request<'a>(
+        view: ViewName,
+        filter: Option<&'a str>,
+        window: TimeWindow,
+        cap: usize,
+        strict_exclusions: bool,
+    ) -> MatchCountRequest<'a> {
+        MatchCountRequest {
+            view,
+            filter,
+            window,
+            cap,
+            strict_exclusions,
+            timeout: TIMEOUT,
+        }
+    }
+
+    /// One trace of one span per start time, the trace index being the position.
+    fn one_span_traces(starts: &[i64]) -> Vec<Span> {
+        starts
+            .iter()
+            .enumerate()
+            .map(|(index, start)| {
+                span_row(u16::try_from(index).expect("few traces"), 0, *start, 100)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn match_count_counts_in_the_window() {
+        let spans = one_span_traces(&[
+            nanos("2026-01-01T09:00:00Z"),
+            nanos("2026-01-01T10:00:00Z"),
+            nanos("2026-01-01T10:30:00Z"),
+            nanos("2026-01-01T11:00:00Z"),
+        ]);
+        let ctx = context_for(&spans);
+        let window = TimeWindow::new(nanos("2026-01-01T10:00:00Z"), nanos("2026-01-01T11:00:00Z"))
+            .expect("window");
+        let count = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, window, 100, false),
+        )
+        .await
+        .expect("count");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn match_count_applies_the_filter() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let mut failed = span_row(2, 0, base, 100);
+        failed.status = SpanStatus::Error;
+        let spans = vec![
+            span_row(0, 0, base, 100),
+            span_row(1, 0, base + 1, 100),
+            failed,
+        ];
+        let ctx = context_for(&spans);
+        let count = match_count(
+            &ctx,
+            count_request(
+                ViewName::Traces,
+                Some("status = 'error'"),
+                day(),
+                100,
+                false,
+            ),
+        )
+        .await
+        .expect("filtered");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn match_count_strict_drops_eval_and_experiment_traces() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        // The strict test traces start within the first microsecond after the epoch.
+        let window = TimeWindow::new(0, 1_000_000).expect("window");
+        let filter = Some("environment = 'llmobs-eval'");
+        let named = match_count(
+            &ctx,
+            count_request(ViewName::Traces, filter, window, 100, false),
+        )
+        .await
+        .expect("named");
+        assert_eq!(named, 1);
+        let strict = match_count(
+            &ctx,
+            count_request(ViewName::Traces, filter, window, 100, true),
+        )
+        .await
+        .expect("strict");
+        assert_eq!(strict, 0);
+    }
+
+    #[tokio::test]
+    async fn match_count_counts_spans() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let mut first = span_row(0, 0, base, 100);
+        first.span_kind = SpanKind::Llm;
+        let mut second = span_row(0, 1, base + 1, 100);
+        second.span_kind = SpanKind::Llm;
+        let other = span_row(0, 2, base + 2, 100);
+        let spans = vec![first, second, other];
+        let ctx = context_for(&spans);
+        let count = match_count(
+            &ctx,
+            count_request(
+                ViewName::Spans,
+                Some("span_kind = 'llm'"),
+                day(),
+                100,
+                false,
+            ),
+        )
+        .await
+        .expect("spans");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn match_count_stops_at_cap_plus_one() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let spans: Vec<Span> = (0..5_u16)
+            .map(|trace| span_row(trace, 0, base + i64::from(trace), 100))
+            .collect();
+        let ctx = context_for(&spans);
+        let capped = match_count(&ctx, count_request(ViewName::Traces, None, day(), 2, false))
+            .await
+            .expect("capped");
+        assert_eq!(capped, 3);
+        let whole = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, day(), 10, false),
+        )
+        .await
+        .expect("whole");
+        assert_eq!(whole, 5);
+    }
+
+    #[tokio::test]
+    async fn match_count_validates_its_request() {
+        let ctx = context();
+        let window = day();
+        let sessions = match_count(
+            &ctx,
+            count_request(ViewName::Sessions, None, window, 10, false),
+        )
+        .await;
+        assert!(
+            matches!(sessions, Err(RunError::InvalidRequest(_))),
+            "{sessions:?}"
+        );
+        for cap in [0, MAX_MATCH_COUNT + 1] {
+            let result = match_count(
+                &ctx,
+                count_request(ViewName::Traces, None, window, cap, false),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(RunError::InvalidRequest(_))),
+                "{result:?}"
+            );
+        }
+        let bad = match_count(
+            &ctx,
+            count_request(ViewName::Traces, Some("error_count >"), window, 10, false),
+        )
+        .await;
+        assert!(matches!(bad, Err(RunError::Invalid(_))), "{bad:?}");
+        let largest = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, window, MAX_MATCH_COUNT, false),
+        )
+        .await;
+        assert!(largest.is_ok(), "{largest:?}");
+    }
+
+    #[tokio::test]
+    async fn strict_refresh_returns_the_two_trigger_columns() {
+        let ctx = context();
+        let ids = [ID_ANSWER];
+        let strict = TraceRefreshRequest {
+            strict_exclusions: true,
+            ..refresh_request(&ids, None, None, false)
+        };
+        let batches = trace_refresh(&ctx, strict).await.expect("strict");
+        let schema = batches.first().expect("a batch").schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, TRACE_REFRESH_STRICT_COLUMNS);
+        assert_eq!(refreshed_ids(&batches), [ID_ANSWER]);
+
+        let full = trace_refresh(&ctx, refresh_request(&ids, None, None, false))
+            .await
+            .expect("full");
+        assert!(full.first().expect("a batch").num_columns() > TRACE_REFRESH_STRICT_COLUMNS.len());
     }
 }

@@ -30,6 +30,7 @@ use crate::meta::invites;
 use crate::meta::members;
 use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
+use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::{self, UserRow, normalize_email};
 use crate::meta::web_sessions::{delete_session, delete_user_sessions};
 
@@ -185,6 +186,7 @@ async fn setup(
         Some(ip),
     )
     .await?;
+    let trace_completion_timeout_s = created.created.project.completion_timeout_s();
     let response = SetupResponse {
         user: user_view(&created.created.user),
         org: OrgMembership {
@@ -199,6 +201,7 @@ async fn setup(
             slug: created.created.project.slug,
             name: created.created.project.name,
             retention_days: created.created.project.retention_days,
+            trace_completion_timeout_s,
             role: Some(OrgRole::Owner),
             created_at: created.created.project.created_at,
         },
@@ -363,13 +366,17 @@ async fn reset_password(
                 users::set_password_hash(conn, id, Some(&password_hash), now).await?;
                 delete_user_sessions(conn, id, None).await?;
                 delete_user_resets(conn, id).await?;
-                Ok(Some(id))
+                let hashes = revoke_user_tokens(conn, id, now).await?;
+                Ok(Some((id, hashes)))
             })
         })
         .await?;
-    let Some(user_id) = consumed else {
+    let Some((user_id, hashes)) = consumed else {
         return Err(invalid_link());
     };
+    for hash in hashes {
+        state.pat_cache.evict(&hash);
+    }
     state.limits.lockout.clear(&email);
     tracing::info!(target: "audit", %user_id, "password reset");
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -776,6 +783,8 @@ fn user_view(user: &UserRow) -> User {
         email: user.email.clone(),
         name: user.name.clone(),
         is_instance_admin: user.is_instance_admin,
+        email_verified: user.email_verified_at.is_some(),
+        has_password: user.password_hash.is_some(),
     }
 }
 
@@ -1138,6 +1147,8 @@ mod tests {
         let me: Me = logged_in.json();
         assert_eq!(me.user.email, "ada@example.com");
         assert_eq!(me.user.name.as_deref(), Some("Ada"));
+        assert!(me.user.email_verified);
+        assert!(me.user.has_password);
         assert_eq!(me.orgs.len(), 1);
         assert_eq!(me.orgs[0].slug, "acme");
         assert_eq!(me.orgs[0].role, OrgRole::Owner);
@@ -1678,6 +1689,55 @@ mod tests {
             again.problem().detail.as_deref(),
             Some("invalid or expired link")
         );
+    }
+
+    #[tokio::test]
+    async fn password_reset_revokes_personal_access_tokens() {
+        let app = TestApp::new().await;
+        sync_clock(&app);
+        insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let logged_in = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", PASSWORD))
+            .send()
+            .await;
+        assert_eq!(logged_in.status, 200);
+        let cookie = session_cookie(&logged_in);
+        let created = app
+            .request(Method::POST, "/api/v1/me/tokens")
+            .header("cookie", &cookie)
+            .json(&serde_json::json!({ "name": "laptop", "scopes": ["read"] }))
+            .send()
+            .await;
+        assert_eq!(created.status, 201);
+        let secret = created.json::<serde_json::Value>()["secret"]
+            .as_str()
+            .expect("secret")
+            .to_owned();
+        let bearer = format!("Bearer {secret}");
+        // Use the token once so that it is in the PAT cache before the reset.
+        let before = app
+            .request(Method::GET, "/api/auth/me")
+            .header("authorization", &bearer)
+            .send()
+            .await;
+        assert_eq!(before.status, 200);
+        let url = crate::admin::reset_password(&app.state.config, "ada@example.com")
+            .await
+            .unwrap();
+        let token = reset_token(&url).to_owned();
+        let reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({ "token": &token, "password": "llmobs-ok2" }))
+            .send()
+            .await;
+        assert_eq!(reset.status, 204);
+        let after = app
+            .request(Method::GET, "/api/auth/me")
+            .header("authorization", &bearer)
+            .send()
+            .await;
+        assert_eq!(after.status, 401);
     }
 
     #[tokio::test]

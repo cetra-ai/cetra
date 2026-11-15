@@ -58,7 +58,7 @@ CREATE TABLE projects (
   org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   name TEXT NOT NULL, slug TEXT NOT NULL,
   retention_days INTEGER,             -- NULL = forever
-  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s, media settings, …
+  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s (integer seconds, 10–3600; absent means 60, D-I-7), media settings, …
   state TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   UNIQUE(org_id, slug)
@@ -403,12 +403,18 @@ CREATE TABLE rule_spend (
   PRIMARY KEY (rule_id, day)
 );
 
-CREATE TABLE pending_traces (         -- trace-completion detector state (06)
-  project_id TEXT NOT NULL, trace_id BLOB NOT NULL,
-  last_ingest_at INTEGER NOT NULL, root_ended INTEGER NOT NULL DEFAULT 0,
+CREATE TABLE pending_traces (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id BLOB NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  min_start INTEGER NOT NULL,
+  root_ended INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, trace_id)
 );
 ```
+
+`pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
 
 `connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
@@ -538,7 +544,7 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 `instance_settings` is created by track I (migration `0004`, D156).
 
-Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add). A dropped org's rows stay 40 days after its org deletion is applied, then a daily task deletes them (D-P-46).
 
 `spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 

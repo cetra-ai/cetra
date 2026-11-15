@@ -18,6 +18,7 @@ use crate::api::evaluators::{
     EvaluatorKind, EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult,
     EvaluatorTestUsage, OutputScoreBody, TestEvaluatorBody,
 };
+use crate::entitlements::Visibility;
 use crate::eval::evaluator::{self, EvaluatorError, Prepared};
 use crate::eval::execute::{self, RunArgs, render};
 use crate::eval::trace_load::{self, LoadError};
@@ -135,30 +136,38 @@ pub(crate) async fn run(
             around,
             mapping,
         } => {
-            let loaded =
-                match trace_load::load_trace(state, project.id, trace_id, span_id, around).await {
-                    Ok(loaded) => loaded,
-                    Err(LoadError::TooLarge) => {
-                        return Ok(refused(TestErrorClass::Permanent, "trace too large", true));
-                    }
-                    Err(LoadError::NotFound | LoadError::NoTargetSpan) => {
-                        return Err(ApiError::NotFound);
-                    }
-                    Err(LoadError::EvaluationTrace) => {
-                        return Err(ApiError::BadRequest {
-                            detail: Some("target is an evaluation trace".to_owned()),
-                            errors: Vec::new(),
-                        });
-                    }
-                    Err(LoadError::Busy | LoadError::Saturated) => {
-                        return Err(ApiError::Unavailable {
-                            detail: "storage is busy",
-                        });
-                    }
-                    Err(error @ (LoadError::Failed(_) | LoadError::Convert(_))) => {
-                        return Err(internal(error));
-                    }
-                };
+            let loaded = match trace_load::load_trace(
+                state,
+                project.id,
+                Visibility::window(state, project.org_id),
+                trace_id,
+                span_id,
+                around,
+            )
+            .await
+            {
+                Ok(loaded) => loaded,
+                Err(LoadError::TooLarge) => {
+                    return Ok(refused(TestErrorClass::Permanent, "trace too large", true));
+                }
+                Err(LoadError::NotFound | LoadError::NoTargetSpan) => {
+                    return Err(ApiError::NotFound);
+                }
+                Err(LoadError::EvaluationTrace) => {
+                    return Err(ApiError::BadRequest {
+                        detail: Some("target is an evaluation trace".to_owned()),
+                        errors: Vec::new(),
+                    });
+                }
+                Err(LoadError::Busy | LoadError::Saturated) => {
+                    return Err(ApiError::Unavailable {
+                        detail: "storage is busy",
+                    });
+                }
+                Err(error @ (LoadError::Failed(_) | LoadError::Convert(_))) => {
+                    return Err(internal(error));
+                }
+            };
             // D-M-6, check A: the target is loaded and nothing has run yet. A deleted trace is
             // not found, as it is not for the caller any more.
             let users = execute::users_of(&loaded.spans);

@@ -17,7 +17,8 @@ use llmobs_core::message::parse_messages;
 use llmobs_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
 use llmobs_core::span::Span;
 use llmobs_otel::{
-    IngestContext, IngestLimits, PriceTable, decode_json, decode_protobuf, normalize,
+    DecodeError, IngestContext, IngestLimits, JsonErrorCategory, PriceTable, decode_json,
+    decode_protobuf, normalize,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
@@ -69,6 +70,15 @@ const PROMOTED: &[&str] = &[
     "gen_ai.operation.name",
     "gen_ai.conversation.id",
     "tag.tags",
+    "llmobs.metadata.note",
+    "llmobs.environment",
+    "deployment.environment.name",
+    "gen_ai.request.temperature",
+    "gen_ai.request.max_tokens",
+    "gen_ai.provider.name",
+    "llmobs.release",
+    "langfuse.release",
+    "lmnr.span.release",
 ];
 
 const GENAI_EVENTS: &[&str] = &[
@@ -131,6 +141,29 @@ fn text() -> impl Strategy<Value = String> {
         3 => json_text(),
         2 => data_uri(),
         1 => (1usize..=65_536).prop_map(|len| "x".repeat(len)),
+    ]
+}
+
+/// Text over `LIMIT`, so the bounded columns and fields are cut. Random text reaches
+/// `LIMIT` only rarely, so the checks would otherwise see short values.
+fn long_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => (LIMIT + 1..=1_024usize).prop_map(|len| "z".repeat(len)),
+        1 => (LIMIT + 1..=512usize).prop_map(|len| format!("{}{SENTINEL}", "z".repeat(len))),
+    ]
+}
+
+fn scope_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => text(),
+        1 => long_text(),
+    ]
+}
+
+fn event_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => prop::sample::select(GENAI_EVENTS).prop_map(str::to_owned),
+        1 => (LIMIT + 1..=512usize).prop_map(|len| format!("gen_ai.{}", "e".repeat(len))),
     ]
 }
 
@@ -232,11 +265,29 @@ fn kv(value: impl Strategy<Value = AnyValue> + 'static) -> impl Strategy<Value =
 }
 
 fn attributes() -> impl Strategy<Value = Vec<KeyValue>> {
-    prop::collection::vec(kv(generated_value().boxed()), 0..6).prop_map(|mut items| {
-        if let Some(first) = items.first().cloned() {
-            items.push(first);
-        }
-        items
+    (
+        prop::collection::vec(kv(generated_value().boxed()), 0..6),
+        prop::collection::vec(promoted_kv(), 0..3),
+    )
+        .prop_map(|(mut items, promoted)| {
+            items.extend(promoted);
+            if let Some(first) = items.first().cloned() {
+                items.push(first);
+            }
+            items
+        })
+}
+
+/// A promoted column key with a value over `LIMIT`, so the column must be cut.
+/// Random keys and values almost never reach that, so the check would not run.
+fn promoted_kv() -> impl Strategy<Value = KeyValue> {
+    let long = (LIMIT + 1..=1_024usize).prop_map(|len| "y".repeat(len));
+    let tags =
+        (LIMIT + 1..=512usize).prop_map(|len| format!(r#"["{}","{SENTINEL}"]"#, "t".repeat(len)));
+    (prop::sample::select(PROMOTED), prop_oneof![long, tags]).prop_map(|(key, value)| KeyValue {
+        key: key.to_owned(),
+        value: Some(string_value(value)),
+        key_strindex: 0,
     })
 }
 
@@ -260,27 +311,40 @@ fn timestamp() -> impl Strategy<Value = u64> {
 }
 
 fn event() -> impl Strategy<Value = Event> {
+    (event_name(), timestamp(), attributes()).prop_map(|(name, time, attributes)| Event {
+        time_unix_nano: time,
+        name,
+        attributes,
+        dropped_attributes_count: 0,
+    })
+}
+
+/// A link gets a long attribute in about half its cases, so the link's attribute JSON is cut.
+fn link() -> impl Strategy<Value = Link> {
     (
-        prop::sample::select(GENAI_EVENTS),
-        timestamp(),
+        id_bytes(16),
+        id_bytes(8),
         attributes(),
+        prop::option::of(long_kv()),
     )
-        .prop_map(|(name, time, attributes)| Event {
-            time_unix_nano: time,
-            name: name.to_owned(),
-            attributes,
-            dropped_attributes_count: 0,
+        .prop_map(|(trace_id, span_id, mut attributes, long)| {
+            attributes.extend(long);
+            Link {
+                trace_id,
+                span_id,
+                trace_state: String::new(),
+                attributes,
+                dropped_attributes_count: 0,
+                flags: 0,
+            }
         })
 }
 
-fn link() -> impl Strategy<Value = Link> {
-    (id_bytes(16), id_bytes(8), attributes()).prop_map(|(trace_id, span_id, attributes)| Link {
-        trace_id,
-        span_id,
-        trace_state: String::new(),
-        attributes,
-        dropped_attributes_count: 0,
-        flags: 0,
+fn long_kv() -> impl Strategy<Value = KeyValue> {
+    (key(), long_text()).prop_map(|(key, text)| KeyValue {
+        key,
+        value: Some(string_value(text)),
+        key_strindex: 0,
     })
 }
 
@@ -320,8 +384,8 @@ fn request() -> impl Strategy<Value = ExportTraceServiceRequest> {
     prop::collection::vec(
         (
             attributes(),
-            text(),
-            text(),
+            scope_text(),
+            scope_text(),
             prop::collection::vec(otlp_span(), 0..=2),
         ),
         0..=2,
@@ -377,20 +441,44 @@ fn check_span(span: &Span) {
     }
     preview_bound(span.input_preview.as_deref());
     preview_bound(span.output_preview.as_deref());
+    for preview in [&span.input_preview, &span.output_preview]
+        .into_iter()
+        .flatten()
+    {
+        bounded(preview);
+    }
     bounded(&span.name);
-    if let Some(message) = &span.status_message {
-        bounded(message);
+    // Every string column of Span, spec 02 § Truncation. Keys are not bounded.
+    let columns = [
+        &span.status_message,
+        &span.service_name,
+        &span.session_id,
+        &span.user_id,
+        &span.environment,
+        &span.release,
+        &span.provider,
+        &span.request_model,
+        &span.response_model,
+        &span.operation,
+        &span.request_params,
+        &span.scope_name,
+        &span.scope_version,
+        &span.system_instructions,
+        &span.tool_definitions,
+    ];
+    for value in columns.into_iter().flatten() {
+        bounded(value);
+    }
+    for tag in &span.tags {
+        bounded(tag);
+    }
+    for value in span.metadata.values() {
+        bounded(value);
     }
     if let Some(value) = &span.input {
         bounded(value);
     }
     if let Some(value) = &span.output {
-        bounded(value);
-    }
-    if let Some(value) = &span.system_instructions {
-        bounded(value);
-    }
-    if let Some(value) = &span.tool_definitions {
         bounded(value);
     }
     for value in span.attributes.values() {
@@ -400,7 +488,13 @@ fn check_span(span: &Span) {
         bounded(value);
     }
     for event in &span.events {
+        bounded(&event.name);
         if let Some(attributes) = &event.attributes {
+            bounded(attributes);
+        }
+    }
+    for link in &span.links {
+        if let Some(attributes) = &link.attributes {
             bounded(attributes);
         }
     }
@@ -510,12 +604,58 @@ proptest! {
     }
 }
 
+/// A request whose one attribute value nests `depth` times through `open`/`close`,
+/// around a valid leaf. The nesting sits inside AnyValue, which serde derives
+/// without a depth bound of its own, so only serde_json's recursion limit stops it.
+fn nested_any_value_request(open: &str, close: &str, depth: usize) -> String {
+    let prefix = r#"{"resourceSpans":[{"scopeSpans":[{"spans":[{"attributes":[{"key":"k","value":"#;
+    let suffix = "}]}]}]}]}";
+    let leaf = r#"{"stringValue":"leaf"}"#;
+    format!(
+        "{prefix}{}{leaf}{}{suffix}",
+        open.repeat(depth),
+        close.repeat(depth)
+    )
+}
+
+const ARRAY_OPEN: &str = r#"{"arrayValue":{"values":["#;
+const ARRAY_CLOSE: &str = "]}}";
+const KVLIST_OPEN: &str = r#"{"kvlistValue":{"values":[{"key":"k","value":"#;
+const KVLIST_CLOSE: &str = "}]}}";
+
 #[test]
-fn deeply_nested_json_is_rejected() {
-    let mut text = "[".repeat(10_000);
-    text.push_str(&"]".repeat(10_000));
-    let error = decode_json(text.as_bytes()).expect_err("serde recursion limit");
-    let rendered = error.to_string();
-    assert!(!rendered.contains(SENTINEL));
-    assert!(rendered.contains("invalid OTLP JSON"));
+fn deeply_nested_any_value_hits_the_recursion_limit() {
+    // serde_json stops at 128 levels of nesting. Each arrayValue step adds 3 levels
+    // and each kvlistValue step adds 4, so 10 000 steps must hit the limit. Without
+    // it, the document is valid OTLP at any depth, and the derived deserializers
+    // would recurse once per step.
+    for (open, close) in [(ARRAY_OPEN, ARRAY_CLOSE), (KVLIST_OPEN, KVLIST_CLOSE)] {
+        let body = nested_any_value_request(open, close, 10_000);
+        let error = decode_json(body.as_bytes()).expect_err("serde recursion limit");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(SENTINEL));
+        assert!(rendered.contains("invalid OTLP JSON"));
+        assert!(
+            matches!(
+                error,
+                DecodeError::Json {
+                    line: 1,
+                    category: JsonErrorCategory::Syntax,
+                    column,
+                } if column < body.len() / 10
+            ),
+            "expected a syntax error near the recursion limit, got {rendered}"
+        );
+    }
+}
+
+#[test]
+fn shallow_nested_any_value_decodes() {
+    // Same shape well inside the limit (20 steps is 91 levels for kvlistValue), so
+    // the failure above comes from depth and not from the shape.
+    for (open, close) in [(ARRAY_OPEN, ARRAY_CLOSE), (KVLIST_OPEN, KVLIST_CLOSE)] {
+        let body = nested_any_value_request(open, close, 20);
+        let request = decode_json(body.as_bytes()).expect("shallow request decodes");
+        assert_eq!(request.resource_spans.len(), 1);
+    }
 }

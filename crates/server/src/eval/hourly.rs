@@ -12,7 +12,6 @@ const HOUR_NS: i64 = 3_600_000_000_000;
 
 /// The matches of each rule in its current UTC hour.
 #[derive(Debug, Default)]
-#[allow(dead_code)] // M4's sweeper calls it (D-I-11).
 pub(crate) struct HourlyCaps {
     rules: Mutex<HashMap<Uuid, HourCount>>,
 }
@@ -30,7 +29,6 @@ impl HourlyCaps {
     }
 
     /// Counts one live match of `rule` in `now`'s UTC hour. False (and counted as dropped) past the cap.
-    #[allow(dead_code)] // M4's sweeper calls it (D-I-11).
     pub(crate) fn admit(&self, rule: Uuid, now: i64) -> bool {
         let hour = now.div_euclid(HOUR_NS);
         let mut rules = self.lock();

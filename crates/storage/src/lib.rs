@@ -55,6 +55,7 @@ pub mod error;
 mod filter;
 pub(crate) mod flush;
 pub(crate) mod gc;
+mod maintenance;
 pub(crate) mod media;
 pub(crate) mod memory;
 pub(crate) mod objects;
@@ -66,6 +67,7 @@ mod query_error;
 mod query_text;
 pub(crate) mod read_cache;
 mod reads;
+mod snapshot;
 mod sql;
 pub(crate) mod verify;
 mod views;
@@ -73,26 +75,42 @@ mod views;
 pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-pub use crate::error::CompactionError;
-pub use crate::gc::ObsoleteReport;
+pub use crate::error::{
+    CompactionError, CopyObjectsError, FlushNowError, OrphanError, SnapshotError,
+};
+pub use crate::gc::{ObsoleteReport, OrphanReport};
+pub use crate::maintenance::Maintenance;
+
+/// The cancel flag of [`Storage::copy_objects`]. A `Mutex` rather than an
+/// `AtomicBool`: the copy checks the flag and creates each object's directory and
+/// link under the same lock, and a caller sets it under that lock before it removes
+/// the destination. An atomic flag alone would let a copy re-create a directory
+/// between the caller's removal and its check.
+pub type CopyCancel = Arc<Mutex<bool>>;
 pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
 pub use reads::{
     AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
-    KpiName, LATEST_SCORE_COLUMNS, ListScope, MAX_FILTER_DELETION_TRACES, MAX_PAGE,
-    MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TRACE_SPANS,
-    MAX_USER_SESSIONS, MetricsData, MetricsGroupBy, MetricsRequest, ModelUsageRow, Page, Point,
-    SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest, ScoreTargets, Series, SeriesName,
-    SessionDetailData, SessionListRequest, SessionSort, SortOrder, SpanListRequest,
-    SpanRefreshRequest, SpanSort, TraceDetailData, TraceListRequest, TraceRefreshRequest,
-    TraceSort, TraceSpansData, TraceSpansRequest, USER_COLUMNS, UserDeletionScope, UserDetailData,
-    UserListRequest, UserSort, alert_value, eval_trace_ids, filter_trace_ids, latest_scores,
-    metrics::metrics, score_list, scores_by_id, session_detail, session_list, span_detail,
-    span_list, span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
-    user_deletion_scope, user_detail, user_list, validate_filter,
+    KpiName, LATEST_SCORE_COLUMNS, ListScope, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
+    MAX_PAGE, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TRACE_SPANS,
+    MAX_USER_SESSIONS, MatchCountRequest, MetricsData, MetricsGroupBy, MetricsRequest,
+    ModelUsageRow, Page, Point, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest,
+    ScoreTargets, Series, SeriesName, SessionDetailData, SessionListRequest, SessionSort,
+    SortOrder, SpanListRequest, SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS,
+    TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
+    TraceSpansRequest, USER_COLUMNS, UserDeletionScope, UserDetailData, UserListRequest, UserSort,
+    alert_value, eval_trace_ids, filter_trace_ids, latest_scores, match_count, metrics::metrics,
+    score_list, scores_by_id, session_detail, session_list, span_detail, span_list, span_refresh,
+    trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans, user_deletion_scope,
+    user_detail, user_list, validate_filter,
 };
-pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
+pub use snapshot::CopyReport;
+pub use snapshot::{CatalogSnapshot, LiveObject};
+pub use sql::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
+    SqlColumn, SqlJson, SqlRequest,
+};
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
     ViewColumns, ViewName, function_catalog, view_catalog,
@@ -190,8 +208,7 @@ pub struct Storage {
     /// Shared with the flush tasks and staged-object collection.
     #[cfg_attr(not(test), allow(dead_code))]
     objects: Arc<Objects>,
-    /// Kept so tests can read `flushed_seq`. The flush tasks hold their own clones.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Read by [`Self::flush_now`] and the tests. The flush tasks hold their own clones.
     committer: Arc<Committer>,
     runtime: Arc<RuntimeEnv>,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
@@ -217,14 +234,39 @@ struct QueryMemory {
     wait: std::time::Duration,
 }
 
-/// Optional hints for one [`Storage::query`] call.
-#[derive(Debug, Clone, Copy, Default)]
+/// Options of one [`Storage::query`] call. Built only with [`QueryOptions::new`], so a caller
+/// always states the data window it reads under (D-P-44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueryOptions {
     /// Time hint for a single-trace lookup (`?around=`), ns.
     ///
     /// When a lookup has no `start_time` bound, only files overlapping
     /// `[around - 1 day, around + 1 day]` are read (D154).
-    pub around: Option<i64>,
+    around: Option<i64>,
+    /// Rows before this instant (ns) are hidden from the views: spans and traces by
+    /// `start_time`, scores by `created_at`. `None` hides nothing (D175, D-P-21).
+    visible_from: Option<i64>,
+}
+
+impl QueryOptions {
+    /// `around`: the single-trace time hint (D154), ns. `visible_from`: the org's data-window
+    /// bound (D175, D-P-21), ns; `None` hides nothing.
+    pub fn new(around: Option<i64>, visible_from: Option<i64>) -> Self {
+        Self {
+            around,
+            visible_from,
+        }
+    }
+
+    /// The `around` hint.
+    pub fn around(&self) -> Option<i64> {
+        self.around
+    }
+
+    /// The data-window bound.
+    pub fn visible_from(&self) -> Option<i64> {
+        self.visible_from
+    }
 }
 
 impl Storage {
@@ -251,7 +293,6 @@ impl Storage {
         config: StorageConfig,
         remote: Option<Arc<dyn object_store::ObjectStore>>,
     ) -> Result<Self, OpenError> {
-        config.validate()?;
         let data_dir = config.data_dir.clone();
         let hard_limit = config.memtable.hard_limit.0;
         // `validate` rejects 0. A missed check still yields one partition.
@@ -273,18 +314,8 @@ impl Storage {
         let window_ns = i64::try_from(window.as_nanos()).unwrap_or(i64::MAX);
         #[allow(clippy::default_constructed_unit_structs)]
         let hooks = Hooks::default();
-        let layout_dir = data_dir.clone();
-        let lock = tokio::task::spawn_blocking(move || prepare_layout(&layout_dir))
-            .await
-            .map_err(|_| {
-                open_io(
-                    "opening data directory",
-                    &data_dir,
-                    io::Error::other("open task panicked"),
-                )
-            })??;
-        let committer = Arc::new(Committer::open(&data_dir, share_hooks(&hooks)).await?);
-        let mut objects = open_objects(&config, &hooks, remote).await?;
+        let (lock, committer, mut objects) = open_shared(&config, &hooks, remote).await?;
+        let committer = Arc::new(committer);
         let mut disk_paths = vec![data_dir.clone()];
         disk_paths.extend(objects.local_root().map(Path::to_path_buf));
         let disk = Arc::new(disk::Disk::open(disk_paths, config.min_free_bytes.0)?);
@@ -459,9 +490,10 @@ impl Storage {
         if let Err(error) =
             gc::collect_once(&committer, &objects, &hooks, catalog::now_ns(), gc::MAX_AGE).await
         {
-            // The error names the object key. Keys contain project ids.
+            // The label only: the error names a staged path, which can be a
+            // media path (spec 03 §9).
             tracing::warn!("staged object collection failed");
-            tracing::debug!(%error, "staged object collection error");
+            tracing::debug!(error = error.label(), "staged object collection error");
         }
         if let Err(error) = gc::collect_obsolete(
             &committer,
@@ -472,9 +504,9 @@ impl Storage {
         )
         .await
         {
-            // The error names the object key. Keys contain project ids.
+            // The label only: the error names an object key.
             tracing::warn!("obsolete file collection failed");
-            tracing::debug!(%error, "obsolete file collection error");
+            tracing::debug!(error = error.label(), "obsolete file collection error");
         }
         let media = MediaGc {
             committer: Arc::clone(&committer),
@@ -677,8 +709,15 @@ impl Storage {
             .await?;
         drop(gate);
         // A second call finishes a drop whose media step failed, whether the
-        // commit above was the first or a no-op.
-        self.media.finish_drop(project).await?;
+        // commit above was the first or a no-op. While a catalog snapshot (a
+        // backup) holds the gate, the media step is left to the GC task's
+        // `finish_drops`, so this call does not wait for the whole backup
+        // (N M2, D-N-18).
+        if self.committer.object_gc_gate.try_read().is_ok() {
+            self.media.finish_drop(project).await?;
+        } else {
+            tracing::info!(project = %project, "project media deletion deferred to GC");
+        }
         if dropped {
             tracing::info!(project = %project, "project dropped");
         }
@@ -714,7 +753,11 @@ impl Storage {
             return Err(MediaError::HashMismatch);
         }
         let sha = hex::encode(blob.sha256);
-        if self.committer.touch_media(project, &sha, now).await? {
+        if self
+            .committer
+            .touch_media(project, &sha, now, blob.newest_span_start)
+            .await?
+        {
             return Ok(());
         }
         let path = Objects::media_path(project, &sha);
@@ -729,7 +772,15 @@ impl Storage {
         // caught here (spec 03 §7); the staged row stays for GC.
         if !self
             .committer
-            .insert_media(project, &sha, &blob.mime_type, size, &path, now)
+            .insert_media(
+                project,
+                &sha,
+                &blob.mime_type,
+                size,
+                &path,
+                now,
+                blob.newest_span_start,
+            )
             .await?
         {
             return Err(MediaError::ProjectDropped);
@@ -739,20 +790,27 @@ impl Storage {
 
     /// The blob of `sha256`, whole or `range` of it (end exclusive), with its
     /// MIME type and the whole blob's size (spec 03 §9). A dropped project has
-    /// nothing to read (spec 03 §7).
+    /// nothing to read (spec 03 §7). `visible_from` hides a blob whose newest
+    /// span is older (D-P-21).
     pub async fn get_media(
         &self,
         project: ProjectId,
         sha256: &[u8; 32],
         range: Option<Range<u64>>,
+        visible_from: Option<i64>,
     ) -> Result<MediaRead, MediaError> {
         if self.published.load().projects.is_dropped(project) {
             return Err(MediaError::NotFound);
         }
         let sha = hex::encode(sha256);
-        let Some((mime_type, size)) = self.committer.media_row(project, &sha).await? else {
+        let Some((mime_type, size, newest_span_start)) =
+            self.committer.media_row(project, &sha).await?
+        else {
             return Err(MediaError::NotFound);
         };
+        if visible_from.is_some_and(|from| newest_span_start < from) {
+            return Err(MediaError::NotFound);
+        }
         if let Some(range) = &range
             && (range.start >= range.end || range.end > size)
         {
@@ -783,6 +841,77 @@ impl Storage {
             scores_wal_failed: self.scores.shared().failed(),
             memtable_bytes: spans.saturating_add(scores),
             memtable_hard_limit: self.hard_limit,
+        }
+    }
+
+    /// Flushes both tables up to what was acknowledged before this call and
+    /// waits for the catalog commit (N M2, D-N-18). Appends continue meanwhile;
+    /// rows acknowledged after the call are not waited for.
+    ///
+    /// One caller at a time: the server's backup slot serialises calls, and
+    /// returning clears both tables' force flags.
+    ///
+    /// # Errors
+    ///
+    /// [`FlushNowError`] when a WAL writer has failed, when the storage is
+    /// shutting down, or when a table's flush has not committed within `timeout`.
+    pub async fn flush_now(&self, timeout: std::time::Duration) -> Result<(), FlushNowError> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(FlushNowError::ShuttingDown);
+        }
+        let _clear = ForceFlushGuard(self);
+        // The target is the highest seq held when the call starts. It is a
+        // one-shot snapshot: rows appended later are never waited for.
+        let mut targets: Vec<(Table, u64)> = Vec::with_capacity(2);
+        for table in [Table::Spans, Table::Scores] {
+            let shared = self.writer(table).shared();
+            let target = shared
+                .memtable()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .max_seq();
+            if target == 0 {
+                continue;
+            }
+            shared.set_force_flush(true);
+            // `notify_one` keeps a permit for a flush task between two waits.
+            shared.flush_notify.notify_one();
+            targets.push((table, target));
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut done = vec![false; targets.len()];
+        loop {
+            for (index, (table, target)) in targets.iter().enumerate() {
+                if done[index] {
+                    continue;
+                }
+                let table = *table;
+                // A failed writer is checked first, so the answer does not depend
+                // on whether a flush happened to commit before this poll.
+                if self.writer(table).shared().failed() {
+                    return Err(FlushNowError::WriterFailed {
+                        table: table.name(),
+                    });
+                }
+                if self.committer.flushed_seq(table).await >= *target {
+                    self.writer(table).shared().set_force_flush(false);
+                    done[index] = true;
+                    continue;
+                }
+                if self.shutting_down.load(Ordering::Acquire) {
+                    return Err(FlushNowError::ShuttingDown);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(FlushNowError::Timeout {
+                        table: table.name(),
+                        timeout,
+                    });
+                }
+            }
+            if done.iter().all(|finished| *finished) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
 
@@ -817,6 +946,80 @@ impl Storage {
             grace,
         )
         .await
+    }
+
+    /// Writes a consistent copy of `catalog.db` to `path` and pins every object it
+    /// lists until the returned [`CatalogSnapshot`] is dropped (N M2, D-N-18).
+    ///
+    /// The gate is taken before the committer lock and held until the snapshot
+    /// is dropped, so every object deletion waits for the backup. Commits wait
+    /// only for the `VACUUM INTO` itself, which runs under the committer lock;
+    /// appends never wait. A failed call removes the partial copy at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotError`] when `path` exists or is not UTF-8, or when SQLite fails.
+    pub async fn snapshot_catalog(&self, path: &Path) -> Result<CatalogSnapshot, SnapshotError> {
+        if path.exists() {
+            return Err(SnapshotError::Exists);
+        }
+        let Some(target) = path.to_str() else {
+            return Err(SnapshotError::NonUtf8Path);
+        };
+        let gate = Arc::clone(&self.committer.object_gc_gate)
+            .write_owned()
+            .await;
+        let copied = match self.committer.snapshot_into(target).await {
+            Ok(catalog) => snapshot::read_copy(path)
+                .await
+                .map(|(objects, flushed_seq)| (catalog, objects, flushed_seq)),
+            Err(error) => Err(error.into()),
+        };
+        let (catalog, objects, flushed_seq) = match copied {
+            Ok(copied) => copied,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(error);
+            }
+        };
+        Ok(CatalogSnapshot::new(
+            path.to_path_buf(),
+            objects,
+            flushed_seq,
+            catalog,
+            gate,
+        ))
+    }
+
+    /// Puts every object of `snapshot` under `dest` at its store-relative key: a
+    /// hard link, or a copy when `dest` is on another filesystem (N M2, D-N-18).
+    /// Local mode only.
+    ///
+    /// The copy runs on a blocking thread and keeps going when the caller's future
+    /// is dropped. Once `cancel` is set (by the caller, under its lock; see
+    /// [`CopyCancel`]), the copy places no further object and returns
+    /// [`CopyObjectsError::Cancelled`].
+    ///
+    /// # Errors
+    ///
+    /// [`CopyObjectsError::RemoteStore`] in S3 mode; [`CopyObjectsError::Io`]
+    /// when an object is missing or cannot be linked or copied;
+    /// [`CopyObjectsError::Cancelled`] when `cancel` is set.
+    pub async fn copy_objects(
+        &self,
+        snapshot: &CatalogSnapshot,
+        dest: &Path,
+        cancel: CopyCancel,
+    ) -> Result<CopyReport, CopyObjectsError> {
+        let Some(root) = self.objects.local_root() else {
+            return Err(CopyObjectsError::RemoteStore);
+        };
+        let root = root.to_path_buf();
+        let dest = dest.to_path_buf();
+        let objects = snapshot.objects.clone();
+        tokio::task::spawn_blocking(move || snapshot::copy_all(&root, &dest, &objects, &cancel))
+            .await
+            .map_err(|_| CopyObjectsError::Task)?
     }
 
     /// One compaction pass at `now` (ns), run to completion. The background
@@ -1117,7 +1320,7 @@ pub(crate) fn project_query(
                 Arc::clone(&spans_snapshot),
                 Arc::clone(&catalog),
                 partitions,
-                options.around,
+                options.around(),
                 Arc::clone(&no_deletions),
                 suspects.clone(),
             )),
@@ -1143,6 +1346,7 @@ pub(crate) fn project_query(
             target_partitions,
             optimizer_rules: vec![Arc::new(query::TraceListRule)],
             suspects,
+            visible_from: options.visible_from(),
         });
     }
     let deletions = state.tombstones.for_project(project);
@@ -1177,7 +1381,7 @@ pub(crate) fn project_query(
         Arc::clone(&spans_snapshot),
         Arc::clone(&state.catalog),
         partitions,
-        options.around,
+        options.around(),
         Arc::clone(&deletions),
         suspects.clone(),
     ));
@@ -1209,6 +1413,7 @@ pub(crate) fn project_query(
         target_partitions,
         optimizer_rules: vec![Arc::new(query::TraceListRule)],
         suspects,
+        visible_from: options.visible_from(),
     })
 }
 
@@ -1367,6 +1572,31 @@ fn recover_table(
             next_seq: outcome.next_seq,
         },
     })
+}
+
+/// The steps [`Storage::open`] and [`Maintenance::open`] share: validates `config`,
+/// takes `LOCK`, migrates `catalog.db` (after its pre-migration copy) and opens the
+/// object store. Nothing is replayed, collected or started here.
+async fn open_shared(
+    config: &StorageConfig,
+    hooks: &Hooks,
+    remote: Option<Arc<dyn object_store::ObjectStore>>,
+) -> Result<(File, Committer, Objects), OpenError> {
+    config.validate()?;
+    let data_dir = config.data_dir.clone();
+    let layout_dir = data_dir.clone();
+    let lock = tokio::task::spawn_blocking(move || prepare_layout(&layout_dir))
+        .await
+        .map_err(|_| {
+            open_io(
+                "opening data directory",
+                &data_dir,
+                io::Error::other("open task panicked"),
+            )
+        })??;
+    let committer = Committer::open(&data_dir, share_hooks(hooks)).await?;
+    let objects = open_objects(config, hooks, remote).await?;
+    Ok((lock, committer, objects))
 }
 
 async fn open_objects(
@@ -1593,6 +1823,17 @@ fn share_hooks(hooks: &Hooks) -> Hooks {
     // Production hooks are `Copy`. Tests share one value and have to clone it.
     #[allow(clippy::clone_on_copy)]
     hooks.clone()
+}
+
+/// Clears both tables' force flags when [`Storage::flush_now`] returns, and
+/// also when its future is dropped.
+struct ForceFlushGuard<'a>(&'a Storage);
+
+impl Drop for ForceFlushGuard<'_> {
+    fn drop(&mut self) {
+        self.0.spans.shared().set_force_flush(false);
+        self.0.scores.shared().set_force_flush(false);
+    }
 }
 
 #[cfg(test)]
@@ -2052,11 +2293,17 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
-        let during = storage.query(project(), Default::default()).await.unwrap();
+        let during = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert!(span_names(Arc::clone(&during.spans)).await.is_empty());
         storage.hooks().release(HookPoint::AfterWalSync);
         append.await.unwrap().unwrap();
-        let after = storage.query(project(), Default::default()).await.unwrap();
+        let after = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         assert_eq!(span_names(after.spans).await.len(), 1);
         assert!(span_names(during.spans).await.is_empty());
         storage.shutdown().await.unwrap();
@@ -2084,6 +2331,7 @@ mod tests {
             sha256: Sha256::digest(&bytes).into(),
             mime_type: "text/plain".to_owned(),
             bytes,
+            newest_span_start: 0,
         };
 
         storage.disk().set_free_for_test(Some(10));
@@ -2154,11 +2402,19 @@ mod tests {
         let storage = Storage::open(config_with_query_memory(dir.path(), 2))
             .await
             .unwrap();
-        let held = storage.query(project(), Default::default()).await.unwrap();
-        let busy = storage.query(project(), Default::default()).await;
+        let held = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let busy = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await;
         assert!(matches!(busy, Err(QueryError::Busy)), "a second query fits");
         drop(held);
-        storage.query(project(), Default::default()).await.unwrap();
+        storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         storage.shutdown().await.unwrap();
     }
 
@@ -2186,7 +2442,10 @@ mod tests {
 
         let storage = Storage::open(config).await.unwrap();
         let ctx = QueryContext::new(
-            storage.query(project(), Default::default()).await.unwrap(),
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
             None,
         )
         .unwrap();
@@ -2245,7 +2504,7 @@ mod tests {
         while !append.is_finished() {
             let names = span_names(
                 storage
-                    .query(project(), Default::default())
+                    .query(project(), QueryOptions::new(None, None))
                     .await
                     .unwrap()
                     .spans,
@@ -2257,7 +2516,7 @@ mod tests {
         assert_eq!(append.await.unwrap().unwrap_err(), AppendError::WalFailed);
         let names = span_names(
             storage
-                .query(project(), Default::default())
+                .query(project(), QueryOptions::new(None, None))
                 .await
                 .unwrap()
                 .spans,
@@ -2327,8 +2586,14 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         let storage = Storage::open(config.clone()).await.unwrap();
-        let first = storage.query(project(), Default::default()).await.unwrap();
-        let second = storage.query(project(), Default::default()).await.unwrap();
+        let first = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let second = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         // Each query has a runtime of its own (spec 03 §6).
         assert!(!Arc::ptr_eq(&first.runtime, &second.runtime));
         let receipt = storage
@@ -2670,7 +2935,10 @@ mod tests {
         assert!(storage.read_cache_stats().unwrap().blocks > 0);
 
         // The file is read through the query's runtime, which has the store.
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
             datafusion::prelude::SessionConfig::new(),
             Arc::clone(&query.runtime),
@@ -2729,6 +2997,204 @@ mod tests {
         let report = storage.verify_pass().await;
         assert_eq!(report.healthy, 1, "{report:?}");
         assert_eq!(report.quarantined, 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A storage whose flush tasks do nothing on their own: one hour of age
+    /// and 1 MiB of size. Only [`Storage::flush_now`] flushes.
+    fn quiet_config_in(dir: &Path) -> StorageConfig {
+        StorageConfig {
+            flush: FlushConfig {
+                max_age: Duration::from_secs(3600),
+                max_bytes: ByteSize::mib(1),
+                ..FlushConfig::default()
+            },
+            ..config_in(dir)
+        }
+    }
+
+    /// Spans rows that `project` sees through a query.
+    async fn span_count(storage: &Storage) -> i64 {
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            Arc::clone(&query.runtime),
+        );
+        ctx.register_table("spans_t", query.spans).unwrap();
+        let counted = ctx
+            .sql("SELECT count(*) FROM spans_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        counted[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_commits_everything_acknowledged() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        let spans = storage
+            .append_spans(project(), spans_at(&[1, 2]))
+            .await
+            .unwrap();
+        let scores = storage
+            .append_scores(project(), score_batch("accuracy"))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(storage.flushed_seq(Table::Spans).await >= spans.seq);
+        assert!(storage.flushed_seq(Table::Scores).await >= scores.seq);
+        assert_eq!(storage.spans.shared().memtable_bytes(), 0);
+        assert_eq!(storage.scores.shared().memtable_bytes(), 0);
+        assert_eq!(span_count(&storage).await, 2);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_with_nothing_to_flush_returns_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        let before = (
+            storage.flushed_seq(Table::Spans).await,
+            storage.flushed_seq(Table::Scores).await,
+        );
+        let started = std::time::Instant::now();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let after = (
+            storage.flushed_seq(Table::Spans).await,
+            storage.flushed_seq(Table::Scores).await,
+        );
+        assert_eq!(before, after);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_does_not_wait_for_later_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(quiet_config_in(dir.path())).await.unwrap());
+        let first = storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let appender = {
+            let storage = Arc::clone(&storage);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut start = 2_i64;
+                while !stop.load(Ordering::Acquire) {
+                    match storage.append_spans(project(), spans_at(&[start])).await {
+                        Ok(_) | Err(AppendError::Backpressure) => {}
+                        Err(error) => panic!("append failed: {error}"),
+                    }
+                    start += 1;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(storage.flushed_seq(Table::Spans).await >= first.seq);
+        stop.store(true, Ordering::Release);
+        appender.await.unwrap();
+        let storage = Arc::try_unwrap(storage).unwrap();
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_clears_the_force_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        assert!(!storage.spans.shared().force_flush());
+        assert!(!storage.scores.shared().force_flush());
+        storage
+            .append_spans(project(), spans_at(&[2]))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Nothing forces the flush now, so the append waits in the memtable.
+        assert!(storage.spans.shared().memtable_bytes() > 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_after_shutdown_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage.shutdown().await.unwrap();
+        let error = storage.flush_now(Duration::from_secs(1)).await.unwrap_err();
+        assert!(matches!(error, FlushNowError::ShuttingDown), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_reports_a_failed_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.hooks().arm_fail(HookPoint::WalWrite);
+        let mut failed = false;
+        for start in 2..12 {
+            if storage
+                .append_spans(project(), spans_at(&[start]))
+                .await
+                .is_err()
+            {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed, "an append failed after the armed fault");
+        let error = storage
+            .flush_now(Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FlushNowError::WriterFailed { table: "spans" }),
+            "{error}"
+        );
+        let shutdown = storage.shutdown().await.unwrap_err();
+        assert!(matches!(
+            shutdown,
+            StorageError::WalFailed { table: "spans" }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn flush_now_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(quiet_config_in(dir.path())).await.unwrap();
+        storage.hooks().hold(HookPoint::FlushAfterFreeze);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        let error = storage
+            .flush_now(Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FlushNowError::Timeout { table: "spans", .. }),
+            "{error}"
+        );
+        storage.hooks().release(HookPoint::FlushAfterFreeze);
         storage.shutdown().await.unwrap();
     }
 }

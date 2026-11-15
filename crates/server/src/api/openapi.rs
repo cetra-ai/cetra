@@ -61,9 +61,10 @@ use super::evaluators::{
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::internal::{
-    CreateInternalOrgRequest, InternalMember, InternalMembers, InternalMembersQuery, InternalOrg,
-    InternalOwner, InternalUsageQuery, InternalUsageRow, InternalUserDeleted, InternalUserRef,
-    MembershipLookup, MembershipLookupRequest, MembershipOrg,
+    CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
+    InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
+    InternalUsageRow, InternalUserDeleted, InternalUserRef, MembershipLookup,
+    MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
@@ -73,8 +74,9 @@ use super::keys::{
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::online_rules::{
-    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage, PauseReason,
-    RuleSpend, RuleTarget, UpdateOnlineRuleRequest,
+    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -188,6 +190,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<InternalMember>();
     set.insert::<InternalMembers>();
     set.insert_page::<InternalUsageRow>("InternalUsagePage");
+    set.insert::<InternalDropKind>();
+    set.insert_page::<InternalDrop>("InternalDropPage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -302,6 +306,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OnlineRulePage>();
     set.insert::<CreateOnlineRuleRequest>();
     set.insert::<UpdateOnlineRuleRequest>();
+    set.insert::<OnlineRulePreviewRequest>();
+    set.insert::<OnlineRulePreview>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -426,7 +432,8 @@ pub fn openapi() -> OpenApi {
 ///
 /// utoipa marks every `Option<T>` nullable. This removes `null` from every property
 /// that is not `required` and from every optional query parameter. The D65 message and
-/// part components are skipped: their optional fields can really be `null`.
+/// part components are skipped: their optional fields can really be `null`. So are the
+/// `NULL_IS_A_VALUE` properties.
 fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
     let skip = d65_component_names();
     if let Some(components) = openapi.components.as_mut() {
@@ -434,7 +441,11 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
             if skip.contains(name.as_str()) {
                 continue;
             }
+            let kept = take_null_is_a_value(name, schema);
             strip_nested(schema);
+            if let RefOr::T(Schema::Object(object)) = schema {
+                object.properties.extend(kept);
+            }
         }
     }
     for path_item in openapi.paths.paths.values_mut() {
@@ -449,6 +460,27 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
         strip_operation(path_item.trace.as_mut());
         strip_operation(path_item.query.as_mut());
     }
+}
+
+/// Properties where `null` is a value of their own, so the contract keeps it: `null`
+/// on a request means "keep data forever", while an absent field leaves the default
+/// (spec 09). The server takes both (`api/account.rs`).
+const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("CreateProjectRequest", "retention_days"),
+    ("UpdateProjectRequest", "retention_days"),
+];
+
+/// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
+/// [`strip_nested`] leaves them alone. The caller puts them back.
+fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<String, RefOr<Schema>> {
+    let RefOr::T(Schema::Object(object)) = schema else {
+        return BTreeMap::new();
+    };
+    NULL_IS_A_VALUE
+        .iter()
+        .filter(|(component, _)| *component == name)
+        .filter_map(|(_, field)| object.properties.remove_entry(*field))
+        .collect()
 }
 
 fn d65_component_names() -> BTreeSet<String> {
@@ -1254,7 +1286,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let post_internal_org = operation("post_internal_org", "internal", "Create an org")
         .description(Some(
-            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         ))
         .securities(Some(vec![SecurityRequirement::new(
             "bearer",
@@ -1269,7 +1301,27 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
                     json_of::<InternalOrg>("The org with this id already exists."),
                 ),
             ],
-            &[400, 401, 403, 422, 429],
+            &[400, 401, 403, 409, 422, 429],
+        ))
+        .build();
+    let delete_internal_org = operation("delete_internal_org", "internal", "Drop an org")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+        .responses(responses_with(
+            [
+                (
+                    "202",
+                    json_of::<Deletion>("The org drop, in status pending or resolving."),
+                ),
+                ("200", json_of::<Deletion>("The org drop is applied.")),
+            ],
+            &[401, 403, 404, 429],
         ))
         .build();
     let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
@@ -1287,6 +1339,25 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 429],
         ))
         .build();
+    let list_internal_deletions = operation(
+        "list_internal_deletions",
+        "internal",
+        "List applied org and project drops",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(with_query::<InternalDropsQuery>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("InternalDropPage", "One page of applied drops, oldest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
     let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
     let post_internal_user_revoke = operation(
         "post_internal_user_revoke",
@@ -1418,8 +1489,16 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, post_internal_org),
         )
         .path(
+            "/api/internal/v1/orgs/{org_id}",
+            PathItem::new(HttpMethod::Delete, delete_internal_org),
+        )
+        .path(
             "/api/internal/v1/usage",
             PathItem::new(HttpMethod::Get, list_internal_usage),
+        )
+        .path(
+            "/api/internal/v1/deletions",
+            PathItem::new(HttpMethod::Get, list_internal_deletions),
         )
         .path(
             "/api/internal/v1/users/revoke",
@@ -2242,6 +2321,22 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let preview = operation(
+        "post_online_rule_preview",
+        "evaluation",
+        "Count what a rule's filter matches",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("OnlineRulePreviewRequest")))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRulePreview>("What the filter matches."),
+        READ_ERRORS,
+    ))
+    .build();
     let resume = operation(
         "post_online_rule_resume",
         "evaluation",
@@ -2277,6 +2372,10 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/preview"),
+            PathItem::new(HttpMethod::Post, preview),
         )
         .path(
             format!("{PROJECT}/online-rules/{{id}}/resume"),
@@ -2443,6 +2542,20 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let get = operation("get_saved_view", "saved_views", "Get a saved view")
+        .description(Some(
+            "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Saved view id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<SavedView>("The saved view."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let update = operation("update_saved_view", "saved_views", "Update a saved view")
         .description(Some(
             "The owner changes name, state, shared and is_default; sharing, or editing a shared view, needs role member. A project admin may also unshare another user's shared view. Setting is_default clears the other default of the same scope: the caller's private views of that kind, or the project's shared views of that kind.",
@@ -2480,6 +2593,10 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views"),
             PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
@@ -2573,7 +2690,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_channel", "alerts", "Create a notification channel")
         .description(Some(
-            "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+            "Needs role member. Email channels need SMTP. At most 20 channels per project (409). \
+             Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateChannelRequest")))
@@ -2584,6 +2702,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let update = operation("update_channel", "alerts", "Update a notification channel")
+        .description(Some(
+            "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+        ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .request_body(Some(json_body("UpdateChannelRequest")))
         .responses(responses(
@@ -2604,7 +2725,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let test = operation("test_channel", "alerts", "Send a test notification")
         .description(Some(
-            "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+            "Sends one sample message now and reports the result. Nothing is stored. Needs role member. \
+             At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). \
+             Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .responses(responses(

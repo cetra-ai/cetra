@@ -70,7 +70,7 @@ See [README.md](README.md) and the common rules in [03-genai-openinference.md](0
 | `v5-stream-text` | `streamText` with Chat, streamed with usage. The spans hold `ai.response.msToFirstChunk` and similar values, which go into `timing_attributes`. |
 | `v5-generate-object` | `generateObject` with a small zod-free JSON schema (`jsonSchema(...)`), Chat. The scripted text is the JSON object. |
 | `v5-embed-many` | `embedMany` with two values, OpenAI embeddings, `dims` 8. |
-| `v5-anthropic-cache` | `generateText` with the Anthropic provider and a cached system prompt; usage `{input: 2100, output: 40, cache_read: 1800, cache_write: 200}`. Covers D111 (Vercel ≤ v5 + Anthropic: the exclusive input, and cache write only in `ai.response.providerMetadata`). |
+| `v5-anthropic-cache` | `generateText` with the Anthropic provider and a cached system prompt; usage `{input: 2100, output: 40, cache_read: 1800, cache_write: 200}`. Covers D113 (Vercel ≤ v5 + Anthropic: the exclusive input, and cache write only in `ai.response.providerMetadata`). |
 
 The existing hand-written `vercel/generate-text` stays as it is.
 
@@ -107,6 +107,6 @@ capture-ts-sync:
 | `v6-generate-text-tool`, `v7-generate-text-tool` | `v5-generate-text-tool` |
 | `v6-stream-text`, `v7-stream-text` | `v5-stream-text` |
 | `v6-generate-object`, `v7-generate-object` | `v5-generate-object` |
-| `v6-anthropic-cache`, `v7-anthropic-cache` | `v5-anthropic-cache`. The report says whether v6+ still needs `providerMetadata` for the cache write (D111). |
+| `v6-anthropic-cache`, `v7-anthropic-cache` | `v5-anthropic-cache`. The report says whether v6+ still needs `providerMetadata` for the cache write (D113). |
 
 **Report:** for each attribute, whether it differs between v5, v6 and v7 (renamed, added, removed, value shape). This table is B1's main input for N19.

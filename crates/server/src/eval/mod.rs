@@ -8,11 +8,14 @@ pub(crate) mod dispatch;
 pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
+pub(crate) mod pending;
 pub(crate) mod retry;
 pub(crate) mod rule_check;
 pub(crate) mod rule_limit;
+pub(crate) mod sampling;
 pub(crate) mod test_run;
 pub(crate) mod trace_load;
+pub(crate) mod trigger;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,6 +53,9 @@ pub(crate) struct EvalQueue {
     pub(crate) budgets: budget::Budgets,
     pub(crate) breakers: breaker::Breakers,
     pub(crate) hourly: hourly::HourlyCaps,
+    /// Per rule: when its unreadable-filter warning was last logged. Entries older than an hour
+    /// are dropped as new ones come in, so the map holds only the rules warned about lately.
+    unreadable_filters: Mutex<HashMap<Uuid, i64>>,
 }
 
 impl std::fmt::Debug for EvalQueue {
@@ -76,6 +82,7 @@ impl EvalQueue {
             budgets: budget::Budgets::default(),
             breakers: breaker::Breakers::default(),
             hourly: hourly::HourlyCaps::default(),
+            unreadable_filters: Mutex::new(HashMap::new()),
         }
     }
 
@@ -87,6 +94,24 @@ impl EvalQueue {
     /// Tells every eval loop to stop.
     pub(crate) fn stop(&self) {
         self.stop.send_replace(true);
+    }
+
+    /// Whether `stop` was called. The sweeper checks it between projects and batches.
+    pub(crate) fn is_stopped(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// Whether `rule`'s unreadable-filter warning is due at `now`: at most one per rule per hour.
+    /// Returns true and records `now` when it is.
+    pub(crate) fn filter_warning_due(&self, rule: Uuid, now: i64) -> bool {
+        const HOUR_NS: i64 = 3_600_000_000_000;
+        let mut warned = lock(&self.unreadable_filters);
+        warned.retain(|_, at| now.saturating_sub(*at) < HOUR_NS);
+        if warned.contains_key(&rule) {
+            return false;
+        }
+        warned.insert(rule, now);
+        true
     }
 
     /// A receiver of the stop flag. Loops wait with `receiver.wait_for(|stopped| *stopped)`, which
@@ -120,6 +145,10 @@ pub(crate) struct EvalTiming {
     pub(crate) prune_every: Duration,
     /// Budget ticker.
     pub(crate) budget_every: Duration,
+    /// Pending-traces flusher (D-I-8).
+    pub(crate) flush_every: Duration,
+    /// Online-rule sweeper (D-I-9).
+    pub(crate) sweep_every: Duration,
     /// How long the dispatcher gives its workers at shutdown before it aborts them.
     pub(crate) drain: Duration,
 }
@@ -131,6 +160,8 @@ impl EvalTiming {
         janitor_every: Duration::from_secs(60),
         prune_every: Duration::from_secs(3_600),
         budget_every: Duration::from_secs(30),
+        flush_every: Duration::from_secs(5),
+        sweep_every: Duration::from_secs(2),
         drain: Duration::from_secs(3),
     };
 
@@ -141,6 +172,8 @@ impl EvalTiming {
         janitor_every: Duration::from_millis(100),
         prune_every: Duration::from_secs(3_600),
         budget_every: Duration::from_millis(100),
+        flush_every: Duration::from_millis(100),
+        sweep_every: Duration::from_millis(50),
         drain: Duration::from_secs(3),
     };
 }
@@ -169,8 +202,10 @@ pub(crate) struct EvalTasks {
     timing: EvalTiming,
 }
 
-/// Starts the dispatcher, janitor, pruner and budget ticker. Each runs one pass as soon as it
-/// starts (the first tick of its interval is not skipped), so a restart prunes and clears at once.
+/// Starts the dispatcher, janitor, pruner, budget ticker, pending-traces flusher and online-rule
+/// sweeper. Each runs one
+/// pass as soon as it starts (the first tick of its interval is not skipped), so a restart prunes
+/// and clears at once.
 pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
     let stop = state.eval.stopped();
     let handles = vec![
@@ -181,6 +216,8 @@ pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
             timing.janitor_every,
         )),
         tokio::spawn(run_prune(state.clone(), stop.clone(), timing.prune_every)),
+        tokio::spawn(run_flusher(state.clone(), stop.clone(), timing.flush_every)),
+        tokio::spawn(run_sweeper(state.clone(), stop.clone(), timing.sweep_every)),
         tokio::spawn(run_budget(state.clone(), stop, timing.budget_every)),
     ];
     EvalTasks { handles, timing }
@@ -282,6 +319,60 @@ async fn run_prune(state: AppState, mut stop: watch::Receiver<bool>, every: Dura
         let now = state.clock.now_ns();
         if let Err(error) = dispatch::prune_once(&state, now).await {
             tracing::error!(error = %error, "eval prune failed");
+        }
+    }
+}
+
+async fn run_flusher(state: AppState, mut stop: watch::Receiver<bool>, every: Duration) {
+    let mut interval = ticker(every);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => return,
+            _ = interval.tick() => {}
+        }
+        match trigger::flush_once(&state).await {
+            Ok(report) if report != trigger::FlushReport::default() => {
+                tracing::debug!(
+                    upserts = report.upserts,
+                    deletes = report.deletes,
+                    pending = state.pending.len(),
+                    "pending traces flushed"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "pending traces could not be flushed");
+            }
+        }
+    }
+}
+
+/// The online-rule sweeper (D-I-9). A tick awaits its pass to the end, so passes never overlap.
+async fn run_sweeper(state: AppState, mut stop: watch::Receiver<bool>, every: Duration) {
+    let mut interval = ticker(every);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => return,
+            _ = interval.tick() => {}
+        }
+        let now = state.clock.now_ns();
+        match trigger::sweep_once(&state, now).await {
+            Ok(report) if report != trigger::SweepReport::default() => {
+                tracing::debug!(
+                    completed = report.completed,
+                    matched = report.matched,
+                    sampled = report.sampled,
+                    capped = report.capped,
+                    enqueued = report.enqueued,
+                    failed_batches = report.failed_batches,
+                    dropped = report.dropped,
+                    "online-rule sweep"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(error = %error, "online-rule sweep failed"),
         }
     }
 }

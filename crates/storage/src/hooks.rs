@@ -18,6 +18,8 @@ pub(crate) enum HookPoint {
     WalSync,
     /// After the group is durable, before it is inserted into the memtable.
     AfterWalSync,
+    /// After the open segment is synced, before the next one is created.
+    WalRotate,
     /// After the memtable insert, before the read state is published.
     BeforePublish,
     /// After the read state is published, before the group is acknowledged.
@@ -49,6 +51,17 @@ pub(crate) enum HookPoint {
     FlushAfterCommit,
     /// After WAL segments covered by `flushed_seq` are deleted and the directory is fsynced.
     FlushAfterTruncate,
+    /// After a new WAL segment file is created, before the directory fsync.
+    ///
+    /// A fault here leaves the empty file behind, as a create that fails after
+    /// `create_new` does.
+    WalSegmentDirSync,
+    /// Before a failed rotation removes the empty file it left at the new name.
+    WalSegmentCleanup,
+    /// After the flush asked the writer to rotate, before truncation deletes the old segment.
+    ///
+    /// A crash here leaves the drained segment and the new one on disk.
+    FlushAfterRotate,
     /// Before GC deletes a staged object that is not in the catalog.
     GcBeforeDelete,
     /// Before GC deletes an obsolete file's object.
@@ -78,13 +91,16 @@ pub(crate) enum HookPoint {
 
 #[cfg(test)]
 impl HookPoint {
-    const COUNT: usize = 24;
+    const COUNT: usize = 28;
 
     const fn index(self) -> usize {
         match self {
             Self::WalWrite => 0,
             Self::WalSync => 1,
             Self::AfterWalSync => 2,
+            Self::WalRotate => 24,
+            Self::WalSegmentDirSync => 26,
+            Self::WalSegmentCleanup => 27,
             Self::BeforePublish => 3,
             Self::AfterPublish => 4,
             Self::CatalogCommit => 5,
@@ -97,6 +113,7 @@ impl HookPoint {
             Self::FlushAfterWrite => 12,
             Self::FlushAfterCommit => 13,
             Self::FlushAfterTruncate => 14,
+            Self::FlushAfterRotate => 25,
             Self::GcBeforeDelete => 15,
             Self::GcObsoleteBeforeDelete => 16,
             Self::GcObsoleteAfterDelete => 17,

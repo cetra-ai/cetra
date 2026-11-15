@@ -623,6 +623,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "get_saved_view",
+            params(&[("id", "01900000-0000-7000-8000-000000000211")]),
+            BTreeMap::new(),
+            "static/saved-view.json",
+            "application/json",
+        ),
+        example(
             "list_deletions",
             BTreeMap::new(),
             BTreeMap::new(),
@@ -679,6 +686,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             params(&[("id", "01900000-0000-7000-8000-000000000701")]),
             BTreeMap::new(),
             "static/online-rule-resumed.json",
+            "application/json",
+        ),
+        example(
+            "post_online_rule_preview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rule-preview.json",
             "application/json",
         ),
         example(

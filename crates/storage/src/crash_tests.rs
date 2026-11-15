@@ -6,6 +6,7 @@
 //! parents are ignored too, and `just test` runs each in a test process of
 //! its own.
 
+use crate::QueryOptions;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -27,7 +28,7 @@ use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
 use crate::hooks::HookPoint;
 use crate::media::MediaBlob;
-use crate::wal::{Table, spans_at};
+use crate::wal::{Table, segment_name, spans_at};
 
 const POINTS: &[(&str, HookPoint)] = &[
     ("FlushAfterFreeze", HookPoint::FlushAfterFreeze),
@@ -39,6 +40,7 @@ const POINTS: &[(&str, HookPoint)] = &[
     ("FlushAfterWrite", HookPoint::FlushAfterWrite),
     ("CatalogCommit", HookPoint::CatalogCommit),
     ("FlushAfterCommit", HookPoint::FlushAfterCommit),
+    ("FlushAfterRotate", HookPoint::FlushAfterRotate),
     ("FlushAfterTruncate", HookPoint::FlushAfterTruncate),
 ];
 
@@ -234,7 +236,10 @@ fn compaction_span_ids() -> Vec<Vec<u8>> {
 }
 
 async fn stored_ids(storage: &crate::Storage) -> Vec<Vec<u8>> {
-    let query = storage.query(project(), Default::default()).await.unwrap();
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = SessionContext::new_with_config_rt(
         SessionConfig::new(),
         std::sync::Arc::clone(&query.runtime),
@@ -653,7 +658,7 @@ async fn every_media_hook_aborts_safely() {
             "{name}: media rows and objects disagree after the put"
         );
         let read = storage
-            .get_media(project(), &media_blob().sha256, None)
+            .get_media(project(), &media_blob().sha256, None, None)
             .await
             .unwrap();
         assert_eq!(read.bytes, media_blob().bytes, "{name}: the blob's bytes");
@@ -792,7 +797,10 @@ async fn catalog_counts(dir: &Path) -> (i64, i64) {
 /// The `trace_id` bytes of every row of the project's `spans` (`traces` is
 /// false) or `traces` provider, sorted.
 async fn stored_trace_ids(storage: &crate::Storage, traces: bool) -> Vec<Vec<u8>> {
-    let query = storage.query(project(), Default::default()).await.unwrap();
+    let query = storage
+        .query(project(), QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = SessionContext::new_with_config_rt(
         SessionConfig::new(),
         std::sync::Arc::clone(&query.runtime),
@@ -869,6 +877,7 @@ fn media_blob() -> MediaBlob {
         sha256: Sha256::digest(bytes.as_ref()).into(),
         mime_type: "image/png".to_owned(),
         bytes,
+        newest_span_start: 0,
     }
 }
 
@@ -1256,4 +1265,71 @@ async fn a_compaction_syncs_each_output_before_the_catalog_commit() {
         )),
         "{steps:?}"
     );
+}
+
+/// Run by [`a_rotation_crash_reopens_with_the_acknowledged_rows`]. The four rows
+/// are one append, so one record, and the writer keeps running. The age trigger
+/// then flushes about 200 ms later and rotates; the abort lands between the new
+/// segment's creation and the drained one's deletion. A single append leaves no
+/// window in which a flush could fall between two appends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by a_rotation_crash_reopens_with_the_acknowledged_rows"]
+async fn rotation_child() {
+    let Ok(dir) = std::env::var("LLMOBS_ROTATE_CRASH_DIR") else {
+        return;
+    };
+    let mut config = quiet_config(Path::new(&dir));
+    config.flush.max_age = Duration::from_millis(200);
+    let storage = crate::Storage::open(config).await.unwrap();
+    storage.hooks().abort_at(HookPoint::FlushAfterRotate);
+    let batches = batches();
+    let one = arrow::compute::concat_batches(&batches[0].schema(), &batches).unwrap();
+    storage.append_spans(project(), one).await.unwrap();
+    // The age trigger fires about 200 ms after the append, well before this
+    // sleep ends. The abort then ends the process.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    panic!("the flush did not reach FlushAfterRotate");
+}
+
+/// The rotation's crash window: the new segment exists and the drained one is
+/// not yet deleted. Reopen keeps every acknowledged row once and continues the
+/// sequence after the flushed records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns a process; `just test` runs it in its own test process"]
+async fn a_rotation_crash_reopens_with_the_acknowledged_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    run_child(
+        "crash_tests::rotation_child",
+        "LLMOBS_ROTATE_CRASH_DIR",
+        "LLMOBS_ROTATE_CRASH_POINT",
+        "FlushAfterRotate",
+        dir.path(),
+    );
+    let wal = dir.path().join("wal").join("spans");
+    let mut names: Vec<String> = std::fs::read_dir(&wal)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    // Record 1 sits in the drained segment; the new one is named for seq 2.
+    assert_eq!(names, vec![segment_name(1), segment_name(2)]);
+
+    let storage = crate::Storage::open(quiet_config(dir.path()))
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_ids(&storage).await,
+        expected_ids(),
+        "acknowledged rows"
+    );
+    objects_match_catalog(&storage, dir.path());
+    let receipt = storage
+        .append_spans(project(), spans_at(&[9_000]))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.seq, 2,
+        "the sequence continues after the flushed records"
+    );
+    storage.shutdown().await.unwrap();
 }

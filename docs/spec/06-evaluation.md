@@ -84,7 +84,7 @@ Checks compare `output` against `expected` (or the param value).
 
 The URL, the headers and the signing secret are sealed in `evaluators.secret_enc`; the stored config and API responses show only `url_host`, `timeout_ms` and the header names (D-I-19).
 
-Request: `POST url` with `Content-Type: application/json`, the configured headers, and JSON `{evaluator: {id, name}, project_id, trace_id, span_id, variables: {…}}`. The signature header is `X-Llmobs-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, t + "." + body)>` (D165). `timeout_ms` defaults to 10 000 and is at most 60 000. Redirects are not followed. A response body over 64 KiB is an error. A `200` whose JSON object `{value?: number|boolean, label?: string, reason?: string}` fits the output definition is a score. Any other status is classified by D160. A `200` with a body that is not that object is a permanent error.
+Request: `POST url` with `Content-Type: application/json`, the configured headers, and JSON `{evaluator: {id, name}, project_id, trace_id, span_id, variables: {…}}`. The signature header is `X-Llmobs-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, t + "." + body)>` (D165). `timeout_ms` defaults to 10 000 and is at most 60 000. Redirects are not followed. A response body over 64 KiB is an error. A `200` whose JSON object `{value?: number|boolean, label?: string, reason?: string}` fits the output definition is a score. Status classes: 408, 425, 429 and 5xx retry; 401, 402, 403, 404 and 410 pause; every other status is permanent (D160, D165). A `200` with a body that is not that object is a permanent error. A categorical webhook output needs a non-empty `categories` list on its output score, with each label checked as a judge label is; the API refuses one without it (field `output_score.categories`).
 
 ## Variable mapping
 
@@ -123,16 +123,15 @@ Shipped as code in `llmobs-eval`; "create from template" copies the prompt into 
 
 Rules are managed under `/online-rules` by project members (D-I-24). Saving a rule checks the filter with storage for the rule's view, the mapping against the evaluator (every variable of a judge prompt mapped; a check's `output`, and `expected` when it needs one; no `expected` or `item.*` expressions; no bare `span.*` in a trace rule) and the budget (judges only, with a priced model) (D-I-30). `target` and `evaluator_id` cannot change. Limits: a name of 1–128 characters, a filter of at most 4 096 bytes, 1–32 variables of at most 1 024 bytes each, `budget_usd` at most 1 000 000, and 500 rules per project (D-I-30). The checks against the evaluator run again in the rule's write transaction, and an evaluator PATCH runs them for every rule of the evaluator in its own write (D-I-19). On the Free plan an org has at most 1 active rule, an enabled one, paused or not; creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction; a smaller limit never disables existing rules (D-I-32).
 
+`POST /online-rules/preview` `{target, filter?, from?, to?}` counts what a filter matches in a window (the last 24 hours by default, at most 30 days), at most 10 000, with strict exclusions; the editor shows the count as the filter is typed (D-I-9).
+
 ### Triggering
 
-- **Span rules:** evaluated in the ingest path after WAL commit, against the span's light columns (the filter DSL is compiled once per rule into a DataFusion `PhysicalExpr` and evaluated on the committed `RecordBatch`). Matches are sampled and enqueued.
-- **Trace rules:** need the trace to be complete. The **trace-completion detector** tracks traces of projects that have at least one enabled trace rule:
-  - on every committed batch: upsert `pending_traces(project, trace_id, last_ingest_at, root_ended |= batch contains the root span)` (one SQLite transaction per batch);
-  - a sweeper (every 2 s) completes traces where `(root_ended AND now − last_ingest_at ≥ 5 s)` or `now − last_ingest_at ≥ project.settings.trace_completion_timeout_s` (default 60 s);
-  - on completion: load the merged trace row, evaluate each trace rule's filter, sample, enqueue, delete the pending row.
-- Spans/traces belonging to experiments (`metadata['llmobs.experiment_id']` present) and evaluation traces (`environment = 'llmobs-eval'`) are skipped by online rules. The check happens before the rule filter, so a user filter cannot override it.
+Trace and span rules fire when the trace is complete: its root span has ended and 5 s passed without a new span, or `trace_completion_timeout_s` (project setting, 10–3600 s, default 60) passed without one (D-I-7). `commit` records traces in memory for projects with an enabled, unpaused rule; evaluation and experiment spans are never recorded; a flusher persists the changes every 5 s, at most 10 000 per tick, and shutdown persists all of them (D-I-8). Every 2 s a sweeper reads the enabled rules, takes each project's completed traces in batches of at most 500 (at most 2 000 per project per tick), and reads each rule's matches through storage (`trace_refresh` or `span_refresh`, at most 200 spans per trace) with strict exclusions, so a filter cannot reach evaluation or experiment traces (D-I-9, D-I-17). A read that fails is retried at the next tick; a trace is dropped after 5 failed ticks. A failed read spends no hourly-cap unit. Each chunk of at most 1 000 matches is admitted against the cap just before its write, so a failed write spends only its own chunk. A rule whose filter cannot be read is skipped with a warning, logged at most once per rule per hour. The sweeper stops between projects and between batches when the server shuts down. Traces that complete while a rule is disabled, paused, or not yet created are not evaluated by it; backfill is the catch-up.
 
-**Sampling** is deterministic: `xxh3(rule_id ‖ trace_id[‖ span_id]) / 2^64 < sample_rate`, so re-processing never double-samples.
+**Sampling** is deterministic (D-I-10): SHA-256(`llmobs.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes big-endian, below `(rate · 2^64)`; a rate of 1 or more always samples. A span rule keeps the 50 earliest sampled spans of each trace, so re-processing never double-samples.
+
+Live enqueues are capped at 10 000 per rule per UTC hour; extra matches are dropped and shown as `dropped_last_hour` (D-I-11).
 
 ### Execution
 

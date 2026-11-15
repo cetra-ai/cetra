@@ -76,7 +76,17 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "put_org_entitlements_token",
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
+    (
+        "delete",
+        "/api/internal/v1/orgs/{org_id}",
+        "delete_internal_org",
+    ),
     ("get", "/api/internal/v1/usage", "list_internal_usage"),
+    (
+        "get",
+        "/api/internal/v1/deletions",
+        "list_internal_deletions",
+    ),
     (
         "post",
         "/api/internal/v1/users/revoke",
@@ -244,6 +254,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "create_saved_view",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/saved-views/{id}",
+        "get_saved_view",
+    ),
+    (
         "patch",
         "/api/v1/projects/{project}/saved-views/{id}",
         "update_saved_view",
@@ -400,6 +415,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "post",
+        "/api/v1/projects/{project}/online-rules/preview",
+        "post_online_rule_preview",
+    ),
+    (
+        "post",
         "/api/v1/projects/{project}/online-rules/{id}/resume",
         "post_online_rule_resume",
     ),
@@ -443,6 +463,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
 const QUERY_OR_BODY: &[&str] = &[
     "get_org_usage",
     "list_internal_usage",
+    "list_internal_deletions",
     "post_internal_user_revoke",
     "post_internal_user_disable",
     "post_internal_membership_lookup",
@@ -465,6 +486,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_user",
     "list_scores",
     "list_saved_views",
+    "get_saved_view",
     "get_metrics",
     "list_deletions",
     "get_deletion",
@@ -472,6 +494,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_evaluators",
     "list_score_definitions",
     "list_online_rules",
+    "post_online_rule_preview",
     "list_eval_jobs",
 ];
 
@@ -575,7 +598,9 @@ fn document_lint() {
             "create_key_scores"
                 | "post_feedback"
                 | "post_internal_org"
+                | "delete_internal_org"
                 | "list_internal_usage"
+                | "list_internal_deletions"
                 | "post_internal_user_revoke"
                 | "post_internal_user_disable"
                 | "post_internal_user_delete"
@@ -657,8 +682,9 @@ fn document_lint() {
         } else if *id == "put_org_entitlements_token" {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
-            expected_errors.extend(["400", "401", "403", "422", "429"]);
+            expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
         } else if *id == "list_internal_usage"
+            || *id == "list_internal_deletions"
             || *id == "post_internal_user_delete"
             || *id == "post_internal_membership_lookup"
         {
@@ -760,7 +786,10 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
+        } else if READ_OPERATIONS.contains(id)
+            || *id == "preview_deletion"
+            || *id == "post_online_rule_preview"
+        {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1067,10 +1096,24 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         ("ReasoningPart", &[]),
         ("UnknownPart", &[]),
     ];
-    let d65_names: HashSet<&str> = D65.iter().map(|(name, _)| *name).collect();
+    // `null` is a value here, not an absent field: a PATCH clears retention with it
+    // (`api/openapi.rs` NULL_IS_A_VALUE).
+    const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("CreateProjectRequest", &["retention_days"]),
+        ("UpdateProjectRequest", &["retention_days"]),
+    ];
+    let allowed_names: HashSet<&str> = D65
+        .iter()
+        .chain(NULL_IS_A_VALUE)
+        .map(|(name, _)| *name)
+        .collect();
     let mut required_nullable = BTreeSet::new();
     for (name, schema) in schemas {
-        if let Some((_, fields)) = D65.iter().find(|(component, _)| *component == name) {
+        if let Some((_, fields)) = D65
+            .iter()
+            .chain(NULL_IS_A_VALUE)
+            .find(|(component, _)| *component == name)
+        {
             assert_eq!(
                 nullable_property_names(schema),
                 fields.iter().copied().collect(),
@@ -1080,7 +1123,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         collect_required_nullable(
             name,
             schema,
-            d65_names.contains(name.as_str()),
+            allowed_names.contains(name.as_str()),
             &mut required_nullable,
         );
     }
@@ -1109,6 +1152,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "OnlineRulePage",
         "EvalJobPage",
         "InternalUsagePage",
+        "InternalDropPage",
     ];
     let expected: BTreeSet<String> = pages
         .iter()

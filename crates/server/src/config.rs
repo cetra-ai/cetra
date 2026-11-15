@@ -509,6 +509,10 @@ pub struct EntitlementsConfig {
     /// The `identities.provider` of the control plane's OIDC provider, whose subjects
     /// the control plane uses to name users (D-P-39). Default `"oidc:cloud"`.
     pub control_plane_provider: String,
+    /// This instance is a cloud cell managed by the control plane (D-P-50). When false (the
+    /// default), every `/api/internal/v1/*` route answers 404, stored and pushed org tokens are
+    /// ignored, and `llmobs1.` bearer tokens are refused: only licence keys are trusted.
+    pub control_plane: bool,
 }
 
 impl Default for EntitlementsConfig {
@@ -517,6 +521,7 @@ impl Default for EntitlementsConfig {
             upgrade_url: None,
             defaults: EntitlementDefaults::default(),
             control_plane_provider: "oidc:cloud".to_owned(),
+            control_plane: false,
         }
     }
 }
@@ -2247,6 +2252,24 @@ mod tests {
             ),
             "{error}"
         );
+    }
+
+    #[test]
+    fn control_plane_is_off_by_default() {
+        let config = load_from(None, &[]).unwrap();
+        assert!(!config.entitlements.control_plane);
+    }
+
+    #[test]
+    fn control_plane_parses_true() {
+        let config = load_from(Some("[entitlements]\ncontrol_plane = true\n"), &[]).unwrap();
+        assert!(config.entitlements.control_plane);
+    }
+
+    #[test]
+    fn control_plane_from_env() {
+        let config = load_from(None, &[("LLMOBS_ENTITLEMENTS__CONTROL_PLANE", "true")]).unwrap();
+        assert!(config.entitlements.control_plane);
     }
 
     #[test]

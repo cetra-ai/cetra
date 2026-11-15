@@ -22,6 +22,7 @@ defaults is in [spec 12 § Configuration](../spec/12-operations.md#configuration
 | `encryption_key` | `LLMOBS_ENCRYPTION_KEY` | `<data_dir>/secret.key`, generated | encrypts stored secrets |
 | `license_key` | `LLMOBS_LICENSE_KEY` | unset | enterprise features |
 | `storage.object_store` | `LLMOBS_OBJECT_STORE` | `file://<data_dir>/objects` | `s3://bucket[/prefix]`: [s3.md](s3.md) |
+| `storage.gc.grace` | `LLMOBS_STORAGE__GC__GRACE` | `5m` | how long obsolete files stay; at most `30d`. In S3 mode, how long a meta-only backup stays restorable |
 | `log.level` | `LLMOBS_LOG` | `info` | |
 | `log.format` | `LLMOBS_LOG__FORMAT` | `pretty` on a terminal, `json` otherwise | |
 
