@@ -263,6 +263,43 @@ fn json_len<T: Serialize>(value: &T) -> usize {
     serde_json::to_string(value).map_or(0, |text| text.len())
 }
 
+/// The format of an import or a preview (D-J-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportFormat {
+    /// Comma-separated values with a header record (RFC 4180).
+    Csv,
+    /// One JSON object per line.
+    Jsonl,
+}
+
+/// Where one CSV column goes (D-J-6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportColumn {
+    /// The header of the column, exactly as in the file.
+    pub column: String,
+    /// `input`, `input.<key>`, `expected`, `expected.<key>`, `metadata.<key>` or `ignore`.
+    pub target: String,
+}
+
+/// The column mapping of a CSV import. Columns the mapping does not list are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportMapping {
+    /// One entry per mapped column, at most 1,000.
+    pub columns: Vec<ImportColumn>,
+}
+
+/// One rejected row of an import or a preview.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportRowError {
+    /// CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line.
+    pub row: i64,
+    /// Why the row was rejected.
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

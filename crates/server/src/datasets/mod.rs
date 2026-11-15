@@ -1,5 +1,7 @@
 //! Dataset validation: names, sizes, JSON Schemas (D-J-2, D-J-4). No database access.
 
+pub(crate) mod import;
+
 use std::fmt;
 
 use serde_json::{Map, Value};
