@@ -158,7 +158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn utf8_column_of_65536_distinct_values_is_unsupported_until_m1_4() {
+    async fn utf8_column_of_65536_distinct_values_round_trips_as_varbin() {
         let utf8_schema = Arc::new(Schema::new(vec![
             Field::new("trace_id", DataType::FixedSizeBinary(16), false),
             Field::new("name", DataType::Utf8, true),
@@ -172,10 +172,19 @@ mod tests {
         )
         .unwrap();
         let names = StringArray::from((0..65_536).map(|i| format!("v{i}")).collect::<Vec<_>>());
-        let batch =
-            RecordBatch::try_new(utf8_schema, vec![Arc::new(ids), Arc::new(names)]).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&utf8_schema),
+            vec![Arc::new(ids), Arc::new(names)],
+        )
+        .unwrap();
         w.write(&batch).unwrap();
-        assert!(matches!(w.finish(), Err(StrataError::Unsupported { .. })));
+        let (bytes, summary) = w.finish().unwrap();
+        let name = &summary.columns[1];
+        assert_eq!(name.encoding_counts[Encoding::Dict as usize], 0);
+        assert_eq!(name.encoding_counts[Encoding::Varbin as usize], name.chunks);
+        let file = open(bytes).await;
+        let decoded = read_column(&file, 1).await.unwrap();
+        assert_same(decoded.as_ref(), batch.column(1).as_ref());
     }
 
     #[tokio::test]

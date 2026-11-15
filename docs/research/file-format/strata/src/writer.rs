@@ -186,7 +186,8 @@ impl StrataWriter {
                 array.as_ref(),
                 self.config.chunk_max_rows,
                 self.config.chunk_max_bytes,
-            );
+                dict.is_some(),
+            )?;
             let mut entries = Vec::with_capacity(ranges.len());
             let mut counts = [0u32; 11];
             let mut bytes = u64::from(dict_len);
