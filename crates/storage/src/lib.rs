@@ -1640,7 +1640,7 @@ mod tests {
     use crate::partials::partials_from_spans;
     use crate::test_support::{span_row, span_rows};
     use crate::views::QueryContext;
-    use crate::wal::{parse_segment_name, spans_at, spans_keyed, spans_named};
+    use crate::wal::{parse_segment_name, segment_name, spans_at, spans_keyed, spans_named};
 
     fn project() -> ProjectId {
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -2921,5 +2921,113 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// The names of the `wal/spans` segments, sorted.
+    fn span_segment_names(data_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = span_segments(data_dir)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// WAL config of the R2.5 tests: every group is synced before its ack.
+    fn always_wal_config(dir: &Path) -> StorageConfig {
+        let mut config = config_in(dir);
+        config.wal.sync = WalSync::Always;
+        config.wal.segment_bytes = ByteSize::mib(1);
+        config
+    }
+
+    #[test]
+    fn a_failed_sync_leaves_the_group_and_does_not_sync_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config = always_wal_config(&data);
+
+        test_support::crashed_life(&config, async |storage| {
+            storage.hooks().arm_fail(HookPoint::WalSync);
+            let error = storage
+                .append_spans(project(), span_rows(&[span_row(1, 0, 1_000, 1_000)]))
+                .await
+                .unwrap_err();
+            assert_eq!(error, AppendError::WalFailed);
+            assert_eq!(storage.hooks().hits(HookPoint::WalSync), 1);
+        });
+
+        // Nothing was rewound: the page cache still holds the group, so a
+        // restart without a power loss replays it.
+        test_support::clean_life(&config, async |storage| {
+            assert_eq!(
+                span_ids(storage).await.len(),
+                1,
+                "the failed group was rewound although its fsync only failed"
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_sync_group_is_lost_on_power_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let config = always_wal_config(&data);
+
+        test_support::crashed_life(&config, async |storage| {
+            storage.hooks().arm_fail(HookPoint::WalSync);
+            let error = storage
+                .append_spans(project(), span_rows(&[span_row(1, 0, 1_000, 1_000)]))
+                .await
+                .unwrap_err();
+            assert_eq!(error, AppendError::WalFailed);
+        });
+        lossy.crash_with(fs::lossy::CrashMode::DropAll, 0);
+
+        test_support::clean_life(&config, async |storage| {
+            assert!(
+                span_ids(storage).await.is_empty(),
+                "an unsynced group survived a power loss"
+            );
+        });
+    }
+
+    #[test]
+    fn a_discarded_segment_stays_removed_after_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let config = always_wal_config(&data);
+        let first_path = data.join("wal/spans").join(segment_name(1));
+        let mut first = Vec::new();
+        let mut old_len = 0;
+
+        // The 1.5 MiB group syncs, rotates to segment 2, and then the insert
+        // fails. The writer discards segment 2 and stops.
+        test_support::crashed_life(&config, async |storage| {
+            first = span_segment_names(&data);
+            assert_eq!(first, vec![segment_name(1)]);
+            old_len = fs::metadata(&first_path).unwrap().len();
+            storage.hooks().arm_fail(HookPoint::AfterWalSync);
+            let error = storage
+                .append_spans(project(), test_support::big_span_batch(1, 1_572_864))
+                .await
+                .unwrap_err();
+            assert_eq!(error, AppendError::WalFailed);
+            assert_eq!(storage.hooks().hits(HookPoint::AfterWalSync), 1);
+            assert_eq!(span_segment_names(&data), first);
+            assert_eq!(fs::metadata(&first_path).unwrap().len(), old_len);
+        });
+        lossy.crash_with(fs::lossy::CrashMode::DropAll, 0);
+
+        // The unlink of segment 2 was not synced, so the power loss may bring
+        // its empty file back. The discarded segment must stay gone.
+        assert_eq!(
+            span_segment_names(&data),
+            first,
+            "the discarded segment came back after the power loss"
+        );
+        test_support::clean_life(&config, async |_storage| {});
     }
 }

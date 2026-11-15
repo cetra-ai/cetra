@@ -17,6 +17,9 @@ pub(crate) enum HookPoint {
     /// `SegmentWriter::sync`, before `sync_data`.
     WalSync,
     /// After the group is durable, before it is inserted into the memtable.
+    ///
+    /// `fail` takes the memtable-insert failure path: the durable group is
+    /// discarded and the writer stops.
     AfterWalSync,
     /// After the memtable insert, before the read state is published.
     BeforePublish,
