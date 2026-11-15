@@ -29,6 +29,8 @@ mod hot;
 mod narrow;
 mod payload;
 mod segment;
+#[allow(dead_code)] // used by the writer from M3.2b on
+mod shred;
 
 mod config;
 mod error;

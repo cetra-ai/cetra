@@ -121,7 +121,7 @@ What these add:
 - Every offset stored in the file is an **absolute byte offset from the start of the file**, unless stated otherwise.
 - Any length or offset read from a file is bounds-checked. A violation returns `StrataError::Corrupt { what, offset }` and never panics.
 - Limits: a file holds fewer than 2³² rows, and a merge has at most 255 inputs. Exceeding either is an error.
-- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. The writer keeps every chunk and page within them.
+- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. The writer keeps every chunk and page within them.
 
 ## Design decisions for v0
 
@@ -412,10 +412,12 @@ The result is a list of row ranges (usually 1–2 chunks).
 
 Applies to `Map<Utf8, Utf8>` columns.
 
-**Promotion.** A key becomes a child column (layer 3, narrow rules, usually `DICT`) when it is present with a non-null value in ≥ 5% of the file's rows.
-- A child's null means "key absent".
-- A row in which a promoted key has a null value, or appears more than once, keeps that key in the residual instead (the child is null for that row).
-- For each promoted key the writer records `residual_hits`: how many rows keep that key in the residual. S8 uses it.
+**Promotion.** A key becomes a child column (layer 3, narrow rules, usually `DICT`) when it occurs **exactly once with a non-null value** in at least 5% of the map column's rows. The count is over rows, rounded up, with a minimum of one row. A null map row counts in the denominator.
+- A key longer than 1,024 bytes is never promoted.
+- At most 64 keys are promoted (`MAX_PROMOTED_KEYS`). Candidates are ranked by count, descending, then by key bytes, ascending, and the top 64 are kept. The promoted keys are stored sorted bytewise.
+- A child's null means "key absent", or "the key stays in the residual of this row".
+- A row in which a promoted key has a null value, or appears more than once, keeps every occurrence of that key in the residual (the child is null for that row).
+- For each promoted key the writer records `residual_hits`: the number of rows in which the key was present but stayed in the residual (a null value, or more than one occurrence). Each row counts once. S8 uses it.
 
 **Null versus empty map.** The residual column carries the map's validity:
 - a null residual means the map is null;
