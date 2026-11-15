@@ -6,6 +6,7 @@ import { projectRef } from "@/api/project-ref";
 import { traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
+import { AddToDatasetButton } from "@/components/datasets/add-to-dataset-dialog";
 import { useProject } from "@/components/shell/project-context";
 import { RunEvaluatorButton } from "@/components/trace/run-evaluator-dialog";
 import { SpanDetail } from "@/components/trace/span-detail";
@@ -164,6 +165,9 @@ export function TraceView({
   const selected = spanId ?? loaded.spans[0]?.span.span_id;
   const selectedRow = loaded.spans.find((row) => row.span.span_id === selected);
   const detached = selectedRow?.detached ?? false;
+  const rootSpanId = loaded.spans.find((row) => row.span.parent_span_id === undefined)?.span
+    .span_id;
+  const selectedIsRoot = selectedRow !== undefined && selectedRow.span.parent_span_id === undefined;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -174,13 +178,19 @@ export function TraceView({
         onClose={onClose}
         live={follow ? { status, onStop: () => setStoppedId(traceId) } : undefined}
         actions={
-          <RunEvaluatorButton
-            trace={loaded.trace}
-            spanId={selectedRow ? selected : undefined}
-            selectedIsRoot={
-              selectedRow !== undefined && selectedRow.span.parent_span_id === undefined
-            }
-          />
+          <>
+            <RunEvaluatorButton
+              trace={loaded.trace}
+              spanId={selectedRow ? selected : undefined}
+              selectedIsRoot={selectedIsRoot}
+            />
+            <AddToDatasetButton
+              traceId={loaded.trace.trace_id}
+              rootSpanId={rootSpanId}
+              spanId={selectedRow ? selected : undefined}
+              selectedIsRoot={selectedIsRoot}
+            />
+          </>
         }
       />
       {loaded.truncated ? (
