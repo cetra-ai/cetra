@@ -2724,9 +2724,6 @@ export interface components {
         /**
          * @description `POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its
          *     `estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.
-         *
-         *     Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the request
-         *     holds no payload content.
          */
         CreateBackfillRequest: {
             /** @description Window start, inclusive. RFC 3339 timestamp or epoch milliseconds. */

@@ -14714,7 +14714,7 @@
       },
       "CreateBackfillRequest": {
         "type": "object",
-        "description": "`POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its\n`estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.\n\nDeserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the request\nholds no payload content.",
+        "description": "`POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its\n`estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.",
         "required": [
           "from",
           "to",
