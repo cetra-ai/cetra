@@ -302,9 +302,10 @@ async fn create_deletion(
     let (actor_kind, actor_id) = actor(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
-    let now = state.clock.now_ns();
     let id = Uuid::now_v7();
 
+    // A filter's matched ids, for the guard only (the worker resolves them again).
+    let mut guard_traces: Vec<TraceId> = Vec::new();
     let (kind, user_id, request, traces) = match body {
         CreateDeletion::TraceIds { trace_ids } => {
             let traces = parse_trace_ids(&trace_ids)?;
@@ -333,7 +334,8 @@ async fn create_deletion(
                 include_eval,
                 include_experiments,
             };
-            // The count only checks the cap now; the worker resolves the traces again.
+            // The count checks the cap; the worker resolves the traces again. The matched ids
+            // go to the guard at once, so judge runs stop before resolution (D-M-6).
             let matched = matching(&state, project, &selection).await?;
             if matched.len() > state.deletions.filter_cap() {
                 return Err(ApiError::TooManyTraces);
@@ -347,6 +349,7 @@ async fn create_deletion(
                 include_experiments: Some(include_experiments),
                 ..Default::default()
             };
+            guard_traces = matched;
             (store::DeletionKind::Filter, None, request, Vec::new())
         }
         CreateDeletion::User { user_id } => {
@@ -361,6 +364,28 @@ async fn create_deletion(
             )
         }
     };
+
+    // The guard learns the request before the cut-off is read, and again with the cut-off
+    // (the later entry wins). A judge copy stamped after the cut-off is then committed after
+    // the guard knew its trace, so the executor's check after the commit sees it (D-M-6).
+    let fill_guard = |at: i64| {
+        let guard = &state.deletions.guard;
+        match kind {
+            store::DeletionKind::TraceIds => guard.add_traces(project, &traces, id, at),
+            // Not stored until resolution: after a restart, a `resolving` filter row guards
+            // nothing until the worker resolves it (accepted, D-M-6).
+            store::DeletionKind::Filter => guard.add_traces(project, &guard_traces, id, at),
+            store::DeletionKind::User => {
+                if let Some(user) = &user_id {
+                    guard.add_user(project, user, id, at);
+                }
+            }
+            store::DeletionKind::Project | store::DeletionKind::Org => {}
+        }
+    };
+    fill_guard(state.clock.now_ns());
+    let now = state.clock.now_ns();
+    fill_guard(now);
 
     let new = store::NewDeletion {
         id,
@@ -389,15 +414,6 @@ async fn create_deletion(
         })
         .await?;
 
-    match kind {
-        store::DeletionKind::TraceIds => state.deletions.guard.add_traces(project, &traces, now),
-        store::DeletionKind::User => {
-            if let Some(user) = &user_id {
-                state.deletions.guard.add_user(project, user, now);
-            }
-        }
-        store::DeletionKind::Filter | store::DeletionKind::Project | store::DeletionKind::Org => {}
-    }
     state.deletions.wake.notify_one();
     tracing::info!(
         target: "audit",
@@ -1230,8 +1246,38 @@ mod tests {
             app.state
                 .deletions
                 .guard
-                .blocks(project, trace, &["u9"], now, now)
+                .blocking(project, trace, &[("u9", now)], now)
+                .is_some()
         );
+    }
+
+    /// A filter deletion guards its matched traces from the `POST` on, before the worker
+    /// resolves it (D-M-6, plan review M-1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn filter_guard_is_filled_at_creation() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let auth = Auth::Cookie(seeded.cookie.clone());
+        commit(&app, &seeded.project, A, 1, "x").await;
+        commit(&app, &seeded.project, B, 2, "y").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let body = json!({"kind": "filter", "filter": "name = 'x'", "from": FROM, "to": TO});
+        let response = post(&app, project, "/deletions", body, &auth).await;
+        assert_eq!(response.status, StatusCode::ACCEPTED);
+        let id: Uuid = response.json::<Value>()["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let now = app.state.clock.now_ns();
+        let guard = &app.state.deletions.guard;
+        assert_eq!(
+            guard.blocking(project, A.parse().unwrap(), &[], now),
+            Some(id)
+        );
+        assert_eq!(guard.blocking(project, B.parse().unwrap(), &[], now), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]

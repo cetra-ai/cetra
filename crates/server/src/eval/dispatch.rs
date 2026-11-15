@@ -1091,12 +1091,116 @@ mod tests {
         };
         let tasks = crate::eval::spawn(&app.state, timing);
         wait_for_status(&app, &seeded, probe, "done").await;
+        // Let the worker's own pass after its job run out, so no earlier wake-up can pick up the
+        // next job.
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // The hour-long tick cannot run the next pass: only the wake-up can.
         let second = manual_job(&app, &seeded, evaluator, trace_id, CHECK_MAPPING).await;
+        let woken = Instant::now();
         app.state.eval.wake();
         wait_for_status(&app, &seeded, second, "done").await;
+        assert!(
+            woken.elapsed() < timing.dispatch_every,
+            "the wake-up ran the job, not a tick"
+        );
         tasks.shutdown(&app.state).await;
+    }
+
+    #[tokio::test]
+    async fn a_paused_rules_backlog_does_not_hold_back_another_rule() {
+        let (app, seeded) = seeded_app(16).await;
+        let project = seeded.project.id;
+        let backlog_evaluator = check(&app, &seeded).await;
+        let paused = rule(&app, &seeded, backlog_evaluator).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    pause_rule(conn, paused, PAUSE_ERRORS, Some("test"), now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .expect("pause");
+        // 5 000 queued jobs of the paused rule: the candidate scan must not return them.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    for index in 0..5_000_u128 {
+                        insert_job(
+                            conn,
+                            NewJob {
+                                id: Uuid::now_v7(),
+                                project_id: project,
+                                kind: KIND_RULE,
+                                rule_id: Some(paused),
+                                evaluator_id: backlog_evaluator,
+                                variable_mapping: None,
+                                trace_id: trace(0x10_000 + index),
+                                span_id: None,
+                                trace_start_ns: now - 30_000_000_000,
+                            },
+                            now,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .expect("backlog");
+
+        let other_evaluator = create_evaluator(
+            &app,
+            &seeded,
+            json!({
+                "name": "Other",
+                "kind": "check",
+                "config": {"check": "exact_match"},
+                "output_score": {"name": "other", "data_type": "boolean"}
+            }),
+        )
+        .await;
+        let other_rule = rule(&app, &seeded, other_evaluator).await;
+        let trace_id = trace(0x19);
+        store_trace(&app, &seeded, trace_id).await;
+        let ready = Uuid::now_v7();
+        enqueue(
+            &app,
+            NewJob {
+                id: ready,
+                project_id: project,
+                kind: KIND_RULE,
+                rule_id: Some(other_rule),
+                evaluator_id: other_evaluator,
+                variable_mapping: None,
+                trace_id,
+                span_id: None,
+                trace_start_ns: now - 30_000_000_000,
+            },
+        )
+        .await;
+
+        let mut running = JoinSet::new();
+        assert_eq!(
+            pass(&app, &mut running).await,
+            1,
+            "the ready job is the only claim"
+        );
+        settle(&mut running).await;
+        assert_ne!(job_row(&app, &seeded, ready).await.status, "queued");
+        let backlog: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM eval_jobs WHERE rule_id = ? AND status = 'queued'",
+        )
+        .bind(paused.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("count");
+        assert_eq!(backlog, 5_000, "the paused rule's jobs wait");
     }
 
     #[tokio::test]

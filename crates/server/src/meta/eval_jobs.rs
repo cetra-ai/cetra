@@ -10,7 +10,7 @@ use sqlx::sqlite::{Sqlite, SqliteArguments, SqlitePool, SqliteRow};
 use sqlx::{FromRow, Row, SqliteConnection};
 use uuid::Uuid;
 
-use super::{MetaError, rule_spend};
+use super::{MetaDb, MetaError, rule_spend};
 
 /// A rule's job (D-I-11).
 pub(crate) const KIND_RULE: &str = "rule";
@@ -426,9 +426,10 @@ pub(crate) async fn list_jobs(
 }
 
 /// The dispatcher's candidates (§ The candidate query): at most 20 per `(priority, project)`,
-/// in `(priority, rank in its project, not_before, id)` order so a small
-/// LIMIT still reaches every project (D-I-6 round-robin), skipping jobs whose rule is disabled or paused, whose
-/// project or org is not active, and whose connection (or webhook evaluator) is in `saturated`.
+/// in `(priority, rank in its project, project_id, not_before, id)` order. The rank makes a small
+/// LIMIT reach every project (D-I-6 round-robin); `project_id` only fixes the order among projects
+/// that tie on rank. Jobs whose rule is disabled or paused, whose project or org is not active, and
+/// whose connection (or webhook evaluator) is in `saturated` are skipped.
 ///
 /// # Errors
 ///
@@ -459,7 +460,7 @@ pub(crate) async fn candidates(
              AND COALESCE(e.connection_id, e.id) NOT IN (SELECT value FROM json_each(?2))
          )
          WHERE rn <= 20
-         ORDER BY priority, rn, not_before, id
+         ORDER BY priority, rn, project_id, not_before, id
          LIMIT ?3",
     )
     .bind(now)
@@ -662,12 +663,38 @@ pub(crate) async fn finish(
     Ok(result.rows_affected() > 0)
 }
 
-/// Skips the queued jobs of `rule_id` with `error`. Returns how many changed.
+/// Rows one write of [`skip_queued_of_rule`] changes at most, so a large backlog is skipped in
+/// short writes and the single writer is never held for long (I-3).
+const SKIP_CHUNK_ROWS: u64 = 1_000;
+
+/// Skips the queued jobs of `rule_id` with `error`, `SKIP_CHUNK_ROWS` per write, looping until a
+/// write changes fewer rows than one chunk. Returns how many changed in all.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError`] when the update fails.
+/// Returns [`MetaError`] when a write fails. The chunks already written stay skipped.
 pub(crate) async fn skip_queued_of_rule(
+    meta: &MetaDb,
+    rule_id: Uuid,
+    error: &'static str,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let mut total = 0;
+    loop {
+        let changed = meta
+            .write(move |conn| {
+                Box::pin(async move { skip_queued_chunk(conn, rule_id, error, now).await })
+            })
+            .await?;
+        total += changed;
+        if changed < SKIP_CHUNK_ROWS {
+            return Ok(total);
+        }
+    }
+}
+
+/// One chunk of [`skip_queued_of_rule`]: at most `SKIP_CHUNK_ROWS` queued jobs of the rule.
+async fn skip_queued_chunk(
     conn: &mut SqliteConnection,
     rule_id: Uuid,
     error: &'static str,
@@ -675,12 +702,13 @@ pub(crate) async fn skip_queued_of_rule(
 ) -> Result<u64, MetaError> {
     let result = sqlx::query(
         "UPDATE eval_jobs SET status = 'skipped', error = ?, finished_at = ?, updated_at = ? \
-         WHERE rule_id = ? AND status = 'queued'",
+         WHERE id IN (SELECT id FROM eval_jobs WHERE rule_id = ? AND status = 'queued' LIMIT ?)",
     )
     .bind(error)
     .bind(now)
     .bind(now)
     .bind(rule_id.to_string())
+    .bind(i64::try_from(SKIP_CHUNK_ROWS).unwrap_or(i64::MAX))
     .execute(&mut *conn)
     .await?;
     Ok(result.rows_affected())
@@ -1794,10 +1822,7 @@ mod tests {
         enqueue(&db, queued, NOW).await;
         let (running_id, _) = running_job(&db, &seeded, "a1000000000000000000000000000062").await;
         let rule = seeded.rule;
-        let changed = db
-            .write(move |conn| {
-                Box::pin(async move { skip_queued_of_rule(conn, rule, "rule paused", NOW).await })
-            })
+        let changed = skip_queued_of_rule(&db, rule, "rule paused", NOW)
             .await
             .unwrap();
         assert_eq!(changed, 1);
@@ -1810,6 +1835,51 @@ mod tests {
             read(&db, seeded.project, running_id).await.status,
             "running"
         );
+    }
+
+    #[tokio::test]
+    async fn skip_queued_of_rule_works_in_chunks_of_a_thousand() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        // Two full chunks and one partial: three writes, 2 500 rows in all.
+        let backlog = 2_500_u32;
+        db.write({
+            let (project, judge, rule) = (seeded.project, seeded.judge, seeded.rule);
+            move |conn| {
+                Box::pin(async move {
+                    for index in 0..backlog {
+                        let job = NewJob {
+                            id: Uuid::now_v7(),
+                            project_id: project,
+                            kind: KIND_RULE,
+                            rule_id: Some(rule),
+                            evaluator_id: judge,
+                            variable_mapping: None,
+                            trace_id: trace(&format!("{:032x}", index + 1)),
+                            span_id: None,
+                            trace_start_ns: NOW,
+                        };
+                        insert_job(conn, job, NOW).await?;
+                    }
+                    Ok(())
+                })
+            }
+        })
+        .await
+        .unwrap();
+
+        let changed = skip_queued_of_rule(&db, seeded.rule, "budget", NOW + 1)
+            .await
+            .unwrap();
+        assert_eq!(u64::from(backlog), changed);
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM eval_jobs WHERE rule_id = ? AND status = 'queued'",
+        )
+        .bind(seeded.rule.to_string())
+        .fetch_one(db.reader())
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[tokio::test]

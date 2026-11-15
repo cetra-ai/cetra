@@ -4,7 +4,7 @@ Read [README.md](README.md) first, especially § Design › Audit (D-M-9).
 
 **Goal:** `llmobs admin reapply-deletions --from <data_dir>` copies, from another data directory's `meta.db`, every deletion the current `meta.db` does not have, with its scope, as an **open** row. The running (or next) `llmobs serve` then registers or drops it again through M3's worker.
 
-This is how a backup restore keeps erasures done after the backup. Before restoring, the operator keeps the old data directory (or a copy of its `meta.db`). After the restore, they start `llmobs serve` once if the backup is from an older version (both databases must be at this binary's schema), then run this command with `--from` pointing at the old directory. Spec 12 § Backups says so (the plan commit updated it, and spec 09 § CLI lists the command).
+This is how a backup restore keeps erasures done after the backup. It also covers a rollback (cross-track review X18): the old binary runs on the restored pre-upgrade `meta.db` and reapplies from the kept directory, which the newer binary already migrated, so a **newer** source is read as it is, by column name (`MetaDb::open_existing_or_newer`). Migrations only add, so the columns this binary reads are there; a missing one fails with `AdminError::Database`, and a row this binary cannot decode is named as for any corrupt row. Before restoring, the operator keeps the old data directory (or a copy of its `meta.db`). After the restore, they start `llmobs serve` once if the backup is from an older version (the source must be at this binary's schema or a newer one; see below), then run this command with `--from` pointing at the old directory. Spec 12 § Backups says so (the plan commit updated it, and spec 09 § CLI lists the command).
 
 The command opens only `meta.db` files, never storage, so it works whether the server runs or not.
 
@@ -20,7 +20,7 @@ The command opens only `meta.db` files, never storage, so it works whether the s
 
 - `crates/server/src/admin.rs`: `AdminError`, `open_meta`, `map_meta`, `list_users`, and the tests' `ready_config`.
 - `crates/cli/src/main.rs`: `AdminCommand`, `admin_command`, `load_config`.
-- `crates/server/src/meta/mod.rs`: `MetaDb::open_existing(data_dir)`, which refuses a missing file (`NotInitialized`) and another schema version (`SchemaMismatch`).
+- `crates/server/src/meta/mod.rs`: `MetaDb::open_existing(data_dir)`, which refuses a missing file (`NotInitialized`) and another schema version (`SchemaMismatch`), and `MetaDb::open_existing_or_newer(data_dir)`, which also accepts a newer one.
 - M1's `meta/deletions.rs`; README § Design › Lifecycle (how the worker treats a `resolving` row with and without `trace_count`, and a `pending` drop with `handed_over_at` NULL). The copy relies on M3's worker: a `resolving` row whose `trace_count` is set is registered directly with its stored scope (`trace_ids`/`filter` with an empty scope go straight to `applied`; `user` always registers), and a `pending` drop is dropped again (`drop_project` is idempotent).
 
 ## Store
@@ -76,7 +76,7 @@ pub struct ReapplyReport {
 }
 
 /// Copies the deletions of `<from>/meta.db` that `config`'s `meta.db` lacks (D-M-9).
-/// Both databases must be at this binary's schema version.
+/// The target must be at this binary's schema; the source at it or a newer one.
 ///
 /// # Errors
 ///
@@ -88,7 +88,7 @@ pub async fn reapply_deletions(config: &ServerConfig, from: &Path) -> Result<Rea
 
 Body: open both, run a private `async fn copy_all(target: &MetaDb, source: &MetaDb) -> Result<ReapplyReport, MetaError>`, then **always** close both before returning its result (as `list_users` runs its work, closes, then returns):
 1. `let target = open_meta(config).await?;`
-2. `let source = match MetaDb::open_existing(from).await { Ok(db) => db, Err(error) => { target.close().await; return Err(map_source(error)); } };` where `map_source` maps `MetaError::NotInitialized` → `AdminError::SourceNotInitialized`, `SchemaMismatch { expected, found }` → `AdminError::SourceSchema { expected, found }`, anything else through `map_meta`.
+2. `let source = match MetaDb::open_existing_or_newer(from).await { Ok(db) => db, Err(error) => { target.close().await; return Err(map_source(error)); } };` where `map_source` maps `MetaError::NotInitialized` → `AdminError::SourceNotInitialized`, `SchemaMismatch { expected, found }` → `AdminError::SourceSchema { expected, found }`, anything else through `map_meta`.
 
 New `AdminError` variants (in `admin.rs`):
 
@@ -96,8 +96,8 @@ New `AdminError` variants (in `admin.rs`):
 /// `--from` holds no `meta.db`.
 #[error("no meta.db in the --from directory")]
 SourceNotInitialized,
-/// The `--from` database is at another schema version.
-#[error("the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs serve` on a copy of it first")]
+/// The `--from` database is at an older schema version. A newer one is read as it is.
+#[error("the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs serve` on a copy of it first")]
 SourceSchema {
     /// Migration version embedded in this binary.
     expected: i64,
@@ -181,7 +181,7 @@ In `admin.rs` tests. The target is `ready_config()`; the source is a second `tem
 2. `second_run_copies_nothing`: run again → `{reopened: 0, failed_copied: 0, present: 6}`.
 3. `rows_already_present_are_left_alone`: the target already has row (a)'s id as `applied` (insert it with `insert_deletion` + `mark_applied` before the run) → it stays `applied`; the report is `{reopened: 4, failed_copied: 1, present: 1}`.
 4. `missing_source_is_refused`: `from` is an empty temp dir → `AdminError::SourceNotInitialized`.
-5. `source_at_another_schema_is_refused`: in the source, `INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) SELECT MAX(version) + 1, 'future', 1, x'', 0 FROM _sqlx_migrations` → `matches!(error, AdminError::SourceSchema { .. })`.
+5. `source_at_an_older_schema_is_refused`: the source's latest `_sqlx_migrations` row is replaced by `expected - 1` → `AdminError::SourceSchema { expected, found: expected - 1 }`, whose message says "older than". `source_at_a_newer_schema_is_copied`: the six-row source with a migration row `expected + 1` → the same report as test 1.
 6. `copied_rows_are_applied_by_the_worker`:
    - `let app = TestApp::new().await; let seeded = app.seed().await;`.
    - `let t0 = app.state.clock.now_ns();` Commit trace A to `seeded.project` with `ingest_time = t0` on the span (M3's tests explain why), then `app.state.clock.advance(Duration::from_secs(1))`.

@@ -80,6 +80,20 @@ impl MetaDb {
     /// migration other than this binary's is [`MetaError::SchemaMismatch`].
     /// No migration rows counts as version `0`.
     pub(crate) async fn open_existing(data_dir: &Path) -> Result<Self, MetaError> {
+        Self::open_checked(data_dir, false).await
+    }
+
+    /// [`Self::open_existing`], but a schema **newer** than this binary's is accepted
+    /// too. Only for reading a source whose tables this binary knows by column name:
+    /// `llmobs admin reapply-deletions --from` after a rollback (D-M-9). Migrations only
+    /// add, so the columns this binary reads are still there; a missing one fails the
+    /// read with [`MetaError::Database`]. An older schema is still
+    /// [`MetaError::SchemaMismatch`].
+    pub(crate) async fn open_existing_or_newer(data_dir: &Path) -> Result<Self, MetaError> {
+        Self::open_checked(data_dir, true).await
+    }
+
+    async fn open_checked(data_dir: &Path, newer_ok: bool) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
         if !path.is_file() {
             return Err(MetaError::NotInitialized);
@@ -87,7 +101,7 @@ impl MetaDb {
         let mut writer = connect(&path, false).await?;
         let found = applied_version(&mut writer).await?;
         let expected = expected_version();
-        if found != expected {
+        if found != expected && !(newer_ok && found > expected) {
             return Err(MetaError::SchemaMismatch { found, expected });
         }
         let readers = reader_pool(&path).await?;

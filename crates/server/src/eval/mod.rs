@@ -42,8 +42,10 @@ pub(crate) struct EvalQueue {
     workers: Arc<Semaphore>,
     /// Per connection: its slots and its token bucket, rebuilt when the connection's
     /// `max_concurrency` or `requests_per_minute` changes (not on other edits, such as a key change).
+    /// Entries are never removed: the map is bounded by the number of connections ever seen.
     connections: Mutex<HashMap<Uuid, Arc<dispatch::ConnectionLimit>>>,
-    /// Per webhook evaluator: 4 slots.
+    /// Per webhook evaluator: 4 slots. Entries are never removed: the map is bounded by the number
+    /// of webhook evaluators ever seen.
     webhooks: Mutex<HashMap<Uuid, Arc<Semaphore>>>,
     /// Per priority: the project whose job was claimed last, where the next pass's rotation starts (D-I-6).
     last_project: Mutex<HashMap<u8, ProjectId>>,
