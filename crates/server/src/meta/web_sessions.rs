@@ -8,7 +8,7 @@ use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::MetaError;
-use super::users::UserRow;
+use super::users::{EmailVerifiedVia, UserRow};
 
 /// Columns for [`insert_session`]. `hash` is the cookie's SHA-256 hex.
 #[derive(Debug)]
@@ -63,6 +63,7 @@ struct SessionRecord {
     name: Option<String>,
     password_hash: Option<String>,
     email_verified_at: Option<i64>,
+    email_verified_via: Option<String>,
     is_instance_admin: i64,
     disabled_at: Option<i64>,
     created_at: i64,
@@ -114,7 +115,7 @@ pub(crate) async fn session_user(
     let record = sqlx::query_as::<_, SessionRecord>(
         "SELECT web_sessions.id AS session_id, web_sessions.last_seen_at, \
          web_sessions.expires_at, users.id AS user_id, users.email, users.name, \
-         users.password_hash, users.email_verified_at, users.is_instance_admin, \
+         users.password_hash, users.email_verified_at, users.email_verified_via, users.is_instance_admin, \
          users.disabled_at, users.created_at, users.updated_at, web_sessions.sso_org_id \
          FROM web_sessions \
          JOIN users ON users.id = web_sessions.user_id \
@@ -239,6 +240,7 @@ fn session_row(record: SessionRecord) -> Result<SessionRow, MetaError> {
             name: record.name,
             password_hash: record.password_hash,
             email_verified_at: record.email_verified_at,
+            email_verified_via: EmailVerifiedVia::from_column(record.email_verified_via)?,
             is_instance_admin,
             disabled_at: record.disabled_at,
             created_at: record.created_at,
@@ -279,6 +281,7 @@ mod tests {
                         name: None,
                         password_hash: None,
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,

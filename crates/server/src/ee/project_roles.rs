@@ -159,6 +159,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: true,
                         },
                         now,

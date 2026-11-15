@@ -55,6 +55,7 @@ use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
@@ -472,6 +473,7 @@ impl TestApp {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -566,7 +568,9 @@ impl TestApp {
         self.state
             .meta
             .write(move |conn| {
-                Box::pin(async move { set_email_verified(conn, user_id, now).await })
+                Box::pin(async move {
+                    set_email_verified(conn, user_id, now, EmailVerifiedVia::MailToken).await
+                })
             })
             .await
             .unwrap();
@@ -636,6 +640,7 @@ impl TestApp {
                             name: Some("Ada Example".to_owned()),
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -1239,6 +1244,7 @@ pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: 
                         name: None,
                         password_hash: None,
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,

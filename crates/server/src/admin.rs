@@ -31,6 +31,7 @@ use crate::meta::deletions::{
 use crate::meta::instance_settings::{self, ENCRYPTION_CHECK};
 use crate::meta::orgs::{org_by_id, org_by_slug};
 use crate::meta::password_resets::insert_reset;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaDb, MetaError};
 use crate::usage::flushed_month_units;
@@ -209,6 +210,7 @@ pub async fn create_user(
                         name,
                         password_hash,
                         email_verified_at: Some(now),
+                        email_verified_via: Some(EmailVerifiedVia::Operator),
                         is_instance_admin: instance_admin,
                     },
                     now,

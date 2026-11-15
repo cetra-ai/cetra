@@ -18,6 +18,7 @@ use crate::meta::deletions::{ActorKind, org_drop_exists_tx, org_drop_of};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{self, OrgRow, org_by_id, org_by_id_tx};
 use crate::meta::personal_tokens::revoke_user_tokens;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{
     NewUser, insert_user, normalize_email, set_email_verified, set_password_hash, user_by_email_tx,
 };
@@ -102,14 +103,15 @@ async fn create_org(
                         return Ok(Outcome::OwnerNotAllowed);
                     }
                     Some(user) => {
-                        if user.email_verified_at.is_none() {
+                        if !user.email_proven() {
                             // D148's defence against a pre-registered account: whoever signed
                             // up with this email never proved it, so their password, sessions
                             // and tokens go before the account owns the org.
                             delete_user_sessions(conn, user.id, None).await?;
                             revoked = revoke_user_tokens(conn, user.id, now).await?;
                             set_password_hash(conn, user.id, None, now).await?;
-                            set_email_verified(conn, user.id, now).await?;
+                            set_email_verified(conn, user.id, now, EmailVerifiedVia::ControlPlane)
+                                .await?;
                         }
                         user
                     }
@@ -121,6 +123,7 @@ async fn create_org(
                                 name: owner_name,
                                 password_hash: None,
                                 email_verified_at: Some(now),
+                                email_verified_via: Some(EmailVerifiedVia::ControlPlane),
                                 is_instance_admin: false,
                             },
                             now,
@@ -287,6 +290,7 @@ mod tests {
                             name,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,
@@ -358,6 +362,7 @@ mod tests {
                             name: None,
                             password_hash: Some("$argon2id$attacker".to_owned()),
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,

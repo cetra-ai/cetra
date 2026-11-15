@@ -668,7 +668,9 @@ CREATE TABLE users (
     disabled_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
-)
+, email_verified_via TEXT
+    CHECK (email_verified_via IS NULL
+        OR email_verified_via IN ('mail_token', 'idp', 'invite', 'control_plane', 'operator')))
 
 table web_sessions
 CREATE TABLE web_sessions (

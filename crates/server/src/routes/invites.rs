@@ -24,6 +24,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::invites::{self, INVITE_TTL_NS, InviteRow, Inviter};
 use crate::meta::members;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, normalize_email};
 
 use super::orgs::page_named;
@@ -343,7 +344,8 @@ async fn accept_invite(
                         .fetch_one(&mut *conn)
                         .await?;
                 if verified.is_none() {
-                    users::set_email_verified(conn, caller_id, now).await?;
+                    users::set_email_verified(conn, caller_id, now, EmailVerifiedVia::Invite)
+                        .await?;
                 }
                 Ok(Accepted::Done {
                     membership: OrgMembership {
@@ -498,6 +500,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -528,6 +531,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,

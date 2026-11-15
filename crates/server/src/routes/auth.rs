@@ -31,6 +31,7 @@ use crate::meta::members;
 use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
 use crate::meta::personal_tokens::revoke_user_tokens;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, UserRow, normalize_email};
 use crate::meta::web_sessions::{delete_session, delete_user_sessions};
 
@@ -486,7 +487,7 @@ async fn verify_email(
                 else {
                     return Ok(None);
                 };
-                users::set_email_verified(conn, id, now).await?;
+                users::set_email_verified(conn, id, now, EmailVerifiedVia::MailToken).await?;
                 Ok(Some(()))
             })
         })
@@ -653,6 +654,7 @@ async fn signup(
                             name: name_for_insert,
                             password_hash: Some(password_hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::Invite),
                             is_instance_admin: false,
                         },
                         now,
@@ -695,6 +697,7 @@ async fn signup(
                         name: name_for_insert,
                         password_hash: Some(password_hash),
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,
@@ -1132,6 +1135,7 @@ mod tests {
                             name: Some("Ada".to_owned()),
                             password_hash: hash,
                             email_verified_at: verified_at,
+                            email_verified_via: verified_at.map(|_| EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -1391,6 +1395,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -2097,6 +2102,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -2485,6 +2491,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: admin,
                         },
                         now,

@@ -5,7 +5,7 @@ use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use super::users::UserRow;
+use super::users::{EmailVerifiedVia, UserRow};
 use super::{MetaError, unique_or};
 use crate::auth::{
     OrgRole, ProjectOverride, org_role_str, parse_org_role, parse_project_override,
@@ -209,7 +209,7 @@ pub(crate) async fn org_members(
     org_id: OrgId,
 ) -> Result<Vec<MemberRow>, MetaError> {
     let records: Vec<MemberRecord> = sqlx::query_as(
-        "SELECT users.id, users.email, users.name, users.password_hash, users.email_verified_at, \
+        "SELECT users.id, users.email, users.name, users.password_hash, users.email_verified_at, users.email_verified_via, \
          users.is_instance_admin, users.disabled_at, users.created_at, users.updated_at, \
          org_members.role, org_members.created_at AS joined_at \
          FROM org_members JOIN users ON users.id = org_members.user_id \
@@ -335,6 +335,7 @@ struct MemberRecord {
     name: Option<String>,
     password_hash: Option<String>,
     email_verified_at: Option<i64>,
+    email_verified_via: Option<String>,
     is_instance_admin: i64,
     disabled_at: Option<i64>,
     created_at: i64,
@@ -365,6 +366,7 @@ fn member_row(record: MemberRecord) -> Result<MemberRow, MetaError> {
             name: record.name,
             password_hash: record.password_hash,
             email_verified_at: record.email_verified_at,
+            email_verified_via: EmailVerifiedVia::from_column(record.email_verified_via)?,
             is_instance_admin,
             disabled_at: record.disabled_at,
             created_at: record.created_at,
@@ -562,6 +564,7 @@ mod tests {
             name: None,
             password_hash: None,
             email_verified_at: None,
+            email_verified_via: None,
             is_instance_admin: false,
         }
     }
@@ -575,6 +578,7 @@ mod tests {
                 let org = insert_org(conn, org_id, "Alpha", "alpha", 1).await?;
                 let verified = |email: &str| NewUser {
                     email_verified_at: Some(1),
+                    email_verified_via: Some(EmailVerifiedVia::MailToken),
                     ..user(email)
                 };
                 let ada = insert_user(conn, verified("ada@example.com"), 1).await?;

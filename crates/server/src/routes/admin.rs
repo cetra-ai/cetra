@@ -26,6 +26,7 @@ use crate::http::error::{self, ApiError, problem_response};
 use crate::meta::MetaError;
 use crate::meta::identities;
 use crate::meta::password_resets::insert_reset;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, NewUser, UserRow};
 use crate::meta::web_sessions::delete_user_sessions;
 
@@ -150,6 +151,7 @@ async fn create_user(
                         name,
                         password_hash: None,
                         email_verified_at: Some(now),
+                        email_verified_via: Some(EmailVerifiedVia::Operator),
                         is_instance_admin: admin,
                     },
                     now,
