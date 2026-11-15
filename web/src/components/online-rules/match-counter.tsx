@@ -22,24 +22,31 @@ export function MatchCounter({
   /** The sample rate as a fraction, above 0 and at most 1. */
   sampleRate: number;
 }) {
-  const [debounced, setDebounced] = useState(filter.trim());
+  // The target and the filter are debounced as one pair, so a query never pairs a new target with
+  // the filter that was current before it.
+  const [debounced, setDebounced] = useState({ target, filter: filter.trim() });
   useEffect(() => {
     const timer = setTimeout(() => {
-      setDebounced(filter.trim());
+      setDebounced({ target, filter: filter.trim() });
     }, 500);
     return () => {
       clearTimeout(timer);
     };
-  }, [filter]);
+  }, [target, filter]);
   const query = $api.useQuery(
     "post",
     "/api/v1/projects/{project}/online-rules/preview",
     {
       params: { path: { project: projectRef(org, project) } },
-      body: { target, ...(debounced ? { filter: debounced } : {}) },
+      body: {
+        target: debounced.target,
+        ...(debounced.filter ? { filter: debounced.filter } : {}),
+      },
     },
     { staleTime: 60_000, placeholderData: keepPreviousData },
   );
+  const pending =
+    debounced.target !== target || debounced.filter !== filter.trim() || query.isFetching;
 
   let content: ReactNode;
   if (query.error) {
@@ -55,8 +62,9 @@ export function MatchCounter({
     const count = capped ? "More than 10,000" : matched.toLocaleString("en-US");
     const subject = target === "span" ? "span" : "trace";
     const plural = capped || matched !== 1 ? `${subject}s` : subject;
+    // A capped count is a floor, so a sampled estimate built on it would be misleading.
     const estimate =
-      sampleRate > 0 && sampleRate < 1 && matched > 0
+      !capped && sampleRate > 0 && sampleRate < 1 && matched > 0
         ? ` · about ${Math.round(matched * sampleRate).toLocaleString("en-US")} would be evaluated at ${Number((sampleRate * 100).toFixed(2))} %`
         : "";
     content = <p>{`${count} ${plural} matched in the last 24 hours${estimate}`}</p>;
@@ -70,7 +78,12 @@ export function MatchCounter({
   }
 
   return (
-    <div role="status" aria-live="polite" className="text-xs text-muted-foreground">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy={pending ? "true" : undefined}
+      className={`text-xs text-muted-foreground transition-opacity ${pending ? "opacity-60" : ""}`}
+    >
       {content}
     </div>
   );

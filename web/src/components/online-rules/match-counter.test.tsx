@@ -107,3 +107,48 @@ it("shows a load error", async () => {
 
   expect(await screen.findByText("The match count could not be loaded.")).toBeInTheDocument();
 });
+
+it("never counts a new target with the filter it replaced", async () => {
+  const bodies = capturePreviews();
+  const { user } = await renderApp(NEW_RULE);
+  await screen.findByText(FIXTURE_TEXT);
+
+  // The target changes before the filter's debounce has run.
+  await user.type(screen.getByLabelText("Filter"), "status = 'error'");
+  await user.click(screen.getByRole("radio", { name: "Spans" }));
+
+  await waitFor(() =>
+    expect(bodies.at(-1)).toEqual({ target: "span", filter: "status = 'error'" }),
+  );
+  expect(bodies.filter((body) => body.target === "span")).toEqual([
+    { target: "span", filter: "status = 'error'" },
+  ]);
+});
+
+it("marks the counter busy and dims it while a count is pending", async () => {
+  capturePreviews();
+  const { user } = await renderApp(NEW_RULE);
+  const status = await screen.findByRole("status");
+  await screen.findByText(FIXTURE_TEXT);
+  expect(status).not.toHaveAttribute("aria-busy");
+
+  await user.type(screen.getByLabelText("Filter"), "status = 'error'");
+
+  expect(status).toHaveAttribute("aria-busy", "true");
+  expect(status).toHaveClass("opacity-60");
+  await waitFor(() => expect(status).not.toHaveAttribute("aria-busy"));
+  expect(status).not.toHaveClass("opacity-60");
+});
+
+it("hides the sampled estimate when the count is capped", async () => {
+  capturePreviews(() => HttpResponse.json({ ...previewFixture, matched: 10000, capped: true }));
+  const { user } = await renderApp(NEW_RULE);
+  await screen.findByText("More than 10,000 traces matched in the last 24 hours");
+
+  await user.clear(screen.getByLabelText("Sample rate (%)"));
+  await user.type(screen.getByLabelText("Sample rate (%)"), "25");
+
+  expect(screen.getByRole("status")).toHaveTextContent(
+    /^More than 10,000 traces matched in the last 24 hours$/,
+  );
+});

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
-import { meQuery, traceDetailQuery } from "@/api/queries";
+import { meQuery, projectQuery, traceDetailQuery } from "@/api/queries";
 import { server } from "@/mocks/node";
 import { ORG_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
@@ -240,6 +240,51 @@ it("saves the trace completion timeout", async () => {
 
   await waitFor(() => expect(body).toEqual({ trace_completion_timeout_s: 120 }));
   expect(await screen.findByText("Saved")).toBeInTheDocument();
+});
+
+it("re-syncs the timeout field when the saved value changes", async () => {
+  let savedTimeout = 60;
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectFixture, trace_completion_timeout_s: savedTimeout }),
+    ),
+  );
+
+  const { queryClient } = await renderApp("/acme/support-bot/settings/general");
+  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  expect(timeout).toHaveValue(60);
+
+  savedTimeout = 90;
+  await queryClient.invalidateQueries({ queryKey: projectQuery("acme", "support-bot").queryKey });
+
+  await waitFor(() => expect(timeout).toHaveValue(90));
+});
+
+it("keeps a timeout the user has typed when the saved value changes", async () => {
+  let savedTimeout = 60;
+  let reads = 0;
+  server.use(
+    http.get("/api/v1/projects/:project", () => {
+      reads += 1;
+      return HttpResponse.json({ ...projectFixture, trace_completion_timeout_s: savedTimeout });
+    }),
+  );
+
+  const { user, queryClient } = await renderApp("/acme/support-bot/settings/general");
+  const timeout = await screen.findByLabelText("Trace completion timeout (seconds)");
+  await user.clear(timeout);
+  await user.type(timeout, "120");
+
+  savedTimeout = 90;
+  const readsBefore = reads;
+  const key = projectQuery("acme", "support-bot").queryKey;
+  await queryClient.invalidateQueries({ queryKey: key });
+  await waitFor(() => expect(reads).toBeGreaterThan(readsBefore));
+  await waitFor(() =>
+    expect(queryClient.getQueryData(key)).toMatchObject({ trace_completion_timeout_s: 90 }),
+  );
+
+  expect(timeout).toHaveValue(120);
 });
 
 it("refuses an out-of-range timeout without calling the server", async () => {

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { meQuery, projectListOptions, projectQuery } from "@/api/queries";
@@ -17,6 +17,7 @@ import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S } from "@/lib/completion-timeout";
 import { removeProjectReads } from "@/lib/deletions";
 import { atLeast } from "@/lib/roles";
 
@@ -53,11 +54,19 @@ function ProjectGeneralPage() {
   const canDelete = me.isSuccess && atLeast(orgRole, "admin");
   const [dropOpen, setDropOpen] = useState(false);
   const dropMutation = $api.useMutation("delete", "/api/v1/projects/{project}");
-  const [timeout, setTimeoutText] = useState(String(data.trace_completion_timeout_s));
+  const serverTimeout = data.trace_completion_timeout_s;
+  const [timeout, setTimeoutText] = useState(String(serverTimeout));
+  // Once the user has typed in the field, later server values no longer overwrite it.
+  const [timeoutEdited, setTimeoutEdited] = useState(false);
   const [timeoutError, setTimeoutError] = useState<string | undefined>();
   const [timeoutSaved, setTimeoutSaved] = useState(false);
   const [timeoutFormError, setTimeoutFormError] = useState<string | undefined>();
   const timeoutMutation = $api.useMutation("patch", "/api/v1/projects/{project}");
+  useEffect(() => {
+    if (!timeoutEdited) {
+      setTimeoutText(String(serverTimeout));
+    }
+  }, [serverTimeout, timeoutEdited]);
 
   function onTimeoutSubmit(event: FormEvent) {
     event.preventDefault();
@@ -66,8 +75,14 @@ function ProjectGeneralPage() {
     timeoutMutation.reset();
     const value = timeout.trim();
     const seconds = Number(value);
-    if (!/^\d+$/.test(value) || seconds < 10 || seconds > 3600) {
-      setTimeoutError("Enter a whole number from 10 to 3600.");
+    if (
+      !/^\d+$/.test(value) ||
+      seconds < COMPLETION_TIMEOUT_MIN_S ||
+      seconds > COMPLETION_TIMEOUT_MAX_S
+    ) {
+      setTimeoutError(
+        `Enter a whole number from ${COMPLETION_TIMEOUT_MIN_S} to ${COMPLETION_TIMEOUT_MAX_S}.`,
+      );
       return;
     }
     setTimeoutError(undefined);
@@ -244,21 +259,23 @@ function ProjectGeneralPage() {
               id="project-trace-timeout"
               name="project-trace-timeout"
               type="number"
-              min={10}
-              max={3600}
+              min={COMPLETION_TIMEOUT_MIN_S}
+              max={COMPLETION_TIMEOUT_MAX_S}
               step={1}
               value={timeout}
               aria-invalid={timeoutError ? true : undefined}
               aria-describedby="project-trace-timeout-description"
               disabled={!canEdit || timeoutMutation.isPending}
               onChange={(event) => {
+                setTimeoutEdited(true);
                 setTimeoutText(event.target.value);
                 setTimeoutSaved(false);
               }}
             />
             <p id="project-trace-timeout-description" className="text-xs text-muted-foreground">
               Online rules evaluate a trace when its root span has ended and 5 seconds pass without
-              a new span, or after this many seconds without a new span. 10 to 3600; default 60.
+              a new span, or after this many seconds without a new span. {COMPLETION_TIMEOUT_MIN_S}{" "}
+              to {COMPLETION_TIMEOUT_MAX_S}; default 60.
             </p>
             {timeoutError ? (
               <p id="project-trace-timeout-error" role="alert" className="text-xs text-destructive">
