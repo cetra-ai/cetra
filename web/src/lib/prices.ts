@@ -15,6 +15,10 @@ export function formatUnitPrice(value: number | undefined): string {
   if (value === 0) {
     return "$0";
   }
+  // Two significant digits, so a tiny price does not print as `$0.00`.
+  if (Math.abs(value) < 0.000001) {
+    return `$${value.toPrecision(2)}`;
+  }
   if (Number.isInteger(value)) {
     return `$${String(value)}`;
   }
@@ -31,6 +35,8 @@ export interface PriceForm {
   provider: string;
   /** `YYYY-MM-DD` or "" for "always". Interpreted as 00:00 UTC. */
   validFrom: string;
+  /** The row's `valid_from` as the server sent it, or "" for a new row. Sent back while the date is unchanged, so its time of day survives an edit. */
+  validFromOriginal: string;
   input: string;
   output: string;
   cacheRead: string;
@@ -74,6 +80,7 @@ function blankForm(): PriceForm {
     pattern: "",
     provider: "",
     validFrom: "",
+    validFromOriginal: "",
     input: "",
     output: "",
     cacheRead: "",
@@ -95,6 +102,7 @@ export function priceForm(row?: PriceRow): PriceForm {
     pattern: exact ? "" : row.match_pattern,
     provider: row.provider ?? "",
     validFrom: isAlwaysValid(row.valid_from) ? "" : row.valid_from.slice(0, 10),
+    validFromOriginal: row.valid_from,
     input: numberText(row.price_input),
     output: numberText(row.price_output),
     cacheRead: numberText(row.price_cache_read),
@@ -148,7 +156,11 @@ export function priceBody(form: PriceForm): PriceInput {
     body.provider = provider;
   }
   if (form.validFrom !== "") {
-    body.valid_from = `${form.validFrom}T00:00:00.000000000Z`;
+    // The date field still shows the row's date: send the row's own instant back, time of day and all.
+    body.valid_from =
+      form.validFrom === form.validFromOriginal.slice(0, 10)
+        ? form.validFromOriginal
+        : `${form.validFrom}T00:00:00.000000000Z`;
   }
   priceField(body, "price_input", form.input);
   priceField(body, "price_output", form.output);
@@ -210,6 +222,16 @@ export function escapeRegex(text: string): string {
   return text.replace(/[\\.+*?()|[\]{}^$#&\-~]/g, "\\$&");
 }
 
+/** The server's D-T-8 message suffix (`crates/server/src/prices.rs`, `broken_rules`), after the rule name. */
+const BROKEN_RULE_SUFFIX = ": the judge model would have no price";
+
+/** The rule name of a D-T-8 message, `<rule name>: the judge model would have no price`. A name may contain colons. */
+function ruleName(message: string): string {
+  return message.endsWith(BROKEN_RULE_SUFFIX)
+    ? message.slice(0, -BROKEN_RULE_SUFFIX.length)
+    : message;
+}
+
 /** The form's message for a `409` that a budgeted online rule causes (D-T-8), or undefined for any other error. */
 export function blockedByRules(error: unknown): string | undefined {
   const problem = problemOf(error);
@@ -219,8 +241,7 @@ export function blockedByRules(error: unknown): string | undefined {
   const names = new Set<string>();
   for (const item of problem.errors ?? []) {
     if (item.field.startsWith("rules.")) {
-      // D-T-8 messages are `<rule name>: …`.
-      names.add(item.message.split(":")[0] ?? item.message);
+      names.add(ruleName(item.message));
     }
   }
   if (names.size === 0) {

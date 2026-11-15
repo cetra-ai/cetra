@@ -261,7 +261,7 @@ async fn create_online_rule(
     };
     // D-T-8: the price table is read and the write made under the price write lock, so a
     // price write cannot pass its guard between the two.
-    let _prices = state.ingest.prices().lock_writes().await;
+    let prices_write = state.ingest.prices().lock_writes().await;
     let evaluator_id = body.evaluator_id;
     let evaluator = evaluators::get_evaluator(state.meta.reader(), project, evaluator_id).await?;
     validate(&state, org, project, &draft, evaluator.as_ref(), now).await?;
@@ -284,7 +284,9 @@ async fn create_online_rule(
     let outcome = state
         .meta
         .write(move |conn| Box::pin(async move { insert_checked(conn, insert, limit, now).await }))
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         RuleWrite::Done { row, .. } => {
             tracing::info!(
@@ -316,7 +318,7 @@ async fn update_online_rule(
     let now = state.clock.now_ns();
     // D-T-8: the price table is read and the write made under the price write lock, so a
     // price write cannot pass its guard between the two.
-    let _prices = state.ingest.prices().lock_writes().await;
+    let prices_write = state.ingest.prices().lock_writes().await;
     let stored = store::get_rule(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -349,7 +351,9 @@ async fn update_online_rule(
         .write(move |conn| {
             Box::pin(async move { update_checked(conn, project, update, limit, now).await })
         })
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         RuleWrite::Done {
             row,

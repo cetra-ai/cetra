@@ -273,7 +273,7 @@ async fn update_evaluator(
     let org = access.project.org_id;
     // D-T-8: the price table is read and the write made under the price write lock, so a
     // price write cannot pass its guard between the two.
-    let _prices = state.ingest.prices().lock_writes().await;
+    let prices_write = state.ingest.prices().lock_writes().await;
     let expected = store::get_evaluator(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -348,7 +348,9 @@ async fn update_evaluator(
                 write_update(conn, org, project, id, expected, fields, &checks).await
             })
         })
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         Outcome::Updated(row) => {
             tracing::info!(

@@ -134,6 +134,70 @@ it("adds a project price", async () => {
   );
 });
 
+it("edits a project price", async () => {
+  let patch: { path: string; body: unknown } | undefined;
+  server.use(
+    listRows(),
+    http.patch("/api/v1/projects/:project/models/:id", async ({ request }) => {
+      patch = { path: new URL(request.url).pathname, body: await request.json() };
+      return HttpResponse.json(modelPricesFixture.data[0]);
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/models");
+  const own = await screen.findByRole("table", { name: "Project prices" });
+  await user.click(within(own).getByRole("button", { name: "Edit" }));
+  const dialog = await screen.findByRole("dialog", { name: "Edit model price" });
+  const input = within(dialog).getByLabelText("Input", { exact: true });
+  await user.clear(input);
+  await user.type(input, "3");
+  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(patch).toBeDefined());
+  expect(patch?.path).toMatch(/\/models\/01900000-0000-7000-8000-000000000c01$/);
+  expect(patch?.body).toEqual(
+    expect.objectContaining({
+      model_name: "gpt-4o (negotiated)",
+      price_input: 3,
+      valid_from: "2026-01-01T00:00:00.000000000Z",
+    }),
+  );
+});
+
+it("refreshes the list after adding", async () => {
+  let added = false;
+  const created = {
+    ...modelPricesFixture.data[0],
+    id: "01900000-0000-7000-8000-000000000c02",
+    model_name: "Local model",
+  };
+  server.use(
+    http.get("/api/v1/projects/:project/models", ({ request }) => {
+      const scope = new URL(request.url).searchParams.get("scope");
+      const rows = modelPricesFixture.data.filter((row) => row.scope === scope);
+      const extra = added && scope === "project" ? [created] : [];
+      return HttpResponse.json({ data: [...rows, ...extra], next_cursor: null });
+    }),
+    http.post("/api/v1/projects/:project/models", () => {
+      added = true;
+      return HttpResponse.json(created, { status: 201 });
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/models");
+  await screen.findByRole("table", { name: "Project prices" });
+  const dialog = await openAdd(user);
+  await user.type(within(dialog).getByLabelText("Model name"), "Local model");
+  await user.type(within(dialog).getByLabelText("Input", { exact: true }), "1");
+  await user.click(within(dialog).getByRole("button", { name: "Add price" }));
+
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole("table", { name: "Project prices" })).getByText("Local model"),
+    ).toBeInTheDocument(),
+  );
+});
+
 it("lets members read but not change", async () => {
   server.use(listRows(), projectAs("member"));
 

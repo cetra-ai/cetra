@@ -19,6 +19,7 @@ function blank(overrides: Partial<PriceForm> = {}): PriceForm {
     pattern: "",
     provider: "",
     validFrom: "",
+    validFromOriginal: "",
     input: "",
     output: "",
     cacheRead: "",
@@ -36,6 +37,12 @@ describe("formatUnitPrice", () => {
     expect(formatUnitPrice(0.075)).toBe("$0.075");
     expect(formatUnitPrice(8)).toBe("$8");
     expect(formatUnitPrice(undefined)).toBe("—");
+  });
+
+  it("does not show a tiny non-zero price as zero", () => {
+    expect(formatUnitPrice(1e-7)).toBe("$1.0e-7");
+    expect(formatUnitPrice(0.0000005)).toBe("$5.0e-7");
+    expect(formatUnitPrice(0.000001)).toBe("$0.000001");
   });
 });
 
@@ -154,6 +161,25 @@ describe("priceBody", () => {
     expect(body.valid_from).toBe("2026-01-01T00:00:00.000000000Z");
   });
 
+  it("keeps the time of day of an unchanged valid_from", () => {
+    const row = {
+      ...(modelPriceFixture as PriceRow),
+      valid_from: "2026-03-01T12:00:00.000000000Z",
+    };
+    const form = priceForm(row);
+    expect(form.validFrom).toBe("2026-03-01");
+    expect(priceBody(form).valid_from).toBe("2026-03-01T12:00:00.000000000Z");
+  });
+
+  it("sends midnight UTC when the valid_from date changes", () => {
+    const row = {
+      ...(modelPriceFixture as PriceRow),
+      valid_from: "2026-03-01T12:00:00.000000000Z",
+    };
+    const form = { ...priceForm(row), validFrom: "2026-03-05" };
+    expect(priceBody(form).valid_from).toBe("2026-03-05T00:00:00.000000000Z");
+  });
+
   it("round trips a row whose pattern is its escaped name", () => {
     const row: PriceRow = {
       scope: "org",
@@ -193,6 +219,22 @@ describe("blockedByRules", () => {
     expect(blockedByRules(error)).toBe(
       "Budgeted online rules use this price: Relevance on answers, Tone.",
     );
+  });
+
+  it("keeps a colon in the rule name", () => {
+    const error = {
+      type: "about:blank",
+      title: "Conflict",
+      status: 409,
+      code: "conflict",
+      errors: [
+        {
+          field: "rules.0190c",
+          message: "Tone: formal: the judge model would have no price",
+        },
+      ],
+    };
+    expect(blockedByRules(error)).toBe("Budgeted online rules use this price: Tone: formal.");
   });
 
   it("ignores other errors", () => {

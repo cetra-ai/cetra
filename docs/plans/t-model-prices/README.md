@@ -137,6 +137,7 @@ These are written in `docs/mvp-decisions.md` § Track T and in specs 02, 04, 09 
 
 - **CG-T1.** `/models/resolve` answers at the current time only; it has no `at` parameter. A user checking a row with a future `valid_from` sees today's winner. Accepted.
 - **CG-T2.** There is no project-wide list of the models seen in traces with no price ("unpriced models"). A later track can add it from storage (`cost_source = 'none'` on `llm` spans grouped by model).
+- **CG-T3.** A `PATCH` of an LLM connection's `adapter` (`routes/connections.rs`, `UpdateLlmConnectionRequest.adapter`) is not checked against budgeted rules. `model_price` asks with the connection's adapter as the provider (D-T-11), so a change of provider can leave a budgeted judge rule whose only price is a provider-specific custom row with no price (D-T-8 is not run for it). This predates T and is left for a follow-up.
 
 ## Conventions
 
