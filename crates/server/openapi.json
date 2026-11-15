@@ -12384,10 +12384,14 @@
             "description": "Display name. Trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
-            "description": "Days to keep data, from 1 to 36500. Absent keeps data forever.",
-            "minimum": 0
+            "description": "Days to keep data, from 1 to 36500. Null or absent keeps data forever.",
+            "maximum": 36500,
+            "minimum": 1
           },
           "slug": {
             "type": "string",
@@ -17375,10 +17379,14 @@
             "description": "Display name. Absent leaves the name unchanged. A present value is trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "description": "Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.",
-            "minimum": 0
+            "maximum": 36500,
+            "minimum": 1
           }
         },
         "additionalProperties": false

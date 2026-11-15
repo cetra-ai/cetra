@@ -405,7 +405,8 @@ pub fn openapi() -> OpenApi {
 ///
 /// utoipa marks every `Option<T>` nullable. This removes `null` from every property
 /// that is not `required` and from every optional query parameter. The D65 message and
-/// part components are skipped: their optional fields can really be `null`.
+/// part components are skipped: their optional fields can really be `null`. So are the
+/// `NULL_IS_A_VALUE` properties.
 fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
     let skip = d65_component_names();
     if let Some(components) = openapi.components.as_mut() {
@@ -413,7 +414,11 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
             if skip.contains(name.as_str()) {
                 continue;
             }
+            let kept = take_null_is_a_value(name, schema);
             strip_nested(schema);
+            if let RefOr::T(Schema::Object(object)) = schema {
+                object.properties.extend(kept);
+            }
         }
     }
     for path_item in openapi.paths.paths.values_mut() {
@@ -428,6 +433,27 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
         strip_operation(path_item.trace.as_mut());
         strip_operation(path_item.query.as_mut());
     }
+}
+
+/// Properties where `null` is a value of their own, so the contract keeps it: `null`
+/// on a request means "keep data forever", while an absent field leaves the default
+/// (spec 09). The server takes both (`api/account.rs`).
+const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("CreateProjectRequest", "retention_days"),
+    ("UpdateProjectRequest", "retention_days"),
+];
+
+/// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
+/// [`strip_nested`] leaves them alone. The caller puts them back.
+fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<String, RefOr<Schema>> {
+    let RefOr::T(Schema::Object(object)) = schema else {
+        return BTreeMap::new();
+    };
+    NULL_IS_A_VALUE
+        .iter()
+        .filter(|(component, _)| *component == name)
+        .filter_map(|(_, field)| object.properties.remove_entry(*field))
+        .collect()
 }
 
 fn d65_component_names() -> BTreeSet<String> {

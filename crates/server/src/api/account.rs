@@ -292,8 +292,9 @@ pub struct CreateProjectRequest {
     /// URL slug. Absent derives one from the name. Project slugs are not reserved words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
-    /// Days to keep data, from 1 to 36500. Absent keeps data forever.
+    /// Days to keep data, from 1 to 36500. Null or absent keeps data forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1, maximum = 36500)]
     pub retention_days: Option<u32>,
 }
 
@@ -308,7 +309,7 @@ pub struct UpdateProjectRequest {
     pub name: Option<String>,
     /// Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
     #[serde(default, deserialize_with = "optional_retention")]
-    #[schema(value_type = Option<u32>)]
+    #[schema(value_type = Option<u32>, minimum = 1, maximum = 36500)]
     pub retention_days: Option<Option<u32>>,
 }
 

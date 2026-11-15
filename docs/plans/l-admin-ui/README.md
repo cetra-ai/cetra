@@ -71,7 +71,7 @@ Adding server endpoints or fields is out of scope for L. These are reported to t
 | CG2 | Project slugs are not reserved (`orgs.rs`: "Project slugs do not use this list") | A project with slug `settings` has the same URL prefix as `/$org/settings/…`. L's routes are static, so `/$org/settings/general` and `/$org/settings/members` win over that project's pages. Its `traces`, `spans` and other pages still resolve, because `/$org/settings` has no children with those names. | Reserve `settings` as a project slug, or accept this and document it in spec 11. |
 | CG3 | `/cli-auth` has no host name in spec 08 | L defines `host` (D-L-9). | **Closed** by the CLI login commits: track H sends `host`, and spec 08 names it. |
 | CG4 | `GET /api/v1/me` (spec 09) is not implemented; only `GET /api/auth/me` exists | None. L reads `GET /api/auth/me`. | Drop `GET /api/v1/me` from spec 09, or add it. |
-| CG5 | `UpdateProjectRequest.retention_days` is not nullable in `openapi.json`, but the server takes `null` as "keep forever" | L15 sends `null` through one commented cast in `projectPatch()`. | Mark the field nullable in the contract. |
+| CG5 | `UpdateProjectRequest.retention_days` is not nullable in `openapi.json`, but the server takes `null` as "keep forever" | L15 sends `null` through one commented cast in `projectPatch()`. | **Closed.** `retention_days` is nullable with `minimum: 1` and `maximum: 36500` on both project requests. The web cast is gone. |
 
 ## Routes
 
@@ -357,4 +357,4 @@ Then open `http://localhost:5173/acme/support-bot/settings/general` (port from V
 
 - **G (coordinator):** D-L-2 amends D-G-19. G's M5 no longer builds `/login` or the 401 handling; it checks L's pages against the real server. If G's M5 lands before L5, it must not add a second login page; it waits for L or uses L's branch.
 - **H (CLI):** done. `llmobs login` sends `host` to `/cli-auth`, handles `error=access_denied` on the callback, and receives the token by form POST (D-L-9, spec 08). The token expires after 90 days.
-- **D owners (contract):** CG1–CG4 above.
+- **D owners (contract):** CG1, CG2, CG4 and CG5 above are closed; spec 09 and `openapi.json` match the server.

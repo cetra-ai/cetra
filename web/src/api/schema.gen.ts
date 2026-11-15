@@ -2328,9 +2328,9 @@ export interface components {
             name: string;
             /**
              * Format: int32
-             * @description Days to keep data, from 1 to 36500. Absent keeps data forever.
+             * @description Days to keep data, from 1 to 36500. Null or absent keeps data forever.
              */
-            retention_days?: number;
+            retention_days?: number | null;
             /** @description URL slug. Absent derives one from the name. Project slugs are not reserved words. */
             slug?: string;
         };
@@ -4972,7 +4972,7 @@ export interface components {
              * Format: int32
              * @description Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
              */
-            retention_days?: number;
+            retention_days?: number | null;
         };
         /**
          * @description Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.
