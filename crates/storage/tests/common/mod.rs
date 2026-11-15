@@ -3,6 +3,7 @@
 
 pub(crate) mod corpus;
 pub(crate) mod machine;
+pub(crate) mod parquet_stats;
 pub(crate) mod payload;
 pub(crate) mod rng;
 pub(crate) mod s3;

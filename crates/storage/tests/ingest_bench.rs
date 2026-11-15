@@ -1,8 +1,10 @@
-//! M6.6 — Ingest benchmark (`tests/ingest_bench.rs`, ignored).
+//! M6.6 — Ingest benchmark (`tests/ingest_bench.rs`, ignored), on realistic
+//! payloads since track R M7 (R7.3).
 //!
 //! Ingest rate, the flush drain and compaction throughput, on local disk or on
-//! S3 (`LLMOBS_TEST_S3_ENDPOINT`, as `tests/s3.rs` reads it). Run by hand in
-//! `--release`:
+//! S3 (`LLMOBS_TEST_S3_ENDPOINT`, as `tests/s3.rs` reads it). The spans are the
+//! traces of `common::payload`: real oasst2 text (`just fetch-corpus`), with the
+//! structure of the captured fixtures. Run by hand in `--release`:
 //!
 //! ```bash
 //! LLMOBS_INGEST_BENCH_DIR=/path/to/empty/dir cargo test --release \
@@ -23,7 +25,8 @@
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::print_stdout
 )]
 
 #[allow(dead_code)] // each test target uses part of the shared helpers
@@ -37,12 +40,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::RecordBatch;
 use bytesize::ByteSize;
+use common::corpus::Corpus;
 use common::machine::{dir_bytes, machine};
-use common::rng::Rng;
+use common::parquet_stats::{Sizes, active_spans_files, column_sizes};
+use common::payload::{self, Payloads, span_payload_bytes};
+use common::rng::mix;
 use common::s3::S3Env;
 use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+use llmobs_core::enums::SpanKind;
+use llmobs_core::ids::{ProjectId, TraceId};
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
     CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
@@ -50,13 +56,7 @@ use llmobs_storage::config::{
 use llmobs_storage::error::AppendError;
 use llmobs_storage::{CompactionReport, Storage};
 
-const SEED: u64 = 1;
 const BATCH_SPANS: usize = 1_000;
-const SPANS_PER_TRACE: usize = 10;
-const LLM_IO_BYTES: usize = 10 * 1024;
-const ATTRIBUTE_BYTES: usize = 300;
-const POOL: usize = 16;
-const SPAN_NS: i64 = 1_000_000;
 const HOUR_NS: i64 = 3_600 * 1_000_000_000;
 const MIB: f64 = 1024.0 * 1024.0;
 
@@ -72,113 +72,11 @@ fn trace_id(index: u64) -> TraceId {
     TraceId::from_bytes(bytes).unwrap()
 }
 
-fn span_id(index: u64) -> SpanId {
-    SpanId::from_bytes((index + 1).to_be_bytes()).unwrap()
-}
-
 fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as i64
-}
-
-/// Random lowercase words with spaces: compresses like prompt text.
-fn text(rng: &mut Rng, len: usize) -> String {
-    let mut out = String::with_capacity(len);
-    while out.len() < len {
-        let byte = if rng.below(6) == 0 {
-            b' '
-        } else {
-            b'a' + rng.below(26) as u8
-        };
-        out.push(char::from(byte));
-    }
-    out
-}
-
-/// One batch of `BATCH_SPANS` spans, `SPANS_PER_TRACE` per trace. 10% are LLM
-/// spans with 10 KiB input and output; the rest carry a 300-byte attribute and
-/// no input or output (spec 03's mix).
-fn build_batch(rng: &mut Rng, pool: &[String], traces: &AtomicU64, now: i64) -> Vec<Span> {
-    let per_batch = BATCH_SPANS / SPANS_PER_TRACE;
-    let first = traces.fetch_add(per_batch as u64, Ordering::Relaxed);
-    let mut spans = Vec::with_capacity(BATCH_SPANS);
-    for t in 0..per_batch {
-        let trace = trace_id(first + t as u64);
-        for s in 0..SPANS_PER_TRACE {
-            let llm = rng.below(10) == 0;
-            let (input, output, attributes) = if llm {
-                (
-                    Some(pool[rng.below(POOL)].clone()),
-                    Some(pool[rng.below(POOL)].clone()),
-                    BTreeMap::new(),
-                )
-            } else {
-                let mut attributes = BTreeMap::new();
-                attributes.insert(
-                    "bench.payload".to_owned(),
-                    pool[rng.below(POOL)][..ATTRIBUTE_BYTES].to_owned(),
-                );
-                (None, None, attributes)
-            };
-            spans.push(Span {
-                project_id: project(),
-                trace_id: trace,
-                span_id: span_id(s as u64),
-                parent_span_id: (s > 0).then(|| span_id(0)),
-                name: format!("span-{s}"),
-                span_kind: if llm { SpanKind::Llm } else { SpanKind::Span },
-                start_time: now,
-                end_time: now + SPAN_NS,
-                status: SpanStatus::Unset,
-                status_message: None,
-                service_name: None,
-                session_id: None,
-                user_id: None,
-                environment: None,
-                release: None,
-                tags: Vec::new(),
-                metadata: Default::default(),
-                provider: None,
-                request_model: None,
-                response_model: None,
-                operation: None,
-                input_tokens: None,
-                output_tokens: None,
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-                reasoning_tokens: None,
-                total_tokens: None,
-                cost_input: None,
-                cost_output: None,
-                cost_total: None,
-                cost_source: None,
-                ttft_ns: None,
-                request_params: None,
-                input,
-                input_format: None,
-                output,
-                output_format: None,
-                input_preview: None,
-                output_preview: None,
-                system_instructions: None,
-                tool_definitions: None,
-                attributes,
-                resource_attributes: Default::default(),
-                scope_name: None,
-                scope_version: None,
-                events: Vec::new(),
-                links: Vec::new(),
-                media_refs: Vec::new(),
-                truncated: Vec::new(),
-                conventions: Vec::new(),
-                ingest_time: now,
-                schema_version: 1,
-            });
-        }
-    }
-    spans
 }
 
 // ---------------------------------------------------------------- config
@@ -220,6 +118,10 @@ fn config(dir: &Path, s3: Option<&S3Env>, prefix: &str) -> StorageConfig {
 #[derive(Default, Clone, Copy)]
 struct Counts {
     spans: u64,
+    llm_spans: u64,
+    payload_bytes: u64,
+    /// Time spent building spans and their `RecordBatch`, summed over writers.
+    gen_nanos: u64,
     arrow_bytes: u64,
     backpressure: u64,
     last_ingest: i64,
@@ -228,25 +130,45 @@ struct Counts {
 impl Counts {
     fn add(&mut self, other: Counts) {
         self.spans += other.spans;
+        self.llm_spans += other.llm_spans;
+        self.payload_bytes += other.payload_bytes;
+        self.gen_nanos += other.gen_nanos;
         self.arrow_bytes += other.arrow_bytes;
         self.backpressure += other.backpressure;
         self.last_ingest = self.last_ingest.max(other.last_ingest);
     }
 }
 
+/// Appends batches of whole traces until the deadline. Each trace is generated
+/// with `payload::trace`; its first and late groups are both appended at once,
+/// since the bench measures throughput, not lateness.
 async fn write_until(
     storage: Arc<Storage>,
     deadline: Instant,
-    seed: u64,
-    pool: Arc<Vec<String>>,
+    payloads: Arc<Payloads>,
     traces: Arc<AtomicU64>,
 ) -> Counts {
-    let mut rng = Rng::new(seed);
     let mut counts = Counts::default();
     while Instant::now() < deadline {
+        let generating = Instant::now();
+        let mut spans: Vec<Span> = Vec::with_capacity(BATCH_SPANS + 64);
+        while spans.len() < BATCH_SPANS {
+            let index = traces.fetch_add(1, Ordering::Relaxed);
+            let generated =
+                payload::trace(&payloads, project(), trace_id(index), mix(index), now_ns());
+            for span in generated.first.iter().chain(&generated.late) {
+                counts.payload_bytes += span_payload_bytes(span) as u64;
+                counts.llm_spans += u64::from(span.span_kind == SpanKind::Llm);
+            }
+            spans.extend(generated.first);
+            spans.extend(generated.late);
+        }
         let now = now_ns();
-        let spans = build_batch(&mut rng, &pool, &traces, now);
+        for span in &mut spans {
+            span.ingest_time = now;
+        }
         let batch: RecordBatch = spans_to_record_batch(&spans).unwrap();
+        counts.gen_nanos += generating.elapsed().as_nanos() as u64;
         drop(spans);
         counts.arrow_bytes += batch.get_array_memory_size() as u64;
         loop {
@@ -263,6 +185,78 @@ async fn write_until(
         counts.last_ingest = counts.last_ingest.max(now);
     }
     counts
+}
+
+/// Sums of the columns named by `matches`, for one level's files.
+fn sum_matching(columns: &BTreeMap<String, Sizes>, matches: impl Fn(&str) -> bool) -> Sizes {
+    columns.iter().filter(|(path, _)| matches(path)).fold(
+        Sizes::default(),
+        |mut total, (_, sizes)| {
+            total.uncompressed += sizes.uncompressed;
+            total.compressed += sizes.compressed;
+            total
+        },
+    )
+}
+
+/// Compression of the active spans files, per level, for local disk. `when`
+/// names the point of the run; `arrow_bytes` is the Arrow size ingested.
+async fn print_compression(dir: &Path, arrow_bytes: u64, when: &str) {
+    let objects = dir.join("objects");
+    let files = active_spans_files(dir).await.unwrap();
+    let sizes = column_sizes(&objects, &files).unwrap();
+    let mut file_bytes: BTreeMap<String, u64> = BTreeMap::new();
+    for (level, path) in &files {
+        let len = std::fs::metadata(objects.join(path)).map_or(0, |meta| meta.len());
+        *file_bytes.entry(format!("L{level}")).or_default() += len;
+    }
+    println!("compression, {when}:");
+    let ratio = |s: Sizes| s.uncompressed as f64 / s.compressed.max(1) as f64;
+    for (level, columns) in &sizes {
+        let groups: [(&str, Sizes); 6] = [
+            (
+                "input",
+                sum_matching(columns, |p| p == "input" || p.starts_with("input.")),
+            ),
+            (
+                "output",
+                sum_matching(columns, |p| p == "output" || p.starts_with("output.")),
+            ),
+            (
+                "system_instructions",
+                sum_matching(columns, |p| {
+                    p == "system_instructions" || p.starts_with("system_instructions.")
+                }),
+            ),
+            (
+                "tool_definitions",
+                sum_matching(columns, |p| {
+                    p == "tool_definitions" || p.starts_with("tool_definitions.")
+                }),
+            ),
+            (
+                "attributes",
+                sum_matching(columns, |p| {
+                    p == "attributes" || p.starts_with("attributes.")
+                }),
+            ),
+            ("all columns", sum_matching(columns, |_| true)),
+        ];
+        println!("  {level}:");
+        for (label, sizes) in groups {
+            println!(
+                "    {label}: {} → {} = {:.2}×",
+                sizes.uncompressed,
+                sizes.compressed,
+                ratio(sizes)
+            );
+        }
+        let files = file_bytes.get(level).copied().unwrap_or(0);
+        println!(
+            "    Arrow / file bytes = {:.2}×",
+            arrow_bytes as f64 / files.max(1) as f64
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -289,24 +283,19 @@ async fn ingest_benchmark() {
     let config = config(&dir, s3.as_ref(), &prefix);
     let storage = Arc::new(Storage::open(config.clone()).await.unwrap());
 
-    let mut rng = Rng::new(SEED);
-    let pool: Arc<Vec<String>> = Arc::new(
-        (0..POOL)
-            .map(|_| text(&mut rng, LLM_IO_BYTES))
-            .collect::<Vec<_>>(),
-    );
+    // The corpus is read once, outside the timing.
+    let payloads = Arc::new(Payloads::new(Corpus::from_env()));
     let traces = Arc::new(AtomicU64::new(0));
 
     // 1. Ingest.
     let begun = Instant::now();
     let deadline = begun + Duration::from_secs(secs);
     let handles: Vec<_> = (0..writers)
-        .map(|w| {
+        .map(|_| {
             tokio::spawn(write_until(
                 Arc::clone(&storage),
                 deadline,
-                SEED + w as u64,
-                Arc::clone(&pool),
+                Arc::clone(&payloads),
                 Arc::clone(&traces),
             ))
         })
@@ -324,6 +313,12 @@ async fn ingest_benchmark() {
         total.arrow_bytes as f64 / MIB / ingest_secs,
         total.arrow_bytes as f64 / total.spans.max(1) as f64,
         total.backpressure,
+    );
+    let generation_share = total.gen_nanos as f64 / 1e9 / (writers as f64 * ingest_secs) * 100.0;
+    println!(
+        "payload: {:.0} payload bytes per span, {:.1}% LLM spans, generation {generation_share:.1}% of writer time",
+        total.payload_bytes as f64 / total.spans.max(1) as f64,
+        total.llm_spans as f64 / total.spans.max(1) as f64 * 100.0,
     );
 
     // 2. Drain: flush everything, then reopen.
@@ -343,6 +338,13 @@ async fn ingest_benchmark() {
         None => dir_bytes(&dir.join("objects")),
     };
     println!("drain: shutdown flushed in {drain_secs:.2} s; flushed object bytes {flushed}");
+    match &s3 {
+        Some(_) => println!(
+            "Arrow / flushed bytes = {:.2}×",
+            total.arrow_bytes as f64 / flushed.max(1) as f64
+        ),
+        None => print_compression(&dir, total.arrow_bytes, "L0, the flush output").await,
+    }
 
     // 3. Compaction: explicit passes until one commits nothing.
     let now = total.last_ingest + 3 * HOUR_NS;
@@ -364,6 +366,15 @@ async fn ingest_benchmark() {
         }
     }
     let compact_secs = begun.elapsed().as_secs_f64();
+    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+    if s3.is_none() {
+        print_compression(
+            &dir,
+            total.arrow_bytes,
+            "L1 and any L0 left, after compaction and GC",
+        )
+        .await;
+    }
     storage.shutdown().await.unwrap();
     drop(storage);
 
@@ -388,6 +399,6 @@ async fn ingest_benchmark() {
     println!("\n## M6.6 ingest benchmark\n");
     println!("Machine: {}", machine(&dir));
     println!(
-        "Store: {store}, ingest {secs} s, {writers} writers, batches of {BATCH_SPANS} spans, {SPANS_PER_TRACE} spans per trace, flush.max_bytes 256 MiB, memtable.hard_limit 1 GiB, min_free_bytes 0, compaction.interval 1 h",
+        "Store: {store}, ingest {secs} s, {writers} writers, batches of {BATCH_SPANS} spans, realistic traces (track R M7 payloads), flush.max_bytes 256 MiB, memtable.hard_limit 1 GiB, min_free_bytes 0, compaction.interval 1 h",
     );
 }

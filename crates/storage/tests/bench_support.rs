@@ -396,3 +396,50 @@ fn real_corpus_loads() {
     assert!(corpus.texts() >= 64_000, "texts {}", corpus.texts());
     assert!(corpus.turns() >= 40_000, "turns {}", corpus.turns());
 }
+
+// ---------------------------------------------------------------- parquet (R7.3)
+
+#[test]
+fn column_sizes_reads_parquet_metadata() {
+    use std::fs::File;
+    use std::sync::Arc;
+
+    use arrow::array::{ArrayRef, RecordBatch, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use common::parquet_stats::column_sizes;
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("input", DataType::Utf8, true)]));
+    let values: Vec<String> = (0..100)
+        .map(|i| format!("message {i} ").repeat(20))
+        .collect();
+    let column: ArrayRef = Arc::new(StringArray::from(values));
+    let batch = RecordBatch::try_new(Arc::clone(&schema), vec![column]).unwrap();
+    // zstd, as the spans files are written.
+    let properties = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        File::create(dir.path().join("0.parquet")).unwrap(),
+        schema,
+        Some(properties),
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let sizes = column_sizes(dir.path(), &[(1, "0.parquet".to_owned())]).unwrap();
+    let input = sizes["L1"]["input"];
+    assert!(
+        input.uncompressed > 0,
+        "uncompressed bytes of the input column"
+    );
+    assert!(input.compressed > 0, "compressed bytes of the input column");
+    assert!(
+        input.compressed < input.uncompressed,
+        "repetitive text compresses"
+    );
+}

@@ -924,3 +924,25 @@ fn step_draft(payloads: &Payloads, trace_seed: u64, index: usize) -> Draft {
         llm: false,
     }
 }
+
+/// The bytes `Content::bytes` counts for a built span: its payload fields and attributes.
+pub(crate) fn span_payload_bytes(span: &Span) -> usize {
+    [
+        &span.input,
+        &span.output,
+        &span.input_preview,
+        &span.output_preview,
+        &span.system_instructions,
+        &span.tool_definitions,
+        &span.request_params,
+    ]
+    .into_iter()
+    .flatten()
+    .map(String::len)
+    .sum::<usize>()
+        + span
+            .attributes
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>()
+}
