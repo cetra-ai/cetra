@@ -6,7 +6,9 @@ use futures::future::try_join_all;
 
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
+use crate::hot::Layer;
 use crate::narrow::{Dictionary, decode_chunk};
+use crate::payload::read_payload_column;
 use crate::segment::{Kind, SegmentRef};
 
 /// Decodes every row of column `column` (its schema index).
@@ -21,17 +23,26 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
         .ok_or_else(|| StrataError::Schema {
             reason: format!("no column {column}"),
         })?;
-    let entries = file.block_entries(column).await?;
-    if entries.is_empty() {
-        return Ok(new_empty_array(field.data_type()));
-    }
-
     let record = file
         .directory()
         .get(column)
         .ok_or_else(|| StrataError::Schema {
             reason: format!("no column {column}"),
         })?;
+    match record.layer {
+        Layer::Payload => return read_payload_column(file, record, field).await,
+        Layer::Narrow => {}
+        _ => {
+            return Err(StrataError::Unsupported {
+                what: format!("layer of column {column}"),
+            });
+        }
+    }
+    let entries = file.block_entries(column).await?;
+    if entries.is_empty() {
+        return Ok(new_empty_array(field.data_type()));
+    }
+
     // Bit 0 of the flags says the column has a dictionary, and the offset must agree.
     let dict = match (record.flags & 1 != 0, record.dict_offset != 0) {
         (true, true) => {

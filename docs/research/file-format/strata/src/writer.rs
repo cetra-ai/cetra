@@ -15,6 +15,7 @@ use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_fil
 use crate::narrow::{
     BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, numeric_of,
 };
+use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats};
 use crate::segment::{Codec, Kind, SegmentCodec, encode_segment};
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
@@ -40,6 +41,8 @@ pub struct ColumnSummary {
     pub bytes: u64,
     /// Number of chunks.
     pub chunks: u32,
+    /// Payload-layer statistics; `None` for narrow columns.
+    pub payload: Option<PayloadStats>,
 }
 
 /// What the writer stored for the whole file.
@@ -169,6 +172,7 @@ impl StrataWriter {
         let mut out = Out(Vec::new());
         write_file_header(&mut out);
         let mut codec = SegmentCodec::new(self.config.zstd_level)?;
+        let mut frame_codec = SegmentCodec::new(FRAME_ZSTD_LEVEL)?;
 
         let mut directory = Vec::with_capacity(self.schema.fields().len());
         let mut pages = Out(Vec::new());
@@ -177,6 +181,44 @@ impl StrataWriter {
         let first_sort_column = self.sort_key.first().copied();
         for (index, field) in self.schema.fields().iter().enumerate() {
             let array = self.column(index)?;
+            let column_id = u32::try_from(index).map_err(|_| StrataError::Unsupported {
+                what: "more than 4 billion columns".to_string(),
+            })?;
+            if payload::is_payload(array.as_ref(), &self.config) {
+                let (header, stats) = payload::write_payload_column(
+                    array.as_ref(),
+                    &self.config,
+                    &mut codec,
+                    &mut frame_codec,
+                    &mut out,
+                )?;
+                let pages_offset =
+                    u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
+                        what: "more than 4 GiB of block-table page references".to_string(),
+                    })?;
+                directory.push(DirectoryRecord {
+                    column_id,
+                    parent: u32::MAX,
+                    layer: Layer::Payload,
+                    flags: 0,
+                    pages_offset,
+                    n_pages: 0,
+                    n_chunks: 0,
+                    dict_offset: 0,
+                    dict_len: 0,
+                    payload_offset: header.offset,
+                    payload_len: header.len,
+                    null_count: array.null_count() as u64,
+                });
+                summaries.push(ColumnSummary {
+                    name: field.name().clone(),
+                    encoding_counts: [0; 12],
+                    bytes: stats.bytes,
+                    chunks: 0,
+                    payload: Some(stats),
+                });
+                continue;
+            }
             let dict = for_column(array.as_ref(), &self.config);
             let (dict_offset, dict_len) = match &dict {
                 Some(dict) => {
@@ -285,9 +327,7 @@ impl StrataWriter {
                 what: "more than 4 billion chunks".to_string(),
             })?;
             directory.push(DirectoryRecord {
-                column_id: u32::try_from(index).map_err(|_| StrataError::Unsupported {
-                    what: "more than 4 billion columns".to_string(),
-                })?,
+                column_id,
                 parent: u32::MAX,
                 layer: Layer::Narrow,
                 // Bit 0 says the column has a dictionary.
@@ -306,6 +346,7 @@ impl StrataWriter {
                 encoding_counts: counts,
                 bytes,
                 chunks: n_chunks,
+                payload: None,
             });
         }
 

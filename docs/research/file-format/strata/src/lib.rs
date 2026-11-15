@@ -9,8 +9,7 @@
 //! `docs/research/file-format/prototype-plan.md` (one level up from this crate).
 //!
 //! The limits of M1 are:
-//! - the writer stores every column through the narrow layer only, however long its
-//!   values; the payload layer (M2) is not implemented;
+//! - payload columns have no search filters yet (M2.3);
 //! - there are no key filters, map shredding or `lookup` (M3);
 //! - there is no `scan`, no predicates, no pruning and no coalescing (M4);
 //! - there is no DataFusion integration (M5).
@@ -29,7 +28,6 @@
 mod format;
 mod hot;
 mod narrow;
-#[allow(dead_code)] // used by the writer from M2.2 on
 mod payload;
 mod segment;
 
@@ -44,5 +42,6 @@ mod writer;
 pub use config::Config;
 pub use error::{Result, StrataError};
 pub use file::StrataFile;
+pub use payload::PayloadStats;
 pub use reader::read_column;
 pub use writer::{ColumnSummary, FileSummary, StrataWriter};

@@ -3,7 +3,8 @@
 /// Tuning parameters. [`Config::default`] gives the values documented on each field.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// zstd level for narrow, frame and table segments. Default 3.
+    /// zstd level for narrow, refs, header and table segments. Default 3.
+    /// Payload frames use the fixed `FRAME_ZSTD_LEVEL`.
     pub zstd_level: i32,
     /// Maximum rows per narrow chunk. Default 4,096. The writer rejects values above 65,535
     /// (the `FSB_RLE` run lengths are `u16`).
@@ -18,6 +19,9 @@ pub struct Config {
     pub dict_max_values: usize,
     /// Maximum dictionary size in bytes. Default 64 KiB.
     pub dict_max_bytes: usize,
+    /// A Utf8 or Binary column whose average non-null value is at least this many bytes is
+    /// stored with the payload layer. Default 256.
+    pub payload_min_avg: usize,
     /// Suffix read length when no hot-tail length hint is given. Default 256 KiB.
     pub open_default_suffix: u64,
 }
@@ -31,6 +35,7 @@ impl Default for Config {
             page_max_entries: 64,
             dict_max_values: 65_535,
             dict_max_bytes: 64 * 1024,
+            payload_min_avg: 256,
             open_default_suffix: 256 * 1024,
         }
     }

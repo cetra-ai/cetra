@@ -229,6 +229,9 @@ impl StrataFile {
             .ok_or_else(|| StrataError::Schema {
                 reason: format!("no column {column}"),
             })?;
+        if record.layer == Layer::Payload {
+            return Ok(Arc::new(Vec::new()));
+        }
         let hot_offset = self.postscript.hot_offset;
         let pages = self.hot.pages_of(record)?;
         for page in &pages {
