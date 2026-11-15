@@ -706,6 +706,8 @@ fn document_lint() {
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
+                | "delete_org"
+                | "delete_project"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
