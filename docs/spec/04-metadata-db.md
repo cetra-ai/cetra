@@ -17,6 +17,7 @@ CREATE TABLE users (
   name TEXT,
   password_hash TEXT,                 -- argon2id PHC string; NULL for SSO-only users
   email_verified_at INTEGER,
+  email_verified_via TEXT,            -- 'mail_token' | 'idp' | 'invite' | 'control_plane' | 'operator' (D-P-66)
   is_instance_admin INTEGER NOT NULL DEFAULT 0,   -- first user; can manage instance settings
   disabled_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -37,7 +38,8 @@ CREATE TABLE web_sessions (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   user_agent TEXT, ip TEXT,
-  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL -- the org whose provider started it (D-P-59, track P M5)
+  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL, -- the org whose provider started it (D-P-59, track P M5)
+  via_provider INTEGER NOT NULL DEFAULT 0  -- 1 when any identity provider started it (D-P-69)
 );
 
 CREATE TABLE orgs (
@@ -199,11 +201,13 @@ CREATE TABLE deletion_projects (
 
 ## Pricing
 
+Custom prices of an org (`project_id` NULL, applies to every project of the org) or of one project (D-T-2). The built-in snapshot is not stored here: it stays embedded and is compiled once at startup (spec 02 § Cost computation).
+
 ```sql
 CREATE TABLE model_prices (
   id TEXT PRIMARY KEY,
-  scope TEXT NOT NULL,                -- 'builtin' | 'org' | 'project'
-  org_id TEXT, project_id TEXT,
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,  -- NULL: an org row
   model_name TEXT NOT NULL,           -- display name
   match_pattern TEXT NOT NULL,        -- regex, anchored, case-insensitive
   provider TEXT,
@@ -212,9 +216,13 @@ CREATE TABLE model_prices (
   tiers TEXT,                         -- JSON [{min_input_tokens, price_input, …}]
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX model_prices_key ON model_prices(
+  org_id, coalesce(project_id, ''), match_pattern, coalesce(provider, ''), valid_from
+);
+CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id IS NOT NULL;
 ```
 
-Built-in rows are re-seeded at each startup from the embedded snapshot (delete `scope='builtin'` + insert, in one transaction). The compiled matcher (`RegexSet` per scope) is cached in memory and rebuilt on change.
+At most 500 org rows per org and 500 rows per project (D-T-4). The server loads every row at startup and keeps one compiled table per org and per project that has rows; each write reloads its org (D-T-9). A write that would take away the price a budgeted online rule's judge model has is refused (D-T-8).
 
 ## Scores definitions
 

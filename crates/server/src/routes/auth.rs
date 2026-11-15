@@ -17,7 +17,7 @@ use crate::auth::password::check_policy;
 use crate::auth::principal::{self, Principal};
 use crate::auth::reset::{ResetError, reset_link, verification_link};
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
-use crate::auth::session::{clear_cookie, resolve_cookie_header, start_session};
+use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
@@ -31,6 +31,7 @@ use crate::meta::members;
 use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
 use crate::meta::personal_tokens::revoke_user_tokens;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, UserRow, normalize_email};
 use crate::meta::web_sessions::{delete_session, delete_user_sessions};
 
@@ -185,7 +186,7 @@ async fn setup(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         Some(ip),
-        None,
+        SessionOrigin::Password,
     )
     .await?;
     let trace_completion_timeout_s = created.created.project.completion_timeout_s();
@@ -357,7 +358,9 @@ async fn reset_password(
     let Some(user) = users::user_by_id(state.meta.reader(), user_id).await? else {
         return Err(invalid_link());
     };
-    if crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin {
+    if crate::ee::sso_enforcement::requires_sso(&state, &user.email)
+        || (crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin)
+    {
         return Err(ApiError::Forbidden {
             code: ProblemCode::SsoRequired,
         });
@@ -457,6 +460,7 @@ async fn forgot_password(
     let now = state.clock.now_ns();
     if let Some(user) = users::user_by_email(state.meta.reader(), &email).await?
         && user.disabled_at.is_none()
+        && !crate::ee::sso_enforcement::requires_sso(&state, &email)
         && !(crate::ee::org_sso::enforces(&state, &email) && !user.is_instance_admin)
         && mail_allowed(&state, &email, now)
     {
@@ -486,7 +490,7 @@ async fn verify_email(
                 else {
                     return Ok(None);
                 };
-                users::set_email_verified(conn, id, now).await?;
+                users::set_email_verified(conn, id, now, EmailVerifiedVia::MailToken).await?;
                 Ok(Some(()))
             })
         })
@@ -653,6 +657,7 @@ async fn signup(
                             name: name_for_insert,
                             password_hash: Some(password_hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::Invite),
                             is_instance_admin: false,
                         },
                         now,
@@ -695,6 +700,7 @@ async fn signup(
                         name: name_for_insert,
                         password_hash: Some(password_hash),
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,
@@ -763,7 +769,7 @@ async fn session_cookie(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         ip,
-        None,
+        SessionOrigin::Password,
     )
     .await
 }
@@ -1132,6 +1138,7 @@ mod tests {
                             name: Some("Ada".to_owned()),
                             password_hash: hash,
                             email_verified_at: verified_at,
+                            email_verified_via: verified_at.map(|_| EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -1391,6 +1398,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -2097,6 +2105,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -2110,7 +2119,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user_id, None, None, None)
+        let cookie = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
             .await
             .unwrap();
         let pair = cookie
@@ -2485,6 +2494,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: admin,
                         },
                         now,

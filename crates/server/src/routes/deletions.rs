@@ -52,7 +52,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/projects/{project}",
             access: Access::Project {
                 perm: ProjectPerm::Drop,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: delete(drop_project),
@@ -62,7 +62,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/orgs/{org}",
             access: Access::Org {
                 perm: OrgPerm::Delete,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: delete(drop_org),
@@ -1456,7 +1456,8 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(write_try.status, StatusCode::ACCEPTED);
+        // Dropping needs the session (D-P-70): a stolen read-write token cannot do it.
+        assert_eq!(write_try.status, StatusCode::FORBIDDEN);
         // The refused project is still active, so the owner may drop it.
         let owner_try = send(&app, Method::DELETE, &drop_path(&overridden), &owner, None).await;
         assert_eq!(owner_try.status, StatusCode::ACCEPTED);

@@ -727,8 +727,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete an organization (owners)
-         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.
+         * Delete an organization (owners, session only)
+         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_org"];
         options?: never;
@@ -1074,8 +1074,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete a project (org admins; API keys are refused)
-         * @description Answers 202; the project is gone from every route at once and its data is erased in the background.
+         * Delete a project (org admins; session only)
+         * @description Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_project"];
         options?: never;

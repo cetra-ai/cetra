@@ -365,6 +365,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -379,9 +380,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let cookie = header
             .to_str()
             .unwrap()

@@ -133,7 +133,7 @@ async fn list_members(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{Method, header};
+    use axum::http::Method;
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -142,17 +142,13 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::orgs::{insert_org, mark_org_deleting};
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, TestResponse, capture_logs, control_plane_token};
+    use crate::test_support::{TestApp, TestResponse, capture_logs};
 
     const PROVIDER: &str = "oidc:cloud";
 
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
-    }
-
     async fn lookup_with(app: &TestApp, token: &str, subject: &str, email: &str) -> TestResponse {
         app.request(Method::POST, "/api/internal/v1/memberships/lookup")
-            .header(header::AUTHORIZATION.as_str(), &bearer(token))
+            .control_plane(token)
             .json(&json!({ "subject": subject, "email": email }))
             .send()
             .await
@@ -163,7 +159,7 @@ mod tests {
             Method::GET,
             &format!("/api/internal/v1/orgs/{org}/members{query}"),
         )
-        .header(header::AUTHORIZATION.as_str(), &bearer(token))
+        .control_plane(token)
         .send()
         .await
     }
@@ -184,6 +180,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: false,
                         },
                         now,
@@ -212,6 +211,9 @@ mod tests {
                             name: Some("Named".to_owned()),
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: false,
                         },
                         now,
@@ -274,8 +276,8 @@ mod tests {
         join(&app, gone, user, OrgRole::Member).await;
         retire(&app, gone).await;
 
-        let token = control_plane_token("members");
-        let found = lookup_with(&app, &token, "sub-lookup", "ignored@example.com").await;
+        let token = "members";
+        let found = lookup_with(&app, token, "sub-lookup", "ignored@example.com").await;
         assert_eq!(found.status, 200);
         assert_eq!(
             found.json::<Value>(),
@@ -300,8 +302,8 @@ mod tests {
         )
         .await;
 
-        let token = control_plane_token("members");
-        let found = lookup_with(&app, &token, "unknown-subject", "  Mail@Example.COM ").await;
+        let token = "members";
+        let found = lookup_with(&app, token, "unknown-subject", "  Mail@Example.COM ").await;
         assert_eq!(found.status, 200);
         let body: Value = found.json();
         assert_eq!(body["user_id"], json!(user.to_string()));
@@ -312,8 +314,8 @@ mod tests {
     #[tokio::test]
     async fn lookup_of_an_unknown_user_is_empty() {
         let app = TestApp::new().await;
-        let token = control_plane_token("members");
-        let none = lookup_with(&app, &token, "nobody", "nobody@example.com").await;
+        let token = "members";
+        let none = lookup_with(&app, token, "nobody", "nobody@example.com").await;
         assert_eq!(none.status, 200);
         assert_eq!(none.json::<Value>(), json!({ "orgs": [] }));
     }
@@ -321,8 +323,8 @@ mod tests {
     #[tokio::test]
     async fn lookup_refuses_an_invalid_email() {
         let app = TestApp::new().await;
-        let token = control_plane_token("members");
-        let refused = lookup_with(&app, &token, "nobody", "not-an-email").await;
+        let token = "members";
+        let refused = lookup_with(&app, token, "nobody", "not-an-email").await;
         assert_eq!(refused.status, 400);
     }
 
@@ -334,9 +336,9 @@ mod tests {
         member(&app, home, "bea@example.com", OrgRole::Admin).await;
         member(&app, home, "ann@example.com", OrgRole::Owner).await;
         member(&app, home, "cy@example.com", OrgRole::Member).await;
-        let token = control_plane_token("members");
+        let token = "members";
 
-        let (all, logs) = capture_logs(async { members_with(&app, &token, home, "").await }).await;
+        let (all, logs) = capture_logs(async { members_with(&app, token, home, "").await }).await;
         assert_eq!(all.status, 200);
         assert!(!logs.contains("example.com"));
         let emails: Vec<String> = all.json::<Value>()["data"]
@@ -355,7 +357,7 @@ mod tests {
             ]
         );
 
-        let some = members_with(&app, &token, home, "?role=owner,admin").await;
+        let some = members_with(&app, token, home, "?role=owner,admin").await;
         assert_eq!(some.status, 200);
         let body: Value = some.json();
         let roles: Vec<(&str, &str)> = body["data"]
@@ -380,21 +382,21 @@ mod tests {
     async fn members_refuse_an_unknown_role() {
         let app = TestApp::new().await;
         let home = org(&app, "Roles", "roles").await;
-        let token = control_plane_token("members");
-        let refused = members_with(&app, &token, home, "?role=owner,boss").await;
+        let token = "members";
+        let refused = members_with(&app, token, home, "?role=owner,boss").await;
         assert_eq!(refused.status, 400);
     }
 
     #[tokio::test]
     async fn members_of_an_unknown_or_inactive_org_are_not_found() {
         let app = TestApp::new().await;
-        let token = control_plane_token("members");
-        let unknown = members_with(&app, &token, OrgId::new_v7(), "").await;
+        let token = "members";
+        let unknown = members_with(&app, token, OrgId::new_v7(), "").await;
         assert_eq!(unknown.status, 404);
 
         let gone = org(&app, "Retired", "retired").await;
         retire(&app, gone).await;
-        let inactive = members_with(&app, &token, gone, "").await;
+        let inactive = members_with(&app, token, gone, "").await;
         assert_eq!(inactive.status, 404);
     }
 
@@ -402,14 +404,14 @@ mod tests {
     async fn needs_the_members_scope() {
         let app = TestApp::new().await;
         let home = org(&app, "Scoped", "scoped").await;
-        let users = control_plane_token("users");
+        let users = "users";
         assert_eq!(
-            lookup_with(&app, &users, "sub", "x@example.com")
+            lookup_with(&app, users, "sub", "x@example.com")
                 .await
                 .status,
             403
         );
-        assert_eq!(members_with(&app, &users, home, "").await.status, 403);
+        assert_eq!(members_with(&app, users, home, "").await.status, 403);
         let anonymous = app
             .request(Method::POST, "/api/internal/v1/memberships/lookup")
             .json(&json!({ "subject": "sub", "email": "x@example.com" }))
@@ -429,8 +431,8 @@ mod tests {
             OrgRole::Member,
         )
         .await;
-        let token = control_plane_token("members");
-        let found = lookup_with(&app, &token, "sub-wins", "other@example.com").await;
+        let token = "members";
+        let found = lookup_with(&app, token, "sub-wins", "other@example.com").await;
         let body: Value = found.json();
         assert_eq!(body["user_id"], json!(linked.to_string()));
         assert_ne!(body["user_id"], json!(other.to_string()));

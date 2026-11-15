@@ -75,7 +75,7 @@ fn drop_json(row: &AppliedDrop) -> InternalDrop {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{Method, header};
+    use axum::http::Method;
     use serde_json::Value;
     use uuid::Uuid;
 
@@ -83,7 +83,7 @@ mod tests {
     use crate::meta::deletions::{
         ActorKind, DeletionState, NewDeletion, RequestDetails, insert_deletion, mark_applied,
     };
-    use crate::test_support::{TestApp, TestResponse, control_plane_token};
+    use crate::test_support::{TestApp, TestResponse};
     use llmobs_core::ids::{OrgId, ProjectId};
 
     /// Inserts one deletion of `kind` in `project` (a project for `project` and `trace_ids`), and
@@ -129,9 +129,8 @@ mod tests {
 
     /// `GET /api/internal/v1/deletions{query}` with a control-plane token of `scope`.
     async fn list(app: &TestApp, scope: &str, query: &str) -> TestResponse {
-        let token = control_plane_token(scope);
         app.request(Method::GET, &format!("/api/internal/v1/deletions{query}"))
-            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {token}"))
+            .control_plane(scope)
             .send()
             .await
     }
