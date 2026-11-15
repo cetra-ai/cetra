@@ -423,6 +423,11 @@ async fn deliver_once_retries_then_fails() {
         }
     }
     assert_eq!(receiver.received().len(), 8);
+    let text = app.state.telemetry.render(&app.state).await;
+    let failed = format!(
+        "llmobs_alert_deliveries_total{{channel=\"webhook\",outcome=\"failed\"}} {MAX_ATTEMPTS}"
+    );
+    assert!(text.lines().any(|line| line == failed), "{text}");
 }
 
 #[tokio::test]
@@ -441,6 +446,9 @@ async fn deliver_once_sends() {
     );
     let (status, attempts, _, error) = row(&app, id).await;
     assert_eq!((status.as_str(), attempts, error), ("sent", 1, None));
+    let text = app.state.telemetry.render(&app.state).await;
+    let sent = "llmobs_alert_deliveries_total{channel=\"webhook\",outcome=\"sent\"} 1";
+    assert!(text.lines().any(|line| line == sent), "{text}");
     assert_eq!(
         deliver_once(&app.state, NOW + SECOND).await.expect("pass"),
         DeliverReport::default()
@@ -466,6 +474,16 @@ async fn email_delivery_sends_to_each_recipient() {
     assert_eq!(sent[1].to, "b@x.io");
     let subject = format!("[{PRODUCT}] Firing: High errors");
     assert!(sent.iter().all(|mail| mail.subject == subject));
+    let text = app.state.telemetry.render(&app.state).await;
+    for line in [
+        "llmobs_emails_total{outcome=\"sent\"} 2",
+        "llmobs_alert_deliveries_total{channel=\"email\",outcome=\"sent\"} 1",
+    ] {
+        assert!(
+            text.lines().any(|candidate| candidate == line),
+            "{line}\n{text}"
+        );
+    }
 }
 
 #[tokio::test]

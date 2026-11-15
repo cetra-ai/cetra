@@ -171,6 +171,10 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .layer(middleware::from_fn(log_request))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::telemetry::track_http,
+        ))
         .with_state(state)
 }
 

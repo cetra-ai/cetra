@@ -325,7 +325,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let ingest = Ingest::new(&config.ingest, &config.media, prices);
-    let mailer = match crate::email::Mailer::from_config(&config) {
+    let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
+    let mailer = match crate::email::Mailer::from_config(&config, telemetry.emails.clone()) {
         Ok(mailer) => mailer.map(Arc::new),
         Err(_error) => {
             release_storage(storage).await;
@@ -422,7 +423,6 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
-    let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
     let state = AppState::new(AppInner {
         config,
         meta,

@@ -317,11 +317,15 @@ impl TestApp {
             })
             .expect("eval runner"),
         );
+        let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
         let mailer = if stub_mailer {
             let from = format!("{PRODUCT} <noreply@example.com>");
-            Some(Arc::new(crate::email::Mailer::stub(&from)))
+            Some(Arc::new(crate::email::Mailer::stub(
+                &from,
+                telemetry.emails.clone(),
+            )))
         } else {
-            crate::email::Mailer::from_config(&config)
+            crate::email::Mailer::from_config(&config, telemetry.emails.clone())
                 .expect("smtp settings build a mailer")
                 .map(Arc::new)
         };
@@ -360,7 +364,6 @@ impl TestApp {
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
-        let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
         let state = AppState::new(AppInner {
             config,
             meta,

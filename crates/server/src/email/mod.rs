@@ -14,9 +14,12 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use llmobs_core::names::PRODUCT;
 use minijinja::{AutoEscape, Environment, Value, context};
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
 
 use crate::api::account::OrgRole;
 use crate::config::{ServerConfig, SmtpUrl, Tls};
+use crate::telemetry::{EmailOutcome, EmailOutcomeLabel};
 
 /// How many times [`Mailer::send_in_background`] tries, including the first.
 const ATTEMPTS: u32 = 3;
@@ -221,6 +224,8 @@ pub(crate) struct Mailer {
     transport: Transport,
     from: Mailbox,
     templates: Environment<'static>,
+    /// `llmobs_emails_total`. A clone of the registry's family, so both count into one series.
+    emails: Family<EmailOutcomeLabel, Counter>,
 }
 
 impl Mailer {
@@ -230,7 +235,10 @@ impl Mailer {
     ///
     /// Returns [`MailError`] when the host cannot be used as an SMTP server
     /// name or a template does not parse. The message does not include the URL.
-    pub(crate) fn from_config(config: &ServerConfig) -> Result<Option<Self>, MailError> {
+    pub(crate) fn from_config(
+        config: &ServerConfig,
+        emails: Family<EmailOutcomeLabel, Counter>,
+    ) -> Result<Option<Self>, MailError> {
         let Some(smtp) = &config.smtp_url else {
             return Ok(None);
         };
@@ -249,12 +257,13 @@ impl Mailer {
             transport,
             from,
             templates: templates()?,
+            emails,
         }))
     }
 
     /// Stub transport. `from` is the `From` mailbox.
     #[cfg(test)]
-    pub(crate) fn stub(from: &str) -> Self {
+    pub(crate) fn stub(from: &str, emails: Family<EmailOutcomeLabel, Counter>) -> Self {
         Self {
             transport: Transport::Stub(Arc::new(std::sync::Mutex::new(StubInbox {
                 sent: Vec::new(),
@@ -262,6 +271,7 @@ impl Mailer {
             }))),
             from: from.parse().expect("stub from address is a mailbox"),
             templates: templates().expect("email templates parse"),
+            emails,
         }
     }
 
@@ -374,18 +384,34 @@ impl Mailer {
     /// Returns [`MailError`] for a bad address, a template failure, or an SMTP
     /// failure. The message does not include `to` or the server reply.
     pub(crate) async fn send_now(&self, to: &str, email: &Email) -> Result<(), MailError> {
-        self.deliver(to, email)
+        let result = self
+            .deliver(to, email)
             .await
             .map(|_| ())
-            .map_err(|failure| failure.error)
+            .map_err(|failure| failure.error);
+        let outcome = match &result {
+            Ok(()) => EmailOutcome::sent,
+            Err(MailError::RestoreMode) => EmailOutcome::refused,
+            Err(_) => EmailOutcome::failed,
+        };
+        self.emails
+            .get_or_create(&EmailOutcomeLabel { outcome })
+            .inc();
+        result
     }
 
     /// Send on a background task. Up to three attempts, waiting 1 s then 2 s.
     ///
     /// The log line carries `template`, `message_id`, and `attempt`. A failure
-    /// also carries `kind`. The recipient is not logged.
+    /// also carries `kind`. The recipient is not logged. `llmobs_emails_total`
+    /// counts the message once, at its final outcome.
     pub(crate) fn send_in_background(self: &Arc<Self>, to: String, email: Email) {
         if matches!(self.transport, Transport::Off) {
+            self.emails
+                .get_or_create(&EmailOutcomeLabel {
+                    outcome: EmailOutcome::refused,
+                })
+                .inc();
             tracing::warn!(
                 template = template_name(&email),
                 "email not sent: restore mode"
@@ -399,6 +425,12 @@ impl Mailer {
             loop {
                 match mailer.deliver(&to, &email).await {
                     Ok(message_id) => {
+                        mailer
+                            .emails
+                            .get_or_create(&EmailOutcomeLabel {
+                                outcome: EmailOutcome::sent,
+                            })
+                            .inc();
                         tracing::info!(
                             target: "email",
                             template,
@@ -413,6 +445,12 @@ impl Mailer {
                         attempt += 1;
                     }
                     Err(failure) => {
+                        mailer
+                            .emails
+                            .get_or_create(&EmailOutcomeLabel {
+                                outcome: EmailOutcome::failed,
+                            })
+                            .inc();
                         tracing::warn!(
                             target: "email",
                             template,
@@ -623,10 +661,14 @@ mod tests {
     use crate::config::{SmtpUrl, Tls};
     use crate::test_support::{TestApp, capture_logs, config};
 
-    use super::{Email, MailError, Mailer};
+    use prometheus_client::metrics::counter::Counter;
+    use prometheus_client::metrics::family::Family;
+
+    use super::{Email, MailError, Mailer, Transport, templates};
+    use crate::telemetry::{EmailOutcome, EmailOutcomeLabel};
 
     fn mailer() -> Mailer {
-        Mailer::stub("llmobs <noreply@example.com>")
+        Mailer::stub("llmobs <noreply@example.com>", Default::default())
     }
 
     #[tokio::test]
@@ -641,7 +683,11 @@ mod tests {
         });
         cfg.email_from = Some("llmobs <noreply@example.com>".to_owned());
         cfg.restore_mode = true;
-        let mailer = Arc::new(Mailer::from_config(&cfg).unwrap().expect("a mailer"));
+        let mailer = Arc::new(
+            Mailer::from_config(&cfg, Default::default())
+                .unwrap()
+                .expect("a mailer"),
+        );
 
         let err = mailer
             .send_now("ada@example.com", &Email::Test)
@@ -662,7 +708,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = config(dir.path());
         cfg.restore_mode = true;
-        assert!(Mailer::from_config(&cfg).unwrap().is_none());
+        assert!(
+            Mailer::from_config(&cfg, Default::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sent_and_refused_mail_are_counted() {
+        let emails = Family::<EmailOutcomeLabel, Counter>::default();
+        let stub = Mailer::stub("llmobs <noreply@example.com>", emails.clone());
+        stub.send_now("ada@example.com", &Email::Test)
+            .await
+            .expect("the stub accepts");
+        let sent = EmailOutcomeLabel {
+            outcome: EmailOutcome::sent,
+        };
+        assert_eq!(emails.get_or_create(&sent).get(), 1);
+
+        let refusing = Mailer {
+            transport: Transport::Off,
+            from: "llmobs <noreply@example.com>".parse().expect("mailbox"),
+            templates: templates().expect("templates parse"),
+            emails: emails.clone(),
+        };
+        refusing
+            .send_now("ada@example.com", &Email::Test)
+            .await
+            .expect_err("restore mode");
+        let refused = EmailOutcomeLabel {
+            outcome: EmailOutcome::refused,
+        };
+        assert_eq!(emails.get_or_create(&refused).get(), 1);
     }
 
     fn rendered(mailer: &Mailer, email: &Email) -> String {

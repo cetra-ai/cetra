@@ -23,7 +23,16 @@ use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
+use axum::extract::{MatchedPath, Request, State};
+use axum::http::StatusCode;
+use axum::middleware::Next;
+use axum::response::Response;
+use llmobs_storage::error::{AppendError, MediaError};
+
+use crate::api::alerts::ChannelKind;
 use crate::http::AppState;
+use crate::ingest::IngestError;
+use crate::ingest::body::BodyError;
 
 /// The prefix of every `llmobs_*` metric. The product rename (D46) changes this line.
 const PREFIX: &str = "llmobs";
@@ -62,35 +71,25 @@ pub(crate) struct Telemetry {
     process_resident_memory_bytes: Gauge,
     /// `process_open_fds`. Linux only; left as it was elsewhere.
     process_open_fds: Gauge,
-    /// `llmobs_http_requests_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_http_requests_total`
     pub(crate) http_requests: Family<HttpLabels, Counter>,
-    /// `llmobs_http_request_duration_seconds`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_http_request_duration_seconds`
     pub(crate) http_request_duration_seconds: Family<HttpRouteLabels, Histogram, fn() -> Histogram>,
-    /// `llmobs_ingest_requests_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_ingest_requests_total`
     pub(crate) ingest_requests: Family<IngestLabels, Counter>,
-    /// `llmobs_ingest_spans_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_ingest_spans_total`
     pub(crate) ingest_spans: Family<ProtocolLabel, Counter>,
-    /// `llmobs_ingest_bytes_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_ingest_bytes_total`
     pub(crate) ingest_bytes: Family<ProtocolLabel, Counter>,
-    /// `llmobs_eval_jobs_finished_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_eval_jobs_finished_total`
     pub(crate) eval_jobs_finished: Family<EvalOutcomeLabel, Counter>,
-    /// `llmobs_eval_run_duration_seconds`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_eval_run_duration_seconds`
     pub(crate) eval_run_duration_seconds: Family<EvalKindLabel, Histogram, fn() -> Histogram>,
-    /// `llmobs_alert_evaluations_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_alert_evaluations_total`
     pub(crate) alert_evaluations: Family<AlertOutcomeLabel, Counter>,
-    /// `llmobs_alert_deliveries_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_alert_deliveries_total`
     pub(crate) alert_deliveries: Family<DeliveryLabels, Counter>,
-    /// `llmobs_emails_total`. Counted from phase 06 (N M3).
-    #[expect(dead_code, reason = "counted from phase 06 (N M3)")]
+    /// `llmobs_emails_total`
     pub(crate) emails: Family<EmailOutcomeLabel, Counter>,
 }
 
@@ -361,6 +360,69 @@ impl Telemetry {
         }
     }
 
+    /// Counts a refused OTLP ingest request.
+    pub(crate) fn refuse_ingest(&self, protocol: Protocol, outcome: IngestOutcome) {
+        self.ingest_requests
+            .get_or_create(&IngestLabels { protocol, outcome })
+            .inc();
+    }
+
+    /// Counts an accepted OTLP ingest request with its spans, and its body bytes as received.
+    pub(crate) fn accept_ingest(&self, protocol: Protocol, spans: u64, bytes: u64) {
+        self.ingest_requests
+            .get_or_create(&IngestLabels {
+                protocol,
+                outcome: IngestOutcome::ok,
+            })
+            .inc();
+        self.ingest_spans
+            .get_or_create(&ProtocolLabel { protocol })
+            .inc_by(spans);
+        self.ingest_bytes
+            .get_or_create(&ProtocolLabel { protocol })
+            .inc_by(bytes);
+    }
+
+    /// Counts an evaluation job that reached a final status.
+    pub(crate) fn finish_eval(&self, outcome: EvalOutcome) {
+        self.eval_jobs_finished
+            .get_or_create(&EvalOutcomeLabel { outcome })
+            .inc();
+    }
+
+    /// Observes the wall time of one evaluator run, in seconds.
+    pub(crate) fn eval_run(&self, kind: EvalKind, seconds: f64) {
+        self.eval_run_duration_seconds
+            .get_or_create(&EvalKindLabel { kind })
+            .observe(seconds);
+    }
+
+    /// Counts one alert evaluation pass's rules: those evaluated, and those whose query or write failed.
+    pub(crate) fn alert_evaluated(&self, ok: usize, failed: usize) {
+        for (outcome, count) in [(Outcome::ok, ok), (Outcome::failed, failed)] {
+            self.alert_evaluations
+                .get_or_create(&AlertOutcomeLabel { outcome })
+                .inc_by(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+    }
+
+    /// Counts one alert delivery attempt on the channel's kind.
+    pub(crate) fn alert_delivered(&self, kind: ChannelKind, sent: bool) {
+        let channel = match kind {
+            ChannelKind::Slack => Channel::slack,
+            ChannelKind::Webhook => Channel::webhook,
+            ChannelKind::Email => Channel::email,
+        };
+        let outcome = if sent {
+            DeliveryOutcome::sent
+        } else {
+            DeliveryOutcome::failed
+        };
+        self.alert_deliveries
+            .get_or_create(&DeliveryLabels { channel, outcome })
+            .inc();
+    }
+
     fn refresh_process(&self) {
         if let Some(bytes) = resident_memory_bytes() {
             self.process_resident_memory_bytes.set(bytes);
@@ -408,6 +470,62 @@ fn http_seconds() -> Histogram {
 
 fn eval_seconds() -> Histogram {
     Histogram::new(exponential_buckets(0.05, 2.0, 12))
+}
+
+/// Counts each answered request by route template, method and status class, and times it
+/// (N M3). An unmatched request, the UI and its assets, and a method no route takes are
+/// `route="other"`. A streamed body is timed when its headers are sent.
+pub(crate) async fn track_http(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = Method::of(request.method());
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("other", MatchedPath::as_str)
+        .to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    // A 1xx is not a final response: it is counted in neither metric.
+    if let Some(status) = StatusClass::of(response.status()) {
+        state
+            .telemetry
+            .http_requests
+            .get_or_create(&HttpLabels {
+                route: route.clone(),
+                method,
+                status,
+            })
+            .inc();
+        state
+            .telemetry
+            .http_request_duration_seconds
+            .get_or_create(&HttpRouteLabels { route, method })
+            .observe(started.elapsed().as_secs_f64());
+    }
+    response
+}
+
+/// The `outcome` of a refused OTLP ingest request (phase 06).
+pub(crate) fn ingest_outcome(error: &IngestError) -> IngestOutcome {
+    match error {
+        IngestError::Body(BodyError::TooLarge) => IngestOutcome::too_large,
+        IngestError::Body(_)
+        | IngestError::TooManySpans
+        | IngestError::Decode(_)
+        | IngestError::Batch(_)
+        | IngestError::MediaHash
+        | IngestError::Media(MediaError::Invalid { .. }) => IngestOutcome::invalid,
+        IngestError::Busy | IngestError::RateLimited { .. } => IngestOutcome::rate_limited,
+        IngestError::Append(AppendError::DiskFull) | IngestError::Media(MediaError::DiskFull) => {
+            IngestOutcome::disk_full
+        }
+        IngestError::Append(_) | IngestError::Media(_) | IngestError::Join(_) => {
+            IngestOutcome::unavailable
+        }
+    }
 }
 
 /// The `version` label of `llmobs_build_info`.
@@ -495,7 +613,6 @@ pub(crate) struct EmailOutcomeLabel {
 /// The HTTP method label. Any other method is `other`.
 #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum Method {
     GET,
     POST,
@@ -507,10 +624,25 @@ pub(crate) enum Method {
     other,
 }
 
+impl Method {
+    /// The label of `method`; a method no route here names is `other`.
+    pub(crate) fn of(method: &axum::http::Method) -> Self {
+        match method.as_str() {
+            "GET" => Self::GET,
+            "POST" => Self::POST,
+            "PUT" => Self::PUT,
+            "PATCH" => Self::PATCH,
+            "DELETE" => Self::DELETE,
+            "HEAD" => Self::HEAD,
+            "OPTIONS" => Self::OPTIONS,
+            _ => Self::other,
+        }
+    }
+}
+
 /// The status class label: `2xx`, `3xx`, `4xx` or `5xx`. Not an identifier, so its encoding is
 /// written by hand.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum StatusClass {
     Class2xx,
     Class3xx,
@@ -530,10 +662,22 @@ impl EncodeLabelValue for StatusClass {
     }
 }
 
+impl StatusClass {
+    /// The class of a response. `None` below 200: a 1xx is not a final response.
+    pub(crate) fn of(status: StatusCode) -> Option<Self> {
+        match status.as_u16() {
+            200..=299 => Some(Self::Class2xx),
+            300..=399 => Some(Self::Class3xx),
+            400..=499 => Some(Self::Class4xx),
+            500..=599 => Some(Self::Class5xx),
+            _ => None,
+        }
+    }
+}
+
 /// The protocol label of the OTLP ingest counters.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum Protocol {
     otlp_http,
     otlp_grpc,
@@ -542,7 +686,6 @@ pub(crate) enum Protocol {
 /// The outcome label of `llmobs_ingest_requests_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum IngestOutcome {
     ok,
     invalid,
@@ -575,7 +718,6 @@ pub(crate) enum EvalStatus {
 /// The outcome label of `llmobs_eval_jobs_finished_total`: the final `eval_jobs` statuses.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum EvalOutcome {
     done,
     failed,
@@ -585,7 +727,6 @@ pub(crate) enum EvalOutcome {
 /// The `kind` label of `llmobs_eval_run_duration_seconds`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum EvalKind {
     llm_judge,
     webhook,
@@ -595,7 +736,6 @@ pub(crate) enum EvalKind {
 /// The outcome label of the alert evaluation counter and of the flush counters.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum Outcome {
     ok,
     failed,
@@ -604,7 +744,6 @@ pub(crate) enum Outcome {
 /// The `channel` label of `llmobs_alert_deliveries_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum Channel {
     email,
     webhook,
@@ -614,7 +753,6 @@ pub(crate) enum Channel {
 /// The `outcome` label of `llmobs_alert_deliveries_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum DeliveryOutcome {
     sent,
     failed,
@@ -623,7 +761,6 @@ pub(crate) enum DeliveryOutcome {
 /// The `outcome` label of `llmobs_emails_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
-#[expect(dead_code, reason = "counted from phase 06 (N M3)")]
 pub(crate) enum EmailOutcome {
     sent,
     failed,
@@ -764,6 +901,22 @@ mod tests {
             .parse()
             .expect("trace id");
         app.commit_trace_at(&seeded.project, trace, 0, now).await;
+        app.request(axum::http::Method::GET, "/api/auth/config")
+            .send()
+            .await;
+        app.request(
+            axum::http::Method::GET,
+            &format!("/api/v1/projects/{}/evaluators", seeded.project.id),
+        )
+        .header("cookie", &seeded.cookie)
+        .send()
+        .await;
+        app.request(axum::http::Method::POST, "/v1/traces")
+            .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await;
         let text = render(&app).await;
         let project_id = seeded.project.id.to_string();
         for secret in [
@@ -774,6 +927,31 @@ mod tests {
         ] {
             assert!(!text.contains(secret), "{secret} is in the output");
         }
+        // A raw UUID is 8 hex digits, a dash, and so on. A route template has none.
+        let uuid_like = text
+            .as_bytes()
+            .windows(9)
+            .any(|window| window[8] == b'-' && window[..8].iter().all(u8::is_ascii_hexdigit));
+        assert!(!uuid_like, "{text}");
+    }
+
+    #[tokio::test]
+    async fn http_requests_are_counted_by_route() {
+        let app = TestApp::new().await;
+        for _ in 0..2 {
+            app.request(axum::http::Method::GET, "/api/auth/config")
+                .send()
+                .await;
+        }
+        app.request(axum::http::Method::GET, "/nope/xyz")
+            .send()
+            .await;
+        let text = render(&app).await;
+        let answered = "llmobs_http_requests_total{route=\"/api/auth/config\",method=\"GET\",status=\"2xx\"} 2";
+        assert!(text.lines().any(|line| line == answered), "{text}");
+        let unmatched =
+            "llmobs_http_requests_total{route=\"other\",method=\"GET\",status=\"4xx\"} 1";
+        assert!(text.lines().any(|line| line == unmatched), "{text}");
     }
 
     #[cfg(target_os = "linux")]

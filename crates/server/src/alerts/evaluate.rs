@@ -163,6 +163,10 @@ pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<Evaluate
             report.failed += 1;
         }
     }
+    state.telemetry.alert_evaluated(
+        report.evaluated.saturating_sub(report.failed),
+        report.failed,
+    );
     Ok(report)
 }
 

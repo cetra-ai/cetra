@@ -2607,7 +2607,7 @@ mod tests {
     fn mailer_follows_smtp_url() {
         let absent = load_from(None, &[]).unwrap();
         assert!(
-            crate::email::Mailer::from_config(&absent)
+            crate::email::Mailer::from_config(&absent, Default::default())
                 .unwrap()
                 .is_none()
         );
@@ -2618,7 +2618,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            crate::email::Mailer::from_config(&present)
+            crate::email::Mailer::from_config(&present, Default::default())
                 .unwrap()
                 .is_some()
         );

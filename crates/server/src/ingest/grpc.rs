@@ -37,6 +37,7 @@ use crate::http::AppState;
 use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
 use crate::meta::projects::ProjectRow;
+use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
 /// The status message of a rate refusal. The wrapper logs it at `debug`.
 const RATE_LIMITED_MESSAGE: &str = "rate limited";
@@ -141,6 +142,9 @@ where
                 }
                 Err(status) => {
                     log_refusal(&status, started);
+                    state
+                        .telemetry
+                        .refuse_ingest(Protocol::otlp_grpc, admit_outcome(&status));
                     Ok(status.into_http())
                 }
             }
@@ -206,7 +210,10 @@ async fn export_request(
     let message = request.into_inner();
     // The admission reserved the largest message; give back what the decoded one does not use.
     let size = message.encoded_len();
-    state.ingest.fit(&mut reservation, size)?;
+    state
+        .ingest
+        .fit(&mut reservation, size)
+        .map_err(|error| refused(state, error))?;
     let bytes = u64::try_from(size).unwrap_or(u64::MAX);
     let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
@@ -225,8 +232,10 @@ async fn export_request(
             retention_cap,
             now,
         )
-        .await?;
-    check_rate(state, project.org_id, normalized.spans.len(), now)?;
+        .await
+        .map_err(|error| refused(state, error))?;
+    check_rate(state, project.org_id, normalized.spans.len(), now)
+        .map_err(|error| refused(state, error))?;
     let rejected = normalized.rejections.total();
     let partial = partial_success(&normalized.rejections).map(|(rejected_spans, error_message)| {
         ExportTracePartialSuccess {
@@ -240,7 +249,14 @@ async fn export_request(
         request_bytes: bytes,
         now_ns: now,
     };
-    let receipt = commit_in_task(state, target, normalized, reservation).await?;
+    let receipt = commit_in_task(state, target, normalized, reservation)
+        .await
+        .map_err(|error| refused(state, error))?;
+    state.telemetry.accept_ingest(
+        Protocol::otlp_grpc,
+        u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
+        bytes,
+    );
     tracing::info!(
         target: "ingest",
         transport = "grpc",
@@ -297,6 +313,24 @@ fn log_refusal(status: &tonic::Status, started: Instant) {
             reason = status.message(),
             "request refused"
         );
+    }
+}
+
+/// Counts a refused ingest step, then converts it to its status. The outcome comes from the
+/// variant, because the status alone cannot tell `disk_full` or a rate refusal from a busy budget.
+fn refused(state: &AppState, error: IngestError) -> tonic::Status {
+    state
+        .telemetry
+        .refuse_ingest(Protocol::otlp_grpc, ingest_outcome(&error));
+    tonic::Status::from(error)
+}
+
+/// The outcome of a refused admission: the credential, the scope, the project or the cap.
+fn admit_outcome(status: &tonic::Status) -> IngestOutcome {
+    match status.code() {
+        Code::Unauthenticated | Code::PermissionDenied => IngestOutcome::unauthorized,
+        Code::ResourceExhausted => IngestOutcome::quota,
+        _ => IngestOutcome::unavailable,
     }
 }
 
@@ -590,5 +624,41 @@ mod tests {
             .expect_err("the bucket is empty");
         assert_eq!(status.code(), Code::Unavailable);
         assert_eq!(status.message(), "rate limited");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_grpc_export_is_counted() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        let message = traces();
+        let spans = span_count(&message);
+        let bytes = message.encoded_len();
+        send(&app.state, &[bearer(&seeded.ingest_key)], &message)
+            .await
+            .expect("exported");
+        let text = app.state.telemetry.render(&app.state).await;
+        let expected = [
+            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
+            format!("llmobs_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
+            format!("llmobs_ingest_bytes_total{{protocol=\"otlp_grpc\"}} {bytes}"),
+        ];
+        for line in expected {
+            assert!(
+                text.lines().any(|candidate| candidate == line),
+                "{line}\n{text}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refused_grpc_credentials_are_counted() {
+        let app = TestApp::new().await;
+        send(&app.state, &[], &traces())
+            .await
+            .expect_err("no credentials");
+        let text = app.state.telemetry.render(&app.state).await;
+        let line =
+            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
+        assert!(text.lines().any(|candidate| candidate == line), "{text}");
     }
 }
