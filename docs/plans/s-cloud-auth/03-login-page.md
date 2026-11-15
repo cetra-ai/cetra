@@ -28,7 +28,8 @@
 | File | Change |
 |---|---|
 | `web/src/lib/external-navigation.ts` | `replace` in `ExternalNavigator`; `replaceExternal` |
-| `web/src/lib/external-navigation.test.ts` | nothing to change unless the type needs it |
+| `web/src/lib/external-navigation.test.ts` | a test of `replaceExternal` |
+| `web/src/test/auth-gate.test.tsx` | the sign-out test's search assertion |
 | `web/src/routes/cli-auth.test.tsx` | its test navigator gains `replace` |
 | `web/src/lib/search/auth.ts`, `auth.test.ts` | `signed_out` flag |
 | `web/src/lib/only-provider.ts` (new), `web/src/lib/only-provider.test.ts` (new) | `onlyProvider` |
@@ -68,7 +69,8 @@
    }
    ```
 
-4. In `web/src/routes/cli-auth.test.tsx`, the object passed to `setExternalNavigator` in `beforeEach` gains `replace: (url) => { urls.push(url); },` after `navigate`. In `login.test.tsx`, the existing SSO test's navigator gains `replace: () => { throw new Error("the SSO login never replaces the page"); },`.
+4. In `lib/external-navigation.test.ts`, add `replaceExternal goes through the navigator's replace`: `setExternalNavigator` with `navigate`, `replace` and `submit` that record their URLs, call `replaceExternal("/api/auth/authorize/github")`, assert `replace` got exactly that URL and `navigate`/`submit` nothing, then `setExternalNavigator(undefined)` (import `afterEach` or restore at the end). `browserNavigator.replace` itself stays untested: jsdom does not implement `location.replace`.
+5. In `web/src/routes/cli-auth.test.tsx`, the object passed to `setExternalNavigator` in `beforeEach` gains `replace: (url) => { urls.push(url); },` after `navigate`. In `login.test.tsx`, the existing SSO test's navigator gains `replace: () => { throw new Error("the SSO login never replaces the page"); },`.
 
 ### 2. `signed_out` (`lib/search/auth.ts`)
 
@@ -210,6 +212,8 @@ export function onlyProvider(config: Schema<"AuthConfig">): Schema<"AuthProvider
 
 Replace `void navigate({ to: "/login" })` with `void navigate({ to: "/login", search: { signed_out: true } })`, and the doc comment `/** POST /api/auth/logout, then /login. … */` with `/** POST /api/auth/logout, then /login?signed_out=1, which never starts a provider (D-S-6). A failed logout still leaves the page. */`.
 
+In `web/src/test/auth-gate.test.tsx`, the sign-out test asserts `expect(router.state.location.search).toEqual({});` after `await waitFor(() => expect(router.state.location.pathname).toBe("/login"));`; change it to `expect(router.state.location.search).toEqual({ signed_out: true });` (it still proves no `redirect` is kept).
+
 In `web/src/components/user-menu.test.tsx`, in the test with `await user.click(screen.getByRole("menuitem", { name: "Sign out" }));` that also asserts `expect(signedOut).toBe(true);`, add after the `waitFor(… "/login")` line: `expect(router.state.location.search).toMatchObject({ signed_out: true });`.
 
 ### 6. The reset page (`routes/reset.tsx`)
@@ -220,7 +224,7 @@ In `web/src/components/user-menu.test.tsx`, in the test with `await user.click(s
 
 ### 7. The account page (`routes/account.tsx`)
 
-1. Imports: `useSuspenseQuery` from `@tanstack/react-query`, `authConfigQuery` from `@/api/auth`, `meQuery` from `@/api/queries`.
+1. Imports: `useSuspenseQuery` from `@tanstack/react-query`, `authConfigQuery` from `@/api/auth`, `meQuery` from `@/api/queries`. Give the route a loader so the page never suspends on first render (the auth gate only loads `me`; existing account tests assert right after `renderApp`): `createFileRoute("/account")({ loader: ({ context }) => context.queryClient.ensureQueryData(authConfigQuery), component: AccountPage })`, as `reset.tsx` does.
 2. In `AccountPage`, add before `return`:
 
    ```ts
@@ -272,7 +276,8 @@ function recordNavigation() {
 2. `shows the instance admins' password form on password=1`: `signedOut(); onlyCloud(); const { replaced } = recordNavigation(); const bodies = loginSucceeds();` render `/login?password=1`; the text `Password sign-in is for instance admins.` is shown; `await fillAndSubmit(user, "root@example.com", "correct horse battery")`; `await waitFor(() => expect(bodies).toEqual([{ email: "root@example.com", password: "correct horse battery" }]))`; `replaced` is empty; no "Forgot password?" link.
 3. `shows a provider error instead of starting the provider again`: `onlyCloud()`, `/login?error=signup_closed`: the alert has `oauthErrorMessage("signup_closed")`; the "Continue with llmobs Cloud" link is there; `replaced` is empty.
 4. `does not start the provider right after signing out`: `onlyCloud()`, `/login?signed_out=1`: the status text `You're signed out.`; the provider link; `replaced` is empty.
-5. `links instance admins to the password form`: `onlyCloud()`, `/login?error=provider_error`; click the link "Instance admin? Sign in with a password"; `await screen.findByLabelText("Password")`; `router.state.location.search` matches `{ password: true }`; `replaced` is empty.
+5. `links instance admins to the password form`: `onlyCloud()`, `/login?error=provider_error`; click the link "Instance admin? Sign in with a password"; `await screen.findByLabelText("Password")`; `await waitFor(() => expect(router.state.location.search).toEqual({ password: true }))` (the link drops `error`); then `expect(replaced).toEqual([])`.
+5b. `shows the password form on password=1 under org SSO`: `signedOut(); onlyCloud({ sso_discovery: true }); const { replaced } = recordNavigation();` render `/login?password=1`: the "Password" field shows, the "Continue" button does not, `replaced` is empty (D-P-60 with D-S-4).
 6. `keeps the buttons with two providers`: `withConfig({ password_enabled: false })` (two providers), `/login`: both "Continue with" links, `replaced` empty, the admin link is there.
 7. `keeps the email step under org SSO`: `onlyCloud({ sso_discovery: true })`, `/login`: the "Continue" button and "Email" field, `replaced` empty.
 8. `keeps the password form when password sign-in is on`: `withConfig({ providers: [CLOUD] })`, `/login`: the "Password" field, `replaced` empty, no admin link.
@@ -281,7 +286,7 @@ Each test that renders the page calls `signedOut()` first, as the existing tests
 
 ### 10. Spec 11
 
-1. § "**Signed out (D-L-1).**": append: `When password login is off, \`sso_discovery\` is false and exactly one provider is configured, \`/login\` leaves at once for that provider with its \`?redirect=\` (location replaced, so Back does not return to it), except on \`?password=1\`, \`?error=\` and \`?signed_out=1\` (R7, D-S-5). Sign-out lands on \`/login?signed_out=1\`, which says "You're signed out." and never leaves at once, since the provider would sign the user straight back in (D-S-6). With password login off, the page links to \`/login?password=1\` ("Instance admin? Sign in with a password"), which shows the password form for instance admins (D-S-4); the reset page accepts a reset link, and the account page shows the password section, for instance admins only.`
+1. § "**Signed out (D-L-1).**": append: `When password login is off, \`sso_discovery\` is false and exactly one provider is configured, \`/login\` leaves at once for that provider with its \`?redirect=\` (location replaced, so Back does not return to it), except on \`?password=1\`, \`?error=\` and \`?signed_out=1\` (R7, D-S-5). Sign-out lands on \`/login\` with the \`signed_out\` flag (written \`?signed_out=true\`), which says "You're signed out." and never leaves at once, since the provider would sign the user straight back in (D-S-6). With password login off, the page links to \`/login?password=1\` ("Instance admin? Sign in with a password"), which shows the password form for instance admins (D-S-4); the reset page accepts a reset link, and the account page shows the password section, for instance admins only.`
 2. § "**Login with org SSO (track P's M5).**": change `/login?password=1\` skips the email step (instance admins, D-P-58, D-P-60).` to `/login?password=1\` skips the email step and shows the password form even when password login is off (instance admins, D-P-58, D-P-60, D-S-4).`
 
 ### 11. CHANGELOG

@@ -74,15 +74,20 @@
 
 5. Give `SignedInAsOther` a prop `onSignedOut: () => void` (add it to its props type) and call `onSignedOut();` first thing in its logout `onSuccess`, before `queryClient.removeQueries(…)`. Pass `onSignedOut={() => setSignedOutHere(true)}` where `InvitePage` renders `<SignedInAsOther …/>`.
 
-6. When `signedOutHere && only !== undefined`, the visitor sees the normal signed-out content (`SignInToAccept` or `SignupToJoin`, whose provider buttons carry `redirect={back}`). Add above it, as the first child of the returned `AuthLayout` (before `{children}`):
+6. When `signedOutHere && only !== undefined`, the visitor sees the normal signed-out content (`SignInToAccept` or `SignupToJoin`, whose provider buttons carry `redirect={back}`). In the final `return` of `InvitePage`, replace the child `{children}` of `<AuthLayout title={`Join ${preview.data.org.name}`} …>` with:
 
    ```tsx
-         {signedOutHere && only !== undefined ? (
-           <p className="text-sm text-muted-foreground">
-             {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
-           </p>
-         ) : null}
+         <>
+           {signedOutHere && signedOut && only !== undefined ? (
+             <p className="text-sm text-muted-foreground">
+               {`You're signed out here. If ${only.display_name} signs you back in as the other account, sign out there first.`}
+             </p>
+           ) : null}
+           {children}
+         </>
    ```
+
+   The notice shows only while the visitor has no session (the `SignInToAccept` and `SignupToJoin` branches).
 
 ### 2. Tests (`routes/invite/$token.test.tsx`)
 
