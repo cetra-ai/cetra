@@ -38,6 +38,7 @@ use crate::objects::OBJECT_STORE_URL;
 use crate::read_cache::{BLOCK, CacheStore, ReadCache};
 use crate::read_state::ReadState;
 use crate::verify::{VerifyQueue, verify_file};
+use crate::wal::segment::segment_header;
 use crate::wal::{Decoded, Table, decode_next, encode, push_framed, read_batch, segment_name};
 use crate::{
     ListScope, QueryContext, QueryOptions, ScoreListRequest, SortOrder, SpanListRequest, SpanSort,
@@ -192,7 +193,8 @@ fn stage(data: &[u8], scratch: &Scratch) -> Staged {
         let first_seq = input.u64();
         let mode = input.u8();
         let bytes = if mode & 1 == 0 {
-            let mut segment = Vec::new();
+            // A framed segment starts with its header; the raw branch stays headerless.
+            let mut segment = segment_header().to_vec();
             let frames = usize::from(input.u8()) % 5;
             for _ in 0..frames {
                 let seq = input.u64();

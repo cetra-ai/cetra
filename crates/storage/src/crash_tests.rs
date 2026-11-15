@@ -302,7 +302,7 @@ async fn child() {
 }
 
 /// Lossy seeds per crash point: `LLMOBS_LOSSY_SEEDS`, default 1 (R2.10).
-fn seeds() -> u64 {
+pub(crate) fn seeds() -> u64 {
     std::env::var("LLMOBS_LOSSY_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())

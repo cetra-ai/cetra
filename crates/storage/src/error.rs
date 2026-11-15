@@ -224,6 +224,16 @@ pub enum WalError {
         /// Byte offset of the corrupt record.
         offset: u64,
     },
+    /// A segment's header is not one this build reads (spec 03 § 12).
+    #[error("WAL segment {segment} of table {table}: {problem}")]
+    Header {
+        /// `spans` or `scores`.
+        table: &'static str,
+        /// Segment file name, for example `00000000000000000042.wal`.
+        segment: String,
+        /// What is wrong with the header.
+        problem: HeaderProblem,
+    },
     /// A segment file or its directory could not be read or written.
     #[error("{action} {path}: {source}")]
     Io {
@@ -235,6 +245,29 @@ pub enum WalError {
         #[source]
         source: io::Error,
     },
+}
+
+/// Why a WAL segment's header is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HeaderProblem {
+    /// The magic differs, or the file is shorter than the header and not a
+    /// prefix of it. Files written before format versions have no header.
+    #[error("not a WAL segment of this storage (it may predate format versions)")]
+    NotAWalSegment,
+    /// The version is not the one this build reads. No older version exists,
+    /// so the segment was written by a newer release.
+    #[error(
+        "format {found} is not the {supported} this build reads; the segment was written by a different release: run the release that wrote it, or restore the backup taken before the upgrade"
+    )]
+    NewerFormat {
+        /// The version in the segment header.
+        found: u16,
+        /// The version this build reads.
+        supported: u16,
+    },
+    /// The flags are not 0.
+    #[error("unknown flags; run the newer release")]
+    UnknownFlags,
 }
 
 impl WalError {

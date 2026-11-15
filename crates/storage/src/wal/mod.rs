@@ -5,7 +5,7 @@
 
 mod record;
 mod replay;
-mod segment;
+pub(crate) mod segment;
 pub(crate) mod writer;
 
 pub(crate) use replay::replay;

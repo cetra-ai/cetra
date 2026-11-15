@@ -56,6 +56,8 @@ Because rows may sit in the day before or after their own date, day pruning (§6
 
 One WAL per table (`spans`, `scores`), each a sequence of segment files. A segment is named with the seq of its first record, zero-padded to 20 digits, plus `.wal`. Segments rotate at `storage.wal.segment_bytes` (default 64 MiB). Rotation happens between groups, so one group can make a segment larger than the limit.
 
+Each segment starts with an 8-byte header (§ 12): the magic `LWAL`, the format version as a `u16`, and a `u16` of flags that must be 0. The header is written and fsynced when the segment is created, before any record, so no crash leaves a record behind a torn header. Records follow it; offsets in errors count from the start of the file.
+
 Record format. Every integer is little-endian. The checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. A payload longer than 256 MiB is rejected. The writer rejects a batch whose decoded size exceeds 1 GiB. Before decoding, a reader checks that every IPC buffer lies inside its message body, that the codec is LZ4 frame (any other codec is corrupt), and each LZ4 buffer's size prefix: -1 is stored raw, 0 is empty, and any other size must be at most 256 times its compressed length plus 64 bytes and must equal what its LZ4 frame decodes to. The decoded size of a record, stored-raw buffers included, is at most 1 GiB; a record that breaks any of these is corrupt.
 
 ```
@@ -89,6 +91,7 @@ A segment is fsynced before a newer one is created, at rotation and at open, so 
 - read segments in order, skip records with seq ≤ `flushed_seq`, and insert the rest into the memtable;
 - a record with a bad CRC or short read at the **tail** of the last segment is a torn write: truncate the segment there;
 - a bad record anywhere else is corruption: refuse to start unless `--wal-skip-corrupt`;
+- a segment whose header is not this build's (an unknown magic, a newer version or flags) refuses the open, is never truncated, and is not skipped by `--wal-skip-corrupt`; a segment shorter than the header that is a prefix of it holds no records (a torn creation): it is truncated to empty when it is the last one and skipped when it is not;
 - the next seq is `max(last valid record's seq, flushed_seq) + 1`, so a sequence number is never reused, even when `every_ms` lost a tail.
 
 ## 2. Memtable
@@ -496,11 +499,11 @@ Every write path, what it syncs and in what order. "fsync dir" is an fsync of th
 |---|---|---|---|---|
 | Data directory layout | `lib.rs` `prepare_layout`, `ensure_dir` | `mkdir` (or it exists) → fsync parent, at every open | open fails | `the_data_dir_layout_is_durable_after_a_crash_before_its_sync` |
 | Lock | `lib.rs` `lock_dir` | create `LOCK` → `flock` → fsync data dir | open fails | `a_second_open_is_locked_until_shutdown` (the lock; the fsync is not tested) |
-| WAL segment creation | `wal/segment.rs` `SegmentWriter::create` | create the file → fsync `wal/<table>/` | at open: open fails; at rotation: the writer stops | model (`LossyCrash`), crash children |
+| WAL segment creation | `wal/segment.rs` `SegmentWriter::create` | create the file, write the header, `fdatasync` the file, `fsync` `wal/<table>/` | at open: open fails; at rotation: the writer stops | `a_created_segment_keeps_its_header_through_a_lossy_crash`, `a_lossy_crash_after_an_interval_rotation_reopens`, model (`LossyCrash`), crash children |
 | WAL group, `"always"` | `wal/writer.rs` `IoJob::commit`, `SegmentWriter::sync` | `write_all` → `fdatasync` → memtable → publish → ack | the writer stops; the group stays as written; `WalFailed` | `a_failed_sync_leaves_the_group_and_does_not_sync_again`, `a_failed_sync_group_is_lost_on_power_loss`, model (`LossyCrash`) |
 | WAL group, interval | `wal/writer.rs` `IoJob::commit`, `run` | `write_all` → ack. `fdatasync` at the first group after the interval, at the idle timer, at shutdown, and before rotation | as above | `interval_rotation_syncs_the_old_segment`, `storage_matches_the_model_in_interval_mode` |
 | WAL rotation | `wal/writer.rs` `IoJob::commit` | `fdatasync` the old segment (interval mode) → create the new one (fsync dir) | the writer stops | `interval_rotation_syncs_the_old_segment` |
-| WAL replay | `wal/replay.rs` `recover_table`, `truncate_tail` | torn tail: `set_len` → fsync the file. The replayed segment is fsynced at open | open fails | `a_torn_tail_truncates_to_the_last_full_record`, `reopen_syncs_the_replayed_segment` |
+| WAL replay | `wal/replay.rs` `recover_table`, `truncate_tail` | torn tail: `set_len` → fsync the file. A segment shorter than the header that is a prefix of it holds no records: truncated to empty when last, skipped when not. The replayed segment is fsynced at open | open fails | `a_torn_tail_truncates_to_the_last_full_record`, `a_torn_header_is_a_torn_creation`, `reopen_syncs_the_replayed_segment` |
 | Discarded group | `wal/writer.rs` `discard_unacked` | `set_len(mark)` → fsync the file; unlink the new segment → fsync dir | logged; the writer is stopping anyway | `a_discarded_segment_stays_removed_after_a_lossy_crash` |
 | WAL truncation | `wal/mod.rs` `truncate_segments`, `flush.rs` `truncate_flushed` | unlink covered segments → fsync dir | logged and **retried** by the next flush. Not fatal, and why (below) | which segments go: `truncation_keeps_the_newest_segment_and_unflushed_records`. The retry: not tested |
 | Local object publish (flush, compaction, rewrite, media) | `objects.rs` `put_local`, `publish_local` | each new directory: fsync parent → temp file → write → fsync file → rename → fsync dir → the caller's catalog commit | the store stops (`SyncFailed`) | `a_failed_object_fsync_refuses_later_writes_and_deletes`, `a_failed_sync_of_a_new_day_directory_stops_the_store`, `an_outside_object_root_under_an_unsynced_ancestor_survives_a_lossy_crash`, crash children |
@@ -548,7 +551,7 @@ From the first public release (D185), a data directory written by any release mu
 | Surface | Where the number is | A reader that finds a newer one |
 |---|---|---|
 | Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
-| WAL | an 8-byte header at the start of every segment (§1) (M8) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
+| WAL | an 8-byte header at the start of every segment (§1) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
 | Parquet | KV key `llmobs.format_version` in every file (§3) (M8) | not read at query time: the directory marker comes first. Checked by the golden tests. |
 
 `llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
