@@ -25,3 +25,6 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   are unchanged.
 - The SQL console lists every saved query you can see, not only the first 1,000, and opens a
   `?view=` link to a query past the listed pages.
+- Deleted spans and the spans of a dropped project leave the WAL by the end of the next flush cycle,
+  not when the newest WAL segment fills (64 MiB): each committed flush starts a new segment when
+  the open one holds records, and deletes the segments it has flushed (D-A1-14).
