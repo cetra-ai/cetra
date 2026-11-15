@@ -858,6 +858,28 @@
     "file": "responses/datasets/01900000-0000-7000-8000-000000000c01.json"
   },
   {
+    "operation_id": "post_dataset_import",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dataset-import-result.json"
+  },
+  {
+    "operation_id": "post_dataset_import_preview",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {
+      "format": "csv"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-import-preview.json"
+  },
+  {
     "operation_id": "post_evaluator",
     "path_params": {},
     "query": {},

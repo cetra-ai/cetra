@@ -300,6 +300,60 @@ pub struct ImportRowError {
     pub message: String,
 }
 
+/// `?format=&partial=` of the preview.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewParams {
+    /// The file's format.
+    pub format: ImportFormat,
+    /// The body is the first part of a larger file (the browser sends at most 1 MiB).
+    #[serde(default)]
+    pub partial: bool,
+}
+
+/// `?format=` of the import.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ImportParams {
+    /// The file's format.
+    pub format: ImportFormat,
+}
+
+/// The head of a file as the import wizard shows it (D-J-6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ImportPreview {
+    pub format: ImportFormat,
+    /// CSV: the header. JSONL: the top-level keys of the shown rows, in first-seen order.
+    pub columns: Vec<String>,
+    /// At most 20. CSV: arrays of cell strings. JSONL: the parsed lines.
+    #[schema(schema_with = any_json_array)]
+    pub rows: Vec<Value>,
+    /// Lines of the head that could not be read.
+    pub errors: Vec<ImportRowError>,
+    /// More rows follow, or the head was cut.
+    pub truncated: bool,
+}
+
+/// The outcome of an import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ImportResult {
+    /// The version the import made.
+    pub version: i64,
+    /// Items imported.
+    pub imported: i64,
+    /// Rows rejected, all of them.
+    pub error_count: i64,
+    /// The first 100 rejected rows.
+    pub errors: Vec<ImportRowError>,
+}
+
+/// OpenAPI schema of `ImportPreview.rows`: an array of any JSON values.
+fn any_json_array() -> utoipa::openapi::schema::Array {
+    utoipa::openapi::schema::ArrayBuilder::new()
+        .items(any_json())
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

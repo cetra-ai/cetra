@@ -1293,6 +1293,46 @@ export interface paths {
         patch: operations["patch_dataset"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/datasets/{dataset}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import items from a CSV or JSONL file
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.
+         */
+        post: operations["post_dataset_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/import/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview the head of an import file
+         * @description Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).
+         */
+        post: operations["post_dataset_import_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/datasets/{dataset}/items": {
         parameters: {
             query?: never;
@@ -3763,6 +3803,64 @@ export interface components {
             name: string;
             /** @description Argument and return types, for example `score(name: string) -> float`. */
             signature: string;
+        };
+        /** @description Where one CSV column goes (D-J-6). */
+        ImportColumn: {
+            /** @description The header of the column, exactly as in the file. */
+            column: string;
+            /** @description `input`, `input.<key>`, `expected`, `expected.<key>`, `metadata.<key>` or `ignore`. */
+            target: string;
+        };
+        /**
+         * @description The format of an import or a preview (D-J-6).
+         * @enum {string}
+         */
+        ImportFormat: "csv" | "jsonl";
+        /** @description The column mapping of a CSV import. Columns the mapping does not list are ignored. */
+        ImportMapping: {
+            /** @description One entry per mapped column, at most 1,000. */
+            columns: components["schemas"]["ImportColumn"][];
+        };
+        /** @description The head of a file as the import wizard shows it (D-J-6). */
+        ImportPreview: {
+            /** @description CSV: the header. JSONL: the top-level keys of the shown rows, in first-seen order. */
+            columns: string[];
+            /** @description Lines of the head that could not be read. */
+            errors: components["schemas"]["ImportRowError"][];
+            format: components["schemas"]["ImportFormat"];
+            rows: unknown[];
+            /** @description More rows follow, or the head was cut. */
+            truncated: boolean;
+        };
+        /** @description The outcome of an import. */
+        ImportResult: {
+            /**
+             * Format: int64
+             * @description Rows rejected, all of them.
+             */
+            error_count: number;
+            /** @description The first 100 rejected rows. */
+            errors: components["schemas"]["ImportRowError"][];
+            /**
+             * Format: int64
+             * @description Items imported.
+             */
+            imported: number;
+            /**
+             * Format: int64
+             * @description The version the import made.
+             */
+            version: number;
+        };
+        /** @description One rejected row of an import or a preview. */
+        ImportRowError: {
+            /** @description Why the row was rejected. */
+            message: string;
+            /**
+             * Format: int64
+             * @description CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line.
+             */
+            row: number;
         };
         /** @description One applied drop in the feed (D-P-49). */
         InternalDrop: {
@@ -12383,6 +12481,213 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_import: {
+        parameters: {
+            query: {
+                /** @description The file's format. */
+                format: components["schemas"]["ImportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        /** @description A file part (at most 100 MiB) and, for CSV, a mapping part. */
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /** Format: binary */
+                    file: string;
+                    mapping?: components["schemas"]["ImportMapping"];
+                };
+            };
+        };
+        responses: {
+            /** @description The version the import made. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_import_preview: {
+        parameters: {
+            query: {
+                /** @description The file's format. */
+                format: components["schemas"]["ImportFormat"];
+                /** @description The body is the first part of a larger file (the browser sends at most 1 MiB). */
+                partial?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        /** @description The first bytes of the file, at most 1 MiB. */
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description The columns and the first rows. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportPreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

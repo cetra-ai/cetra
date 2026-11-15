@@ -1,6 +1,4 @@
 //! Parses dataset imports: CSV with a column mapping and JSONL (D-J-6). Pure functions: no database, no I/O.
-// Used by tests only until J2.2 adds the routes; J2.2 removes this line.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 

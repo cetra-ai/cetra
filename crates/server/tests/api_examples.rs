@@ -22,7 +22,8 @@ use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
 use llmobs_server::api::datasets::{
-    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion,
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, ImportMapping,
+    ImportPreview, ImportResult,
 };
 use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
@@ -429,6 +430,8 @@ fn static_files_match_their_types() {
     roundtrip::<Page<Backfill>>("static/backfills.json");
     roundtrip::<Backfill>("static/backfill.json");
     roundtrip::<BackfillEstimate>("static/backfill-estimate.json");
+    roundtrip::<ImportPreview>("static/dataset-import-preview.json");
+    roundtrip::<ImportResult>("static/dataset-import-result.json");
 }
 
 #[test]
@@ -441,6 +444,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
+    roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
     let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
@@ -625,6 +629,8 @@ fn generated_files_roundtrip() {
             "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
             "post_backfill" => roundtrip::<Backfill>(&example.file),
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
+            "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
+            "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }

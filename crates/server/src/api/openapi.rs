@@ -49,7 +49,9 @@ use super::connections::{
 use super::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, NewDatasetItem, UpdateDatasetRequest, UpdateItemRequest,
+    DatasetVersionListParams, ImportColumn, ImportFormat, ImportMapping, ImportParams,
+    ImportPreview, ImportResult, ImportRowError, NewDatasetItem, PreviewParams,
+    UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -306,6 +308,12 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UpdateItemRequest>();
     set.insert_page::<DatasetVersion>("DatasetVersionPage");
     set.insert_page::<DatasetItem>("DatasetItemPage");
+    set.insert::<ImportFormat>();
+    set.insert::<ImportColumn>();
+    set.insert::<ImportMapping>();
+    set.insert::<ImportRowError>();
+    set.insert::<ImportPreview>();
+    set.insert::<ImportResult>();
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -2902,13 +2910,51 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .description(Some(
             "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version in which the item is gone; older versions still hold it.",
         ))
-        .parameters(Some(vec![project_param(), dataset, item]))
+        .parameters(Some(vec![project_param(), dataset.clone(), item]))
         .responses(responses(
             "200",
             json_of::<DatasetVersion>("The new version."),
             &[400, 401, 403, 404, 409, 429],
         ))
         .build();
+    let import_preview = operation(
+        "post_dataset_import_preview",
+        "datasets",
+        "Preview the head of an import file",
+    )
+    .description(Some(
+        "Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).",
+    ))
+    .parameters(Some(with_query::<PreviewParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .request_body(Some(import_preview_body()))
+    .responses(responses(
+        "200",
+        json_of::<ImportPreview>("The columns and the first rows."),
+        &[400, 401, 403, 404, 413, 429],
+    ))
+    .build();
+    let import_op = operation(
+        "post_dataset_import",
+        "datasets",
+        "Import items from a CSV or JSONL file",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.",
+    ))
+    .parameters(Some(with_query::<ImportParams>(vec![
+        project_param(),
+        dataset,
+    ])))
+    .request_body(Some(import_upload_body()))
+    .responses(responses(
+        "201",
+        json_of::<ImportResult>("The version the import made."),
+        &[400, 401, 403, 404, 409, 413, 415, 429, 503],
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/datasets/{{dataset}}/versions"),
@@ -2954,6 +3000,41 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             format!("{PROJECT}/datasets/{{dataset}}"),
             PathItem::new(HttpMethod::Delete, delete),
         )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import/preview"),
+            PathItem::new(HttpMethod::Post, import_preview),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import"),
+            PathItem::new(HttpMethod::Post, import_op),
+        )
+}
+
+/// The body of the preview: the first bytes of the file, raw.
+fn import_preview_body() -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some("The first bytes of the file, at most 1 MiB."))
+        .content(
+            "application/octet-stream",
+            Content::new(Some(binary_string())),
+        )
+        .build()
+}
+
+/// The body of an import: a `file` part and, for CSV, a `mapping` part.
+fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
+    let schema = ObjectBuilder::new()
+        .property("file", binary_string())
+        .property("mapping", Ref::from_schema_name("ImportMapping"))
+        .required("file");
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some(
+            "A file part (at most 100 MiB) and, for CSV, a mapping part.",
+        ))
+        .content("multipart/form-data", Content::new(Some(schema)))
+        .build()
 }
 
 fn score_definition_paths(paths: PathsBuilder) -> PathsBuilder {

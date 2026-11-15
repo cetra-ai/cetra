@@ -7698,6 +7698,302 @@
         }
       }
     },
+    "/api/v1/projects/{project}/datasets/{dataset}/import": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Import items from a CSV or JSONL file",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.",
+        "operationId": "post_dataset_import",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "The file's format.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ImportFormat"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "A file part (at most 100 MiB) and, for CSV, a mapping part.",
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "mapping": {
+                    "$ref": "#/components/schemas/ImportMapping"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The version the import made.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/datasets/{dataset}/import/preview": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Preview the head of an import file",
+        "description": "Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).",
+        "operationId": "post_dataset_import_preview",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "The file's format.",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ImportFormat"
+            }
+          },
+          {
+            "name": "partial",
+            "in": "query",
+            "description": "The body is the first part of a larger file (the browser sends at most 1 MiB).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The first bytes of the file, at most 1 MiB.",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The columns and the first rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/datasets/{dataset}/items": {
       "get": {
         "tags": [
@@ -17732,6 +18028,143 @@
           "signature": {
             "type": "string",
             "description": "Argument and return types, for example `score(name: string) -> float`."
+          }
+        }
+      },
+      "ImportColumn": {
+        "type": "object",
+        "description": "Where one CSV column goes (D-J-6).",
+        "required": [
+          "column",
+          "target"
+        ],
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "The header of the column, exactly as in the file."
+          },
+          "target": {
+            "type": "string",
+            "description": "`input`, `input.<key>`, `expected`, `expected.<key>`, `metadata.<key>` or `ignore`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImportFormat": {
+        "type": "string",
+        "description": "The format of an import or a preview (D-J-6).",
+        "enum": [
+          "csv",
+          "jsonl"
+        ]
+      },
+      "ImportMapping": {
+        "type": "object",
+        "description": "The column mapping of a CSV import. Columns the mapping does not list are ignored.",
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportColumn"
+            },
+            "description": "One entry per mapped column, at most 1,000."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ImportPreview": {
+        "type": "object",
+        "description": "The head of a file as the import wizard shows it (D-J-6).",
+        "required": [
+          "format",
+          "columns",
+          "rows",
+          "errors",
+          "truncated"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CSV: the header. JSONL: the top-level keys of the shown rows, in first-seen order."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportRowError"
+            },
+            "description": "Lines of the head that could not be read."
+          },
+          "format": {
+            "$ref": "#/components/schemas/ImportFormat"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "description": "Any JSON value."
+            }
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More rows follow, or the head was cut."
+          }
+        }
+      },
+      "ImportResult": {
+        "type": "object",
+        "description": "The outcome of an import.",
+        "required": [
+          "version",
+          "imported",
+          "error_count",
+          "errors"
+        ],
+        "properties": {
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows rejected, all of them."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportRowError"
+            },
+            "description": "The first 100 rejected rows."
+          },
+          "imported": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items imported."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the import made."
+          }
+        }
+      },
+      "ImportRowError": {
+        "type": "object",
+        "description": "One rejected row of an import or a preview.",
+        "required": [
+          "row",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Why the row was rejected."
+          },
+          "row": {
+            "type": "integer",
+            "format": "int64",
+            "description": "CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line."
           }
         }
       },

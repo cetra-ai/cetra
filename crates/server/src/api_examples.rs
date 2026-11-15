@@ -447,6 +447,18 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
         ),
         example(
+            "post_dataset_import_preview",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            params(&[("format", "csv")]),
+            "static/dataset-import-preview.json",
+            "application/json",
+        ),
+        example_created(
+            "post_dataset_import",
+            params(&[("dataset", EXAMPLE_DATASET)]),
+            "static/dataset-import-result.json",
+        ),
+        example(
             "list_admin_users",
             BTreeMap::new(),
             BTreeMap::new(),

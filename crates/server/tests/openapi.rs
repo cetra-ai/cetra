@@ -557,6 +557,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
         "delete_dataset_item",
     ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+        "post_dataset_import_preview",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import",
+        "post_dataset_import",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -921,6 +931,10 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_dataset_import_preview" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_dataset_import" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"

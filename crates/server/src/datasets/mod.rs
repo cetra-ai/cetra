@@ -110,8 +110,6 @@ impl Schemas {
 
     /// [`Self::compile`] of a stored dataset; an `Err(column)` becomes
     /// `MetaError::Corrupt { table: "datasets", column }`.
-    // Used by M2's import; no J1 caller.
-    #[allow(dead_code)]
     pub(crate) fn of(dataset: &DatasetRow) -> Result<Self, MetaError> {
         Self::compile(
             dataset.input_schema.as_deref(),

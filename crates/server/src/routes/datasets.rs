@@ -1,23 +1,34 @@
 //! Dataset routes (spec 09 § Datasets & experiments, D-J-2 to D-J-5). Project readers list and
 //! read; `ManageDatasets` writes (member and above, a `write` key, a read-write token).
 
-use axum::extract::{DefaultBodyLimit, Extension, State};
+use std::fmt;
+use std::future::Future;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::extract::multipart::{MultipartError, MultipartRejection};
+use axum::extract::rejection::BytesRejection;
+use axum::extract::{DefaultBodyLimit, Extension, Multipart, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use llmobs_core::ids::ProjectId;
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::SqliteConnection;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, NewDatasetItem, UpdateDatasetRequest, UpdateItemRequest,
+    DatasetVersionListParams, ImportFormat, ImportMapping, ImportParams, ImportPreview,
+    ImportResult, ImportRowError, NewDatasetItem, PreviewParams, UpdateDatasetRequest,
+    UpdateItemRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
+use crate::datasets::import::{self, FileError};
 use crate::datasets::{
     ItemValues, MAX_BATCH_ITEMS, MAX_SCHEMA_CHECK_BYTES, MAX_SCHEMA_FAILURES, Schemas,
     check_description, check_item, check_name, check_schema, json_bytes,
@@ -44,6 +55,27 @@ const ITEM_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Page size of the live-item read when a new schema is checked.
 const SCHEMA_PAGE: u32 = 1_000;
+
+/// The preview body: the head of the file (D-J-6).
+const PREVIEW_BODY_LIMIT: usize = import::MAX_PREVIEW_BYTES;
+
+/// The import body: the file plus the multipart framing and the mapping part.
+const IMPORT_BODY_LIMIT: usize = import::MAX_FILE_BYTES + 1024 * 1024;
+
+/// The largest mapping part.
+const MAPPING_BYTES: usize = 1024 * 1024;
+
+/// Imports parsed at once in this process; each holds its file in memory.
+#[cfg(not(test))]
+const IMPORTS_AT_ONCE: usize = 2;
+/// Tests run many imports in parallel threads; they must not see 503.
+#[cfg(test)]
+const IMPORTS_AT_ONCE: usize = 64;
+static IMPORTS: Semaphore = Semaphore::const_new(IMPORTS_AT_ONCE);
+
+/// The whole multipart body must arrive within this time, so a slow sender cannot hold an
+/// import permit (D-J-6).
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Dataset routes. Reads need project view; writes need [`ProjectPerm::ManageDatasets`].
 /// Not session-only.
@@ -158,6 +190,26 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: delete(delete_item),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(preview_import).layer(DefaultBodyLimit::max(PREVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/import",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(import_items).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         },
     ]
 }
@@ -930,6 +982,381 @@ async fn delete_item_tx(
         created_by,
         created_at: now,
     }))
+}
+
+/// The head of an import file, checked against the dataset's schemas and not written (D-J-6).
+async fn preview_import(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Query(params): error::Query<PreviewParams>,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<error::Json<ImportPreview>, ApiError> {
+    let project = access.project.id;
+    // Reading the dataset proves the caller may see it; the preview uses no schema.
+    let row = find(&state, project, &dataset).await?;
+    let bytes = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::PayloadTooLarge {
+                detail: "a preview takes at most 1 MiB",
+            }
+        } else {
+            bad_request_text("the body cannot be read")
+        }
+    })?;
+    tracing::debug!(
+        dataset_id = %row.id,
+        project_id = %project,
+        bytes = bytes.len(),
+        format = ?params.format,
+        "dataset import preview"
+    );
+    let format = params.format;
+    let partial = params.partial;
+    let head = tokio::task::spawn_blocking(move || import::preview(&bytes, format, partial))
+        .await
+        .map_err(task_failed)?
+        .map_err(file_error)?;
+    Ok(error::Json(ImportPreview {
+        format,
+        columns: head.columns,
+        rows: head.rows,
+        errors: head.errors,
+        truncated: head.truncated,
+    }))
+}
+
+/// Imports a CSV or JSONL file as one new version (D-J-6). Every row is checked first; a file
+/// with no valid row writes nothing.
+async fn import_items(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Query(params): error::Query<ImportParams>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<(StatusCode, error::Json<ImportResult>), ApiError> {
+    let multipart = multipart.map_err(|_| ApiError::UnsupportedMediaType {
+        detail: "the import is multipart/form-data with a file part",
+    })?;
+    let project = access.project.id;
+    let used = find(&state, project, &dataset).await?;
+    // Taken before any of the file is read: the permits bound the memory of the imports.
+    let _permit = import_permit(&IMPORTS)?;
+    let parts = upload_deadline(read_parts(multipart), UPLOAD_TIMEOUT).await??;
+    let format = params.format;
+    let mapping = match (format, parts.mapping) {
+        (ImportFormat::Csv, Some(mapping)) => Some(mapping),
+        (ImportFormat::Csv, None) => {
+            return Err(bad_request(vec![field_error(
+                "mapping",
+                "required for CSV",
+            )]));
+        }
+        (ImportFormat::Jsonl, Some(_)) => {
+            return Err(bad_request(vec![field_error(
+                "mapping",
+                "JSONL imports take no mapping",
+            )]));
+        }
+        (ImportFormat::Jsonl, None) => None,
+    };
+    let file_name = parts.file_name;
+    let file = parts.file;
+    let checked_against = used.clone();
+    let checked =
+        tokio::task::spawn_blocking(move || check_file(&checked_against, mapping.as_ref(), &file))
+            .await
+            .map_err(task_failed)??
+            .map_err(file_error)?;
+    let Checked { items, errors } = checked;
+    let imported = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    let error_count = i64::try_from(errors.len()).unwrap_or(i64::MAX);
+    if items.is_empty() {
+        let listed = errors
+            .iter()
+            .take(import::MAX_LISTED_ERRORS)
+            .map(|error| field_error(&format!("rows[{}]", error.row), &error.message))
+            .collect();
+        return Err(ApiError::BadRequest {
+            detail: Some("no row could be imported".to_owned()),
+            errors: listed,
+        });
+    }
+    let actor = created_by(&principal);
+    let insert = items
+        .into_iter()
+        .map(|item| NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id: Uuid::now_v7(),
+            input: item.input,
+            expected_output: item.expected_output,
+            metadata: item.metadata,
+            source_trace_id: None,
+            source_span_id: None,
+        })
+        .collect();
+    let change = VersionChange {
+        close: Vec::new(),
+        insert,
+        description: format!("import {file_name} ({imported} items)"),
+        created_by: actor.clone(),
+    };
+    let version = write_checked(&state, project, &used, change).await?;
+    tracing::info!(
+        target: "audit",
+        dataset_id = %used.id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        version,
+        imported,
+        rejected = error_count,
+        format = ?format,
+        "dataset items imported"
+    );
+    let listed = errors.into_iter().take(import::MAX_LISTED_ERRORS).collect();
+    Ok((
+        StatusCode::CREATED,
+        error::Json(ImportResult {
+            version,
+            imported,
+            error_count,
+            errors: listed,
+        }),
+    ))
+}
+
+/// The rows of a file that passed their checks, and every rejected row.
+struct Checked {
+    items: Vec<ItemValues>,
+    errors: Vec<ImportRowError>,
+}
+
+/// Parses `bytes` (CSV with `mapping`, or JSONL) and checks every row against `used`'s schemas.
+/// Runs on a blocking thread. The outer `Err` is a stored schema that no longer compiles.
+fn check_file(
+    used: &DatasetRow,
+    mapping: Option<&ImportMapping>,
+    bytes: &[u8],
+) -> Result<Result<Checked, FileError>, MetaError> {
+    let schemas = Schemas::of(used)?;
+    let parsed = match mapping {
+        Some(mapping) => import::parse_csv(bytes, mapping),
+        None => import::parse_jsonl(bytes),
+    };
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
+        Err(error) => return Ok(Err(error)),
+    };
+    let mut errors = parsed.errors;
+    let mut items = Vec::with_capacity(parsed.items.len());
+    for (row, item) in parsed.items {
+        match check_item("", &item, &schemas).first() {
+            None => items.push(item),
+            Some(error) => errors.push(ImportRowError {
+                row,
+                message: format!("{}: {}", error.field, error.message),
+            }),
+        }
+    }
+    errors.sort_by_key(|error| error.row);
+    Ok(Ok(Checked { items, errors }))
+}
+
+/// What the import's write transaction found.
+enum ImportWrite {
+    Written(i64),
+    Gone,
+    SchemaChanged,
+}
+
+/// Writes `change` as one version of the dataset `used`, after re-reading the dataset in the
+/// write transaction: gone is 404; a changed `input_schema` or `expected_schema` is a 409 and
+/// nothing is written (D-J-2: the rows were checked against `used`).
+async fn write_checked(
+    state: &AppState,
+    project: ProjectId,
+    used: &DatasetRow,
+    change: VersionChange,
+) -> Result<i64, ApiError> {
+    let key = DatasetKey::Id(used.id);
+    let input_schema = used.input_schema.clone();
+    let expected_schema = used.expected_schema.clone();
+    let now = state.clock.now_ns();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+                    return Ok(ImportWrite::Gone);
+                };
+                if row.input_schema != input_schema || row.expected_schema != expected_schema {
+                    return Ok(ImportWrite::SchemaChanged);
+                }
+                let version = store::write_version(conn, row.id, change, now).await?;
+                Ok(ImportWrite::Written(version))
+            })
+        })
+        .await?;
+    match outcome {
+        ImportWrite::Written(version) => Ok(version),
+        ImportWrite::Gone => Err(ApiError::NotFound),
+        ImportWrite::SchemaChanged => Err(ApiError::Conflict {
+            detail: "the dataset's schema changed; retry",
+        }),
+    }
+}
+
+/// One permit of [`IMPORTS`], or 503 when every one is taken.
+fn import_permit(imports: &Semaphore) -> Result<SemaphorePermit<'_>, ApiError> {
+    imports.try_acquire().map_err(|_| ApiError::Unavailable {
+        detail: "another import is running; retry in a few seconds",
+    })
+}
+
+/// The parts of an import upload. `Debug` prints sizes only.
+struct Parts {
+    file_name: String,
+    file: Vec<u8>,
+    mapping: Option<ImportMapping>,
+}
+
+impl fmt::Debug for Parts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Parts")
+            .field("file_bytes", &self.file.len())
+            .field("mapping", &self.mapping.is_some())
+            .finish()
+    }
+}
+
+/// Reads the `file` part (at most 100 MiB) and the optional `mapping` part (at most 1 MiB).
+async fn read_parts(mut multipart: Multipart) -> Result<Parts, ApiError> {
+    let mut file: Option<(String, Vec<u8>)> = None;
+    let mut mapping: Option<ImportMapping> = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| multipart_failed(&error))?
+    {
+        let name = field.name().unwrap_or_default().to_owned();
+        match name.as_str() {
+            "file" => {
+                if file.is_some() {
+                    return Err(bad_request(vec![field_error(&name, "part repeated")]));
+                }
+                let file_name = clean_file_name(field.file_name());
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| multipart_failed(&error))?
+                {
+                    if bytes.len() + chunk.len() > import::MAX_FILE_BYTES {
+                        return Err(too_large_file());
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                file = Some((file_name, bytes));
+            }
+            "mapping" => {
+                if mapping.is_some() {
+                    return Err(bad_request(vec![field_error(&name, "part repeated")]));
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|error| multipart_failed(&error))?
+                {
+                    if bytes.len() + chunk.len() > MAPPING_BYTES {
+                        return Err(bad_request(vec![field_error(
+                            "mapping",
+                            "the mapping is larger than 1 MiB",
+                        )]));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                mapping = Some(serde_json::from_slice(&bytes).map_err(|_| {
+                    bad_request(vec![field_error("mapping", "invalid mapping JSON")])
+                })?);
+            }
+            _ => return Err(bad_request(vec![field_error(&name, "unknown part")])),
+        }
+    }
+    let Some((file_name, file)) = file else {
+        return Err(bad_request(vec![field_error("file", "required")]));
+    };
+    Ok(Parts {
+        file_name,
+        file,
+        mapping,
+    })
+}
+
+/// The file name as stored in the version description: control characters removed, cut to
+/// 200 characters; `upload` when absent or empty after that.
+fn clean_file_name(name: Option<&str>) -> String {
+    let cleaned: String = name
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    if cleaned.is_empty() {
+        "upload".to_owned()
+    } else {
+        cleaned
+    }
+}
+
+/// `fut`, or 400 `the upload took too long` after `limit`.
+async fn upload_deadline<T>(fut: impl Future<Output = T>, limit: Duration) -> Result<T, ApiError> {
+    tokio::time::timeout(limit, fut)
+        .await
+        .map_err(|_| ApiError::BadRequest {
+            detail: Some("the upload took too long".to_owned()),
+            errors: Vec::new(),
+        })
+}
+
+fn multipart_failed(error: &MultipartError) -> ApiError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        too_large_file()
+    } else {
+        bad_request_text("the multipart body cannot be read")
+    }
+}
+
+fn too_large_file() -> ApiError {
+    ApiError::PayloadTooLarge {
+        detail: "the file is larger than 100 MiB",
+    }
+}
+
+/// A file that cannot be read or checked as a whole (a 400).
+fn file_error(error: FileError) -> ApiError {
+    let (detail, errors) = match error {
+        FileError::Mapping(errors) => ("invalid mapping".to_owned(), errors),
+        FileError::Header(message) => (message, Vec::new()),
+        FileError::TooManyRows => ("the file has more than 50000 rows".to_owned(), Vec::new()),
+    };
+    ApiError::BadRequest {
+        detail: Some(detail),
+        errors,
+    }
+}
+
+/// A blocking task that did not finish (it panicked or was cancelled) is a server failure.
+fn task_failed(error: tokio::task::JoinError) -> ApiError {
+    ApiError::Internal(Box::new(error))
+}
+
+fn bad_request_text(text: &str) -> ApiError {
+    ApiError::BadRequest {
+        detail: Some(text.to_owned()),
+        errors: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -1940,5 +2367,518 @@ mod tests {
         .await;
         assert_eq!(status, 201);
         assert!(!logs.contains("canary-j1-input"), "{logs}");
+    }
+
+    const CSV_MAPPING: &str =
+        r#"{"columns":[{"column":"q","target":"input"},{"column":"a","target":"expected"}]}"#;
+
+    /// A multipart body with a `file` part and an optional `mapping` part.
+    fn multipart(file_name: &str, file: &[u8], mapping: Option<&str>) -> (String, Vec<u8>) {
+        const BOUNDARY: &str = "llmobs-test-boundary";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(file);
+        body.extend_from_slice(b"\r\n");
+        if let Some(mapping) = mapping {
+            body.extend_from_slice(
+                format!(
+                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"mapping\"\r\nContent-Type: application/json\r\n\r\n{mapping}\r\n"
+                )
+                .as_bytes(),
+            );
+        }
+        body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+        (format!("multipart/form-data; boundary={BOUNDARY}"), body)
+    }
+
+    /// `POST …/import?format=` with a `file` part named `file_name`.
+    async fn import(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        format: &str,
+        file_name: &str,
+        file: &[u8],
+        mapping: Option<&str>,
+    ) -> TestResponse {
+        let (content_type, body) = multipart(file_name, file, mapping);
+        app.request(
+            Method::POST,
+            &format!("{}/{dataset}/import?format={format}", base(seeded)),
+        )
+        .header("cookie", &seeded.cookie)
+        .header("content-type", &content_type)
+        .body(body)
+        .send()
+        .await
+    }
+
+    /// `POST …/import/preview?query` with `body` as the raw file.
+    async fn preview(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        query: &str,
+        body: &[u8],
+    ) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/{dataset}/import/preview?{query}", base(seeded)),
+        )
+        .header("cookie", &seeded.cookie)
+        .body(body.to_vec())
+        .send()
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_shows_the_head() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = preview(&app, &seeded, "faq", "format=csv", b"q,a\nhi,x\nho,y\n").await;
+        assert_eq!(response.status, 200);
+        let body: Value = response.json();
+        assert_eq!(body["columns"], json!(["q", "a"]));
+        assert_eq!(body["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(body["truncated"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_partial_drops_the_cut_record() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = preview(
+            &app,
+            &seeded,
+            "faq",
+            "format=csv&partial=true",
+            b"q,a\nhi,x\nho",
+        )
+        .await;
+        assert_eq!(response.status, 200);
+        let body: Value = response.json();
+        assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(body["truncated"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_bad_header_is_a_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = preview(&app, &seeded, "faq", "format=csv", b"q,q\n").await;
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.problem().detail.as_deref(),
+            Some("column 2 repeats the name of column 1")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_over_one_mib_is_a_413() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let big = vec![b'a'; 1024 * 1024 + 1];
+        let response = preview(&app, &seeded, "faq", "format=csv", &big).await;
+        assert_eq!(response.status, 413);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_with_a_read_key_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = app
+            .request(
+                Method::POST,
+                &format!("{}/faq/import/preview?format=csv", base(&seeded)),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .body(b"q,a\nhi,x\n".to_vec())
+            .send()
+            .await;
+        assert_eq!(response.status, 403);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_csv_makes_one_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "csv",
+            "data.csv",
+            b"q,a\nWhat?,Yes\n,No\nHow?,Ok\n",
+            Some(CSV_MAPPING),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["imported"], 2);
+        assert_eq!(body["error_count"], 1);
+        assert_eq!(
+            body["errors"],
+            json!([{ "row": 2, "message": "the row has no input" }])
+        );
+
+        let items: Value = get(&app, &seeded, "faq/items").await.json();
+        assert_eq!(items["data"].as_array().unwrap().len(), 2);
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        assert_eq!(
+            versions["data"][0]["description"],
+            "import data.csv (2 items)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_jsonl_makes_one_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let file = b"{\"input\":\"a\"}\n{\"input\":\"b\"}\n{\"input\":1,\"x\":2}\n";
+        let response = import(&app, &seeded, "faq", "jsonl", "data.jsonl", file, None).await;
+        assert_eq!(response.status, 201);
+        let body: Value = response.json();
+        assert_eq!(body["imported"], 2);
+        assert_eq!(
+            body["errors"],
+            json!([{ "row": 3, "message": "unknown key x" }])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_checks_the_schema() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": schema }),
+        )
+        .await;
+        let file = b"{\"input\":{\"question\":\"a\"}}\n{\"input\":{}}\n";
+        let response = import(&app, &seeded, "faq", "jsonl", "data.jsonl", file, None).await;
+        assert_eq!(response.status, 201);
+        let body: Value = response.json();
+        assert_eq!(body["imported"], 1);
+        assert_eq!(
+            body["errors"],
+            json!([{ "row": 2, "message": "input: /: required" }])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schema_change_during_an_import_is_a_conflict() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let used = find(&app.state, seeded.project.id, "faq").await.unwrap();
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        let patched = patch(&app, &seeded, "faq", json!({ "input_schema": schema })).await;
+        assert_eq!(patched.status, 200);
+
+        let change = VersionChange {
+            close: Vec::new(),
+            insert: vec![NewRevision {
+                revision_id: Uuid::now_v7(),
+                item_id: Uuid::now_v7(),
+                input: json!({ "question": "a" }),
+                expected_output: None,
+                metadata: Map::new(),
+                source_trace_id: None,
+                source_span_id: None,
+            }],
+            description: "import".to_owned(),
+            created_by: None,
+        };
+        let outcome = write_checked(&app.state, seeded.project.id, &used, change).await;
+        assert!(matches!(
+            outcome,
+            Err(ApiError::Conflict { detail }) if detail == "the dataset's schema changed; retry"
+        ));
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[test]
+    fn clean_file_name_rules() {
+        assert_eq!(clean_file_name(None), "upload");
+        assert_eq!(clean_file_name(Some("")), "upload");
+        assert_eq!(clean_file_name(Some("\u{1}")), "upload");
+        assert_eq!(clean_file_name(Some("a\u{7}b.csv")), "ab.csv");
+        assert_eq!(clean_file_name(Some(&"a".repeat(250))), "a".repeat(200));
+    }
+
+    #[tokio::test]
+    async fn upload_deadline_stops_a_slow_body() {
+        let slow = upload_deadline(std::future::pending::<()>(), Duration::from_millis(10)).await;
+        let error = slow.expect_err("times out");
+        assert!(matches!(
+            error,
+            ApiError::BadRequest { detail: Some(ref detail), .. }
+                if detail == "the upload took too long"
+        ));
+        assert_eq!(
+            upload_deadline(std::future::ready(1), Duration::from_millis(10))
+                .await
+                .expect("ready"),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_without_valid_rows_writes_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "jsonl",
+            "data.jsonl",
+            b"{\"expected_output\":1}\n",
+            None,
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        let problem = response.problem();
+        assert_eq!(problem.detail.as_deref(), Some("no row could be imported"));
+        assert_eq!(problem.errors[0].field, "rows[1]");
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_lists_at_most_100_errors() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let mut file = String::from("{\"input\":1}\n");
+        for _ in 0..150 {
+            file.push_str("[1]\n");
+        }
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "jsonl",
+            "data.jsonl",
+            file.as_bytes(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status, 201);
+        let body: Value = response.json();
+        assert_eq!(body["error_count"], 150);
+        assert_eq!(body["errors"].as_array().unwrap().len(), 100);
+        assert_eq!(body["errors"][0]["row"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_refuses_more_than_50000_rows() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let file = "{\"input\":1}\n".repeat(50_001);
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "jsonl",
+            "data.jsonl",
+            file.as_bytes(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.problem().detail.as_deref(),
+            Some("the file has more than 50000 rows")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_respects_the_live_item_cap() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create_ok(&app, &seeded, "faq").await;
+        let dataset_id = dataset["id"].as_str().unwrap();
+        let inputs = (0..store::LIVE_ITEM_CAP - 1).map(|i| json!(i)).collect();
+        add_items(&app, dataset_id, inputs).await;
+        let file = b"{\"input\":1}\n{\"input\":2}\n";
+        let response = import(&app, &seeded, "faq", "jsonl", "data.jsonl", file, None).await;
+        assert_eq!(response.status, 409);
+        assert_eq!(
+            response.problem().detail.as_deref(),
+            Some("a dataset holds at most 50000 items")
+        );
+        let stored: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(stored["current_version"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_over_100_mib_is_a_413() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let file = vec![b'a'; import::MAX_FILE_BYTES + 1];
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "csv",
+            "data.csv",
+            &file,
+            Some(CSV_MAPPING),
+        )
+        .await;
+        assert_eq!(response.status, 413);
+        assert_eq!(
+            response.problem().detail.as_deref(),
+            Some("the file is larger than 100 MiB")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_mapping_errors_name_the_entry() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let mapping = r#"{"columns":[{"column":"nope","target":"input"}]}"#;
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "csv",
+            "data.csv",
+            b"q,a\nhi,x\n",
+            Some(mapping),
+        )
+        .await;
+        let errors = field_errors(&response);
+        assert_eq!(errors[0].0, "mapping.columns[0].column");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_csv_needs_a_mapping_and_jsonl_refuses_one() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let no_mapping = import(
+            &app,
+            &seeded,
+            "faq",
+            "csv",
+            "data.csv",
+            b"q,a\nhi,x\n",
+            None,
+        )
+        .await;
+        assert_eq!(
+            field_errors(&no_mapping),
+            vec![("mapping".to_owned(), "required for CSV".to_owned())]
+        );
+        let with_mapping = import(
+            &app,
+            &seeded,
+            "faq",
+            "jsonl",
+            "data.jsonl",
+            b"{\"input\":1}\n",
+            Some(CSV_MAPPING),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&with_mapping),
+            vec![(
+                "mapping".to_owned(),
+                "JSONL imports take no mapping".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_needs_multipart_and_manage_datasets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let json_body = app
+            .request(
+                Method::POST,
+                &format!("{}/faq/import?format=jsonl", base(&seeded)),
+            )
+            .header("cookie", &seeded.cookie)
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_eq!(json_body.status, 415);
+
+        let (content_type, body) = multipart("data.jsonl", b"{\"input\":1}\n", None);
+        let read_only = app
+            .request(
+                Method::POST,
+                &format!("{}/faq/import?format=jsonl", base(&seeded)),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .header("content-type", &content_type)
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(read_only.status, 403);
+    }
+
+    #[test]
+    fn import_permit_is_refused_when_busy() {
+        let imports = Semaphore::new(1);
+        let held = import_permit(&imports).expect("one permit");
+        assert!(matches!(
+            import_permit(&imports),
+            Err(ApiError::Unavailable { .. })
+        ));
+        drop(held);
+        assert!(import_permit(&imports).is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_logs_hold_no_content() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let (status, logs) = capture_logs(async {
+            import(
+                &app,
+                &seeded,
+                "faq",
+                "csv",
+                "canary-file-2.csv",
+                b"q,a\ncanary-import-2,yes\n",
+                Some(CSV_MAPPING),
+            )
+            .await
+            .status
+        })
+        .await;
+        assert_eq!(status, 201);
+        assert!(!logs.contains("canary-import-2"), "{logs}");
+        assert!(!logs.contains("canary-file-2"), "{logs}");
     }
 }
