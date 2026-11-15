@@ -17,6 +17,10 @@
 //! directory. `LLMOBS_TRACE_BENCH_CACHE` is `cold` (default), `warm` or `off`:
 //! `cold` empties `<dir>/cache` before the open, `warm` runs the whole query
 //! set once untimed first, `off` sets `query.read_cache_bytes = 0`.
+//! Spans carry the realistic payloads of `common::payload` (track R M7). The
+//! corpus comes from `just fetch-corpus`. `LLMOBS_TRACE_BENCH_MAX_BYTES` (for
+//! example `384MiB`) replaces the first attempt's 128 MiB flush size, which a
+//! trace of tens of KiB of Arrow needs larger.
 
 #![allow(
     clippy::unwrap_used,
@@ -35,8 +39,10 @@ use std::time::{Duration, Instant};
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use bytesize::ByteSize;
 use chrono::{TimeZone, Utc};
+use common::corpus::{CORPUS_SHA256, Corpus};
 use common::machine::{dir_bytes, machine};
-use common::rng::Rng;
+use common::payload::{Payloads, span_payload_bytes};
+use common::rng::{Rng, mix};
 use common::s3::S3Env;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use llmobs_core::batch::spans_to_record_batch;
@@ -154,7 +160,6 @@ struct SpanPlan {
     is_llm: bool,
     is_root: bool,
     tag_mask: u16,
-    preview: Option<(usize, u8)>,
     tokens: Option<i64>,
     model: Option<usize>,
     error: bool,
@@ -168,6 +173,8 @@ struct GroupPlan {
 
 struct TracePlan {
     id: TraceId,
+    /// The trace's position in the generated dataset: its seed comes from it.
+    index: usize,
     start: i64,
     env: usize,
     session: Option<u32>,
@@ -198,6 +205,14 @@ fn start_time(rng: &mut Rng, start: i64) -> i64 {
 }
 
 /// A bitmask with 0–3 of the 10 tag bits set (spec 06 § Data: 0–3 tags/span).
+/// The plan's preview draws (length and fill byte). They are still drawn, in
+/// the same order, so the data plan's stream is unchanged (R7.4). The previews
+/// themselves now come from the payload content.
+fn draw_preview(rng: &mut Rng) {
+    rng.below(301);
+    rng.below(26);
+}
+
 fn tag_mask(rng: &mut Rng) -> u16 {
     let count = rng.below(4);
     let mut mask = 0_u16;
@@ -256,14 +271,15 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
     // Root group: the root span plus the children not handed to late groups.
     {
         let mut spans = Vec::new();
+        let root_tags = tag_mask(rng);
+        draw_preview(rng);
         spans.push(SpanPlan {
             start: root_start,
             end: root_end,
             span_index: 0,
             is_llm: false,
             is_root: true,
-            tag_mask: tag_mask(rng),
-            preview: Some((100 + rng.below(301), b'a' + rng.below(26) as u8)),
+            tag_mask: root_tags,
             tokens: None,
             model: None,
             error: has_error && error_span == 0,
@@ -278,16 +294,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
             let cs = root_start + (rng.unit() * duration as f64) as i64;
             let ce = (cs + duration / 10).min(root_end);
             let tokens = is_llm.then(|| rng.lognormal(800.0, 20_000.0) as i64);
+            let tags = tag_mask(rng);
+            if is_llm {
+                draw_preview(rng);
+            }
+            let model = is_llm.then(|| rng.below(MODELS.len()));
             spans.push(SpanPlan {
                 start: cs,
                 end: ce,
                 span_index: *child,
                 is_llm,
                 is_root: false,
-                tag_mask: tag_mask(rng),
-                preview: is_llm.then(|| (100 + rng.below(301), b'a' + rng.below(26) as u8)),
+                tag_mask: tags,
                 tokens,
-                model: is_llm.then(|| rng.below(MODELS.len())),
+                model,
                 error: has_error && error_span == *child,
                 cost_share: is_llm.then_some(cost_share),
             });
@@ -321,16 +341,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
             let cs = base + (j as i64 + 1) * (duration / SPANS_PER_TRACE as i64);
             let ce = cs + duration / SPANS_PER_TRACE as i64;
             let tokens = is_llm.then(|| rng.lognormal(800.0, 20_000.0) as i64);
+            let tags = tag_mask(rng);
+            if is_llm {
+                draw_preview(rng);
+            }
+            let model = is_llm.then(|| rng.below(MODELS.len()));
             spans.push(SpanPlan {
                 start: cs,
                 end: ce,
                 span_index: *child,
                 is_llm,
                 is_root: false,
-                tag_mask: tag_mask(rng),
-                preview: is_llm.then(|| (100 + rng.below(301), b'a' + rng.below(26) as u8)),
+                tag_mask: tags,
                 tokens,
-                model: is_llm.then(|| rng.below(MODELS.len())),
+                model,
                 error: has_error && error_span == *child,
                 cost_share: is_llm.then_some(cost_share),
             });
@@ -344,6 +368,7 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
 
     TracePlan {
         id: trace_id(index),
+        index,
         start: root_start,
         env,
         session,
@@ -355,7 +380,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
     }
 }
 
-fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
+/// The spans of one group. Content comes from `payloads`, seeded by the trace's
+/// index; the plan keeps the tokens, cost, models, status and times.
+fn build_spans(plan: &TracePlan, group: &GroupPlan, payloads: &Payloads) -> Vec<Span> {
+    let seed = mix(SEED ^ mix(plan.index as u64));
+    // An LLM span's call number is its rank among the trace's LLM spans.
+    let mut llm_indices: Vec<usize> = plan
+        .groups
+        .iter()
+        .flat_map(|g| g.spans.iter())
+        .filter(|s| s.is_llm)
+        .map(|s| s.span_index)
+        .collect();
+    llm_indices.sort_unstable();
+    let calls = payloads.llm_calls(seed, llm_indices.len());
     let session = plan.session.map(|s| format!("session-{s}"));
     let user = plan.user.map(|u| format!("user-{u}"));
     let mut out = Vec::with_capacity(group.spans.len());
@@ -366,10 +404,17 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
                 tags.push((*tag).to_owned());
             }
         }
-        let preview = s
-            .preview
-            .map(|(len, fill)| std::iter::repeat_n(fill as char, len).collect::<String>());
-        out.push(Span {
+        let content = if s.is_root {
+            payloads.root(seed)
+        } else if s.is_llm {
+            let rank = llm_indices
+                .binary_search(&s.span_index)
+                .expect("an LLM span is among the trace's LLM spans");
+            calls[rank].clone()
+        } else {
+            payloads.step(seed, s.span_index)
+        };
+        let mut span = Span {
             project_id: project(),
             trace_id: plan.id,
             span_id: span_id(s.span_index),
@@ -419,8 +464,8 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
             input_format: None,
             output: None,
             output_format: None,
-            input_preview: preview.clone(),
-            output_preview: preview,
+            input_preview: None,
+            output_preview: None,
             system_instructions: None,
             tool_definitions: None,
             attributes: Default::default(),
@@ -434,7 +479,9 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
             conventions: Vec::new(),
             ingest_time: group.ingest,
             schema_version: 1,
-        });
+        };
+        content.apply(&mut span);
+        out.push(span);
     }
     out
 }
@@ -512,6 +559,20 @@ struct Manifest {
     endpoint: Option<String>,
     #[serde(default)]
     bucket: Option<String>,
+    /// The payload generator the data was written with (`payload_tag`); absent
+    /// in datasets written before track R M7.
+    #[serde(default)]
+    payload: Option<String>,
+    /// Arrow bytes appended and payload bytes generated (`span_payload_bytes`).
+    #[serde(default)]
+    arrow_bytes: u64,
+    #[serde(default)]
+    payload_bytes: u64,
+}
+
+/// Identifies the payload generator: a dataset is reused only with the same one.
+fn payload_tag() -> String {
+    format!("m7:{}", &CORPUS_SHA256[..12])
 }
 
 /// Where the dataset lives: the local directory, and an S3 prefix when
@@ -578,38 +639,38 @@ async fn dataset_files(backend: &Backend) -> (usize, u64) {
 
 /// The dataset to query: the stored one when its manifest matches the target,
 /// otherwise a generated one. With S3 a missing or foreign manifest regenerates.
+/// The dataset to query: the stored one when its manifest matches the target,
+/// the payload generator and (with S3) the endpoint and bucket; otherwise a
+/// generated one. A catalog without a matching manifest is regenerated, since
+/// its payloads are unknown.
 async fn dataset(backend: &Backend, traces: usize) -> Manifest {
     let has_catalog = backend.dir.join("catalog.db").is_file();
     let stored = std::fs::read_to_string(manifest_path(&backend.dir))
         .ok()
         .and_then(|text| serde_json::from_str::<Manifest>(&text).ok());
+    let payload = Some(payload_tag());
     match (has_catalog, &backend.s3, stored) {
         (true, Some(s3), Some(manifest))
             if manifest.endpoint.as_deref() == Some(s3.endpoint.as_str())
-                && manifest.bucket.as_deref() == Some(s3.bucket.as_str()) =>
+                && manifest.bucket.as_deref() == Some(s3.bucket.as_str())
+                && manifest.payload == payload =>
         {
             manifest
         }
-        (true, Some(_), _) => generate_dataset(backend, traces).await,
-        (true, None, Some(manifest)) => manifest,
-        (true, None, None) => Manifest {
-            traces,
-            files: vec![count_spans_files(&backend.dir)],
-            gen_secs: 0.0,
-            max_bytes: ByteSize::mib(128).0,
-            sample: Vec::new(),
-            late_1_3h: 0,
-            endpoint: None,
-            bucket: None,
-        },
-        (false, _, _) => generate_dataset(backend, traces).await,
+        (true, None, Some(manifest)) if manifest.payload == payload => manifest,
+        _ => generate_dataset(backend, traces).await,
     }
 }
 
 // The bench reports on stdout like the rest of the file.
 #[allow(clippy::print_stdout)]
 async fn generate_dataset(backend: &Backend, traces: usize) -> Manifest {
-    let max_bytes = ByteSize::mib(128);
+    let max_bytes = match std::env::var("LLMOBS_TRACE_BENCH_MAX_BYTES") {
+        Ok(value) => value
+            .parse::<ByteSize>()
+            .expect("LLMOBS_TRACE_BENCH_MAX_BYTES is a size such as 384MiB"),
+        Err(_) => ByteSize::mib(128),
+    };
     let (count, _, generated) = generate(backend, traces, max_bytes).await;
     if (900..=1100).contains(&count) {
         return generated;
@@ -671,6 +732,46 @@ async fn append_retry(storage: &llmobs_storage::Storage, batch: RecordBatch) {
     }
 }
 
+/// Arrow and payload bytes written by one generation.
+#[derive(Default)]
+struct Written {
+    arrow_bytes: u64,
+    payload_bytes: u64,
+}
+
+async fn append_batch(storage: &llmobs_storage::Storage, batch: &[Span], written: &mut Written) {
+    let rb = spans_to_record_batch(batch).unwrap();
+    written.arrow_bytes += rb.get_array_memory_size() as u64;
+    append_retry(storage, rb).await;
+}
+
+/// Builds the spans of `groups` in order and appends them in batches of about
+/// `BATCH_SPANS` spans.
+async fn append_groups(
+    storage: &llmobs_storage::Storage,
+    plans: &[TracePlan],
+    payloads: &Payloads,
+    groups: &[Pending],
+    written: &mut Written,
+) {
+    let mut batch: Vec<Span> = Vec::with_capacity(BATCH_SPANS + SPANS_PER_TRACE);
+    for p in groups {
+        let spans = build_spans(&plans[p.trace], &plans[p.trace].groups[p.group], payloads);
+        written.payload_bytes += spans
+            .iter()
+            .map(|s| span_payload_bytes(s) as u64)
+            .sum::<u64>();
+        batch.extend(spans);
+        if batch.len() >= BATCH_SPANS {
+            append_batch(storage, &batch, written).await;
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        append_batch(storage, &batch, written).await;
+    }
+}
+
 /// Generate into `dir` (wiping it first) and return the file count and elapsed
 /// time. Appends in ingest-time order, batches of ~10,000 spans. The last two
 /// minutes of ingest time stay in the WAL: append everything else, shutdown,
@@ -690,6 +791,7 @@ async fn generate(
     }
     std::fs::create_dir_all(dir).unwrap();
 
+    let payloads = Payloads::new(Corpus::from_env());
     let start = range_start();
     let end = range_end();
     let mut rng = Rng::new(SEED);
@@ -716,7 +818,7 @@ async fn generate(
     let max_ingest = pending.last().map_or(end, |p| p.ingest);
     let tail_start = max_ingest.saturating_sub(TAIL);
 
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         traces,
         files: Vec::new(),
         gen_secs: 0.0,
@@ -725,29 +827,22 @@ async fn generate(
         late_1_3h,
         endpoint: backend.s3.as_ref().map(|s3| s3.endpoint.clone()),
         bucket: backend.s3.as_ref().map(|s3| s3.bucket.clone()),
+        payload: Some(payload_tag()),
+        arrow_bytes: 0,
+        payload_bytes: 0,
     };
 
+    let mut written = Written::default();
     let files = {
         let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
-        let mut batch: Vec<Span> = Vec::with_capacity(BATCH_SPANS + SPANS_PER_TRACE);
-        for p in pending.iter().filter(|p| p.ingest < tail_start) {
-            batch.extend(build_spans(
-                &plans[p.trace],
-                &plans[p.trace].groups[p.group],
-            ));
-            if batch.len() >= BATCH_SPANS {
-                let rb = spans_to_record_batch(&batch).unwrap();
-                append_retry(&storage, rb).await;
-                batch.clear();
-            }
-        }
-        if !batch.is_empty() {
-            let rb = spans_to_record_batch(&batch).unwrap();
-            append_retry(&storage, rb).await;
-            batch.clear();
-        }
+        let early: Vec<Pending> = pending
+            .iter()
+            .copied()
+            .filter(|p| p.ingest < tail_start)
+            .collect();
+        append_groups(&storage, &plans, &payloads, &early, &mut written).await;
         storage.shutdown().await.unwrap();
         drop(storage);
         let files = dataset_files(backend).await.0;
@@ -755,29 +850,21 @@ async fn generate(
         let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
-        for p in pending.iter().filter(|p| p.ingest >= tail_start) {
-            batch.extend(build_spans(
-                &plans[p.trace],
-                &plans[p.trace].groups[p.group],
-            ));
-            if batch.len() >= BATCH_SPANS {
-                let rb = spans_to_record_batch(&batch).unwrap();
-                append_retry(&storage, rb).await;
-                batch.clear();
-            }
-        }
-        if !batch.is_empty() {
-            let rb = spans_to_record_batch(&batch).unwrap();
-            append_retry(&storage, rb).await;
-        }
+        let late: Vec<Pending> = pending
+            .iter()
+            .copied()
+            .filter(|p| p.ingest >= tail_start)
+            .collect();
+        append_groups(&storage, &plans, &payloads, &late, &mut written).await;
         // Drop without shutdown: the tail stays in the WAL / memtable.
         drop(storage);
         files
     };
 
-    let mut manifest = manifest;
     manifest.files.push(files);
     manifest.gen_secs = begun.elapsed().as_secs_f64();
+    manifest.arrow_bytes = written.arrow_bytes;
+    manifest.payload_bytes = written.payload_bytes;
     std::fs::write(
         manifest_path(dir),
         serde_json::to_string(&manifest).unwrap(),
@@ -1267,6 +1354,12 @@ async fn trace_benchmark() {
         dataset_bytes,
         manifest.gen_secs,
         manifest.late_1_3h,
+    );
+    println!(
+        "Payloads: {} arrow bytes, {} payload bytes, {} arrow bytes per trace",
+        manifest.arrow_bytes,
+        manifest.payload_bytes,
+        manifest.arrow_bytes / manifest.traces.max(1) as u64,
     );
     println!();
     println!("| query | mode | cold | p50 | p95 | max | target | pass | rows | differing ids |");
