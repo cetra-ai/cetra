@@ -599,6 +599,11 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
         .map_err(|error| forever_meta(&error))?;
     state.live.publish_resync(project);
     state.metrics_cache.clear_project(project);
+    {
+        // A price reload that read the rows before the delete must not reinstall them (D-T-9).
+        let _writes = state.ingest.prices().lock_writes().await;
+        state.ingest.prices().forget_project(project);
+    }
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
         on_dropped(&Dropped {
@@ -716,6 +721,11 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
     for project in &projects {
         state.live.publish_resync(*project);
         state.metrics_cache.clear_project(*project);
+    }
+    {
+        // A price reload that read the rows before the delete must not reinstall them (D-T-9).
+        let _writes = state.ingest.prices().lock_writes().await;
+        state.ingest.prices().forget_org(row.org_id);
     }
     if dropped {
         tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");

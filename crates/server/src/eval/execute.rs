@@ -95,7 +95,10 @@ pub(crate) async fn run_evaluator(
     } = args;
     // A judge trace is written now, so the D85 age bound never applies (D-P-22).
     let ingest = state.ingest.context(project, None, now);
-    let prices = state.ingest.prices();
+    let prices = state
+        .ingest
+        .prices()
+        .for_project(project.org_id, project.id);
     if matches!(evaluator.config, EvaluatorConfig::Check(_)) {
         // Checks are CPU work: they run off the async workers (D-I-23).
         let runner = Arc::clone(&state.eval_runner);
@@ -605,8 +608,17 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
                 .and_then(BudgetPeriod::from_name),
         )
     {
-        let (amount, guard) =
-            reserve(state, rule, judge, link.adapter, limit, period, &variables).await?;
+        let (amount, guard) = reserve(
+            state,
+            project.org_id,
+            rule,
+            judge,
+            link.adapter,
+            limit,
+            period,
+            &variables,
+        )
+        .await?;
         estimate = Some(amount);
         reservation = Some(guard);
     }
@@ -740,8 +752,10 @@ fn load_retry(state: &AppState, job: &ClaimedJob, error: &'static str) -> Exit {
 }
 
 /// Step 10: prices the call, reserves its estimate and returns the estimate with the guard.
+#[allow(clippy::too_many_arguments)] // the state, the org, the rule, its judge and budget, and the variables
 async fn reserve<'a>(
     state: &'a AppState,
+    org: OrgId,
     rule: &RuleRow,
     judge: &JudgeConfig,
     adapter: Adapter,
@@ -753,7 +767,7 @@ async fn reserve<'a>(
     let prompt = PromptTemplate::compile(&judge.prompt)
         .and_then(|template| template.render(variables))
         .map_err(|error| permanent(&error.to_string()))?;
-    let prices = state.ingest.prices();
+    let prices = state.ingest.prices().for_project(org, rule.project_id);
     let Some(price) = budget::model_price(&prices, &judge.model, adapter, now) else {
         return Err(unpriced(rule.id));
     };
@@ -3663,7 +3677,7 @@ mod job_tests {
         let row = run_once(&app, &seeded.project, job, Some(conn)).await;
         assert_eq!(row.status, "done", "{:?}", row.error);
         let now = app.state.clock.now_ns();
-        let prices = app.state.ingest.prices();
+        let prices = app.state.ingest.prices().builtin();
         let adapter = Adapter::from_name("openai").expect("adapter");
         let price = budget::model_price(&prices, PRICED, adapter, now).expect("priced");
         let prompt = format!("Question: {QUESTION}\nAnswer: {ANSWER}");

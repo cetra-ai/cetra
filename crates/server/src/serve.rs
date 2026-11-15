@@ -292,7 +292,15 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(ServeError::Prices(error));
         }
     };
-    let ingest = Ingest::new(&config.ingest, &config.media, prices);
+    let prices = match crate::prices::Prices::load(meta.reader(), prices).await {
+        Ok(prices) => prices,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
+    let ingest = Ingest::new(&config.ingest, &config.media, Arc::new(prices));
     let mailer = match crate::email::Mailer::from_config(&config) {
         Ok(mailer) => mailer.map(Arc::new),
         Err(_error) => {

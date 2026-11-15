@@ -326,7 +326,7 @@ async fn update_evaluator(
     // The rules of this evaluator are checked against the new config in the write (D-I-19).
     let checks = RuleChecks {
         subject: Subject::from_config(&prepared.evaluator.config),
-        prices: state.ingest.prices(),
+        prices: state.ingest.prices().for_project(org, project),
         now: state.clock.now_ns(),
     };
     let fields = EvaluatorFields {
@@ -1469,7 +1469,7 @@ mod tests {
         };
         let checks = RuleChecks {
             subject: Subject::from_row(&expected).unwrap(),
-            prices: app.state.ingest.prices(),
+            prices: app.state.ingest.prices().builtin(),
             now,
         };
         let stale = app
@@ -1501,7 +1501,7 @@ mod tests {
         };
         let checks = RuleChecks {
             subject: Subject::from_row(&current).unwrap(),
-            prices: app.state.ingest.prices(),
+            prices: app.state.ingest.prices().builtin(),
             now,
         };
         let outcome = app
@@ -1724,7 +1724,7 @@ mod tests {
         };
         let checks = RuleChecks {
             subject: Subject::from_config(&parsed),
-            prices: app.state.ingest.prices(),
+            prices: app.state.ingest.prices().builtin(),
             now,
         };
         let outcome = app

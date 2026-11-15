@@ -271,7 +271,7 @@ async fn judge_cost(
     };
     let adapter = judge_adapter(state, org, &subject).await?;
     let price = adapter.and_then(|adapter| {
-        let prices = state.ingest.prices();
+        let prices = state.ingest.prices().for_project(org, rule.project_id);
         budget::model_price(&prices, &judge.model, adapter, now).cloned()
     });
     let mapping: BTreeMap<String, String> =
@@ -633,7 +633,7 @@ mod tests {
         let chars = PROMPT.chars().count() + 2 * 2_000;
         assert_eq!(body["estimated_input_tokens"], 2 * chars.div_ceil(4) as u64);
         assert_eq!(body["estimated_output_tokens"], 2 * 1024);
-        let prices = app.state.ingest.prices();
+        let prices = app.state.ingest.prices().builtin();
         let price = budget::model_price(&prices, PRICED, Adapter::OpenAi, NOW).expect("priced");
         let expected = 2.0 * budget::estimate_usd(chars, 1024, price);
         let cost = body["estimated_cost_usd"].as_f64().expect("a cost");

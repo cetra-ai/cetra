@@ -337,7 +337,11 @@ impl TestApp {
         }
         let prices = llmobs_otel::PriceTable::new(llmobs_otel::builtin_price_rows())
             .expect("built-in price table");
-        let ingest = crate::ingest::Ingest::new(&config.ingest, &config.media, prices);
+        let ingest = crate::ingest::Ingest::new(
+            &config.ingest,
+            &config.media,
+            Arc::new(crate::prices::Prices::new(prices)),
+        );
         let license = crate::ee::license::LicenseState::from_key(
             config.license_key.as_ref().map(|key| key.expose().as_str()),
         );

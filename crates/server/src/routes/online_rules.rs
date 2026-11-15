@@ -623,7 +623,7 @@ async fn validate(
             let adapter = judge_adapter(state, org, &subject).await?;
             // The checks on the mapping's keys run even when an expression does not parse.
             let variables: BTreeSet<String> = draft.mapping.keys().cloned().collect();
-            let prices = state.ingest.prices();
+            let prices = state.ingest.prices().for_project(org, project);
             let shape = RuleShape {
                 target: draft.target,
                 mapping: mapping.as_ref(),
@@ -880,12 +880,14 @@ mod tests {
     use llmobs_core::enums::SpanStatus;
     use llmobs_core::ids::{SpanId, TraceId};
     use llmobs_core::span::Span;
+    use llmobs_otel::{PriceRow, PriceScope, exact_pattern};
     use serde_json::{Value, json};
 
     use super::*;
     use crate::auth::roles::OrgRole;
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+    use crate::meta::model_prices;
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
     use crate::test_support::{
@@ -1468,6 +1470,54 @@ mod tests {
                 "give budget_usd and budget_period together".to_owned()
             )]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_budget_on_a_local_model_is_accepted_once_the_project_prices_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge_with_model(&app, &seeded, "llama3.1:8b").await;
+        let body = rule_body(evaluator);
+        assert_eq!(
+            field_errors(&create(&app, &seeded, &body).await),
+            [(
+                "budget_usd".to_owned(),
+                "the judge model has no price, so the rule cannot have a budget".to_owned()
+            )]
+        );
+
+        let (org, project, now) = (seeded.org_id, seeded.project.id, app.state.clock.now_ns());
+        let row = PriceRow {
+            scope: PriceScope::Project,
+            model_name: "llama3.1:8b".to_owned(),
+            match_pattern: exact_pattern("llama3.1:8b"),
+            provider: None,
+            valid_from: 0,
+            price_input: Some(0.0),
+            price_output: Some(0.0),
+            price_cache_read: None,
+            price_cache_write: None,
+            price_reasoning: None,
+            tiers: None,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    model_prices::insert_tx(conn, Uuid::now_v7(), org, Some(project), &row, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        app.state
+            .ingest
+            .prices()
+            .reload_org(app.state.meta.reader(), org)
+            .await
+            .unwrap();
+        create_ok(&app, &seeded, &body).await;
     }
 
     #[tokio::test]
