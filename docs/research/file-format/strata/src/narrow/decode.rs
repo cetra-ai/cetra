@@ -1,19 +1,30 @@
 //! Decoding one narrow chunk back to an Arrow array: the inverse of `encode.rs`.
 
-use arrow::array::{ArrayData, ArrayRef, make_array, new_null_array};
-use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
+use std::sync::Arc;
+
+use arrow::array::{
+    ArrayData, ArrayRef, ListArray, StringArray, StringBuilder, make_array, new_null_array,
+};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field};
 
 use super::bitpack::unpack;
 use super::{
-    BlockEntry, Class, Encoding, MAX_CHUNK_ROWS, Numeric, fits, flags, numeric_of, unsupported,
+    BlockEntry, Class, Dictionary, Encoding, MAX_CHUNK_ELEMENTS, MAX_CHUNK_ROWS, Numeric, fits,
+    flags, numeric_of, unsupported,
 };
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, le_u64};
 
 /// Decodes `entry` with its body (`None` for `Const` and `ConstNull`) into an array of
-/// `field`'s type. The entry's `segment_offset` is used only in error offsets.
-pub fn decode_chunk(entry: &BlockEntry, body: Option<&[u8]>, field: &Field) -> Result<ArrayRef> {
+/// `field`'s type. `dict` is the column's dictionary, needed by `Const` of Utf8 and by
+/// `Dict` and `ListDict`. The entry's `segment_offset` is used only in error offsets.
+pub fn decode_chunk(
+    entry: &BlockEntry,
+    body: Option<&[u8]>,
+    field: &Field,
+    dict: Option<&Dictionary>,
+) -> Result<ArrayRef> {
     let at = entry.segment_offset;
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
     if entry.n_rows > MAX_CHUNK_ROWS {
@@ -23,7 +34,7 @@ pub fn decode_chunk(entry: &BlockEntry, body: Option<&[u8]>, field: &Field) -> R
     let dt = field.data_type();
     match entry.encoding {
         Encoding::ConstNull => return Ok(new_null_array(dt, n)),
-        Encoding::Const => return decode_const(entry, dt, n),
+        Encoding::Const => return decode_const(entry, dt, n, dict),
         _ => {}
     }
 
@@ -35,6 +46,10 @@ pub fn decode_chunk(entry: &BlockEntry, body: Option<&[u8]>, field: &Field) -> R
         None
     };
     match dt {
+        DataType::Utf8 => decode_utf8(entry, &mut c, n, nulls, dict, at),
+        DataType::List(child) if child.data_type() == &DataType::Utf8 => {
+            decode_list_utf8(entry, &mut c, n, nulls, child, dict, at)
+        }
         DataType::Boolean => {
             if entry.encoding != Encoding::Bool {
                 return Err(corrupt("encoding for type"));
@@ -212,12 +227,151 @@ fn decode_fsb(
     build_array(dt, n, nulls, values, at)
 }
 
-/// A `Const` chunk: its one value repeated `n` times.
-fn decode_const(entry: &BlockEntry, dt: &DataType, n: usize) -> Result<ArrayRef> {
+/// The dictionary a `Dict` or `ListDict` chunk needs.
+fn require_dict(dict: Option<&Dictionary>, at: u64) -> Result<&Dictionary> {
+    dict.ok_or(StrataError::Corrupt {
+        what: "chunk dictionary",
+        offset: at,
+    })
+}
+
+/// Reads the packed codes: a width byte, then the codes of `n` values.
+fn read_codes(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Vec<u64>> {
+    let width = c.u8("dictionary width")?;
+    let rest = c.remaining();
+    let packed = c.bytes(rest, "dictionary codes")?;
+    unpack(packed, n, width).map_err(|_| StrataError::Corrupt {
+        what: "dictionary codes",
+        offset: at,
+    })
+}
+
+/// The value of a code, as a string. A code outside the dictionary is corrupt.
+fn code_str(dict: &Dictionary, code: u64, at: u64) -> Result<&str> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let value = u32::try_from(code)
+        .ok()
+        .and_then(|code| dict.value(code))
+        .ok_or_else(|| corrupt("dictionary code"))?;
+    std::str::from_utf8(value).map_err(|_| corrupt("dictionary utf8"))
+}
+
+/// A `Dict` chunk of Utf8: one code per row. Null rows also carry a code, which must be
+/// in the dictionary too.
+fn decode_utf8(
+    entry: &BlockEntry,
+    c: &mut Cursor<'_>,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    dict: Option<&Dictionary>,
+    at: u64,
+) -> Result<ArrayRef> {
+    if entry.encoding != Encoding::Dict {
+        return Err(StrataError::Corrupt {
+            what: "encoding for type",
+            offset: at,
+        });
+    }
+    let dict = require_dict(dict, at)?;
+    let codes = read_codes(c, n, at)?;
+    let mut builder = StringBuilder::with_capacity(n, 0);
+    for (i, code) in codes.into_iter().enumerate() {
+        let value = code_str(dict, code, at)?;
+        if nulls.as_ref().is_none_or(|valid| valid.is_valid(i)) {
+            builder.append_value(value);
+        } else {
+            builder.append_null();
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+/// A `ListDict` chunk of List(Utf8): `n + 1` list offsets, then the codes of all elements.
+/// A null list has zero length.
+fn decode_list_utf8(
+    entry: &BlockEntry,
+    c: &mut Cursor<'_>,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    child: &Arc<Field>,
+    dict: Option<&Dictionary>,
+    at: u64,
+) -> Result<ArrayRef> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    if entry.encoding != Encoding::ListDict {
+        return Err(corrupt("encoding for type"));
+    }
+    let dict = require_dict(dict, at)?;
+
+    let mut offsets: Vec<usize> = Vec::new();
+    for _ in 0..=n {
+        offsets.push(c.u32("list offsets")? as usize);
+    }
+    if offsets.first() != Some(&0) {
+        return Err(corrupt("list offsets"));
+    }
+    for (i, pair) in offsets.windows(2).enumerate() {
+        let [start, end] = pair else {
+            return Err(corrupt("list offsets"));
+        };
+        if start > end {
+            return Err(corrupt("list offsets"));
+        }
+        let valid = nulls.as_ref().is_none_or(|v| v.is_valid(i));
+        if !valid && start != end {
+            return Err(corrupt("list null length"));
+        }
+    }
+    let total = offsets.last().copied().unwrap_or_default();
+    if total > MAX_CHUNK_ELEMENTS {
+        return Err(corrupt("list elements"));
+    }
+
+    let codes = read_codes(c, total, at)?;
+    let mut builder = StringBuilder::new();
+    for code in codes {
+        builder.append_value(code_str(dict, code, at)?);
+    }
+    let values: StringArray = builder.finish();
+
+    let offsets = offsets
+        .iter()
+        .map(|o| i32::try_from(*o).map_err(|_| corrupt("list offsets")))
+        .collect::<Result<Vec<i32>>>()?;
+    // Invariant: `offsets` is non-empty, starts at 0 and never decreases, checked above, so
+    // `OffsetBuffer::new` cannot panic.
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
+    let list = ListArray::try_new(Arc::clone(child), offsets, Arc::new(values), nulls)
+        .map_err(|_| corrupt("list values"))?;
+    Ok(Arc::new(list))
+}
+
+/// A `Const` chunk: its one value repeated `n` times. For Utf8 the value is a dictionary
+/// code, in the first four bytes of `min`.
+fn decode_const(
+    entry: &BlockEntry,
+    dt: &DataType,
+    n: usize,
+    dict: Option<&Dictionary>,
+) -> Result<ArrayRef> {
     let at = entry.segment_offset;
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
     let len = usize::from(entry.const_len);
     match dt {
+        DataType::Utf8 => {
+            if len != 4 {
+                return Err(corrupt("const length"));
+            }
+            let dict = require_dict(dict, at)?;
+            let code = entry
+                .min
+                .get(..4)
+                .and_then(le_u64)
+                .ok_or_else(|| corrupt("const value"))?;
+            let value = code_str(dict, code, at)?;
+            Ok(Arc::new(StringArray::from(vec![value; n])))
+        }
+        DataType::List(_) => Err(corrupt("encoding for type")),
         DataType::Boolean => {
             if len != 1 {
                 return Err(corrupt("const length"));
@@ -269,19 +423,31 @@ fn decode_const(entry: &BlockEntry, dt: &DataType, n: usize) -> Result<ArrayRef>
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::narrow::{EncodedChunk, encode_chunk};
+    use crate::narrow::{EncodedChunk, encode_chunk, for_column};
     use crate::testgen::{assert_same, batch};
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int8Array,
-        Int16Array, Int32Array, Int64Array, TimestampNanosecondArray, UInt8Array, UInt16Array,
-        UInt32Array, UInt64Array,
+        Int16Array, Int32Array, Int64Array, ListBuilder, StringArray, StringBuilder,
+        TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use proptest::prelude::*;
     use std::sync::Arc;
 
+    /// The dictionary of all rows of `array`. The codec tests lift the writer's size limits,
+    /// so that random arrays of any size have one.
+    fn dict_of(array: &ArrayRef) -> Option<Dictionary> {
+        let config = Config {
+            dict_max_values: usize::MAX,
+            dict_max_bytes: usize::MAX,
+            ..Config::default()
+        };
+        for_column(array.as_ref(), &config)
+    }
+
     /// Encodes `array`, decodes it with the field of the same type and compares the result.
     fn round_trip(array: ArrayRef) -> EncodedChunk {
-        let chunk = encode_chunk(&array, &Config::default()).unwrap();
+        let dict = dict_of(&array);
+        let chunk = encode_chunk(&array, dict.as_ref(), &Config::default()).unwrap();
         let entry = BlockEntry {
             first_row: 0,
             n_rows: array.len() as u32,
@@ -294,10 +460,32 @@ mod tests {
             max: chunk.max,
         };
         let field = Field::new("c", array.data_type().clone(), true);
-        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field, dict.as_ref()).unwrap();
         assert_eq!(decoded.data_type(), array.data_type());
         assert_same(decoded.as_ref(), array.as_ref());
         chunk
+    }
+
+    /// A List(Utf8) array with the field the writer's schema gives it, from rows that are
+    /// `None` (a null list) or a list of values.
+    fn list_of_utf8(rows: &[Option<Vec<String>>]) -> ArrayRef {
+        let mut builder = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
+            "item",
+            DataType::Utf8,
+            true,
+        )));
+        for row in rows {
+            match row {
+                Some(elements) => {
+                    for element in elements {
+                        builder.values().append_value(element);
+                    }
+                    builder.append(true);
+                }
+                None => builder.append(false),
+            }
+        }
+        Arc::new(builder.finish())
     }
 
     macro_rules! int_round_trip {
@@ -306,7 +494,7 @@ mod tests {
                 #[test]
                 fn $name(v in proptest::collection::vec(proptest::option::of(any::<$ty>()), 0..5_000)) {
                     let array: ArrayRef = Arc::new(<$array>::from_iter(v));
-                    let chunk = encode_chunk(&array, &Config::default()).unwrap();
+                    let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
                     let entry = BlockEntry {
                         first_row: 0,
                         n_rows: array.len() as u32,
@@ -319,7 +507,7 @@ mod tests {
                         max: chunk.max,
                     };
                     let field = Field::new("c", array.data_type().clone(), true);
-                    let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+                    let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field, None).unwrap();
                     assert_same(decoded.as_ref(), array.as_ref());
                 }
             }
@@ -442,7 +630,7 @@ mod tests {
             min: chunk.min,
             max: chunk.max,
         };
-        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field).unwrap();
+        let decoded = decode_chunk(&entry, chunk.body.as_deref(), &field, None).unwrap();
         assert_eq!(decoded.data_type(), array.data_type());
     }
 
@@ -489,6 +677,84 @@ mod tests {
 
     proptest! {
         #[test]
+        fn utf8_round_trips(
+            v in proptest::collection::vec(proptest::option::of(".{0,12}"), 0..5_000),
+        ) {
+            round_trip(Arc::new(StringArray::from_iter(v)));
+        }
+
+        #[test]
+        fn list_of_utf8_round_trips(
+            rows in proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(".{0,8}", 0..40)),
+                0..1_000,
+            ),
+        ) {
+            round_trip(list_of_utf8(&rows));
+        }
+    }
+
+    #[test]
+    fn utf8_constant_chunk_is_const_with_a_code() {
+        let chunk = round_trip(Arc::new(StringArray::from(vec!["x"; 9])));
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert_eq!(chunk.const_len, 4);
+        assert!(chunk.body.is_none());
+    }
+
+    #[test]
+    fn empty_and_nul_suffixed_strings_stay_distinct() {
+        let array = StringArray::from(vec![Some("a"), Some("a\0"), Some(""), None, Some("a")]);
+        assert_eq!(round_trip(Arc::new(array)).encoding, Encoding::Dict);
+        let array = StringArray::from(vec!["a", "a\0", "a", "a\0"]);
+        round_trip(Arc::new(array));
+    }
+
+    #[test]
+    fn long_list_round_trips_as_list_dict() {
+        let long: Vec<String> = (0..3_000).map(|i| format!("v{}", i % 17)).collect();
+        let rows = vec![Some(vec![]), None, Some(long), Some(vec!["v1".to_string()])];
+        let chunk = round_trip(list_of_utf8(&rows));
+        assert_eq!(chunk.encoding, Encoding::ListDict);
+    }
+
+    proptest! {
+        #[test]
+        fn random_dictionary_bodies_never_panic(
+            list in any::<bool>(),
+            n_rows in 0u32..5_000,
+            entry_flags in any::<u8>(),
+            min in any::<[u8; 16]>(),
+            max in any::<[u8; 16]>(),
+            body in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let sample: ArrayRef = Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"]));
+            let dict = dict_of(&sample).unwrap();
+            let (encoding, field) = if list {
+                (
+                    Encoding::ListDict,
+                    Field::new("c", DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))), true),
+                )
+            } else {
+                (Encoding::Dict, Field::new("c", DataType::Utf8, true))
+            };
+            let entry = BlockEntry {
+                first_row: 0,
+                n_rows,
+                segment_offset: 8,
+                segment_len: body.len() as u32 + 16,
+                encoding,
+                flags: entry_flags,
+                const_len: 4,
+                min,
+                max,
+            };
+            let _ = decode_chunk(&entry, Some(&body), &field, Some(&dict));
+        }
+    }
+
+    proptest! {
+        #[test]
         fn random_entries_and_bodies_never_panic(
             encoding in 0u8..=10,
             n_rows in 0u32..5_000,
@@ -524,7 +790,7 @@ mod tests {
                 max,
             };
             let field = Field::new("c", dt, true);
-            let _ = decode_chunk(&entry, Some(&body), &field);
+            let _ = decode_chunk(&entry, Some(&body), &field, None);
             }
         }
     }

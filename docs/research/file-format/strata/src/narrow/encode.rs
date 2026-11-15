@@ -1,12 +1,14 @@
 //! Encoding one Arrow slice into one narrow chunk, following the S3 rules.
 
-use arrow::array::{Array, ArrayRef, BooleanArray, FixedSizeBinaryArray};
+use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray};
 use arrow::datatypes::DataType;
 
 use super::bitpack::{pack, width_for};
-use super::{Class, Encoding, Numeric, flags, numeric_of, unsupported};
+use super::{
+    Class, Dictionary, Encoding, MAX_CHUNK_ELEMENTS, Numeric, flags, numeric_of, unsupported,
+};
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Result, StrataError};
 use crate::format::le_u64;
 
 /// One chunk, encoded. `body` is `None` for `Const` and `ConstNull`, which write no
@@ -40,9 +42,13 @@ impl EncodedChunk {
     }
 }
 
-/// Encodes one chunk. `_config` is not used in M1.2: the writer applies zstd. M1.3 uses it
-/// for dictionaries.
-pub fn encode_chunk(array: &ArrayRef, _config: &Config) -> Result<EncodedChunk> {
+/// Encodes one chunk. `dict` is the column's dictionary, which Utf8 and List(Utf8) chunks
+/// need. `_config` is unused: the writer applies zstd and the dictionary is passed in.
+pub fn encode_chunk(
+    array: &ArrayRef,
+    dict: Option<&Dictionary>,
+    _config: &Config,
+) -> Result<EncodedChunk> {
     let array: &dyn Array = array.as_ref();
     if array.null_count() == array.len() {
         return Ok(EncodedChunk::bare(
@@ -56,6 +62,14 @@ pub fn encode_chunk(array: &ArrayRef, _config: &Config) -> Result<EncodedChunk> 
         DataType::FixedSizeBinary(w) => {
             let width = usize::try_from(*w).map_err(|_| unsupported(dt))?;
             encode_fsb(array, width)
+        }
+        DataType::Utf8 => {
+            let dict = dict.ok_or_else(|| unsupported(dt))?;
+            encode_utf8(array, dict)
+        }
+        DataType::List(field) if field.data_type() == &DataType::Utf8 => {
+            let dict = dict.ok_or_else(|| unsupported(dt))?;
+            encode_list_utf8(array, dict)
         }
         _ => {
             let num = numeric_of(dt).ok_or_else(|| unsupported(dt))?;
@@ -369,6 +383,128 @@ fn encode_fsb(array: &dyn Array, width: usize) -> Result<EncodedChunk> {
     Ok(chunk)
 }
 
+/// The dictionary code of `v`. The dictionary holds every value of its column, so a miss is
+/// a writer bug, reported without the value.
+fn code_of(dict: &Dictionary, v: &[u8]) -> Result<u32> {
+    dict.code_of(v).ok_or_else(|| StrataError::Schema {
+        reason: "a value is missing from its dictionary".to_string(),
+    })
+}
+
+/// A Utf8 chunk with a dictionary: `Const` when every value is the same, else `Dict`.
+fn encode_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
+    let strings = array
+        .as_string_opt::<i32>()
+        .ok_or_else(|| unsupported(array.data_type()))?;
+    let n = strings.len();
+    let has_nulls = strings.null_count() > 0;
+    // Null rows take code 0 in the packed codes; the zone uses only the valid codes.
+    let mut codes: Vec<u64> = Vec::with_capacity(n);
+    let mut valid_codes: Vec<u32> = Vec::with_capacity(n);
+    for i in 0..n {
+        if strings.is_valid(i) {
+            let code = code_of(dict, strings.value(i).as_bytes())?;
+            codes.push(u64::from(code));
+            valid_codes.push(code);
+        } else {
+            codes.push(0);
+        }
+    }
+
+    let first = valid_codes.first().copied().unwrap_or_default();
+    if !has_nulls && valid_codes.iter().all(|c| *c == first) {
+        let mut chunk = EncodedChunk::bare(Encoding::Const, flags::HAS_ZONE);
+        chunk.const_len = 4;
+        set_prefix(&mut chunk.min, &first.to_le_bytes());
+        chunk.max = chunk.min;
+        return Ok(chunk);
+    }
+
+    let lo = valid_codes.iter().min().copied().unwrap_or_default();
+    let hi = valid_codes.iter().max().copied().unwrap_or_default();
+    let mut body = Vec::new();
+    let mut chunk_flags = flags::HAS_ZONE;
+    if has_nulls {
+        chunk_flags |= flags::HAS_NULLS;
+        body.extend(validity_bitmap(array));
+    }
+    // Null rows hold code 0, so the largest code is the largest valid one.
+    let width = width_for(u64::from(hi));
+    body.push(width);
+    pack(&codes, width, &mut body);
+    let mut chunk = EncodedChunk::bare(Encoding::Dict, chunk_flags);
+    set_prefix(&mut chunk.min, &lo.to_le_bytes());
+    set_prefix(&mut chunk.max, &hi.to_le_bytes());
+    chunk.body = Some(body);
+    Ok(chunk)
+}
+
+/// A List(Utf8) chunk with a dictionary, as `ListDict`: the list offsets, then the packed
+/// codes of every element. A null element inside a non-null list is not supported yet.
+fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
+    let list = array
+        .as_list_opt::<i32>()
+        .ok_or_else(|| unsupported(array.data_type()))?;
+    let child = list
+        .values()
+        .as_string_opt::<i32>()
+        .ok_or_else(|| unsupported(array.data_type()))?;
+    let n = list.len();
+    let has_nulls = list.null_count() > 0;
+    let mut codes: Vec<u64> = Vec::new();
+    let mut offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    offsets.push(0);
+    for (i, pair) in list.value_offsets().windows(2).enumerate() {
+        if list.is_valid(i) {
+            let [start, end] = pair else {
+                return Err(StrataError::Schema {
+                    reason: "list offsets are not paired".to_string(),
+                });
+            };
+            let start = usize::try_from(*start).map_err(|_| StrataError::Schema {
+                reason: "list offset is negative".to_string(),
+            })?;
+            let end = usize::try_from(*end).map_err(|_| StrataError::Schema {
+                reason: "list offset is negative".to_string(),
+            })?;
+            for j in start..end {
+                if child.is_null(j) {
+                    return Err(StrataError::Unsupported {
+                        what: "null list element".to_string(),
+                    });
+                }
+                codes.push(u64::from(code_of(dict, child.value(j).as_bytes())?));
+            }
+        }
+        // A null list has no elements in the chunk, whatever its child range holds.
+        if codes.len() > MAX_CHUNK_ELEMENTS {
+            return Err(StrataError::Unsupported {
+                what: format!("a list chunk of more than {MAX_CHUNK_ELEMENTS} elements"),
+            });
+        }
+        let end = u32::try_from(codes.len()).map_err(|_| StrataError::Unsupported {
+            what: "a list chunk of more than 4 billion elements".to_string(),
+        })?;
+        offsets.push(end);
+    }
+
+    let mut body = Vec::new();
+    let mut chunk_flags = 0u8;
+    if has_nulls {
+        chunk_flags |= flags::HAS_NULLS;
+        body.extend(validity_bitmap(array));
+    }
+    for offset in &offsets {
+        body.extend_from_slice(&offset.to_le_bytes());
+    }
+    let width = width_for(codes.iter().copied().max().unwrap_or_default());
+    body.push(width);
+    pack(&codes, width, &mut body);
+    let mut chunk = EncodedChunk::bare(Encoding::ListDict, chunk_flags);
+    chunk.body = Some(body);
+    Ok(chunk)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -384,7 +520,7 @@ mod tests {
     #[test]
     fn a_constant_chunk_has_no_body() {
         let array: ArrayRef = Arc::new(Int64Array::from(vec![7; 100]));
-        let chunk = encode_chunk(&array, &Config::default()).unwrap();
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
         assert_eq!(chunk.encoding, Encoding::Const);
         assert!(chunk.body.is_none());
     }
@@ -392,7 +528,7 @@ mod tests {
     #[test]
     fn all_null_is_const_null_without_body() {
         let array = new_null_array(&DataType::Int64, 10);
-        let chunk = encode_chunk(&array, &Config::default()).unwrap();
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
         assert_eq!(chunk.encoding, Encoding::ConstNull);
         assert!(chunk.body.is_none());
     }
@@ -400,7 +536,7 @@ mod tests {
     #[test]
     fn all_equal_with_nulls_is_for_width_zero() {
         let array: ArrayRef = Arc::new(Int64Array::from(vec![Some(5), None, Some(5), Some(5)]));
-        let chunk = encode_chunk(&array, &Config::default()).unwrap();
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
         assert_eq!(chunk.encoding, Encoding::ForBitpack);
         let body = chunk.body.unwrap();
         // One validity byte, then the width byte.
@@ -408,11 +544,25 @@ mod tests {
     }
 
     #[test]
-    fn utf8_is_unsupported_in_m1_2() {
+    fn utf8_without_a_dictionary_is_unsupported_until_m1_4() {
         let array = arrow::array::StringArray::from(vec!["a"]);
         let array: ArrayRef = Arc::new(array);
         assert!(matches!(
-            encode_chunk(&array, &Config::default()),
+            encode_chunk(&array, None, &Config::default()),
+            Err(crate::error::StrataError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
+    fn null_list_element_is_unsupported_until_m1_4() {
+        let mut builder = arrow::array::ListBuilder::new(arrow::array::StringBuilder::new());
+        builder.values().append_value("a");
+        builder.values().append_null();
+        builder.append(true);
+        let array: ArrayRef = Arc::new(builder.finish());
+        let dict = crate::narrow::for_column(array.as_ref(), &Config::default());
+        assert!(matches!(
+            encode_chunk(&array, dict.as_ref(), &Config::default()),
             Err(crate::error::StrataError::Unsupported { .. })
         ));
     }

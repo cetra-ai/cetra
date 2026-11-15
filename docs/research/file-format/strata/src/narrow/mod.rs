@@ -1,16 +1,18 @@
 //! The narrow layer: one column stored as chunks, each with one of the S3 encodings and
 //! described by a 56-byte block-table entry.
 //!
-//! M1.2 covers integers, dates, timestamps, floats, booleans and FixedSizeBinary.
+//! M1.3 adds Utf8 and List(Utf8) through file-level sorted dictionaries.
 //! [`encode_chunk`] and [`decode_chunk`] are inverses of each other.
 
 mod bitpack;
 mod chunker;
 mod decode;
+mod dict;
 mod encode;
 
 pub use chunker::chunk_ranges;
 pub use decode::decode_chunk;
+pub use dict::{Dictionary, for_column};
 pub use encode::{EncodedChunk, encode_chunk};
 
 use arrow::datatypes::DataType;
@@ -20,6 +22,10 @@ use crate::format::{Cursor, Out};
 
 /// The most rows a chunk may hold. The `FSB_RLE` run lengths are `u16`.
 pub const MAX_CHUNK_ROWS: u32 = 65_535;
+
+/// The most list elements a List(Utf8) chunk may hold. The writer refuses a bigger chunk
+/// (`Unsupported`), and the reader refuses it as `Corrupt` before it allocates for it.
+pub const MAX_CHUNK_ELEMENTS: usize = 1 << 24;
 
 /// The S3 encodings.
 #[repr(u8)]
@@ -37,11 +43,11 @@ pub enum Encoding {
     FsbRaw = 4,
     /// Fixed-size binary values as run-length encoded runs.
     FsbRle = 5,
-    /// Dictionary codes, for Utf8 (M1.3).
+    /// Dictionary codes, for Utf8.
     Dict = 6,
     /// Variable-length values (M1.4).
     Varbin = 7,
-    /// Dictionary codes of list elements (M1.3).
+    /// Dictionary codes of list elements, for List(Utf8).
     ListDict = 8,
     /// A bit per row, for booleans.
     Bool = 9,

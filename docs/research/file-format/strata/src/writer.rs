@@ -13,7 +13,8 @@ use crate::error::{Result, StrataError};
 use crate::format::{Out, VERSION, checksum32};
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_file_header};
 use crate::narrow::{
-    BlockEntry, Class, EncodedChunk, MAX_CHUNK_ROWS, chunk_ranges, encode_chunk, numeric_of,
+    BlockEntry, Class, EncodedChunk, MAX_CHUNK_ROWS, chunk_ranges, encode_chunk, for_column,
+    numeric_of,
 };
 use crate::segment::{Codec, Kind, encode_segment};
 
@@ -165,6 +166,22 @@ impl StrataWriter {
         let first_sort_column = self.sort_key.first().copied();
         for (index, field) in self.schema.fields().iter().enumerate() {
             let array = self.column(index)?;
+            let dict = for_column(array.as_ref(), &self.config);
+            let (dict_offset, dict_len) = match &dict {
+                Some(dict) => {
+                    let mut body = Out(Vec::new());
+                    dict.encode(&mut body)?;
+                    let seg = encode_segment(
+                        Kind::Dictionary,
+                        &body.0,
+                        Codec::Zstd,
+                        self.config.zstd_level,
+                        &mut out,
+                    )?;
+                    (seg.offset, seg.len)
+                }
+                None => (0, 0),
+            };
             let ranges = chunk_ranges(
                 array.as_ref(),
                 self.config.chunk_max_rows,
@@ -172,7 +189,7 @@ impl StrataWriter {
             );
             let mut entries = Vec::with_capacity(ranges.len());
             let mut counts = [0u32; 11];
-            let mut bytes = 0u64;
+            let mut bytes = u64::from(dict_len);
             for range in ranges {
                 let slice = array.slice(range.start, range.len());
                 let EncodedChunk {
@@ -182,7 +199,7 @@ impl StrataWriter {
                     min,
                     max,
                     body,
-                } = encode_chunk(&slice, &self.config)?;
+                } = encode_chunk(&slice, dict.as_ref(), &self.config)?;
                 let (segment_offset, segment_len) = match body {
                     Some(body) => {
                         let seg = encode_segment(
@@ -261,12 +278,13 @@ impl StrataWriter {
                 })?,
                 parent: u32::MAX,
                 layer: Layer::Narrow,
-                flags: 0,
+                // Bit 0 says the column has a dictionary.
+                flags: u8::from(dict.is_some()),
                 pages_offset,
                 n_pages,
                 n_chunks,
-                dict_offset: 0,
-                dict_len: 0,
+                dict_offset,
+                dict_len,
                 payload_offset: 0,
                 payload_len: 0,
                 null_count: array.null_count() as u64,

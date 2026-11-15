@@ -6,8 +6,8 @@ use futures::future::try_join_all;
 
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
-use crate::narrow::decode_chunk;
-use crate::segment::Kind;
+use crate::narrow::{Dictionary, decode_chunk};
+use crate::segment::{Kind, SegmentRef};
 
 /// Decodes every row of column `column` (its schema index).
 ///
@@ -26,11 +26,28 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
         return Ok(new_empty_array(field.data_type()));
     }
 
+    let record = file
+        .directory()
+        .get(column)
+        .ok_or_else(|| StrataError::Schema {
+            reason: format!("no column {column}"),
+        })?;
+    let dict = if record.dict_offset != 0 {
+        let segment = SegmentRef {
+            offset: record.dict_offset,
+            len: record.dict_len,
+        };
+        let bytes = file.read_segment(&segment, Kind::Dictionary).await?;
+        Some(Dictionary::decode(&bytes, record.dict_offset)?)
+    } else {
+        None
+    };
+
     let bodies = try_join_all(entries.iter().map(|entry| async move {
         if entry.segment_len == 0 {
             return Ok::<Option<Vec<u8>>, StrataError>(None);
         }
-        let segment = crate::segment::SegmentRef {
+        let segment = SegmentRef {
             offset: entry.segment_offset,
             len: entry.segment_len,
         };
@@ -42,7 +59,7 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
 
     let mut arrays = Vec::with_capacity(entries.len());
     for (entry, body) in entries.iter().zip(&bodies) {
-        arrays.push(decode_chunk(entry, body.as_deref(), field)?);
+        arrays.push(decode_chunk(entry, body.as_deref(), field, dict.as_ref())?);
     }
     let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
     Ok(concat(&refs)?)
@@ -141,21 +158,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn utf8_column_is_unsupported_until_m1_3() {
+    async fn utf8_column_of_65536_distinct_values_is_unsupported_until_m1_4() {
         let utf8_schema = Arc::new(Schema::new(vec![
             Field::new("trace_id", DataType::FixedSizeBinary(16), false),
             Field::new("name", DataType::Utf8, true),
         ]));
         let mut w =
             StrataWriter::new(Arc::clone(&utf8_schema), &["trace_id"], Config::default()).unwrap();
-        let ids =
-            FixedSizeBinaryArray::try_new(16, arrow::buffer::Buffer::from_vec(vec![0u8; 16]), None)
-                .unwrap();
-        let names = StringArray::from(vec![Some("a")]);
+        let ids = FixedSizeBinaryArray::try_new(
+            16,
+            arrow::buffer::Buffer::from_vec(vec![0u8; 16 * 65_536]),
+            None,
+        )
+        .unwrap();
+        let names = StringArray::from((0..65_536).map(|i| format!("v{i}")).collect::<Vec<_>>());
         let batch =
             RecordBatch::try_new(utf8_schema, vec![Arc::new(ids), Arc::new(names)]).unwrap();
         w.write(&batch).unwrap();
         assert!(matches!(w.finish(), Err(StrataError::Unsupported { .. })));
+    }
+
+    #[tokio::test]
+    async fn string_columns_use_dict_and_list_dict() {
+        let full = batch(20_000);
+        let mut w = writer(schema());
+        w.write(&full).unwrap();
+        let (bytes, summary) = w.finish().unwrap();
+        // Columns 5 to 9 are span_kind, status, model, environment and tags.
+        for column in &summary.columns[5..] {
+            let counts = column.encoding_counts;
+            for (encoding, count) in counts.iter().enumerate() {
+                let allowed = matches!(encoding, 0 | 6 | 8);
+                assert!(
+                    allowed || *count == 0,
+                    "{} has {count} chunks of encoding {encoding}",
+                    column.name
+                );
+            }
+        }
+        let file = open(bytes).await;
+        for column in 0..full.num_columns() {
+            let decoded = read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), full.column(column).as_ref());
+        }
     }
 
     #[tokio::test]

@@ -1,16 +1,27 @@
 //! Deterministic test batches, and the array comparison the tests share. M1.3 adds the
-//! string columns.
+//! string and list columns.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, RecordBatch,
-    TimestampNanosecondArray,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, ListArray,
+    RecordBatch, StringArray, TimestampNanosecondArray,
 };
-use arrow::buffer::Buffer;
+use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+
+const SPAN_KINDS: [&str; 5] = ["llm", "tool", "agent", "chain", "span"];
+const MODELS: [&str; 6] = [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "claude-3-5-sonnet",
+    "claude-3-haiku",
+    "llama-3-70b",
+    "gemini-1.5-pro",
+];
+const TAGS: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
 
 /// The schema of [`batch`].
 pub(crate) fn schema() -> SchemaRef {
@@ -24,6 +35,15 @@ pub(crate) fn schema() -> SchemaRef {
         Field::new("input_tokens", DataType::Int64, true),
         Field::new("cost", DataType::Float64, true),
         Field::new("flag", DataType::Boolean, false),
+        Field::new("span_kind", DataType::Utf8, false),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("model", DataType::Utf8, true),
+        Field::new("environment", DataType::Utf8, false),
+        Field::new(
+            "tags",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        ),
     ]))
 }
 
@@ -51,12 +71,43 @@ pub(crate) fn batch(n: usize) -> RecordBatch {
         }
     }));
     let flag = BooleanArray::from((0..n).map(|i| i.is_multiple_of(3)).collect::<Vec<bool>>());
+    let span_kind = StringArray::from_iter_values((0..n).map(|i| SPAN_KINDS[i % 5]));
+    let status = StringArray::from_iter_values(
+        (0..n).map(|i| if i.is_multiple_of(2) { "ok" } else { "error" }),
+    );
+    let model =
+        StringArray::from_iter((0..n).map(|i| (!i.is_multiple_of(4)).then(|| MODELS[i % 6])));
+    let environment = StringArray::from_iter_values((0..n).map(|_| "prod"));
+
+    // Row i holds i % 4 tags, tag k being TAGS[(i + k) % 8].
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0i32);
+    let mut tag_values: Vec<&str> = Vec::new();
+    for i in 0..n {
+        for k in 0..i % 4 {
+            tag_values.push(TAGS[(i + k) % 8]);
+        }
+        offsets.push(tag_values.len() as i32);
+    }
+    let tags = ListArray::try_new(
+        Arc::new(Field::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(ScalarBuffer::from(offsets)),
+        Arc::new(StringArray::from(tag_values)),
+        None,
+    )
+    .unwrap();
+
     let columns: Vec<ArrayRef> = vec![
         Arc::new(trace_ids),
         Arc::new(start_times),
         Arc::new(input_tokens),
         Arc::new(cost),
         Arc::new(flag),
+        Arc::new(span_kind),
+        Arc::new(status),
+        Arc::new(model),
+        Arc::new(environment),
+        Arc::new(tags),
     ];
     RecordBatch::try_new(schema(), columns).unwrap()
 }
