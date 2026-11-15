@@ -15,11 +15,18 @@ use crate::api::common::{Problem, ProblemCode};
 #[derive(Serialize)]
 struct Probe {
     status: &'static str,
+    /// Shown only in restore mode (N M3, D-N-25).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    restore_mode: bool,
 }
 
 /// Process is alive.
 pub(crate) async fn healthz() -> Response {
-    axum::Json(Probe { status: "ok" }).into_response()
+    axum::Json(Probe {
+        status: "ok",
+        restore_mode: false,
+    })
+    .into_response()
 }
 
 /// `meta.db` answers and neither WAL has failed.
@@ -36,9 +43,37 @@ pub(crate) async fn readyz(State(state): State<AppState>) -> Response {
         failed.push("scores WAL");
     }
     if failed.is_empty() {
-        axum::Json(Probe { status: "ready" }).into_response()
+        axum::Json(Probe {
+            status: "ready",
+            restore_mode: state.config.restore_mode,
+        })
+        .into_response()
     } else {
         let problem = Problem::new(ProblemCode::Busy, Some(failed.join(", ")));
         error::problem_response(&problem)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::Method;
+
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn readyz_reports_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let ready = app.request(Method::GET, "/readyz").send().await;
+        assert_eq!(ready.status, 200);
+        let body: serde_json::Value = ready.json();
+        assert_eq!(
+            body,
+            serde_json::json!({"status": "ready", "restore_mode": true})
+        );
+
+        let plain = TestApp::new().await;
+        let ready = plain.request(Method::GET, "/readyz").send().await;
+        let body: serde_json::Value = ready.json();
+        assert_eq!(body, serde_json::json!({"status": "ready"}));
     }
 }

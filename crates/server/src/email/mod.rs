@@ -178,6 +178,9 @@ pub(crate) enum MailError {
     /// `From` or `To` is not a mailbox.
     #[error("invalid email address")]
     InvalidAddress,
+    /// Restore mode (N M3, D-N-25): no email is sent.
+    #[error("email is off: restore mode")]
+    RestoreMode,
 }
 
 impl fmt::Debug for MailError {
@@ -195,6 +198,7 @@ impl MailError {
             Self::Rejected(_) => "rejected",
             Self::Template(_) => "template",
             Self::InvalidAddress => "invalid_address",
+            Self::RestoreMode => "restore_mode",
         }
     }
 }
@@ -206,6 +210,8 @@ struct Failure {
 
 enum Transport {
     Smtp(AsyncSmtpTransport<Tokio1Executor>),
+    /// Restore mode: refuses every message (N M3, D-N-25).
+    Off,
     #[cfg(test)]
     Stub(Arc<std::sync::Mutex<StubInbox>>),
 }
@@ -234,8 +240,13 @@ impl Mailer {
                 .as_deref()
                 .ok_or(MailError::InvalidAddress)?,
         )?;
+        let transport = if config.restore_mode {
+            Transport::Off
+        } else {
+            Transport::Smtp(smtp_transport(smtp)?)
+        };
         Ok(Some(Self {
-            transport: Transport::Smtp(smtp_transport(smtp)?),
+            transport,
             from,
             templates: templates()?,
         }))
@@ -267,7 +278,7 @@ impl Mailer {
     pub(crate) fn sent(&self) -> Vec<SentMail> {
         match &self.transport {
             Transport::Stub(inbox) => lock(inbox).sent.clone(),
-            Transport::Smtp(_) => Vec::new(),
+            Transport::Smtp(_) | Transport::Off => Vec::new(),
         }
     }
 
@@ -374,6 +385,13 @@ impl Mailer {
     /// The log line carries `template`, `message_id`, and `attempt`. A failure
     /// also carries `kind`. The recipient is not logged.
     pub(crate) fn send_in_background(self: &Arc<Self>, to: String, email: Email) {
+        if matches!(self.transport, Transport::Off) {
+            tracing::warn!(
+                template = template_name(&email),
+                "email not sent: restore mode"
+            );
+            return;
+        }
         let mailer = Arc::clone(self);
         tokio::spawn(async move {
             let template = template_name(&email);
@@ -456,6 +474,7 @@ impl Mailer {
                 transport.send(message).await.map_err(classify)?;
                 Ok(())
             }
+            Transport::Off => Err(MailError::RestoreMode),
             #[cfg(test)]
             Transport::Stub(_) => Ok(()),
         }
@@ -601,12 +620,49 @@ mod tests {
     use axum::http::Method;
 
     use crate::api::account::{AuthConfig, OrgRole};
-    use crate::test_support::{TestApp, capture_logs};
+    use crate::config::{SmtpUrl, Tls};
+    use crate::test_support::{TestApp, capture_logs, config};
 
-    use super::{Email, Mailer};
+    use super::{Email, MailError, Mailer};
 
     fn mailer() -> Mailer {
         Mailer::stub("llmobs <noreply@example.com>")
+    }
+
+    #[tokio::test]
+    async fn restore_mode_mailer_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.smtp_url = Some(SmtpUrl {
+            tls: Tls::None,
+            host: "smtp.example.test".to_owned(),
+            port: 2525,
+            credentials: None,
+        });
+        cfg.email_from = Some("llmobs <noreply@example.com>".to_owned());
+        cfg.restore_mode = true;
+        let mailer = Arc::new(Mailer::from_config(&cfg).unwrap().expect("a mailer"));
+
+        let err = mailer
+            .send_now("ada@example.com", &Email::Test)
+            .await
+            .expect_err("restore mode");
+        assert!(matches!(err, MailError::RestoreMode), "{err:?}");
+
+        let (_, logs) = capture_logs(async {
+            mailer.send_in_background("ada@example.com".to_owned(), Email::Test);
+        })
+        .await;
+        assert!(logs.contains("email not sent: restore mode"), "{logs}");
+        assert!(!logs.contains("ada@example.com"), "{logs}");
+    }
+
+    #[test]
+    fn without_smtp_url_there_is_no_mailer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.restore_mode = true;
+        assert!(Mailer::from_config(&cfg).unwrap().is_none());
     }
 
     fn rendered(mailer: &Mailer, email: &Email) -> String {

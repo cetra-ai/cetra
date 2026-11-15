@@ -313,6 +313,7 @@ impl TestApp {
         let eval_runner = Arc::new(
             llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
             })
             .expect("eval runner"),
         );
@@ -326,8 +327,7 @@ impl TestApp {
         };
         let mut providers = {
             let http = crate::auth::oidc::identity_client().expect("identity client");
-            crate::auth::oidc::Providers::from_config(&config.auth, &http)
-                .expect("identity providers")
+            crate::auth::oidc::Providers::for_config(&config, &http).expect("identity providers")
         };
         if let Some(base) = github_base {
             providers.retarget_github(base);
@@ -355,6 +355,7 @@ impl TestApp {
         let org_sso = crate::ee::org_sso::OrgSso::new(
             llmobs_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
             },
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
@@ -880,6 +881,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         otlp_http_addr: None,
         // Tests must not bind the gRPC port (4317).
         grpc_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
@@ -1428,6 +1430,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         trusted_proxies: Vec::new(),
         otlp_http_addr: None,
         grpc_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),

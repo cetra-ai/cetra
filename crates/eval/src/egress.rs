@@ -24,15 +24,18 @@ const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct EgressPolicy {
     /// Keep addresses that [`is_denied`] would drop.
     pub allow_private_network: bool,
+    /// Restore mode (N M3, D-N-25): every request is refused before it is sent.
+    pub restore_mode: bool,
 }
 
 impl EgressPolicy {
     /// Whether a request to `url` may be attempted: `http` or `https`, and a literal IP host
     /// that is not denied (D166) unless private networks are allowed. A host name is allowed
-    /// here; the resolver checks its addresses.
+    /// here; the resolver checks its addresses. Restore mode allows nothing.
     #[must_use]
     pub fn allows_url(&self, url: &Url) -> bool {
-        matches!(url.scheme(), "http" | "https")
+        !self.restore_mode
+            && matches!(url.scheme(), "http" | "https")
             && (self.allow_private_network || !literal_ip(url).is_some_and(is_denied))
     }
 }
@@ -94,6 +97,7 @@ fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
         .use_rustls_tls()
         .dns_resolver(Arc::new(GuardedResolver {
             allow_private_network: policy.allow_private_network,
+            restore_mode: policy.restore_mode,
         }))
 }
 
@@ -121,6 +125,9 @@ impl EgressClient {
     /// [`EgressError::Request`]. Their text is not the client error's `Display`,
     /// which contains the URL.
     pub async fn post(&self, req: EgressRequest<'_>) -> Result<EgressResponse, EgressError> {
+        if self.policy.restore_mode {
+            return Err(EgressError::RestoreMode);
+        }
         if req.url.scheme() != "http" && req.url.scheme() != "https" {
             return Err(EgressError::Scheme);
         }
@@ -227,13 +234,19 @@ impl std::error::Error for DeniedAddress {}
 
 struct GuardedResolver {
     allow_private_network: bool,
+    restore_mode: bool,
 }
 
 impl Resolve for GuardedResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let allow_private_network = self.allow_private_network;
+        let restore_mode = self.restore_mode;
         let host = name.as_str().to_owned();
         Box::pin(async move {
+            // Restore mode resolves no name: the same refusal as a fully denied lookup.
+            if restore_mode {
+                return Err(Box::new(DeniedAddress) as Box<dyn std::error::Error + Send + Sync>);
+            }
             let looked_up = tokio::net::lookup_host((host.as_str(), 0))
                 .await
                 .map_err(|_| Box::new(LookupFailed) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -454,9 +467,11 @@ mod tests {
     fn allows_url_checks_scheme_and_literal_addresses() {
         let strict = EgressPolicy {
             allow_private_network: false,
+            restore_mode: false,
         };
         let open = EgressPolicy {
             allow_private_network: true,
+            restore_mode: false,
         };
         let url = |text: &str| Url::parse(text).unwrap();
 
@@ -477,6 +492,7 @@ mod tests {
 
         let strict = identity_http_client(EgressPolicy {
             allow_private_network: false,
+            restore_mode: false,
         })
         .expect("client");
         strict
@@ -488,6 +504,7 @@ mod tests {
 
         let open = identity_http_client(EgressPolicy {
             allow_private_network: true,
+            restore_mode: false,
         })
         .expect("client");
         let response = open.get(mock.path("/redirect")).send().await.expect("send");
@@ -580,8 +597,56 @@ mod tests {
     fn client(allow_private_network: bool) -> EgressClient {
         EgressClient::new(EgressPolicy {
             allow_private_network,
+            restore_mode: false,
         })
         .expect("client")
+    }
+
+    #[tokio::test]
+    async fn restore_mode_refuses_before_sending() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let client = EgressClient::new(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        })
+        .expect("client");
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/hook")).unwrap();
+        let err = post(&client, &url, Duration::from_secs(2), 64)
+            .await
+            .expect_err("restore mode");
+        assert_eq!(err, EgressError::RestoreMode);
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "a connection was accepted");
+    }
+
+    #[test]
+    fn restore_mode_denies_every_url() {
+        let policy = EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        };
+        let url = |text: &str| Url::parse(text).unwrap();
+        assert!(!policy.allows_url(&url("https://example.com/")));
+        assert!(!policy.allows_url(&url("http://127.0.0.1/")));
+    }
+
+    #[tokio::test]
+    async fn identity_client_in_restore_mode_cannot_resolve() {
+        let mock = Mock::start().await;
+        let client = identity_http_client(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        })
+        .expect("client");
+        client
+            .get(mock.url(true))
+            .send()
+            .await
+            .expect_err("restore mode resolves no name");
+        assert_eq!(mock.hits(), 0);
     }
 
     async fn post(

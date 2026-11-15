@@ -273,6 +273,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     };
     let eval_runner = match llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
         allow_private_network: config.security.allow_private_network_egress,
+        restore_mode: config.restore_mode,
     }) {
         Ok(runner) => Arc::new(runner),
         Err(_error) => {
@@ -305,7 +306,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let providers = match crate::auth::oidc::identity_client()
-        .and_then(|http| crate::auth::oidc::Providers::from_config(&config.auth, &http))
+        .and_then(|http| crate::auth::oidc::Providers::for_config(&config, &http))
     {
         Ok(providers) => providers,
         Err(error) => {
@@ -361,8 +362,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let org_sso = match crate::ee::org_sso::OrgSso::new(
         llmobs_eval::EgressPolicy {
             allow_private_network: config.security.allow_private_network_egress,
+            restore_mode: config.restore_mode,
         },
-        crate::ee::org_sso::dns::TxtResolver::system(),
+        txt_resolver(&config),
     ) {
         Ok(org_sso) => org_sso,
         Err(error) => {
@@ -488,9 +490,17 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
-    tasks.push(spawn_notices(state.clone()));
+    // Usage notices send email, which restore mode does not do (N M3, D-N-25).
+    if !state.config.restore_mode {
+        tasks.push(spawn_notices(state.clone()));
+    }
     tasks.push(spawn_org_sso(state.clone()));
     tasks.push(spawn_org_sso_recheck(state.clone()));
+    if state.config.restore_mode {
+        tracing::warn!(
+            "restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)"
+        );
+    }
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -553,6 +563,15 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         tasks,
         eval_tasks: Some(eval_tasks),
     })
+}
+
+/// The DNS resolver of org-SSO domain verification. Restore mode looks nothing up (N M3, D-N-25).
+fn txt_resolver(config: &ServerConfig) -> crate::ee::org_sso::dns::TxtResolver {
+    if config.restore_mode {
+        crate::ee::org_sso::dns::TxtResolver::Unconfigured
+    } else {
+        crate::ee::org_sso::dns::TxtResolver::system()
+    }
 }
 
 /// Finishes an interrupted rotation, loads the key, then checks it (D-I-1, D-I-3).
@@ -945,6 +964,35 @@ mod tests {
     use crate::meta::instance_settings::put_setting;
     use crate::test_support::{OTLP_KEY, config, with_init};
     use llmobs_core::ids::OrgId;
+
+    #[test]
+    fn restore_mode_uses_no_dns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        assert!(matches!(
+            txt_resolver(&restore),
+            crate::ee::org_sso::dns::TxtResolver::Unconfigured
+        ));
+    }
+
+    #[tokio::test]
+    async fn restore_mode_logs_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        let running = running.unwrap();
+        assert!(
+            logs.contains("restore mode: outbound work is off"),
+            "{logs}"
+        );
+        let body = http_get(running.local_addr, "/healthz", "close").await;
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+        running.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn an_empty_database_logs_the_setup_url_once() {

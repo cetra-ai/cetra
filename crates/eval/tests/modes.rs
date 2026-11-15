@@ -50,6 +50,7 @@ const PROVIDERS: [Provider; 3] = [
 fn client() -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client")
 }

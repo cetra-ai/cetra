@@ -617,6 +617,9 @@ pub struct ServerConfig {
         deserialize_with = "deserialize_optional_socket_addr"
     )]
     pub grpc_addr: Option<SocketAddr>,
+    /// Restore mode (N M3, D-N-25): serve reads and run no outbound work. For restore drills.
+    #[serde(default)]
+    pub restore_mode: bool,
     /// `[storage]` table. `data_dir` is copied from the top-level field.
     ///
     /// `StorageConfig` requires `data_dir` and denies unknown fields, so the
@@ -2920,6 +2923,18 @@ link_existing_by_email = true
         assert!(text.contains("invalid socket address"), "{text}");
         assert!(text.contains("grpc_addr"), "{text}");
         assert!(!text.contains("nope"), "{text}");
+    }
+
+    #[test]
+    fn restore_mode_defaults_off_and_reads_toml_and_env() {
+        let default = load_from(None, &[]).unwrap();
+        assert!(!default.restore_mode);
+
+        let toml = load_from(Some("restore_mode = true\n"), &[]).unwrap();
+        assert!(toml.restore_mode);
+
+        let env = load_from(None, &[("LLMOBS_RESTORE_MODE", "true")]).unwrap();
+        assert!(env.restore_mode);
     }
 
     #[test]

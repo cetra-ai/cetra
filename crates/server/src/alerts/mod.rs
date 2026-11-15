@@ -44,7 +44,13 @@ impl AlertTiming {
 /// Starts the evaluation, delivery and pruning loops. Each loop waits for its pass to finish
 /// before the next tick (`MissedTickBehavior::Skip`), so passes never overlap. The first pass
 /// runs one period after the start. Errors are logged and the loop goes on.
+///
+/// In restore mode only the pruning loop starts (N M3, D-N-25): evaluation and delivery send
+/// alerts outward.
 pub(crate) fn spawn_loops(state: &AppState, timing: AlertTiming) -> Vec<JoinHandle<()>> {
+    if state.config.restore_mode {
+        return vec![spawn_history_prune_loop(state.clone(), timing.prune_every)];
+    }
     vec![
         spawn_evaluation_loop(state.clone(), timing.evaluate_every),
         spawn_delivery_loop(state.clone(), timing.deliver_every),
@@ -116,4 +122,20 @@ fn spawn_history_prune_loop(state: AppState, every: Duration) -> JoinHandle<()> 
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::alerts::{AlertTiming, spawn_loops};
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn restore_mode_spawns_only_the_prune_loop() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let handles = spawn_loops(&app.state, AlertTiming::TEST);
+        assert_eq!(handles.len(), 1);
+        for handle in handles {
+            handle.abort();
+        }
+    }
 }

@@ -14,6 +14,7 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 | `trusted_proxies` | `LLMOBS_TRUSTED_PROXIES` | empty (comma-separated CIDRs, D142) |
 | `grpc_addr` | `LLMOBS_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `LLMOBS_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
+| `restore_mode` | `LLMOBS_RESTORE_MODE` | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
 | `storage.object_store` | `LLMOBS_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
 | `storage.s3.region` | `AWS_REGION` | unset |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |

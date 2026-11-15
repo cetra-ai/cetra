@@ -167,6 +167,7 @@ fn egress_error(error: &EgressError) -> SendError {
         ),
         EgressError::Scheme => (false, "unsupported URL scheme"),
         EgressError::TooLarge { .. } => (false, "the response was too large"),
+        EgressError::RestoreMode => (false, "outbound calls are off: restore mode"),
     };
     SendError {
         retryable: retry,
