@@ -19,7 +19,9 @@
 //!   does not bound the bytes fetched (M4F);
 //! - a DataFusion `TableProvider` with exact filter pushdown, `Inexact` `LIKE` as `Contains`,
 //!   and `lookup_scan` for a `trace_id` equality (M5.1);
-//! - `trace_detail` and `trace_list` fast paths, without DataFusion (M5.2).
+//! - `trace_detail` and `trace_list` fast paths, without DataFusion (M5.2);
+//! - `merge` of sorted files (M6.1): every column is decoded, interleaved and re-encoded, and
+//!   the row-source map costs 16 bytes per row; there is no input-count limit.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -46,6 +48,7 @@ mod datafusion;
 mod error;
 mod fast;
 mod file;
+mod merge;
 mod reader;
 #[cfg(test)]
 mod testgen;
@@ -57,6 +60,7 @@ pub use error::{Result, StrataError};
 pub use fast::{trace_detail, trace_list};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
+pub use merge::merge;
 pub use payload::PayloadStats;
 pub use predicate::{CmpOp, Lit, Predicate};
 pub use reader::read_column;

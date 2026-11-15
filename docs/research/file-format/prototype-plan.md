@@ -567,13 +567,15 @@ Each visited chunk costs at least one wave. The early stop only helps when `star
 ### S10. Merge
 
 ```rust
-pub async fn merge(inputs: &[StrataFile], sort_key: Vec<String>, config: Config, out: impl std::io::Write) -> Result<FileSummary>;
+pub async fn merge(inputs: &[Arc<StrataFile>], sort_key: &[&str], config: Config) -> Result<(Vec<u8>, FileSummary)>;
 ```
 
-1. **Sort key.** K-way merge of the inputs' sort-key columns; ties are broken by input index, then row. This produces a row-source map of one `u8` per output row (≤ 255 inputs).
-2. **Re-decide per output file**, from summed input statistics: payload classification, dictionary eligibility (union of the dictionaries, falling back to `VARBIN` above the caps), and map promotion (summed key counts; a key promoted in one input and residual in another is re-split). A column whose layer differs between inputs (payload in some, narrow in others), or whose layer changes in the output, is decoded fully and re-encoded under the output's decision. Frame copying (step 4) applies only to columns that are payload in the input and the output.
-3. **Narrow columns,** one at a time: replay the row-source map over the decoded input chunks and re-chunk.
-4. **Payload columns.**
+Inputs must share one schema and be sorted by the first sort-key column; both are checked. Empty inputs are skipped. Output is returned as bytes, like the writer. No input count is limited.
+
+1. **Sort key.** K-way merge of the inputs' sort-key columns; ties are broken by input index, then row. This produces a row-source map of one `(input, row)` pair per output row, 16 bytes per row, with no input-count limit. The map is grown by pushing, not pre-sized from the files' claimed row counts.
+2. **Re-decide per output file.** The output is written by the writer's own code (`write_file`) from the merged column arrays, so every per-column decision is taken again on the output data: payload classification, dictionary eligibility, and map promotion and key filters. A column whose layer differs between inputs is decoded fully and re-encoded under the output's decision. Frame copying (step 4) applies only to columns that are payload in the input and the output.
+3. **Narrow columns,** one at a time: each column is decoded from every input, interleaved by the row-source map and encoded again. M6.1 does this for every column.
+4. **Payload columns** (M6.2; until then M6.1 re-encodes them like narrow columns, from the merged arrays).
    - Decompress every input frame and hash its chunks with `xxh3_128` (no hash is stored in the file).
    - Inputs are processed in input order, frame by frame. An input frame is **copied byte for byte** when every chunk in it is new to the output and referenced by at least one output row. Its chunks then get the next consecutive output ids, keeping the S4 invariant, and the frame's raw layout is unchanged. The trigram filter is rebuilt, since boundary pairs change.
    - Every other chunk that is still referenced is re-packed into new frames.
@@ -581,7 +583,7 @@ pub async fn merge(inputs: &[StrataFile], sort_key: Vec<String>, config: Config,
 5. Key filters, the hot tail and the rollups are rebuilt.
 
 Memory:
-- Narrow phase: peak ≤ 2 × the largest single column's decoded Arrow size across the inputs, plus the row-source map. Tested.
+- Narrow phase: peak ≤ 2 × the largest single column's decoded Arrow size across the inputs, plus the row-source map (16 bytes per row) and the sort-key row format. Tested on 4 inputs of 1,000,000 rows in release (`tests/merge_memory.rs`, M6.1); the test allows 48 bytes per row for the map and keys, and half the largest column for the output and codecs.
 - Payload phase: peak memory is reported, not bounded.
 
 ## Phases
