@@ -45,11 +45,118 @@ pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection,
         .connect()
         .await
         .map_err(|source| CatalogError::Open { path, source })?;
+    let applied = applied_version(&mut connection).await?;
+    let expected = sqlx::migrate!("./migrations/catalog")
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0);
+    pre_migration_copy(&mut connection, data_dir, "catalog.db", applied, expected).await?;
     sqlx::migrate!("./migrations/catalog")
         .run(&mut connection)
         .await
         .map_err(|source| CatalogError::Migrate { source })?;
     Ok(connection)
+}
+
+/// The highest applied migration version, or `0` when the database has none.
+async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, CatalogError> {
+    let present: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|source| CatalogError::Db { source })?;
+    if present.is_none() {
+        return Ok(0);
+    }
+    let version: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version DESC LIMIT 1")
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|source| CatalogError::Db { source })?;
+    Ok(version.unwrap_or(0))
+}
+
+/// Before migrations that change an existing database, copies `<name>` to
+/// `<name>.pre-m<applied, 4 digits>` with `VACUUM INTO` (an existing copy is
+/// kept), and removes the other `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
+/// current one (`applied >= expected`) get no copy. File errors arrive as
+/// `sqlx::Error::Io`.
+async fn pre_migration_copy(
+    connection: &mut SqliteConnection,
+    dir: &Path,
+    name: &str,
+    applied: i64,
+    expected: i64,
+) -> Result<(), CatalogError> {
+    if applied == 0 || applied >= expected {
+        return Ok(());
+    }
+    let io = |source: std::io::Error| CatalogError::PreMigrationCopy {
+        source: sqlx::Error::Io(source),
+    };
+    // Keyed by the schema being left, not the package version, which stays
+    // the same between releases while commit-pinned builds migrate (D-N-22).
+    let target = dir.join(format!("{name}.pre-m{applied:04}"));
+    let staging = dir.join(format!("{name}.pre-m{applied:04}.tmp"));
+    // An existing copy is kept: a failed upgrade must not replace the good
+    // pre-upgrade copy with a half-migrated database.
+    let copied = !target.exists();
+    if copied {
+        let staging_text = staging
+            .to_str()
+            .ok_or_else(|| CatalogError::PreMigrationCopy {
+                source: sqlx::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "data directory path is not UTF-8",
+                )),
+            })?;
+        if staging.exists() {
+            std::fs::remove_file(&staging).map_err(io)?;
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(staging_text)
+            .execute(&mut *connection)
+            .await
+            .map_err(|source| CatalogError::PreMigrationCopy { source })?;
+        std::fs::File::open(&staging)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?;
+        std::fs::rename(&staging, &target).map_err(io)?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(io)?;
+    }
+    let prefix = format!("{name}.pre-");
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        let path = entry.map_err(io)?.path();
+        let stale = path != target
+            && path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.starts_with(&prefix));
+        if stale {
+            std::fs::remove_file(&path).map_err(io)?;
+        }
+    }
+    if copied {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "copied the database before migrating"
+        );
+    } else {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "kept the existing pre-migration copy"
+        );
+    }
+    Ok(())
 }
 
 /// Read every active file and both sequence rows.
@@ -470,6 +577,85 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut connection = open_catalog_db(dir.path()).await.unwrap();
         assert!(has_file_sources(&mut connection).await);
+    }
+
+    /// Lists the `catalog.db.pre-*` files in `dir`.
+    fn pre_copies(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("catalog.db.pre-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_catalog_keeps_a_pre_migration_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        // An older binary left only migration 0001 applied.
+        let mut first_only = sqlx::migrate!("./migrations/catalog");
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        first_only.run(&mut older).await.unwrap();
+        drop(older);
+        std::fs::write(dir.path().join("catalog.db.pre-0.0.0-old"), b"old").unwrap();
+
+        let connection = open_catalog_db(dir.path()).await.unwrap();
+        drop(connection);
+
+        let copy = dir.path().join("catalog.db.pre-m0001");
+        assert!(copy.is_file());
+        assert_eq!(
+            pre_copies(dir.path()),
+            vec![copy.file_name().unwrap().to_str().unwrap().to_owned()]
+        );
+        let mut copy = SqliteConnectOptions::new()
+            .filename(&copy)
+            .connect()
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut copy)
+            .await
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[tokio::test]
+    async fn an_existing_pre_migration_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.db");
+        let mut first_only = sqlx::migrate!("./migrations/catalog");
+        let first = first_only.migrations[..1].to_vec();
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        first_only.run(&mut older).await.unwrap();
+        drop(older);
+        let copy = dir.path().join("catalog.db.pre-m0001");
+        std::fs::write(&copy, b"known content").unwrap();
+
+        drop(open_catalog_db(dir.path()).await.unwrap());
+
+        assert_eq!(std::fs::read(&copy).unwrap(), b"known content");
+    }
+
+    #[tokio::test]
+    async fn a_new_or_current_catalog_gets_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(open_catalog_db(dir.path()).await.unwrap());
+        drop(open_catalog_db(dir.path()).await.unwrap());
+        assert!(pre_copies(dir.path()).is_empty());
     }
 
     #[tokio::test]

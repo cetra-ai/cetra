@@ -101,7 +101,9 @@ the request and prints the report. It is the only command on the socket in M2.
 Why a socket:
 - it works with `docker compose exec llmobs llmobs admin backup …` (Q's cells) and over SSH;
 - authentication: the server checks the connecting process's uid (`SO_PEERCRED`, through
-  `UnixStream::peer_cred`) and accepts only the data directory's owner or root. File permissions
+  `UnixStream::peer_cred`) and accepts only its own uid or root. Its own uid is the owner of the
+  socket file it just bound, not the data directory's owner: a Kubernetes PVC root stays root's under
+  `fsGroup`, and `kubectl exec` runs as the server's uid (review N-1). File permissions
   alone are not enough: macOS ignores them on `connect`;
 - it adds no network surface and no token.
 
@@ -264,8 +266,14 @@ stopped:
 
    **In S3 mode this is a rollback of the live bucket.** Every object written after the backup is
    unknown to the restored catalog and is deleted permanently. Run it with `--dry-run` first.
-4. Start `llmobs serve`. Migrations run if the backup is older.
-5. Run `llmobs admin reapply-deletions --from <kept data directory>`, which exists already (D-M-9).
+4. If the backup is from an older version, run **`llmobs admin migrate`**: with the server stopped,
+   it migrates `meta.db` and `catalog.db` and exits (added by B8).
+5. Run `llmobs admin reapply-deletions --from <kept data directory>` (D-M-9). It re-opens every
+   deletion the restored `meta.db` lacks, with its scope.
+6. Only now start `llmobs serve`. The deletion worker registers the re-opened deletions with storage
+   within seconds of the start. Starting before reapply would serve, evaluate and alert on erased
+   data in that window (cross-track review X15). How evaluation results produced from restored data
+   are cascaded is track M's (M7, M8).
 
 `gc-orphans` with `--min-age` also works on a normal stopped installation, to clean what a crash left.
 "Known" means a row in `data_files` (any state: active, obsolete or quarantined), `media` or
@@ -275,13 +283,15 @@ not dropping or dropped. Temporary names (the private `is_temp_name` in `objects
 ### Pre-migration copies (D-N-22)
 
 - **`meta.db`:** when `MetaDb::open` finds an existing file whose applied migration is older than the
-  binary's, it runs `VACUUM INTO '<data_dir>/meta.db.pre-<binary version>'` before migrating, then
+  binary's, it runs `VACUUM INTO '<data_dir>/meta.db.pre-m<applied>'` before migrating, then
   deletes every other `meta.db.pre-*`.
-- **`catalog.db`:** `open_catalog_db` does the same with `catalog.db.pre-<binary version>`.
-- **Failed upgrades:** an existing `<name>.pre-<version>` is kept, never replaced. A copy goes
-  through `<name>.pre-<version>.tmp` and a rename.
-- **Version:** the binary version is `env!("CARGO_PKG_VERSION")`. Both crates inherit the workspace
-  version, so the two copies carry the same name suffix.
+- **`catalog.db`:** `open_catalog_db` does the same with `catalog.db.pre-m<applied>`.
+- **Name:** `<name>.pre-m<applied>`, where `<applied>` is the highest migration applied before
+  this start, zero-padded to 4 digits: `meta.db.pre-m0012`. It is not the package version, which
+  stays `0.0.0` between releases while commit-pinned builds migrate (cross-track review X14).
+- **Failed upgrades:** an existing `<name>.pre-m<applied>` is kept, never replaced. A half-failed
+  migration leaves `<applied>` unchanged, so the retry keeps the good copy. A copy goes through a
+  `.tmp` file and a rename.
 - **When there is no copy:** a fresh data directory (no file yet) or a file already at the binary's
   version.
 
@@ -306,7 +316,7 @@ Spec 12 § Upgrades already describes this; M2 builds it.
 | D-N-19 | **Backup layout:** `manifest.json` (format 1, version, time, mode, store kind, key source, flushed sequences, `gc_grace_secs`, `restorable_until`, SHA-256 of the database and key files, object count and bytes), `meta.db`, `catalog.db`, `secret.key`, `objects/`. One backup at a time (`busy`); the target must be absent or empty and outside `data_dir`. |
 | D-N-20 | **`gc.grace` may be up to 30 days** (was 24 h), and is the retention that keeps a meta-only S3 backup restorable; no separate `gc.object_retention` key. Erased data stays in obsolete files for up to `gc.grace` (user). |
 | D-N-21 | **Restore is documented, plus `llmobs admin gc-orphans [--min-age 1h] [--dry-run]`** (server stopped): it deletes unknown objects older than the minimum age and reports catalog data files missing from the store (exit 1) and missing media (a warning); in S3 mode it rolls the live bucket back to the backup (user). |
-| D-N-22 | **Pre-migration copies:** `meta.db.pre-<version>` and `catalog.db.pre-<version>` by `VACUUM INTO` before migrations run, keeping only the last pair. |
+| D-N-22 | **Pre-migration copies:** `meta.db.pre-m<applied>` and `catalog.db.pre-m<applied>` (the highest migration applied before the upgrade; not the package version, which stays `0.0.0` between releases) by `VACUUM INTO` before migrations run; an existing copy of that name is kept; only the last pair remains. Restores re-apply deletions before the first start (`llmobs admin migrate` for older backups). |
 | D-N-23 | **No built-in backup schedule;** external schedulers call the command (user). |
 | D-N-24 | **`--meta-only` is S3-mode only, and S3-mode backups are always meta-only;** a local-mode `--meta-only` is refused because it would not be restorable. |
 

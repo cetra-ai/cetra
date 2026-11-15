@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::admin_socket;
 use crate::auth::Limits;
 use crate::clock::Clock;
 use crate::config::{ConfigError, ServerConfig};
@@ -170,6 +171,9 @@ pub struct Running {
     usage_stop_tx: Option<oneshot::Sender<()>>,
     usage_task: Option<JoinHandle<()>>,
     state: Option<AppState>,
+    /// The control socket's accept task, when it bound (D-N-17). Shutdown stops it
+    /// first, before the HTTP drain.
+    admin_socket: Option<JoinHandle<()>>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
     /// The eval loops. Shutdown stops them before the storage flush (D-I-12).
@@ -198,6 +202,9 @@ impl Drop for Running {
         }
         if let Some(task) = &self.usage_task {
             task.abort();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
         }
         for task in &self.tasks {
             task.abort();
@@ -372,6 +379,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         ingest_rate: crate::entitlements::rate::IngestRate::default(),
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
+        backup_slot: tokio::sync::Mutex::new(()),
         eval,
         pending: crate::eval::pending::PendingTraces::default(),
     });
@@ -441,6 +449,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_notices(state.clone()));
+    let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -498,6 +507,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         usage_stop_tx: Some(usage_stop_tx),
         usage_task: Some(usage_task),
         state: Some(state),
+        admin_socket,
         tasks,
         eval_tasks: Some(eval_tasks),
     })
@@ -666,13 +676,22 @@ fn spawn_prune(state: AppState) -> JoinHandle<()> {
 }
 
 impl Running {
-    /// Stop accepting, drain HTTP, stop the eval loops and background tasks, wait for detached
-    /// commits, flush the pending traces, the last-used stamps and the usage counters, flush
-    /// storage, close `meta.db`.
+    /// The server state, while the server runs.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &AppState {
+        self.state
+            .as_ref()
+            .expect("state is present until shutdown")
+    }
+
+    /// Stop the control socket, stop accepting, drain HTTP, stop the eval loops and background
+    /// tasks, wait for detached commits, flush the pending traces, the last-used stamps and the
+    /// usage counters, flush storage, close `meta.db`.
     ///
-    /// A storage flush error is logged. The lock is released inside
-    /// `Storage::shutdown` before that error, and this method still closes
-    /// `meta.db`.
+    /// The control socket goes first: a backup in progress is cancelled, and no
+    /// new one starts during the drain. A storage flush error is logged. The lock
+    /// is released inside `Storage::shutdown` before that error, and this method
+    /// still closes `meta.db`.
     ///
     /// # Errors
     ///
@@ -680,6 +699,15 @@ impl Running {
     pub async fn shutdown(mut self) -> Result<(), ServeError> {
         if let Some(state) = &self.state {
             state.live.close();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+            let _ = socket.await;
+        }
+        if let Some(state) = &self.state
+            && let Err(error) = admin_socket::remove_socket_file(&state.config.data_dir)
+        {
+            tracing::warn!(error = %error, "could not remove the admin socket");
         }
         if let Some(sender) = self.shutdown_tx.take() {
             let _ = sender.send(());
@@ -812,9 +840,6 @@ fn directory_error(path: &Path, source: &io::Error) -> ServeError {
 mod tests {
     use std::time::Instant;
 
-    use llmobs_storage::config::{
-        AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
-    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -826,12 +851,10 @@ mod tests {
     use tonic::codec::CompressionEncoding;
 
     use super::*;
-    use crate::config::{
-        AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-        MediaConfig, OrgsConfig, PublicUrl, Secret, SecurityConfig,
-    };
+    use crate::config::Secret;
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use crate::test_support::{OTLP_KEY, config, with_init};
     use llmobs_core::ids::OrgId;
 
     #[tokio::test]
@@ -1271,21 +1294,8 @@ mod tests {
         meta.close().await;
     }
 
-    const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
     const TRACES: &str =
         include_str!("../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
-
-    fn with_init(mut config: ServerConfig) -> ServerConfig {
-        config.init = serde_json::from_value(serde_json::json!({
-            "admin_email": "ada@example.com",
-            "admin_password": "llmobs-ok1",
-            "org": "Acme",
-            "project": "Support bot",
-            "secret_key": OTLP_KEY,
-        }))
-        .unwrap();
-        config
-    }
 
     async fn send_raw(addr: SocketAddr, request: &[u8]) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1683,43 +1693,5 @@ mod tests {
 
         let again = bind(config(dir.path()), None).await.unwrap();
         again.shutdown().await.unwrap();
-    }
-
-    fn config(data_dir: &Path) -> ServerConfig {
-        ServerConfig {
-            data_dir: data_dir.to_path_buf(),
-            public_url: PublicUrl::default(),
-            http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            trusted_proxies: Vec::new(),
-            otlp_http_addr: None,
-            grpc_addr: None,
-            storage: StorageConfig {
-                data_dir: data_dir.to_path_buf(),
-                min_free_bytes: ByteSize::b(0),
-                object_store: None,
-                s3: S3Config::default(),
-                wal: WalConfig::default(),
-                flush: FlushConfig::default(),
-                memtable: MemtableConfig::default(),
-                query: QueryConfig::default(),
-                anchor: AnchorConfig::default(),
-                gc: Default::default(),
-                compaction: Default::default(),
-                deletion: Default::default(),
-            },
-            ingest: IngestConfig::default(),
-            media: MediaConfig::default(),
-            eval: EvalConfig::default(),
-            security: SecurityConfig::default(),
-            entitlements: EntitlementsConfig::default(),
-            orgs: OrgsConfig::default(),
-            encryption_key: None,
-            license_key: None,
-            auth: AuthSettings::default(),
-            smtp_url: None,
-            email_from: None,
-            init: InitConfig::default(),
-            log: LogConfig::default(),
-        }
     }
 }

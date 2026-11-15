@@ -35,8 +35,9 @@ Always take `object_gc_gate` **before** the committer's `inner` mutex, never whi
 
 A deletion holding the committer lock never waits for the gate, so there is no deadlock.
 
-Commits wait only for the `VACUUM INTO` itself, which runs under the committer lock. That is short:
-`catalog.db` is small.
+Commits wait only for the `VACUUM INTO` itself, which runs under the committer lock. That is a known
+cost (00-design § Consistency): it grows with the `data_files` and `media` rows, and on a large
+catalog flushes stall for its duration.
 
 One consequence to document: tokio's `RwLock` prefers writers. While a snapshot is alive, a
 `drop_project` waits in `finish_drop` until the backup ends, and media GC waits too. Neither is a

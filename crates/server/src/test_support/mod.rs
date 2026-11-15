@@ -377,6 +377,7 @@ impl TestApp {
                 permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
             ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            backup_slot: tokio::sync::Mutex::new(()),
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
         });
@@ -1155,5 +1156,60 @@ impl Write for LogBuffer {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// The OTLP key the tests send with, also the project key of [`with_init`].
+pub(crate) const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// A server config with `init` set, so `bind` seeds an admin, an org, a project and [`OTLP_KEY`].
+pub(crate) fn with_init(mut config: ServerConfig) -> ServerConfig {
+    config.init = serde_json::from_value(serde_json::json!({
+        "admin_email": "ada@example.com",
+        "admin_password": "llmobs-ok1",
+        "org": "Acme",
+        "project": "Support bot",
+        "secret_key": OTLP_KEY,
+    }))
+    .unwrap();
+    config
+}
+
+/// A config for a server on `data_dir`, on ephemeral loopback ports, with the defaults.
+pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        data_dir: data_dir.to_path_buf(),
+        public_url: PublicUrl::default(),
+        http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        trusted_proxies: Vec::new(),
+        otlp_http_addr: None,
+        grpc_addr: None,
+        storage: StorageConfig {
+            data_dir: data_dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig::default(),
+            anchor: AnchorConfig::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        },
+        ingest: IngestConfig::default(),
+        media: MediaConfig::default(),
+        eval: EvalConfig::default(),
+        security: SecurityConfig::default(),
+        entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
+        encryption_key: None,
+        license_key: None,
+        auth: AuthSettings::default(),
+        smtp_url: None,
+        email_from: None,
+        init: InitConfig::default(),
+        log: LogConfig::default(),
     }
 }

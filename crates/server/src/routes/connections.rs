@@ -631,6 +631,8 @@ fn meta_error_kind(error: &MetaError) -> &'static str {
         MetaError::Db(_) => "db",
         MetaError::Conflict(_) => "conflict",
         MetaError::Corrupt { .. } => "corrupt",
+        MetaError::PreMigrationIo(_) => "pre-migration io",
+        MetaError::PreMigrationDb(_) => "pre-migration db",
     }
 }
 

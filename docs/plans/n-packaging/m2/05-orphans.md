@@ -129,8 +129,8 @@ pub enum OrphanError {
 }
 ```
 
-Use the crate's existing `ObjectError` path if `objects.delete` returns it; adjust the variant to
-the actual type.
+`Objects::delete` returns `ObjectError`. Its `Display` names the key, so `OrphanError` keeps only
+its label (spec 03 §9), as `media.rs` and `apply_deletions` log it.
 
 ## Tests
 
@@ -140,10 +140,12 @@ Three traps:
 - `raw_store()` takes `object_store::path::Path` (`ObjectPath::from(key)`), not `&str`.
 - End every test with `storage.shutdown().await`, as the `gc.rs` tests do.
 
-`collect_orphans` runs on a fully started engine. `Storage::open` runs GC and `finish_drops` itself,
-so `--dry-run` reports, but opening is not read-only. A `--min-age` below an hour is safe only
-because nothing appends. That is safe only because the CLI (B8) opens the
-storage while the server is stopped (`LOCK`), and nothing appends; it then calls `shutdown()`.
+The tests call `collect_orphans` on a fully started engine. The CLI (B8) must not: `Storage::open`
+runs the staged-object GC, obsolete GC and `finish_drops`, and starts compaction, so a dry run would
+delete objects and rewrite the restored `catalog.db` (review N-2). B8 uses the maintenance open
+(`storage::Maintenance`, below the fixes of the full plan review): it takes `LOCK`, migrates
+`catalog.db`, and starts no task and no GC. A `--min-age` below an hour is safe only because the
+server is stopped (`LOCK`) and nothing appends.
 
 
 - `collect_orphans_deletes_unknown_old_objects`:

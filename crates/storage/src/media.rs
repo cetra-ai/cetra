@@ -106,13 +106,16 @@ impl MediaGc {
                 continue;
             }
             let path = Objects::media_path(project, &sha);
-            let Some(bytes) = self
-                .committer
-                .collect_media(project, &sha, before, &self.hooks, || {
-                    self.objects.delete_len(&path)
-                })
-                .await?
-            else {
+            // The gate comes before any committer call (N M2, D-N-18).
+            let deleted = {
+                let _gate = self.committer.object_gc_gate.read().await;
+                self.committer
+                    .collect_media(project, &sha, before, &self.hooks, || {
+                        self.objects.delete_len(&path)
+                    })
+                    .await?
+            };
+            let Some(bytes) = deleted else {
                 continue;
             };
             report.deleted += 1;
@@ -168,6 +171,8 @@ impl MediaGc {
     /// Idempotent: a project with no media row left only gets its `dropped`
     /// state. Errors are logged by the callers as `error = error.label()`.
     pub(crate) async fn finish_drop(&self, project: ProjectId) -> Result<(), MediaError> {
+        // Held to the end: a catalog snapshot cannot run while media is deleted (N M2, D-N-18).
+        let _gate = self.committer.object_gc_gate.read().await;
         for sha in self.committer.media_of(project).await? {
             let path = Objects::media_path(project, &sha);
             self.hooks.pause(HookPoint::MediaBeforeDelete);
