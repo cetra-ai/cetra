@@ -159,21 +159,34 @@ fn is_personal_token(token: &str) -> bool {
     tail.len() == 32 && tail.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
+/// Waits up to [`WAIT`] for the token or the cancel. Each accepted connection is handled in its
+/// own task, so one that sends nothing (or stalls) delays neither the browser's POST nor the
+/// other connections; the task reports its outcome here.
 async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> anyhow::Result<String> {
     let deadline = tokio::time::Instant::now() + WAIT;
+    let (outcomes_tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel::<Callback>();
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            anyhow::bail!("timed out waiting for the browser");
-        }
-        let (socket, _) = tokio::time::timeout(remaining, listener.accept())
-            .await
-            .map_err(|_| anyhow::anyhow!("timed out waiting for the browser"))?
-            .context("accepting the callback")?;
-        match handle_callback(socket, expected_state).await {
-            Callback::Token(token) => return Ok(token),
-            Callback::Cancelled => anyhow::bail!("sign-in cancelled in the browser"),
-            Callback::Refused => {}
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (socket, _) = accepted.context("accepting the callback")?;
+                let outcomes_tx = outcomes_tx.clone();
+                let expected_state = expected_state.to_owned();
+                tokio::spawn(async move {
+                    let callback = handle_callback(socket, &expected_state).await;
+                    // The wait may have ended already; the outcome is then not needed.
+                    let _ = outcomes_tx.send(callback);
+                });
+            }
+            outcome = outcomes.recv() => match outcome {
+                Some(Callback::Token(token)) => return Ok(token),
+                Some(Callback::Cancelled) => anyhow::bail!("sign-in cancelled in the browser"),
+                // A refused request is answered and the wait goes on. `outcomes_tx` is still
+                // held here, so the channel never closes.
+                Some(Callback::Refused) | None => {}
+            },
+            () = tokio::time::sleep_until(deadline) => {
+                anyhow::bail!("timed out waiting for the browser");
+            }
         }
     }
 }
@@ -232,6 +245,14 @@ async fn read_head(socket: &mut TcpStream) -> Option<String> {
     String::from_utf8(buf).ok()
 }
 
+/// A Content-Length of ASCII digits only: `usize::from_str` would also take a leading `+`.
+fn parse_length(value: &str) -> Option<usize> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
 fn parse_head(text: &str) -> Option<Head> {
     let mut lines = text.split("\r\n");
     let mut parts = lines.next()?.split_whitespace();
@@ -246,7 +267,7 @@ fn parse_head(text: &str) -> Option<Head> {
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
             "content-type" => content_type = Some(value.to_owned()),
-            "content-length" => content_length = Some(value.parse::<usize>().ok()?),
+            "content-length" => content_length = Some(parse_length(value)?),
             _ => {}
         }
     }
@@ -371,7 +392,12 @@ fn form_decode(value: &str) -> Option<String> {
                 if index + 2 >= bytes.len() {
                     return None;
                 }
-                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                // Two hex digits only: `from_str_radix` would also take a sign, as in `%+1`.
+                let digits = &bytes[index + 1..index + 3];
+                if !digits.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                let hex = std::str::from_utf8(digits).ok()?;
                 out.push(u8::from_str_radix(hex, 16).ok()?);
                 index += 3;
             }
@@ -621,6 +647,42 @@ mod tests {
         let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
         assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
         assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[tokio::test]
+    async fn an_idle_connection_does_not_delay_the_post() {
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
+        // A connection that sends nothing stays open while the browser posts.
+        let _idle = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            send_raw(port, &form_post(&format!("token={token}&state=state-a"))),
+        )
+        .await
+        .expect("the POST is answered while the idle connection is open");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[test]
+    fn a_signed_content_length_is_refused() {
+        let head = "POST /callback HTTP/1.1\r\nContent-Length: +5\r\n";
+        assert!(parse_head(head).is_none());
+        let plain = "POST /callback HTTP/1.1\r\nContent-Length: 5\r\n";
+        assert_eq!(
+            parse_head(plain).and_then(|head| head.content_length),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn a_sign_is_not_a_percent_escape() {
+        assert_eq!(form_decode("%+1"), None);
+        assert_eq!(form_decode("%-1"), None);
+        assert_eq!(form_decode("%41").as_deref(), Some("A"));
+        assert_eq!(form_fields("a=%+1"), None);
     }
 
     #[tokio::test]
