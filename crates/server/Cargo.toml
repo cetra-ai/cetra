@@ -49,6 +49,7 @@ oauth2.workspace = true
 reqwest.workspace = true
 hickory-resolver.workspace = true
 hmac.workspace = true
+jsonschema.workspace = true
 bytes.workspace = true
 flate2.workspace = true
 http-body-util.workspace = true
@@ -67,7 +68,6 @@ http-body.workspace = true
 tracing-subscriber.workspace = true
 insta.workspace = true
 tempfile.workspace = true
-jsonschema.workspace = true
 sha2.workspace = true
 strum.workspace = true
 # Mock IdP signatures. `pkcs1v15` is the RS256 signer. `rand_core` 0.10 matches workspace `rand` 0.10.

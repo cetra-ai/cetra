@@ -16,6 +16,7 @@ pub(crate) mod bootstrap;
 pub(crate) mod clock;
 pub mod config;
 pub(crate) mod crypto;
+pub(crate) mod datasets;
 pub(crate) mod deletion;
 pub(crate) mod ee;
 pub(crate) mod email;

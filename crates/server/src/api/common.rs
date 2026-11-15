@@ -70,6 +70,15 @@ where
     }
 }
 
+/// The OpenAPI schema of a field that holds any JSON value (D-J-2): `AnyValue`, as
+/// `api::payload`'s `json` branch. Use it with `#[schema(schema_with = any_json)]`.
+pub(crate) fn any_json() -> RefOr<utoipa::openapi::schema::Schema> {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::AnyValue)
+        .description(Some("Any JSON value."))
+        .into()
+}
+
 /// RFC 7807 problem document.
 ///
 /// Spec 09 § Conventions.

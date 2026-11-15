@@ -109,6 +109,9 @@ pub(crate) enum ProjectPerm {
     ManageEvaluation,
     /// Alert rules and notification channels (spec 08: member and above; D-K-9).
     ManageAlerts,
+    /// Datasets and experiments: create, edit, delete, items, import, add from trace, experiment
+    /// results (D-J-5). Member and above; a `write` API key; a read-write personal access token.
+    ManageDatasets,
     /// Read project data through a POST with a body, such as the SQL console (D-H-4).
     /// Same holders as `View`; a read-only PAT and a `read` key may use it on POST.
     Query,
@@ -214,7 +217,9 @@ impl ProjectPerm {
     pub(crate) fn min_role(self) -> Role {
         match self {
             Self::View | Self::Query | Self::ViewMembers => Role::Viewer,
-            Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts => Role::Member,
+            Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts | Self::ManageDatasets => {
+                Role::Member
+            }
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -223,7 +228,7 @@ impl ProjectPerm {
     pub(crate) fn key_scope(self) -> Option<KeyScope> {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
-            Self::Annotate | Self::Delete => Some(KeyScope::Write),
+            Self::Annotate | Self::Delete | Self::ManageDatasets => Some(KeyScope::Write),
             Self::ManageEvaluation
             | Self::ManageSettings
             | Self::ManageMembers
@@ -309,6 +314,12 @@ mod tests {
         assert!(ProjectPerm::ManageEvaluation.key_scope().is_none());
         assert_eq!(ProjectPerm::ManageAlerts.min_role(), Role::Member);
         assert!(ProjectPerm::ManageAlerts.key_scope().is_none());
+        // Datasets and experiments: member and above, and a `write` key (D-J-5).
+        assert_eq!(ProjectPerm::ManageDatasets.min_role(), Role::Member);
+        assert_eq!(
+            ProjectPerm::ManageDatasets.key_scope(),
+            Some(KeyScope::Write)
+        );
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());
