@@ -32,7 +32,7 @@ The format is unreleased, so encodings change in place, with no version bump and
 **Edit:**
 - `strata/src/{format.rs,segment.rs,file.rs,reader.rs,writer.rs,config.rs}`;
 - `strata/src/narrow/{mod.rs,decode.rs,dict.rs,encode.rs}`, plus every other file that imports `MAX_CHUNK_ROWS` or `MAX_CHUNK_ELEMENTS`;
-- `strata/src/payload/chunk.rs` (tests only);
+- `strata/src/payload/chunk.rs` and `strata/src/hot.rs` (tests only);
 - `docs/research/file-format/prototype-plan.md` (§ Conventions).
 
 ### Steps
@@ -88,6 +88,8 @@ The format is unreleased, so encodings change in place, with no version bump and
 
 6. **Writer: no empty dictionary for Utf8.** In `dict.rs` `for_column`, a **Utf8** column whose dictionary would have zero values (no non-null value) gets `None`, so no dictionary segment is written.
 
+   The existing zero-row test `empty_file_opens` still passes: its Utf8 columns now have no dictionary, and `read_column` returns early for zero entries.
+
    **List(Utf8) is unchanged:** a List(Utf8) column with no element keeps its empty dictionary, and so stays `LIST_DICT`. Without one, `uses_ipc` would send it to `IPC`.
 
 7. **Design doc.** In `prototype-plan.md` § Conventions (all structures), add a **Limits** bullet listing the six constants of step 1 and what each bounds. These are format rules: a file breaking them is corrupt.
@@ -100,7 +102,7 @@ The format is unreleased, so encodings change in place, with no version bump and
   - Timestamp(ns, "UTC"), Boolean, FixedSizeBinary(16);
   - strings: Utf8 with a dictionary, Utf8 without one, Binary;
   - lists and maps: List(Utf8) with a dictionary, and Map(Utf8 non-null, Utf8 nullable).
-- It slices the array at `skip in 0..70` and `len in 0..=(rows − skip)`, builds the dictionary from the **full** array, runs `encode_chunk` then `decode_chunk`, and compares the result with the slice. Floats are compared bitwise with the existing helper.
+- It slices the array at `skip = skip_draw.min(rows)` with `skip_draw in 0..70`, and `len in 0..=(rows − skip)`, builds the dictionary from the **full** array, runs `encode_chunk` then `decode_chunk`, and compares the result with the slice. Floats are compared bitwise with the existing helper.
 
 **Float zones** (`encode.rs`). Each case also decodes back bitwise:
 - `[0.0, 1.5, NaN, null]`: zone `min` bytes = `0.0f64.to_le_bytes()`, `max` = `1.5f64.to_le_bytes()`, `HAS_NAN` set.
@@ -110,13 +112,14 @@ The format is unreleased, so encodings change in place, with no version bump and
 - The same constant cases for Float32, with `const_len = 4`.
 
 **Segment fuzz** (`segment.rs`, `with_cases(500)`).
-- Build a header with the right magic, a random valid kind and codec, a random `raw_len` (sometimes above `MAX_SEGMENT_RAW`), `stored_len` = the number of random stored bytes (0..2,048), and a **correct** checksum over header bytes 0..12 and the stored bytes. Then call `decode_segment`.
+- Build a header with the right magic, a random valid kind and codec, a random `raw_len` (one case in ten above `MAX_SEGMENT_RAW`; otherwise at most 1 MiB, to keep zstd's reservation small), `stored_len` = the number of random stored bytes (0..2,048), and a **correct** checksum over header bytes 0..12 and the stored bytes. Then call `decode_segment`.
 - The result is `Ok` or `Err`, never a panic. A `raw_len` above the cap gives `Corrupt { what: "segment raw length" }`.
 
 **Block entries and pages.**
 - A proptest gives random 56-byte inputs to `BlockEntry::decode`, and random section-7 bytes to `HotTail::pages_of` (with a hand-built directory record): never a panic.
 - On a real file written from `testgen::batch(20_000)`, patch the hot tail and write the file back. Section 7 is the last hot section, so its bytes end at `file.len() − 64`. A `PageRef` is `first_row u32 · offset u64 · len u32`, and the hot checksum is postscript bytes 12..16 (= `checksum32(&[hot])`). After each patch, recompute the checksum.
-  - Patching one `PageRef.first_row` makes `block_entries` return `Corrupt`.
+  - Patch the **last** `PageRef`: the last 16 bytes of the hot tail, which is the last page of the last column. `first_row` is its first 4 bytes, and `offset` the next 8.
+  - Patching that `PageRef.first_row` makes `block_entries` (on the last column) return `Corrupt`.
   - Patching a page's `offset` to point inside the hot tail makes it return `Corrupt`.
 
 **Decoder fuzz.** Extend `random_entries_and_bodies_never_panic`:
@@ -144,7 +147,7 @@ The format is unreleased, so encodings change in place, with no version bump and
 - A null in a sort-key column gives `Schema`. The test uses a schema whose `trace_id` field is **nullable**, since `RecordBatch::try_new` rejects nulls in a non-nullable field.
 - An all-null Utf8 column writes no dictionary: its directory `dict_offset == 0`, and flag bit 0 is clear.
 
-**`Const` with and without a dictionary.** One Utf8 column whose chunks are all `"abc"`:
+**`Const` with and without a dictionary** (at the `encode_chunk` level, in `encode.rs` tests). One Utf8 column whose chunks are all `"abc"`:
 - with a dictionary, it is `Const` with `const_len = 4` (a code);
 - with `dict_max_values = 0` (no dictionary), it is `Const` with `const_len = 3` and the bytes `"abc"`.
 
@@ -189,11 +192,11 @@ pub(crate) fn decode_lengths(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Ve
 
 **`encode_lengths`:**
 - `base = min(lens)`, or 0 when `n = 0`. Because null slots are 0, `base` is 0 whenever there is a null.
-- `width = width_for(max(len − base))`.
+- `width = width_for(max(len − base))`. `pack` takes `&[u64]`, so convert each `len − base` with `u64::from`.
 
 **`decode_lengths`:**
 1. Read `base` (u32) and `width` (u8). `width > 32` is `Corrupt { what: "lengths" }`.
-2. `packed = n.checked_mul(width).map(|b| b.div_ceil(64)).and_then(|w| w.checked_mul(8))`. An overflow is `Corrupt`.
+2. `packed = n.checked_mul(usize::from(width)).map(|b| b.div_ceil(64)).and_then(|w| w.checked_mul(8))`. An overflow is `Corrupt`.
 3. Take exactly `packed` bytes with `c.bytes(packed, "lengths")`. A short body is `Corrupt`, raised before any allocation.
 4. Call `unpack(bytes, n, width)`; its error becomes `Corrupt { what: "lengths", offset: at }`.
 5. Add `base` to each value with `checked_add`, then `u32::try_from`. A failure is `Corrupt { what: "lengths" }`.
@@ -221,7 +224,7 @@ It is true only when all of these hold:
 - field 0 is `Utf8` and not nullable;
 - field 1 is `Utf8` and nullable.
 
-Encode, decode and the chunker all use this one predicate. Other map types stay `IPC`.
+Field 0 is never nullable in a valid `MapArray`, so the check on it only matters for hand-built `DataType`s. Encode, decode and the chunker all use this one predicate. Other map types stay `IPC`.
 
 **`MAP` (code 11) body:**
 
@@ -249,9 +252,14 @@ value bytes, concatenated
 2. Check every byte count against the remaining body before allocating. The sum of key bytes plus value bytes must be ≤ `MAX_CHUNK_OUTPUT`.
 3. Build the offsets by prefix sum with `checked_add`, then `i32::try_from`.
 4. `let DataType::Map(entries_field, sorted) = dt`, then `let DataType::Struct(fields) = entries_field.data_type()`.
-5. Build the keys and values as `StringArray::try_new(offsets, buffer, nulls)`. That call validates UTF-8; map its error to `Corrupt { what: "map utf8" }`.
-6. `let entries = StructArray::try_new(fields.clone(), vec![Arc::new(keys), Arc::new(values)], None)`.
-7. `MapArray::try_new(Arc::clone(entries_field), offsets, entries, nulls, *sorted)`. Map every error to `Corrupt`.
+5. Further body rules:
+   - a `value_nulls` byte other than 0 or 1 is `Corrupt { what: "map value nulls" }`;
+   - the null rule applies to value lengths too: a null value with a non-zero length is `Corrupt { what: "null length" }`;
+   - bytes left after the value bytes fail the usual `expect_end`.
+
+6. Build the keys and values as `StringArray::try_new(offsets, buffer, nulls)`. That call validates UTF-8; map its error to `Corrupt { what: "map utf8" }`.
+7. `let entries = StructArray::try_new(fields.clone(), vec![Arc::new(keys), Arc::new(values)], None)`.
+8. `MapArray::try_new(Arc::clone(entries_field), offsets, entries, nulls, *sorted)`. Map every error to `Corrupt`.
 
 The field and fields come from the column's `Field`, so the arrays compare equal to the input.
 
@@ -296,18 +304,23 @@ The field and fields come from the column's `Field`, so the arrays compare equal
    | `blob` Binary | null when `i % 5 == 0`, else `i % 300` bytes of `(i % 251) as u8` |
    | `uid` Utf8 (high cardinality, so `VARBIN`) | `format!("user-{i:08}")` |
    | `attrs` Map(Utf8, Utf8 nullable) | null when `i % 13 == 0`; else `i % 4` entries `("k{j}", "v{i}-{j}")`, with the value null when `(i + j) % 7 == 0` |
-   | the `batch` columns | every column of `batch(n)` |
+   | the other `batch` columns | `input_tokens`, `cost`, `flag`, `span_kind`, `status`, `model`, `environment` and `tags`, taken unchanged from `batch(n)` and appended in that order after `attrs` |
 
-   The map field is built as `Field::new("attrs", DataType::Map(Arc::new(Field::new("entries", DataType::Struct(vec![Field::new("keys", Utf8, false), Field::new("values", Utf8, true)].into()), false)), false), true)`.
+   - The schema is exactly `trace_id, start_time, f32, short_id, blob, uid, attrs, input_tokens, cost, flag, span_kind, status, model, environment, tags`.
+   - Build `attrs` with `MapBuilder::new(None, StringBuilder::new(), StringBuilder::new())`. Its default field names (`entries`, `keys`, `values`) and nullability match `Field::new("attrs", DataType::Map(Arc::new(Field::new("entries", DataType::Struct(vec![Field::new("keys", Utf8, false), Field::new("values", Utf8, true)].into()), false)), false), true)`, which is the schema field, so `RecordBatch::try_new` accepts it.
 
 8. **Existing tests made invalid by the format change.** Update or replace each:
    - `decode.rs` `varbin_with_decreasing_offsets_is_corrupt`: replace it with "a `VARBIN` lengths block whose sum exceeds the bytes is `Corrupt`".
    - `decode.rs` `maps_round_trip_as_ipc`: becomes `maps_round_trip_as_map`.
    - `decode.rs` `random_varbin_and_ipc_bodies_never_panic`: add `MAP`.
-   - `encode.rs` `map_column_is_ipc`: assert `Map`, and add an `IPC` case for a map whose value entries are `(Utf8 nullable, Utf8)`.
+   - `encode.rs` `map_column_is_ipc`: rename it to `map_column_is_map`, and assert `Encoding::Map`.
+   - Add `map_with_non_nullable_values_is_ipc`: build the array with `MapBuilder::new(None, StringBuilder::new(), StringBuilder::new()).with_values_field(Arc::new(Field::new("values", DataType::Utf8, false)))`, append `("k", "v")`, and assert `Encoding::Ipc`. `is_utf8_map` is false because field 1 is not nullable.
+   - Add a `Map<Utf8, Int64>` case that asserts `Ipc`.
    - `chunker.rs` `list_of_utf8_rows_count_elements_and_row`: under the new budget a row with 2 elements is 4 + 4 × 2 = 12 bytes, so with budget 32 the expectation becomes `[3, 1]` (recompute it from the test's data and state it in the test).
    - Every hand-built `VARBIN` or `LIST_DICT` body in tests, including the M1F.1 cap test: rebuild it with a lengths block.
    - The M1F.1 sliced-array test: its map case now exercises `MAP`.
+   - `decode.rs` `random_entries_and_bodies_never_panic`: `encoding in 0u8..=10` becomes `0u8..=11`.
+   - Update the `Encoding` docs that say "(M1.4)" for `Varbin` and `Ipc` to describe the new bodies.
 
 9. **`roundtrip_light.rs`.**
    - After printing the table, assert `summary.bytes * 100 ≤ pq_total * 135`. These are the existing variable names; read the file for the exact ones.
@@ -339,7 +352,7 @@ The field and fields come from the column's `Field`, so the arrays compare equal
 **Encoding counts.** A map column's `ColumnSummary.encoding_counts[Encoding::Map as usize]` equals its chunk count.
 
 **Chunker budgets.** Assert the ranges for each row of the step 5 table:
-- Utf8 with a dictionary: 4 bytes per row, so 4,096 rows at budget 32 KiB;
+- Utf8 with a dictionary: 4 bytes per row. With `max_rows = 65,535` and `max_bytes = 32 KiB`, the ranges are 8,192 rows each; with `max_rows = 4,096`, they are 4,096 rows (the row limit binds);
 - List(Utf8) with a dictionary: 4 + 4 per element;
 - `MAP`: 4 + Σ (k + v + 8).
 
@@ -371,6 +384,7 @@ The M1F.1 commands pass. The commit body holds the new size table next to the M1
 1. **Golden hash, before changing any code.**
    - Add a unit test `golden_output_hash` in `writer.rs`. It writes `testgen::wide_batch(20_000)` with `Config::default()` and computes `xxhash_rust::xxh3::xxh3_64(&finish().0)`.
    - Run it once on the M1F.2 code, and write the printed value into the test as `const GOLDEN: u64 = 0x…;`, asserted equal.
+   - Also write the `#[ignore]` `writer_throughput` test now (§ Tests), run `cargo +1.99.1 test --release -- --ignored --nocapture writer_throughput` on the M1F.2 code, and keep the printed MB/s for the commit body.
    - Commit nothing yet. Every later step must keep this test green.
 
 2. **Gear table at compile time** (`payload/chunk.rs`). Replace the `OnceLock` with:
@@ -418,7 +432,7 @@ The M1F.1 commands pass. The commit body holds the new size table next to the M1
 
      Ranges are consecutive blocks of `per` rows. Never use `clamp`, which panics when `max_rows == 0`.
    - **Variable-width types** walk the rows lazily: `value_offsets().windows(2)` for Utf8, Binary and List, and the map offsets for `MAP`. They accumulate the same per-row sizes as M1F.2, with no `Vec<usize>`.
-   - Keep the M1F.2 `row_sizes` function under `#[cfg(test)]` as `row_sizes_reference`. Add a proptest over `(n in 0..2000, type, max_rows in 0..5000, max_bytes in 1..70_000)`, `max_rows = 0` and `max_bytes = 1` included, comparing the new ranges with ranges computed from `row_sizes_reference` by the M1F.2 loop.
+   - Keep the M1F.2 `row_sizes` function, with its M1F.2 signature, under `#[cfg(test)]` as `row_sizes_reference`. Add a proptest over `(n in 0..2000, type, max_rows in 0..5000, max_bytes in 1..70_000)`, `max_rows = 0` and `max_bytes = 1` included. The types are Int64, Int16, Boolean, FixedSizeBinary(16), FixedSizeBinary(0), Utf8 with and without a dictionary, Binary, List(Utf8) with a dictionary, and `Map<Utf8, Utf8>`. The proptest compares comparing the new ranges with ranges computed from `row_sizes_reference` by the M1F.2 loop.
 
 5. **Validity and values without per-row loops** (`encode.rs`).
    - `validity_bitmap` takes `nulls.inner().sliced()`, copies exactly `len.div_ceil(8)` bytes into a `Vec<u8>`, and clears the bits at and above `len % 8` in the last byte when `len % 8 != 0`. Arrow does not mask them on byte-aligned slices. It is called only when `null_count() > 0`.
@@ -430,6 +444,7 @@ The M1F.1 commands pass. The commit body holds the new size table next to the M1
    - `Dictionary` stores `Vec<String>`, validated once in `decode` and built from `&str` in `build`.
    - Keep `value(&self, code) -> Option<&[u8]>` (its tests use it), and add `str_value(&self, code: u32) -> Option<&str>`.
    - `code_str` uses `str_value` with no re-validation.
+   - `code_of` becomes `binary_search_by(|x| x.as_bytes().cmp(v))`.
 
 7. **Dictionary building stops early** (`dict.rs` `build`).
    - Keep a running byte total of the values **as they are inserted**: count a value only when `BTreeSet::insert` returns true.
@@ -439,7 +454,12 @@ The M1F.1 commands pass. The commit body holds the new size table next to the M1
 8. **M2.2 plan.** In `docs/research/file-format/plans/02-m2-payload.md`, M2.2:
    - § Config: "Default 1" becomes "Default 3".
    - Every `encode_segment(.., level, out)` call becomes `encode_segment(.., &mut codec, out)`.
-   - The writer creates a second `SegmentCodec::new(FRAME_ZSTD_LEVEL)` for frames, passed to `write_payload_column` and `FrameBuilder`. Their signatures gain `frame_codec: &mut SegmentCodec` and `codec: &mut SegmentCodec` parameters. Write these signature changes into the M2.2 text.
+   - Write these exact signatures into the M2.2 text, replacing the old ones:
+     - `write_payload_column(array: &dyn Array, config: &Config, codec: &mut SegmentCodec, frame_codec: &mut SegmentCodec, out: &mut Out) -> Result<(SegmentRef, PayloadStats)>`;
+     - `FrameBuilder::add(&mut self, chunk: &[u8], codec: &mut SegmentCodec, out: &mut Out) -> Result<u32>`, and `FrameBuilder::finish(&mut self, codec: &mut SegmentCodec, out: &mut Out) -> Result<()>`. `FrameBuilder` does not hold the codec.
+   - Frames are written with `encode_segment(Kind::PayloadFrame, &raw, Codec::Zstd, frame_codec, out)`; refs pages and the header use `codec`.
+   - The writer creates `let mut frame_codec = SegmentCodec::new(FRAME_ZSTD_LEVEL)?` next to the `config.zstd_level` codec, and passes both.
+   - Remove every mention of `config.zstd_level` or `FRAME_ZSTD_LEVEL` as an `encode_segment` argument in M2.2.
 
 ### Tests
 
