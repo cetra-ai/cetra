@@ -11,7 +11,9 @@
 //! The current limits are:
 //! - sort-key lookup and key filters (M3.1); maps are shredded (M3.2);
 //! - segment reads go in waves, coalesced by scan kind, and are counted (M4.1);
-//! - there is no `scan`, no predicates and no pruning (M4.2, M4.3);
+//! - `scan` over narrow columns: predicates, zone and dictionary pruning, limits (M4.2);
+//! - `scan` does not read payload or map columns, and has no `Contains`, `MapKeyEq` or
+//!   `lookup_scan` (M4.3);
 //! - there is no DataFusion integration (M5).
 
 #![forbid(unsafe_code)]
@@ -29,6 +31,8 @@ mod index;
 mod io;
 mod narrow;
 mod payload;
+mod predicate;
+mod scan;
 mod segment;
 mod shred;
 
@@ -45,5 +49,7 @@ pub use error::{Result, StrataError};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
 pub use payload::PayloadStats;
+pub use predicate::{CmpOp, Lit, Predicate};
 pub use reader::read_column;
+pub use scan::ScanRequest;
 pub use writer::{ColumnSummary, FileSummary, StrataWriter};

@@ -16,10 +16,10 @@ use crate::error::{Result, StrataError};
 use crate::format::{
     Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, MAX_ROWS, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
 };
-use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
+use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
 use crate::io::{IoStats, ScanKind, coalesce};
-use crate::narrow::{BlockEntry, decode_chunk, is_utf8_map};
+use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -127,6 +127,16 @@ fn check_map_layout(hot: &HotTail, hot_offset: u64) -> Result<()> {
     Ok(())
 }
 
+/// One column of a metadata wave: its directory record, its page references, and the
+/// positions of its page bodies and dictionary body in the wave's segment list.
+struct MetaItem<'a> {
+    column: usize,
+    record: &'a DirectoryRecord,
+    pages: Vec<PageRef>,
+    pages_range: Range<usize>,
+    dict_at: Option<usize>,
+}
+
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
 /// segments from.
 pub struct StrataFile {
@@ -146,6 +156,8 @@ pub struct StrataFile {
     key_filters: Mutex<HashMap<u32, Arc<KeyFilter>>>,
     /// Block-table entries of each column, read on first use.
     blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
+    /// Dictionaries of each narrow column, read on first use. `None` for a column without one.
+    dicts: Mutex<HashMap<usize, Option<Arc<Dictionary>>>>,
     /// Ranged GET requests issued by `fetch`.
     requests: AtomicU64,
     /// Bytes fetched by `fetch`.
@@ -342,6 +354,7 @@ impl StrataFile {
             sort_key_entries,
             key_filters: Mutex::new(HashMap::new()),
             blocks: Mutex::new(HashMap::new()),
+            dicts: Mutex::new(HashMap::new()),
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
@@ -495,53 +508,159 @@ impl StrataFile {
         self.waves.store(0, Ordering::Relaxed);
     }
 
-    /// The block-table entries of column `column`, in row order. They are read from the
-    /// column's pages on first use and cached.
+    /// The block-table entries of column `column`, in row order. They are read on first use,
+    /// with the column's dictionary, by [`StrataFile::load_metadata`], and cached. A payload
+    /// column and a map parent hold no chunks of their own, so they have no entries.
     pub async fn block_entries(&self, column: usize) -> Result<Arc<Vec<BlockEntry>>> {
+        self.load_metadata(&[column], ScanKind::Point).await?;
         let cached = self
             .blocks
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&column)
             .cloned();
-        if let Some(entries) = cached {
-            return Ok(entries);
-        }
+        Ok(cached.unwrap_or_else(|| Arc::new(Vec::new())))
+    }
 
-        let record = self
-            .hot
-            .directory
-            .get(column)
-            .ok_or_else(|| StrataError::Schema {
-                reason: format!("no column {column}"),
-            })?;
-        if record.layer == Layer::Payload {
-            return Ok(Arc::new(Vec::new()));
-        }
-        let hot_offset = self.postscript.hot_offset;
-        let pages = self.hot.pages_of(record)?;
-        for page in &pages {
-            segment_end(page.offset, page.len, hot_offset)?;
-        }
-        let segments: Vec<(SegmentRef, Kind)> = pages
-            .iter()
-            .map(|page| {
+    /// Loads into the caches the block entries and dictionaries of `columns` (directory ids)
+    /// that are not cached yet. The pages and dictionaries of all of them are one `fetch`, so
+    /// the call is one wave, or none when nothing is left to read. Payload and map-parent
+    /// columns are skipped.
+    pub(crate) async fn load_metadata(&self, columns: &[usize], kind: ScanKind) -> Result<()> {
+        let mut segments: Vec<(SegmentRef, Kind)> = Vec::new();
+        let mut items: Vec<MetaItem<'_>> = Vec::new();
+        for &column in columns {
+            if items.iter().any(|item| item.column == column) {
+                continue;
+            }
+            let record = self
+                .hot
+                .directory
+                .get(column)
+                .ok_or_else(|| StrataError::Schema {
+                    reason: format!("no column {column}"),
+                })?;
+            if matches!(record.layer, Layer::Payload | Layer::MapParent) {
+                continue;
+            }
+            let cached = self
+                .blocks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(&column);
+            if cached {
+                continue;
+            }
+
+            let pages = self.hot.pages_of(record)?;
+            let pages_start = segments.len();
+            for page in &pages {
                 let segment = SegmentRef {
                     offset: page.offset,
                     len: page.len,
                 };
-                (segment, Kind::BlockTablePage)
-            })
-            .collect();
-        let bodies = self.fetch(&segments, ScanKind::Point).await?;
+                segments.push((segment, Kind::BlockTablePage));
+            }
+            let pages_range = pages_start..segments.len();
 
+            // Bit 0 of the flags says the column has a dictionary, and the offset must agree.
+            // A column with no chunks has no dictionary read.
+            let dict_at = if record.n_chunks == 0 {
+                None
+            } else {
+                match (record.flags & 1 != 0, record.dict_offset != 0) {
+                    (true, true) => {
+                        let segment = SegmentRef {
+                            offset: record.dict_offset,
+                            len: record.dict_len,
+                        };
+                        segments.push((segment, Kind::Dictionary));
+                        Some(segments.len() - 1)
+                    }
+                    (false, false) => None,
+                    _ => {
+                        return Err(StrataError::Corrupt {
+                            what: "dictionary flag",
+                            offset: record.dict_offset,
+                        });
+                    }
+                }
+            };
+            items.push(MetaItem {
+                column,
+                record,
+                pages,
+                pages_range,
+                dict_at,
+            });
+        }
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        let bodies = self.fetch(&segments, kind).await?;
+        let mut loaded = Vec::with_capacity(items.len());
+        for item in &items {
+            let corrupt = || StrataError::Corrupt {
+                what: "segment range",
+                offset: u64::from(item.record.pages_offset),
+            };
+            let page_bodies = bodies.get(item.pages_range.clone()).ok_or_else(corrupt)?;
+            let entries = self.decode_pages(item.record, &item.pages, page_bodies)?;
+            let dict = match item.dict_at {
+                Some(at) => {
+                    let body = bodies.get(at).ok_or_else(corrupt)?;
+                    Some(Arc::new(Dictionary::decode(body, item.record.dict_offset)?))
+                }
+                None => None,
+            };
+            loaded.push((item.column, entries, dict));
+        }
+
+        let mut blocks = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut dicts = self.dicts.lock().unwrap_or_else(PoisonError::into_inner);
+        for (column, entries, dict) in loaded {
+            blocks.insert(column, Arc::new(entries));
+            dicts.insert(column, dict);
+        }
+        Ok(())
+    }
+
+    /// The dictionary of column `column`, or `None` for a column without one. It is read with
+    /// the column's other metadata, on first use, and cached.
+    pub(crate) async fn dictionary(&self, column: usize) -> Result<Option<Arc<Dictionary>>> {
+        self.load_metadata(&[column], ScanKind::Point).await?;
+        let cached = self
+            .dicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&column)
+            .cloned();
+        Ok(cached.flatten())
+    }
+
+    /// Decodes the block-table pages of `record` from their bodies, in page order, into its
+    /// block entries. Checks the page layout, the row order and the chunk count.
+    fn decode_pages(
+        &self,
+        record: &DirectoryRecord,
+        pages: &[PageRef],
+        bodies: &[Vec<u8>],
+    ) -> Result<Vec<BlockEntry>> {
+        let hot_offset = self.postscript.hot_offset;
         let corrupt_page = |offset: u64| StrataError::Corrupt {
             what: "block page",
             offset,
         };
+        if pages.len() != bodies.len() {
+            return Err(StrataError::Corrupt {
+                what: "segment range",
+                offset: u64::from(record.pages_offset),
+            });
+        }
         let mut entries = Vec::new();
         let mut next_row = 0u64;
-        for (page, body) in pages.iter().zip(&bodies) {
+        for (page, body) in pages.iter().zip(bodies) {
             // A page holds between 1 and MAX_PAGE_ENTRIES entries, and its first row is the
             // first row of its first entry.
             let mut c = Cursor::new(body, page.offset);
@@ -583,12 +702,6 @@ impl StrataFile {
                 offset: self.postscript.hot_offset,
             });
         }
-
-        let entries = Arc::new(entries);
-        self.blocks
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(column, Arc::clone(&entries));
         Ok(entries)
     }
 
@@ -1480,12 +1593,12 @@ mod tests {
     #[test]
     fn one_wave_per_concurrent_read() {
         runtime().block_on(async {
-            // A dictionary column: block pages, dictionary, chunks.
+            // A dictionary column: block pages and dictionary in one wave, then the chunks.
             let file = open_written(&batch(20_000), &Config::default()).await;
             let model = file.schema().index_of("model").unwrap();
             file.reset_io_stats();
             crate::reader::read_column(&file, model).await.unwrap();
-            assert_eq!(file.io_stats().waves, 3);
+            assert_eq!(file.io_stats().waves, 2);
 
             // A plain column: block pages, chunks.
             let file = open_written(&batch(20_000), &Config::default()).await;

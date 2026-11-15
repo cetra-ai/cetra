@@ -9,7 +9,7 @@ use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
 use crate::io::ScanKind;
-use crate::narrow::{Dictionary, decode_chunk};
+use crate::narrow::decode_chunk;
 use crate::payload::read_payload_column;
 use crate::segment::{Kind, SegmentRef};
 use crate::shred::unshred;
@@ -76,35 +76,11 @@ async fn read_shredded(file: &StrataFile, column: usize, field: &Field) -> Resul
 /// Reads the narrow column at directory index `column`, which may be a schema column, a map
 /// child or a residual. `field` gives its type.
 async fn read_narrow(file: &StrataFile, column: usize, field: &Field) -> Result<ArrayRef> {
-    let record = file
-        .directory()
-        .get(column)
-        .ok_or_else(|| StrataError::Schema {
-            reason: format!("no column {column}"),
-        })?;
     let entries = file.block_entries(column).await?;
     if entries.is_empty() {
         return Ok(new_empty_array(field.data_type()));
     }
-
-    // Bit 0 of the flags says the column has a dictionary, and the offset must agree.
-    let dict = match (record.flags & 1 != 0, record.dict_offset != 0) {
-        (true, true) => {
-            let segment = SegmentRef {
-                offset: record.dict_offset,
-                len: record.dict_len,
-            };
-            let bytes = file.read_segment(&segment, Kind::Dictionary).await?;
-            Some(Dictionary::decode(&bytes, record.dict_offset)?)
-        }
-        (false, false) => None,
-        _ => {
-            return Err(StrataError::Corrupt {
-                what: "dictionary flag",
-                offset: record.dict_offset,
-            });
-        }
-    };
+    let dict = file.dictionary(column).await?;
 
     // The chunks are one scan wave. Constant chunks have no segment and are decoded without one.
     let segments: Vec<(SegmentRef, Kind)> = entries
@@ -133,7 +109,12 @@ async fn read_narrow(file: &StrataFile, column: usize, field: &Field) -> Result<
 
     let mut arrays = Vec::with_capacity(entries.len());
     for (entry, body) in entries.iter().zip(&bodies) {
-        arrays.push(decode_chunk(entry, body.as_deref(), field, dict.as_ref())?);
+        arrays.push(decode_chunk(
+            entry,
+            body.as_deref(),
+            field,
+            dict.as_deref(),
+        )?);
     }
     let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
     Ok(concat(&refs)?)

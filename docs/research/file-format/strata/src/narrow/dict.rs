@@ -35,6 +35,11 @@ impl Dictionary {
         self.values.get(code as usize).map(String::as_str)
     }
 
+    /// The number of values, so the codes are `0..len()`.
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
     /// Writes the S3 layout: `u32 n`, `u32 offsets[n+1]` relative to the bytes area, then
     /// the bytes.
     pub fn encode(&self, out: &mut Out) -> Result<()> {

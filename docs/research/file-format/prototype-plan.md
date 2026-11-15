@@ -449,18 +449,22 @@ pub struct FileSummary { pub rows: u64, pub bytes: u64, pub hot_len: u32, pub pe
 
 pub struct StrataFile;
 impl StrataFile {
-    pub async fn open(store: Arc<dyn ObjectStore>, path: Path, hot_len_hint: Option<u32>) -> Result<Self>;
+    pub async fn open(store: Arc<dyn ObjectStore>, path: Path, hint: Option<u32>, config: &Config) -> Result<Self>;
     pub fn schema(&self) -> SchemaRef;                     // file schema (Utf8, Binary)
     pub async fn lookup(&self, key: &[u8]) -> Result<Vec<Range<u32>>>;
-    pub async fn lookup_scan(&self, key: &[u8], projection: Vec<usize>) -> Result<Vec<RecordBatch>>; // the W0–W3 path below
+    pub async fn lookup_scan(&self, key: &[u8], projection: &[usize]) -> Result<Vec<RecordBatch>>; // M4.3; the W0–W3 path below
     pub fn may_contain(&self, column: &str, value: &[u8]) -> Option<bool>;
-    pub fn scan(&self, req: ScanRequest) -> BoxStream<'static, Result<RecordBatch>>;
+    pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>>; // M4.2
     pub fn io_stats(&self) -> IoStats;                     // requests, bytes, waves
 }
 pub struct ScanRequest { projection: Vec<usize>, predicate: Option<Predicate>, row_ranges: Option<Vec<Range<u32>>>, limit: Option<usize>, kind: ScanKind /* Point | Scan */ }
-pub enum Predicate { And(Vec<_>), Or(Vec<_>), Not(Box<_>), Eq(col, Scalar), In(col, Vec<Scalar>),
-                     Cmp(col, Op, Scalar), IsNull(col), IsNotNull(col), MapKeyEq(col, key, Scalar), Contains(col, Vec<u8>) }
+pub enum Lit { Null, Bool(bool), Int(i64), UInt(u64), Float(f64), Utf8(String), Bytes(Vec<u8>) }
+pub enum CmpOp { Eq, NotEq, Lt, LtEq, Gt, GtEq }
+pub enum Predicate { And(Vec<Predicate>), Or(Vec<Predicate>), Not(Box<Predicate>), Cmp(usize, CmpOp, Lit),
+                     In(usize, Vec<Lit>), IsNull(usize), IsNotNull(usize), MapKeyEq(usize, String, Lit), Contains(usize, Vec<u8>) }
 ```
+
+Returning a `Vec` instead of a stream is a prototype simplification; M5 wraps it.
 
 **The writer buffers the whole file.** Every decision is per file: payload classification, dictionary eligibility, map promotion. G8 compares against the Parquet writer on the same data, and the report states that Parquet streams while Strata buffers.
 
