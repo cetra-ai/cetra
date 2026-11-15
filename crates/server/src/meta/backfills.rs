@@ -98,6 +98,8 @@ pub(crate) enum PageWrite {
     RuleGone,
     /// The rule is disabled; nothing was written.
     RuleDisabled,
+    /// The rule was edited since the run started (its `updated_at` changed); nothing was written.
+    RuleChanged,
 }
 
 /// How a backfill ends.
@@ -202,9 +204,10 @@ pub(crate) async fn running_backfills(pool: &SqlitePool) -> Result<Vec<BackfillR
     records.into_iter().map(row_from).collect()
 }
 
-/// Writes one page of a backfill in one transaction (D-I-40): the rule must still exist and be
-/// enabled, then every job is upserted (D-I-11) and the counters are updated. `matched` is the
-/// run's total so far, not a delta; `enqueued` grows by the jobs inserted or re-queued.
+/// Writes one page of a backfill in one transaction (D-I-40): the rule must still exist, be
+/// enabled and have the `rule_updated_at` the run started with, then every job is upserted (D-I-11)
+/// and the counters are updated. `matched` is the run's total so far, not a delta; `enqueued` grows
+/// by the jobs inserted or re-queued.
 ///
 /// # Errors
 ///
@@ -214,17 +217,22 @@ pub(crate) async fn write_page(
     conn: &mut SqliteConnection,
     backfill: Uuid,
     rule: Uuid,
+    rule_updated_at: i64,
     jobs: &[NewJob],
     matched: u64,
     now: i64,
 ) -> Result<PageWrite, MetaError> {
-    let enabled: Option<i64> = sqlx::query_scalar("SELECT enabled FROM online_rules WHERE id = ?")
-        .bind(rule.to_string())
-        .fetch_optional(&mut *conn)
-        .await?;
-    match enabled {
+    let stored: Option<(i64, i64)> =
+        sqlx::query_as("SELECT enabled, updated_at FROM online_rules WHERE id = ?")
+            .bind(rule.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    match stored {
         None => return Ok(PageWrite::RuleGone),
-        Some(0) => return Ok(PageWrite::RuleDisabled),
+        Some((0, _)) => return Ok(PageWrite::RuleDisabled),
+        Some((_, updated_at)) if updated_at != rule_updated_at => {
+            return Ok(PageWrite::RuleChanged);
+        }
         Some(_) => {}
     }
     let mut enqueued: u64 = 0;
@@ -501,6 +509,7 @@ mod tests {
         ]
     }
 
+    /// A page written for a rule whose `updated_at` is `NOW`, the value `seed` inserts.
     async fn write_one_page(
         db: &MetaDb,
         backfill: Uuid,
@@ -509,7 +518,9 @@ mod tests {
         matched: u64,
     ) -> Result<PageWrite, MetaError> {
         db.write(move |conn| {
-            Box::pin(async move { write_page(conn, backfill, rule, &jobs, matched, NOW).await })
+            Box::pin(
+                async move { write_page(conn, backfill, rule, NOW, &jobs, matched, NOW).await },
+            )
         })
         .await
     }
@@ -680,6 +691,33 @@ mod tests {
             .unwrap();
         assert_eq!(gone, PageWrite::RuleGone);
         assert!(list(&db, seeded.rule).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_page_refuses_an_edited_rule() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let backfill = insert(&db, new_backfill(seeded.rule), NOW).await.unwrap();
+        let rule = seeded.rule;
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE online_rules SET updated_at = updated_at + 1 WHERE id = ?")
+                    .bind(rule.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let changed = write_one_page(&db, backfill.id, seeded.rule, page_jobs(&seeded), 1)
+            .await
+            .unwrap();
+        assert_eq!(changed, PageWrite::RuleChanged);
+        assert_eq!(job_count(&db).await, 0);
+        let row = &list(&db, seeded.rule).await[0];
+        assert_eq!((row.matched, row.enqueued), (0, 0));
     }
 
     #[tokio::test]

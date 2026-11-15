@@ -53,7 +53,7 @@ it("estimates, then runs the same body and closes", async () => {
   await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
   const status = await within(dialog).findByRole("status");
   expect(status).toHaveTextContent("More than 1,000 traces match; the newest 1,000 are used.");
-  expect(status).toHaveTextContent("250 would be evaluated.");
+  expect(status).toHaveTextContent("Up to 250 would be evaluated.");
   expect(status).toHaveTextContent("Estimated cost: $0.31");
 
   const listsBefore = requests.lists();
@@ -73,14 +73,14 @@ it("needs a fresh estimate after a change", async () => {
   const { user, dialog } = await openDialog();
 
   await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
-  await within(dialog).findByText("250 would be evaluated.");
+  await within(dialog).findByText("Up to 250 would be evaluated.");
 
   const max = within(dialog).getByLabelText("Max targets");
   await user.clear(max);
   await user.type(max, "500");
 
   expect(within(dialog).getByRole("button", { name: "Run backfill" })).toBeDisabled();
-  expect(within(dialog).queryByText("250 would be evaluated.")).toBeNull();
+  expect(within(dialog).queryByText("Up to 250 would be evaluated.")).toBeNull();
 });
 
 it("validates the inputs before it estimates", async () => {
@@ -129,11 +129,57 @@ it("shows a conflict and stays open", async () => {
   const { user, dialog } = await openDialog();
 
   await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
-  await within(dialog).findByText("250 would be evaluated.");
+  await within(dialog).findByText("Up to 250 would be evaluated.");
   await user.click(within(dialog).getByRole("button", { name: "Run backfill" }));
 
   expect(
     await within(dialog).findByText("a backfill of this rule is already running"),
   ).toBeInTheDocument();
   expect(screen.getByRole("dialog", { name: "Run on existing data" })).toBeInTheDocument();
+});
+
+it("shows the server's field errors under their fields", async () => {
+  recordRequests({
+    estimate: () =>
+      problemResponse(400, "bad_request", {
+        errors: [
+          { field: "max_targets", message: "max_targets must be 1 to 10000" },
+          { field: "sample_rate", message: "sample_rate must be above 0 and at most 1" },
+        ],
+      }),
+  });
+  const { user, dialog } = await openDialog();
+
+  await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
+
+  expect(await within(dialog).findByText("max_targets must be 1 to 10000")).toBeInTheDocument();
+  expect(within(dialog).getByText("sample_rate must be above 0 and at most 1")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("Max targets")).toHaveAttribute("aria-invalid", "true");
+});
+
+it("shows the server's window error under the window selector", async () => {
+  recordRequests({
+    estimate: () =>
+      problemResponse(400, "bad_request", {
+        errors: [{ field: "to", message: "to must be at least 5 minutes ago" }],
+      }),
+  });
+  const { user, dialog } = await openDialog();
+
+  await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
+
+  expect(await within(dialog).findByText("to must be at least 5 minutes ago")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("Window")).toHaveAttribute("aria-invalid", "true");
+});
+
+it("shows a failed estimate that has no field errors", async () => {
+  recordRequests({
+    estimate: () => problemResponse(500, "internal", {}),
+  });
+  const { user, dialog } = await openDialog();
+
+  await user.click(within(dialog).getByRole("button", { name: "Estimate" }));
+
+  expect(await within(dialog).findByText("Internal Server Error")).toBeInTheDocument();
+  expect(within(dialog).queryByText(/would be evaluated/)).toBeNull();
 });

@@ -84,7 +84,7 @@ function summaryOf(
     capped
       ? `More than ${maxTargets.toLocaleString("en-US")} ${noun.many} match; the newest ${maxTargets.toLocaleString("en-US")} are used.`
       : `${matched.toLocaleString("en-US")} ${matched === 1 ? `${noun.one} matches` : `${noun.many} match`}.`,
-    `${sampled.toLocaleString("en-US")} would be evaluated.`,
+    `Up to ${sampled.toLocaleString("en-US")} would be evaluated.`,
   ];
   if (estimated.estimated_cost_usd !== undefined) {
     const input = (estimated.estimated_input_tokens ?? 0).toLocaleString("en-US");
@@ -215,6 +215,8 @@ function BackfillBody({
         },
         onError: () => {
           onStarting(false);
+          // A refused start (a running backfill, a disabled rule) may still have changed the list.
+          void queryClient.invalidateQueries({ queryKey: backfillsKey(org, project, rule.id) });
         },
       },
     );
@@ -235,7 +237,7 @@ function BackfillBody({
       <DialogHeader>
         <DialogTitle>Run on existing data</DialogTitle>
         <DialogDescription>
-          {`Evaluate ${noun.many} that were stored before the rule existed or while it was off. Targets the rule already scored are skipped.`}
+          {`Evaluate ${noun.many} that were stored before the rule existed or while it was off. Targets the rule already scored are skipped when it runs.`}
         </DialogDescription>
       </DialogHeader>
 

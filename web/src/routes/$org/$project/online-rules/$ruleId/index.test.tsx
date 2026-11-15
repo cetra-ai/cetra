@@ -263,6 +263,23 @@ it("does not backfill a disabled rule", async () => {
   expect(screen.getByText("Enable the rule to run it on existing data.")).toBeInTheDocument();
 });
 
+it("does not backfill a paused rule", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () =>
+      HttpResponse.json({
+        ...ruleFixture,
+        paused_reason: "errors",
+        paused_at: NOW,
+        paused_detail: "error rate 60 %",
+      }),
+    ),
+  );
+  await renderApp(RULE_URL);
+
+  expect(await screen.findByRole("button", { name: "Run on existing data" })).toBeDisabled();
+  expect(screen.getByText("Resume the rule to run it on existing data.")).toBeInTheDocument();
+});
+
 it("does not start a backfill while one runs", async () => {
   server.use(
     http.get("/api/v1/projects/:project/online-rules/:id/backfills", () =>

@@ -1,6 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { backfillsQuery } from "@/api/queries-online-rules";
+import { useEffect, useRef } from "react";
+import { backfillsQuery, evalJobsKey, onlineRuleKey } from "@/api/queries-online-rules";
 import type { Schema } from "@/api/types";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ const STATUS_LABELS: Record<Backfill["status"], string> = {
 const ERROR_TEXT: Record<string, string> = {
   interrupted: "Interrupted by a server restart. Run it again.",
   "rule disabled": "The rule was disabled.",
+  "rule changed": "The rule was edited during the run. Run it again.",
   "storage unavailable": "Storage was busy. Run it again.",
   "invalid filter": "The rule's filter no longer parses. Fix the rule, then run it again.",
   "storage read failed": "The traces could not be read.",
@@ -48,10 +50,29 @@ export function BackfillsTable({
   project: string;
   ruleId: string;
 }) {
+  const queryClient = useQueryClient();
   const query = useQuery({
     ...backfillsQuery(org, project, ruleId),
     refetchInterval: (state) => backfillRefetchInterval(state.state.data),
   });
+  // The ids that were running at the last read: one that is no longer running ended, so its
+  // jobs and the rule's counters changed.
+  const running = useRef<Set<string>>(new Set());
+  const data = query.data;
+  useEffect(() => {
+    if (data === undefined) {
+      return;
+    }
+    const now = new Set(
+      data.data.filter((backfill) => backfill.status === "running").map((backfill) => backfill.id),
+    );
+    const ended = [...running.current].some((id) => !now.has(id));
+    running.current = now;
+    if (ended) {
+      void queryClient.invalidateQueries({ queryKey: evalJobsKey(org, project) });
+      void queryClient.invalidateQueries({ queryKey: onlineRuleKey(org, project, ruleId) });
+    }
+  }, [data, queryClient, org, project, ruleId]);
   if (query.isError) {
     return (
       <p role="alert" className="text-xs text-destructive">

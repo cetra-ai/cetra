@@ -39,11 +39,10 @@ impl BackfillStatus {
     }
 }
 
+// Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the request
+// holds no payload content.
 /// `POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its
 /// `estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.
-///
-/// Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the request
-/// holds no payload content.
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBackfillRequest {

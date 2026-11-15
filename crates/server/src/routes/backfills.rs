@@ -14,7 +14,7 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
-use crate::api::common::Page;
+use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::eval::backfill::{self, BackfillRule, JudgeCost, Window};
@@ -149,27 +149,18 @@ async fn create_backfill(
     let user_id = principal::session_user(&principal)?.id;
     let project = access.project.id;
     let now = state.clock.now_ns();
-    let rule = store::get_rule(state.meta.reader(), project, id)
-        .await?
-        .ok_or(ApiError::NotFound)?;
-    let window = checked_window(&body, rule.sample_rate, now)?;
-    let new = NewBackfill {
-        id: Uuid::now_v7(),
-        rule_id: id,
-        from_ns: window.from,
-        to_ns: window.to,
-        max_targets: window.max_targets,
-        sample_rate: window.sample_rate,
-        created_by: Some(user_id),
-    };
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { create_checked(conn, project, id, new, now).await })
+            Box::pin(async move { create_checked(conn, project, id, &body, user_id, now).await })
         })
         .await?;
     match outcome {
         Create::Missing => Err(ApiError::NotFound),
+        Create::Invalid(errors) => Err(ApiError::BadRequest {
+            detail: None,
+            errors,
+        }),
         Create::Inactive => Err(ApiError::Conflict {
             detail: "the rule must be enabled and not paused to backfill",
         }),
@@ -181,7 +172,7 @@ async fn create_backfill(
                 rule_id = %id,
                 project_id = %project,
                 user_id = %user_id,
-                max_targets = window.max_targets,
+                max_targets = row.max_targets,
                 "online rule backfill started"
             );
             Ok((StatusCode::ACCEPTED, error::Json(backfill_json(&row)?)))
@@ -192,27 +183,54 @@ async fn create_backfill(
 /// What the create transaction found.
 enum Create {
     Missing,
+    /// The body fails the limits (D-I-42); nothing is written.
+    Invalid(Vec<FieldError>),
     /// Disabled or paused: nothing is written.
     Inactive,
     Created(Box<BackfillRow>),
 }
 
-/// The create transaction: the rule must still exist and be enabled and unpaused. The partial
-/// unique index refuses a second running backfill of the rule, as a `Conflict`.
+/// The create transaction. The rule must still exist, the body must pass the limits (with the
+/// rule's sample rate read here, so it is the rule's rate in this transaction), and the rule must
+/// be enabled and unpaused. The partial unique index refuses a second running backfill of the
+/// rule, as a `Conflict`.
 async fn create_checked(
     conn: &mut SqliteConnection,
     project: ProjectId,
     id: Uuid,
-    new: NewBackfill,
+    body: &CreateBackfillRequest,
+    user_id: Uuid,
     now: i64,
 ) -> Result<Create, MetaError> {
-    match store::get_rule_tx(conn, project, id).await? {
-        None => Ok(Create::Missing),
-        Some(rule) if !rule.enabled || rule.paused_reason.is_some() => Ok(Create::Inactive),
-        Some(_) => Ok(Create::Created(Box::new(
-            backfills::insert_backfill(conn, new, now).await?,
-        ))),
+    let Some(rule) = store::get_rule_tx(conn, project, id).await? else {
+        return Ok(Create::Missing);
+    };
+    let window = match backfill::validate(
+        body.from.ns(),
+        body.to.ns(),
+        body.max_targets,
+        body.sample_rate,
+        rule.sample_rate,
+        now,
+    ) {
+        Ok(window) => window,
+        Err(errors) => return Ok(Create::Invalid(errors)),
+    };
+    if !rule.enabled || rule.paused_reason.is_some() {
+        return Ok(Create::Inactive);
     }
+    let new = NewBackfill {
+        id: Uuid::now_v7(),
+        rule_id: id,
+        from_ns: window.from,
+        to_ns: window.to,
+        max_targets: window.max_targets,
+        sample_rate: window.sample_rate,
+        created_by: Some(user_id),
+    };
+    Ok(Create::Created(Box::new(
+        backfills::insert_backfill(conn, new, now).await?,
+    )))
 }
 
 /// Checks the body against the limits (D-I-42). The sample rate defaults to the rule's.

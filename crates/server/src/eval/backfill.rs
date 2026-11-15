@@ -49,6 +49,8 @@ const CHARS_PER_VARIABLE: usize = 2_000;
 
 /// A rule was disabled while its backfill ran (D-I-41).
 pub(crate) const ERROR_RULE_DISABLED: &str = "rule disabled";
+/// A rule was edited while its backfill ran (its `updated_at` changed) (D-I-41).
+pub(crate) const ERROR_RULE_CHANGED: &str = "rule changed";
 /// Storage was busy or a read timed out (D-I-41).
 pub(crate) const ERROR_STORAGE_UNAVAILABLE: &str = "storage unavailable";
 /// The rule's stored filter no longer parses (D-I-41).
@@ -213,7 +215,7 @@ impl<'a> Pager<'a> {
             rule,
             window,
             limit,
-            page: PAGE,
+            page: page_size(),
             read: 0,
             cursor: None,
             done: false,
@@ -300,6 +302,18 @@ impl<'a> Pager<'a> {
         self.cursor = page.next_cursor;
         Ok(Some(TargetPage { ctx, rows }))
     }
+}
+
+/// The rows one page reads: `PAGE`, or a test's smaller page (`faults::set_page_size`).
+#[cfg(not(test))]
+fn page_size() -> usize {
+    PAGE
+}
+
+/// The rows one page reads: `PAGE`, or a test's smaller page.
+#[cfg(test)]
+fn page_size() -> usize {
+    faults::page_size().unwrap_or(PAGE)
 }
 
 /// The rows `sampling::sampled` keeps for `rule` at `rate`, in order (D-I-10, D-I-40).
@@ -492,6 +506,23 @@ pub(crate) async fn backfill_once(state: &AppState) -> Result<usize, MetaError> 
                 );
             }
             Ok(RunEnd::Stopped) => {}
+            // A stored row that does not decode would fail every pass: the backfill fails instead.
+            Err(MetaError::Corrupt { table, column }) => {
+                tracing::error!(
+                    backfill_id = %row.id,
+                    table,
+                    column,
+                    "a backfill read a corrupt stored value; it fails"
+                );
+                match finish(state, row, BackfillEnd::Failed(ERROR_RULE), 0, 0).await {
+                    Ok(_) => finished += 1,
+                    Err(error) => tracing::error!(
+                        backfill_id = %row.id,
+                        error = %error,
+                        "a backfill could not be failed; it runs again next pass"
+                    ),
+                }
+            }
             Err(error) => tracing::error!(
                 backfill_id = %row.id,
                 error = %error,
@@ -534,6 +565,11 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
         Ok(None) => return Ok(RunEnd::Gone),
         Err(text) => return finish(state, row, BackfillEnd::Failed(text), 0, 0).await,
     };
+    if !rule_row.enabled {
+        return finish(state, row, BackfillEnd::Failed(ERROR_RULE_DISABLED), 0, 0).await;
+    }
+    // The rule as it was when the run started: a page write refuses it once `updated_at` moves.
+    let rule_updated_at = rule_row.updated_at;
     let rule = match decoded(BackfillRule::new(&rule_row, project.org_id), ERROR_RULE)? {
         Ok(rule) => rule,
         Err(text) => return finish(state, row, BackfillEnd::Failed(text), 0, 0).await,
@@ -562,6 +598,8 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
     let mut matched: u64 = 0;
     let mut enqueued: u64 = 0;
     loop {
+        #[cfg(test)]
+        faults::at_page(state, rule.id).await?;
         if state.eval.is_stopped() {
             return Ok(RunEnd::Stopped);
         }
@@ -595,7 +633,16 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    backfills::write_page(conn, backfill, rule_id, &jobs, matched, now).await
+                    backfills::write_page(
+                        conn,
+                        backfill,
+                        rule_id,
+                        rule_updated_at,
+                        &jobs,
+                        matched,
+                        now,
+                    )
+                    .await
                 })
             })
             .await?;
@@ -612,6 +659,16 @@ async fn run_backfill(state: &AppState, row: &BackfillRow) -> Result<RunEnd, Met
                     state,
                     row,
                     BackfillEnd::Failed(ERROR_RULE_DISABLED),
+                    matched,
+                    enqueued,
+                )
+                .await;
+            }
+            PageWrite::RuleChanged => {
+                return finish(
+                    state,
+                    row,
+                    BackfillEnd::Failed(ERROR_RULE_CHANGED),
                     matched,
                     enqueued,
                 )
@@ -679,12 +736,39 @@ async fn finish(
 /// Test seam: the next candidate read fails with a chosen error.
 #[cfg(test)]
 mod faults {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use llmobs_storage::RunError;
+    use uuid::Uuid;
+
+    use crate::http::AppState;
+    use crate::meta::MetaError;
+
+    /// What the armed hook does at its page boundary.
+    pub(super) enum Action {
+        /// Stops the server's eval loop (the runner returns `Stopped`).
+        Stop,
+        /// Runs one SQL statement on `online_rules` for the rule (one `?` bound to its id).
+        Sql(&'static str),
+        /// The run fails with a `meta.db` error.
+        Db,
+        /// The run fails with a corrupt stored value.
+        Corrupt,
+    }
+
+    struct Hook {
+        rule: Uuid,
+        /// The page boundary the action fires at (0 is before the first page).
+        after: usize,
+        /// Boundaries of `rule` passed so far.
+        seen: usize,
+        action: Action,
+    }
 
     thread_local! {
         static READ: RefCell<Option<RunError>> = const { RefCell::new(None) };
+        static PAGE: Cell<Option<usize>> = const { Cell::new(None) };
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
     /// The next page read fails with `error`.
@@ -694,6 +778,71 @@ mod faults {
 
     pub(super) fn take_read() -> Option<RunError> {
         READ.with(|slot| slot.borrow_mut().take())
+    }
+
+    /// Reads of this thread use `rows` per page from now on.
+    pub(super) fn set_page_size(rows: usize) {
+        PAGE.with(|slot| slot.set(Some(rows)));
+    }
+
+    pub(super) fn page_size() -> Option<usize> {
+        PAGE.with(Cell::get)
+    }
+
+    /// Fires `action` when the run of `rule` reaches its page boundary `after`: boundary 0 is
+    /// before the first page, boundary 1 after the first page was written, and so on.
+    pub(super) fn arm(rule: Uuid, after: usize, action: Action) {
+        HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Hook {
+                rule,
+                after,
+                seen: 0,
+                action,
+            });
+        });
+    }
+
+    /// Runs the armed action when `rule` reaches its boundary. Called at the top of each page.
+    pub(super) async fn at_page(state: &AppState, rule: Uuid) -> Result<(), MetaError> {
+        let action = HOOK.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let hook = slot.as_mut()?;
+            if hook.rule != rule {
+                return None;
+            }
+            if hook.seen < hook.after {
+                hook.seen += 1;
+                return None;
+            }
+            slot.take().map(|hook| hook.action)
+        });
+        match action {
+            None => Ok(()),
+            Some(Action::Stop) => {
+                state.eval.stop();
+                Ok(())
+            }
+            Some(Action::Sql(sql)) => {
+                state
+                    .meta
+                    .write(move |conn| {
+                        Box::pin(async move {
+                            sqlx::query(sql)
+                                .bind(rule.to_string())
+                                .execute(&mut *conn)
+                                .await
+                                .map(|_| ())
+                                .map_err(MetaError::from)
+                        })
+                    })
+                    .await
+            }
+            Some(Action::Db) => Err(MetaError::Db(sqlx::Error::PoolTimedOut)),
+            Some(Action::Corrupt) => Err(MetaError::Corrupt {
+                table: "backfills",
+                column: "matched",
+            }),
+        }
     }
 }
 
@@ -884,6 +1033,367 @@ mod tests {
             ))),
             ERROR_STORAGE_FAILED
         );
+        assert_eq!(
+            stored(BackfillReadError::Run(RunError::TooLarge)),
+            ERROR_STORAGE_FAILED
+        );
+        assert_eq!(
+            stored(BackfillReadError::Convert(ConvertError::Missing(
+                "trace_id"
+            ))),
+            ERROR_STORAGE_FAILED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_scoring_and_rule_decode_or_are_corrupt() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (rule, evaluator) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let reader = app.state.meta.reader();
+
+        let row = evaluators::get_evaluator(reader, seeded.project.id, evaluator)
+            .await
+            .expect("read")
+            .expect("row");
+        assert!(Scoring::from_row(&row).is_some_and(|scoring| scoring.name == "same"));
+        let mut bad_kind = evaluators::get_evaluator(reader, seeded.project.id, evaluator)
+            .await
+            .expect("read")
+            .expect("row");
+        bad_kind.kind = "bogus".to_owned();
+        assert!(Scoring::from_row(&bad_kind).is_none());
+        let mut bad_score = row;
+        bad_score.output_score = "not json".to_owned();
+        assert!(Scoring::from_row(&bad_score).is_none());
+
+        let rule_row = online_rules::get_rule(reader, seeded.project.id, rule)
+            .await
+            .expect("read")
+            .expect("row");
+        let decoded = BackfillRule::new(&rule_row, seeded.org_id).expect("decodes");
+        assert!(decoded.target == RuleTarget::Trace);
+        let mut bad_target = rule_row;
+        bad_target.target = "bogus".to_owned();
+        assert!(matches!(
+            BackfillRule::new(&bad_target, seeded.org_id),
+            Err(MetaError::Corrupt {
+                table: "online_rules",
+                column: "target"
+            })
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pager_stops_at_a_limit_that_is_not_a_page_multiple() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let rule = rule_of(seeded.project.id, seeded.org_id, RuleTarget::Trace, None);
+        let mut limited =
+            Pager::new(&app.state, &rule, window(NOW - 60 * SECOND, NOW), 3).with_page(2);
+        let mut pages = Vec::new();
+        while let Some(page) = limited.next_page().await.unwrap() {
+            pages.push(trace_ids(&page.rows));
+        }
+        assert_eq!(
+            pages,
+            vec![vec![trace_id(5), trace_id(4)], vec![trace_id(3)]]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unscored_skips_the_spans_the_rule_scored() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let start = NOW - 30 * SECOND;
+        app.commit_spans(
+            &seeded.project,
+            vec![
+                span(trace_id(1), 1, start, SpanStatus::Ok),
+                span(trace_id(1), 2, start + 1, SpanStatus::Ok),
+                span(trace_id(1), 3, start + 2, SpanStatus::Ok),
+            ],
+        )
+        .await;
+        let (rule, evaluator) = online_rule(&app, seeded.project.id, "span", None, 1.0).await;
+        let score = ScoreCreate {
+            score_id: None,
+            target: ScoreTarget::Span {
+                trace_id: trace_id(1),
+                span_id: span_id(2),
+            },
+            session_id: None,
+            user_id: None,
+            name: "same".to_owned(),
+            value: ScoreValue::Numeric(1.0),
+            reason: None,
+            source: None,
+            metadata: std::collections::BTreeMap::new(),
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            Writer::Evaluator {
+                kind: EvaluatorKind::Check,
+                evaluator_id: evaluator,
+                rule_id: Some(rule),
+            },
+            vec![score],
+        )
+        .await
+        .expect("score");
+
+        let spec = BackfillRule {
+            id: rule,
+            project: seeded.project.id,
+            org: seeded.org_id,
+            target: RuleTarget::Span,
+            filter: None,
+        };
+        let scoring = Scoring {
+            name: "same".to_owned(),
+            kind: EvaluatorKind::Check,
+        };
+        let mut pager = Pager::new(&app.state, &spec, window(NOW - 60 * SECOND, NOW), 10);
+        let page = pager.next_page().await.unwrap().expect("a page");
+        let kept = unscored(&page.ctx, &spec, &scoring, page.rows)
+            .await
+            .unwrap();
+        let spans: Vec<Option<SpanId>> = kept.iter().map(|row| row.span_id).collect();
+        assert_eq!(spans, vec![Some(span_id(3)), Some(span_id(1))]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_estimate_with_a_sample_rate_and_a_judge_counts_both() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(
+            &seeded.project,
+            (1..=20_u128)
+                .map(|n| span(trace_id(n), 1, NOW - 30 * SECOND, SpanStatus::Ok))
+                .collect(),
+        )
+        .await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 0.5).await;
+        let spec = BackfillRule {
+            id: rule,
+            project: seeded.project.id,
+            org: seeded.org_id,
+            target: RuleTarget::Trace,
+            filter: None,
+        };
+        let judge = JudgeCost {
+            template_chars: 100,
+            variables: 1,
+            max_output_tokens: 10,
+            price: Some(price(Some(1.0), Some(2.0))),
+        };
+        let window = Window {
+            from: NOW - 60 * SECOND,
+            to: NOW,
+            max_targets: 1000,
+            sample_rate: 0.5,
+        };
+        let got = estimate(&app.state, &spec, window, Some(&judge))
+            .await
+            .unwrap();
+        let expected = (1..=20_u128)
+            .filter(|&n| sampling::sampled(0.5, rule, trace_id(n), None))
+            .count() as u64;
+        assert_eq!((got.matched, got.sampled), (20, expected));
+        assert!(expected > 0 && expected < 20, "a mixed sample");
+        let cost = got.cost.expect("a judge has a cost estimate");
+        // (100 template chars + 2 000 for the variable) / 4 chars per token.
+        assert_eq!(cost.input_tokens, expected * 525);
+        assert_eq!(cost.output_tokens, expected * 10);
+        assert!(cost.cost_usd.is_some_and(|usd| usd > 0.0));
+    }
+
+    /// Five matching traces, one a second apart, all inside the window of the runner tests.
+    fn five_traces() -> Vec<Span> {
+        (1..=5_u128)
+            .map(|n| {
+                span(
+                    trace_id(n),
+                    1,
+                    NOW - 50 * SECOND + n as i64 * SECOND,
+                    SpanStatus::Ok,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_runner_stopped_between_pages_leaves_the_first_page_recorded() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+
+        faults::set_page_size(2);
+        faults::arm(rule, 1, faults::Action::Stop);
+        assert_eq!(backfill_once(&app.state).await.expect("pass"), 0);
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(
+            (row.status.as_str(), row.matched, row.enqueued),
+            (STATUS_RUNNING, 2, 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_disabled_after_the_first_page_fails_the_backfill() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+
+        faults::set_page_size(2);
+        faults::arm(
+            rule,
+            1,
+            faults::Action::Sql("UPDATE online_rules SET enabled = 0 WHERE id = ?"),
+        );
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_FAILED);
+        assert_eq!(row.error.as_deref(), Some("rule disabled"));
+        assert_eq!((row.matched, row.enqueued), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn a_rule_edited_between_pages_fails_the_backfill() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+
+        faults::set_page_size(2);
+        faults::arm(
+            rule,
+            1,
+            faults::Action::Sql("UPDATE online_rules SET updated_at = updated_at + 1 WHERE id = ?"),
+        );
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_FAILED);
+        assert_eq!(row.error.as_deref(), Some("rule changed"));
+        assert_eq!((row.matched, row.enqueued), (2, 2));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_rule_fails_its_backfill_even_with_an_empty_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+        execute(
+            &app,
+            "UPDATE online_rules SET enabled = 0 WHERE id = ?",
+            vec![rule.to_string()],
+        )
+        .await;
+
+        backfill_once(&app.state).await.expect("pass");
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!(row.status, STATUS_FAILED);
+        assert_eq!(row.error.as_deref(), Some("rule disabled"));
+    }
+
+    #[tokio::test]
+    async fn a_db_failure_leaves_its_backfill_running_and_the_next_one_runs() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (first_rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let first = backfill(
+            &app,
+            first_rule,
+            NOW - 60 * SECOND,
+            NOW - 20 * SECOND,
+            1000,
+            1.0,
+        )
+        .await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (second_rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let second = backfill(
+            &app,
+            second_rule,
+            NOW - 60 * SECOND,
+            NOW - 20 * SECOND,
+            1000,
+            1.0,
+        )
+        .await;
+
+        faults::set_page_size(2);
+        faults::arm(first_rule, 1, faults::Action::Db);
+        assert_eq!(backfill_once(&app.state).await.expect("pass"), 1);
+        let row = backfill_row(&app, first_rule, first).await;
+        assert_eq!((row.status.as_str(), row.matched), (STATUS_RUNNING, 2));
+        let row = backfill_row(&app, second_rule, second).await;
+        assert_eq!(row.status, STATUS_DONE);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_stored_value_fails_its_backfill_and_the_next_one_runs() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (first_rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let first = backfill(
+            &app,
+            first_rule,
+            NOW - 60 * SECOND,
+            NOW - 20 * SECOND,
+            1000,
+            1.0,
+        )
+        .await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (second_rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let second = backfill(
+            &app,
+            second_rule,
+            NOW - 60 * SECOND,
+            NOW - 20 * SECOND,
+            1000,
+            1.0,
+        )
+        .await;
+
+        faults::set_page_size(2);
+        faults::arm(first_rule, 1, faults::Action::Corrupt);
+        assert_eq!(backfill_once(&app.state).await.expect("pass"), 2);
+        let row = backfill_row(&app, first_rule, first).await;
+        assert_eq!(row.status, STATUS_FAILED);
+        assert_eq!(row.error.as_deref(), Some("rule could not be read"));
+        assert_eq!(row.matched, 2);
+        let row = backfill_row(&app, second_rule, second).await;
+        assert_eq!(row.status, STATUS_DONE);
+    }
+
+    #[tokio::test]
+    async fn a_backfill_of_an_inactive_project_is_not_picked_up() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.commit_spans(&seeded.project, five_traces()).await;
+        let (rule, _) = online_rule(&app, seeded.project.id, "trace", None, 1.0).await;
+        let id = backfill(&app, rule, NOW - 60 * SECOND, NOW - 20 * SECOND, 1000, 1.0).await;
+        execute(
+            &app,
+            "UPDATE projects SET state = 'deleting' WHERE id = ?",
+            vec![seeded.project.id.to_string()],
+        )
+        .await;
+
+        assert_eq!(backfill_once(&app.state).await.expect("pass"), 0);
+        let row = backfill_row(&app, rule, id).await;
+        assert_eq!((row.status.as_str(), row.matched), (STATUS_RUNNING, 0));
     }
 
     #[tokio::test(flavor = "multi_thread")]
