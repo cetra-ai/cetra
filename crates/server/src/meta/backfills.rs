@@ -88,7 +88,6 @@ pub(crate) struct NewBackfill {
 }
 
 /// What one page's write did (D-I-40, D-I-41).
-#[allow(dead_code)] // I6.4 reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageWrite {
     /// The jobs were written; `enqueued` were inserted or re-queued.
@@ -103,7 +102,6 @@ pub(crate) enum PageWrite {
 }
 
 /// How a backfill ends.
-#[allow(dead_code)] // I6.4 reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BackfillEnd {
     /// Every page was read and enqueued.
@@ -194,7 +192,6 @@ pub(crate) async fn list_backfills(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[allow(dead_code)] // I6.4 calls it.
 pub(crate) async fn running_backfills(pool: &SqlitePool) -> Result<Vec<BackfillRow>, MetaError> {
     let records: Vec<BackfillRecord> = sqlx::query_as(concat!(
         "SELECT ",
@@ -216,7 +213,6 @@ pub(crate) async fn running_backfills(pool: &SqlitePool) -> Result<Vec<BackfillR
 ///
 /// Returns [`MetaError`] when a statement fails, or `MetaError::Corrupt` when a count does not fit
 /// in an `i64`.
-#[allow(dead_code)] // I6.4 calls it.
 pub(crate) async fn write_page(
     conn: &mut SqliteConnection,
     backfill: Uuid,
@@ -258,7 +254,6 @@ pub(crate) async fn write_page(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[allow(dead_code)] // I6.4 calls it.
 pub(crate) async fn finish_backfill(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -288,7 +283,6 @@ pub(crate) async fn finish_backfill(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[allow(dead_code)] // I6.4 calls it.
 pub(crate) async fn fail_running(conn: &mut SqliteConnection, now: i64) -> Result<u64, MetaError> {
     let result =
         sqlx::query("UPDATE backfills SET status = ?, error = ?, finished_at = ? WHERE status = ?")
