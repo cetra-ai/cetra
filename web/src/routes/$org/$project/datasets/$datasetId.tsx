@@ -6,6 +6,8 @@ import { problemOf } from "@/api/problem";
 import { datasetQuery, datasetVersionsInit } from "@/api/queries-datasets";
 import { AddItemDialog } from "@/components/datasets/add-item-dialog";
 import { DatasetSettings } from "@/components/datasets/dataset-settings";
+import { ExportMenu } from "@/components/datasets/export-menu";
+import { ImportDialog } from "@/components/datasets/import-dialog";
 import { ItemsTable } from "@/components/datasets/items-table";
 import { VersionsTable } from "@/components/datasets/versions-table";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -62,6 +64,7 @@ function DatasetPage() {
     },
   );
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   if (detail.isPending) {
     return null;
@@ -140,7 +143,20 @@ function DatasetPage() {
             {`${dataset.item_count} items · version ${latest}`}
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-start gap-2">
+          <DisabledReason reason={editReason}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={editReason !== undefined}
+              onClick={() => {
+                setImporting(true);
+              }}
+            >
+              Import
+            </Button>
+          </DisabledReason>
+          <ExportMenu datasetId={datasetId} version={shown} />
           <DisabledReason reason={editReason}>
             <Button
               type="button"
@@ -216,6 +232,7 @@ function DatasetPage() {
       </Tabs>
 
       <AddItemDialog datasetId={datasetId} open={adding} onOpenChange={setAdding} />
+      <ImportDialog datasetId={datasetId} open={importing} onOpenChange={setImporting} />
     </div>
   );
 }

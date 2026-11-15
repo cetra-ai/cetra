@@ -82,3 +82,89 @@ function parseVersion(value: unknown): number | undefined {
   }
   return parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
+
+export type ImportFormat = "csv" | "jsonl";
+
+/** The largest file the import wizard takes (D-J-6). */
+export const IMPORT_MAX_BYTES = 100 * 1024 * 1024;
+
+/** The head of a file the preview reads (D-J-6). */
+export const PREVIEW_BYTES = 1024 * 1024;
+
+/** `csv` for `.csv`; `jsonl` for `.jsonl` and `.ndjson` (case-insensitive); else `undefined`. */
+export function importFormatOf(fileName: string): ImportFormat | undefined {
+  const name = fileName.toLowerCase();
+  if (name.endsWith(".csv")) {
+    return "csv";
+  }
+  if (name.endsWith(".jsonl") || name.endsWith(".ndjson")) {
+    return "jsonl";
+  }
+  return undefined;
+}
+
+/** The import targets of D-J-6. */
+export type ImportTarget =
+  | "input"
+  | `input.${string}`
+  | "expected"
+  | `expected.${string}`
+  | `metadata.${string}`
+  | "ignore";
+
+/**
+ * A column's default target: `input` → "input"; `expected` or `expected_output` → "expected";
+ * `metadata` → "ignore"; any other column `c` → `input.c`. Names compare case-insensitively
+ * after trimming.
+ */
+export function defaultTarget(column: string): ImportTarget {
+  const name = column.trim().toLowerCase();
+  if (name === "input") {
+    return "input";
+  }
+  if (name === "expected" || name === "expected_output") {
+    return "expected";
+  }
+  if (name === "metadata") {
+    return "ignore";
+  }
+  return `input.${column}`;
+}
+
+/**
+ * Problems with a mapping, in this order, each once: no column maps to the input; the whole
+ * input and its keys both used; the same for the expected output; a target used by two columns;
+ * a keyed target with an empty key.
+ */
+export function mappingProblems(rows: { column: string; target: ImportTarget }[]): string[] {
+  const targets: string[] = rows.map((row) => row.target);
+  const problems: string[] = [];
+  const inputKeyed = targets.some((target) => target.startsWith("input."));
+  const expectedKeyed = targets.some((target) => target.startsWith("expected."));
+  if (!targets.includes("input") && !inputKeyed) {
+    problems.push("Map at least one column to the input");
+  }
+  if (targets.includes("input") && inputKeyed) {
+    problems.push("Map the whole input or input keys, not both");
+  }
+  if (targets.includes("expected") && expectedKeyed) {
+    problems.push("Map the whole expected output or its keys, not both");
+  }
+  const counts = new Map<string, number>();
+  for (const target of targets) {
+    if (target !== "ignore") {
+      counts.set(target, (counts.get(target) ?? 0) + 1);
+    }
+  }
+  for (const [target, count] of counts) {
+    if (count > 1) {
+      problems.push(`Two columns map to ${target}`);
+    }
+  }
+  for (const row of rows) {
+    if (/^(input|expected|metadata)\.$/.test(row.target)) {
+      problems.push(`${row.column}: the key is empty`);
+    }
+  }
+  return problems;
+}

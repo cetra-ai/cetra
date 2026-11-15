@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  defaultTarget,
+  importFormatOf,
+  mappingProblems,
   parseDatasetSearch,
   parseJsonField,
   payloadJson,
@@ -109,5 +112,77 @@ describe("parseDatasetSearch", () => {
     expect(parseDatasetSearch({ version: "-1" })).toEqual({});
     expect(parseDatasetSearch({ version: "1.5" })).toEqual({});
     expect(parseDatasetSearch({ version: "a" })).toEqual({});
+  });
+});
+
+describe("importFormatOf", () => {
+  it("reads the format from the extension, case-insensitively", () => {
+    expect(importFormatOf("a.CSV")).toBe("csv");
+    expect(importFormatOf("b.jsonl")).toBe("jsonl");
+    expect(importFormatOf("c.ndjson")).toBe("jsonl");
+    expect(importFormatOf("d.json")).toBeUndefined();
+  });
+});
+
+describe("defaultTarget", () => {
+  it("maps the well-known column names", () => {
+    expect(defaultTarget("Input")).toBe("input");
+    expect(defaultTarget("expected_output")).toBe("expected");
+    expect(defaultTarget("metadata")).toBe("ignore");
+    expect(defaultTarget("question")).toBe("input.question");
+  });
+});
+
+describe("mappingProblems", () => {
+  it("is empty for a valid mapping", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: "input.q" },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("asks for an input", () => {
+    expect(mappingProblems([{ column: "a", target: "expected" }])).toEqual([
+      "Map at least one column to the input",
+    ]);
+  });
+
+  it("refuses the whole input and its keys together", () => {
+    expect(
+      mappingProblems([
+        { column: "x", target: "input" },
+        { column: "q", target: "input.q" },
+      ]),
+    ).toEqual(["Map the whole input or input keys, not both"]);
+  });
+
+  it("refuses the whole expected output and its keys together", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: "input.q" },
+        { column: "a", target: "expected" },
+        { column: "b", target: "expected.b" },
+      ]),
+    ).toEqual(["Map the whole expected output or its keys, not both"]);
+  });
+
+  it("names a target that two columns use", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: "input" },
+        { column: "r", target: "input" },
+      ]),
+    ).toEqual(["Two columns map to input"]);
+  });
+
+  it("names a keyed target with an empty key", () => {
+    expect(
+      mappingProblems([
+        { column: "q", target: "input." },
+        { column: "a", target: "expected" },
+      ]),
+    ).toEqual(["q: the key is empty"]);
   });
 });
