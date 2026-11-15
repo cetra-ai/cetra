@@ -3,6 +3,7 @@ export const orgSettingsNav = [
   { to: "/$org/settings/plan", label: "Plan", ownerOnly: false },
   { to: "/$org/settings/members", label: "Members", ownerOnly: false },
   { to: "/$org/settings/llm-connections", label: "LLM connections", ownerOnly: false },
+  { to: "/$org/settings/models", label: "Model prices", ownerOnly: false },
   { to: "/$org/settings/sso", label: "Single sign-on", ownerOnly: true },
 ] as const;
 
