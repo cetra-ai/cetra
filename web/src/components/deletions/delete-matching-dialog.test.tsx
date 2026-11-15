@@ -6,6 +6,7 @@ import { expect, it, vi } from "vitest";
 import { traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { ProjectProvider } from "@/components/shell/project-context";
+import { DELETION_POLL_MS, setDeletionPollMs } from "@/lib/deletions";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import deletionFixture from "../../../../fixtures/api/static/deletion.json";
@@ -74,6 +75,31 @@ it("counts the matches, then deletes them with the selection's filter and range"
     include_eval: false,
     include_experiments: false,
   });
+});
+
+it("refetches the reads again once the deletion has left resolving", async () => {
+  setDeletionPollMs(10);
+  try {
+    let polls = 0;
+    server.use(
+      http.post(PREVIEW, () => HttpResponse.json({ matched_traces: 3, capped: false })),
+      http.post(DELETE, () =>
+        HttpResponse.json({ ...deletionFixture, status: "resolving" }, { status: 202 }),
+      ),
+      http.get("/api/v1/projects/:project/deletions/:id", () => {
+        polls += 1;
+        return HttpResponse.json({ ...deletionFixture, status: "pending" });
+      }),
+    );
+    const user = userEvent.setup();
+    const { queryClient } = renderDialog();
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    await user.click(await screen.findByRole("button", { name: "Delete 3 traces" }));
+    await waitFor(() => expect(polls).toBe(1));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+  } finally {
+    setDeletionPollMs(DELETION_POLL_MS);
+  }
 });
 
 it("uses the singular for one matching trace", async () => {

@@ -47,7 +47,7 @@ describe("deletionSubject", () => {
   it("shows a filter's text, with its trace count when known", () => {
     const filter = { ...range, filter: "status = 'error'" };
     expect(deletionSubject({ ...base, kind: "filter", filter, trace_count: 1 })).toBe(
-      "status = 'error' (1 trace)",
+      "status = 'error' (1 trace incl. evaluation traces)",
     );
     expect(deletionSubject({ ...base, kind: "filter", filter })).toBe("status = 'error'");
   });
@@ -55,14 +55,14 @@ describe("deletionSubject", () => {
   it("shows a search when there is no filter text", () => {
     const filter = { ...range, search: "timeout" };
     expect(deletionSubject({ ...base, kind: "filter", filter, trace_count: 2 })).toBe(
-      'search "timeout" (2 traces)',
+      'search "timeout" (2 traces incl. evaluation traces)',
     );
     expect(deletionSubject({ ...base, kind: "filter", filter })).toBe('search "timeout"');
   });
 
   it("says all traces when there is neither text nor search", () => {
     expect(deletionSubject({ ...base, kind: "filter", filter: range, trace_count: 0 })).toBe(
-      "all traces (0 traces)",
+      "all traces (0 traces incl. evaluation traces)",
     );
     expect(deletionSubject({ ...base, kind: "filter", filter: range })).toBe("all traces");
   });

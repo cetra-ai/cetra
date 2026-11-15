@@ -14,7 +14,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { invalidateProjectReads } from "@/lib/deletions";
+import { invalidateProjectReads, invalidateWhenHidden } from "@/lib/deletions";
 
 export type TraceSelection = {
   filter?: string;
@@ -116,10 +116,11 @@ function DeleteMatchingBody({
         body: { kind: "filter", ...body },
       },
       {
-        onSuccess: () => {
+        onSuccess: (deletion) => {
           onDeleting(false);
           onClose();
           void invalidateProjectReads(queryClient);
+          void invalidateWhenHidden(queryClient, ref, deletion);
         },
         onError: () => {
           onDeleting(false);

@@ -67,6 +67,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Web UI: the sidebar opens on screens under 768 px (a trigger above the page); session ids show in full in the session header; the traces list refreshes after "Delete matching…" once storage hides the rows, and the deletion history says its trace count includes evaluation traces; Enter submits the Save view and Rename view dialogs.
 - Security review of the auth code: an invitation no longer counts as proof of an email address, so
   linking Google, GitHub or an org's identity provider clears the password of an account made with an
   invitation (D-P-66).
