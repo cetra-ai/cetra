@@ -432,9 +432,11 @@ async fn largest_object(dir: &Path) -> Result<i64, String> {
 /// The multipart uploads under `prefix`, as `ListMultipartUploads` reports them. `object_store`
 /// has no call for it, so this runs curl with its built-in SigV4 signing. The keys go to curl on
 /// stdin (`-K -`), never on a command line. The URL follows `LLMOBS_TEST_S3_PATH_STYLE`, with the
-/// query parameters in sorted order, which is the order curl signs.
+/// query parameters in sorted order, which is the order curl signs. The prefix is sent with a
+/// trailing `/` (encoded), so `s3-chaos-x-1` does not match `s3-chaos-x-12`. The answer must be a
+/// 200 `ListMultipartUploadsResult`: any other status is an error, not an empty list.
 fn incomplete_uploads(env: &Env, prefix: &str) -> Result<usize, String> {
-    let query = format!("prefix={prefix}&uploads");
+    let query = format!("prefix={prefix}%2F&uploads");
     let endpoint = env.endpoint.trim_end_matches('/');
     let url = if env.path_style {
         format!("{endpoint}/{}?{query}", env.bucket)
@@ -448,6 +450,7 @@ fn incomplete_uploads(env: &Env, prefix: &str) -> Result<usize, String> {
     let mut child = Command::new("curl")
         .args(["-s", "-K", "-", "--aws-sigv4"])
         .arg(format!("aws:amz:{}:s3", env.region))
+        .args(["-w", "\n%{http_code}"])
         .arg(&url)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -460,7 +463,7 @@ fn incomplete_uploads(env: &Env, prefix: &str) -> Result<usize, String> {
             .take()
             .expect("curl was spawned with a stdin pipe");
         stdin
-            .write_all(format!("user = \"{key}:{secret}\"\n").as_bytes())
+            .write_all(format!("user = \"{}\"\n", curl_credentials(&key, &secret)).as_bytes())
             .map_err(|error| format!("write the credentials to curl: {error}"))?;
     }
     let output = child
@@ -469,9 +472,23 @@ fn incomplete_uploads(env: &Env, prefix: &str) -> Result<usize, String> {
     if !output.status.success() {
         return Err(format!("curl exited with {}", output.status));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .matches("<Upload>")
-        .count())
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (body, status) = text
+        .rsplit_once('\n')
+        .ok_or("curl printed no HTTP status")?;
+    let status = status.trim();
+    if status != "200" || !body.contains("<ListMultipartUploadsResult") {
+        return Err(format!("ListMultipartUploads answered {status}"));
+    }
+    Ok(body.matches("<Upload>").count())
+}
+
+/// The `user = "..."` value of a curl config line: `\` and `"` are escaped, as curl reads quoted
+/// strings with backslash escapes.
+fn curl_credentials(key: &str, secret: &str) -> String {
+    format!("{key}:{secret}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 /// Deletes every object under `prefix`, calling Versity directly (copied from `tests/s3.rs`).

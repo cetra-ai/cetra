@@ -147,6 +147,10 @@ impl Compactor {
 
     /// Drops the read-cache blocks of a file that verification found healthy,
     /// so a bad cached block cannot outlive the check (spec 03 §6).
+    ///
+    /// Known narrow race, not fixed here: a reader that fetched the file's bytes before this
+    /// evict can write them back into the cache after it, so a bad block could survive the
+    /// check. The next suspect of M4 (`docs/research/storage/hardening.md` § M4) fixes it.
     async fn drop_cached_blocks(&self, file: &FileMeta) {
         let Some(cache) = self.objects.read_cache() else {
             return;

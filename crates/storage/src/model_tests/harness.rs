@@ -129,7 +129,12 @@ pub(super) struct Harness {
 
 /// How long a shutdown runs before the ending window opens (R4.5). `Storage::shutdown` cuts its
 /// flush off after 30 s, and the window must already be open by then.
-const SHUTDOWN_WINDOW: Duration = Duration::from_secs(29);
+const SHUTDOWN_WINDOW: Duration = Duration::from_secs(25);
+
+/// How long a shutdown runs under the fault schedule before the schedule is switched off. A flush
+/// that keeps failing then commits on its next retry, instead of sleeping its full backoff until
+/// the 30 s cut-off.
+const CALM_AFTER: Duration = Duration::from_secs(3);
 
 /// Opens storage on `config`. With a store, it is `remote`'s chaos store. Opening runs calm:
 /// the schedule is off while the open runs, and the previous setting is restored after it (a
@@ -272,15 +277,24 @@ impl Harness {
         let Life { storage, runtime } = self.life.take().expect("a life");
         let remote = self.remote.as_ref();
         let result = runtime.block_on(async {
+            let started = tokio::time::Instant::now();
             let shutdown = storage.shutdown();
             tokio::pin!(shutdown);
             tokio::select! {
                 result = &mut shutdown => result,
-                () = tokio::time::sleep(SHUTDOWN_WINDOW) => {
+                () = tokio::time::sleep(CALM_AFTER) => {
                     if let Some(remote) = remote {
-                        remote.chaos.set_ending(true);
+                        remote.chaos.set_active(false);
                     }
-                    shutdown.await
+                    tokio::select! {
+                        result = &mut shutdown => result,
+                        () = tokio::time::sleep_until(started + SHUTDOWN_WINDOW) => {
+                            if let Some(remote) = remote {
+                                remote.chaos.set_ending(true);
+                            }
+                            shutdown.await
+                        }
+                    }
                 }
             }
         });

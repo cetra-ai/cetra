@@ -51,15 +51,14 @@ fn interval_cases() -> u32 {
     (cases() / 2).max(2)
 }
 
-/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 4 (R4.5). A shutdown whose flush fails
-/// under the schedule retries it until the 30 s grace period ends, so a case can take 30 s or
-/// more. Measured in debug over nine runs at 4 cases: 6 s to 98 s, 8 of 9 under 45 s. At 8 cases
-/// five runs took 10 s to 103 s, and two of them were over 45 s, so 8 does not fit the 60 s budget.
+/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 8 (R4.5). A
+/// restart's shutdown switches the fault schedule off 3 s in, so a flush that keeps failing
+/// commits on its next retry. Measured in debug at 8 cases over six runs: 11 s to 32 s.
 fn s3_cases() -> u32 {
     std::env::var("LLMOBS_MODEL_S3_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(4)
+        .unwrap_or(8)
 }
 
 proptest! {

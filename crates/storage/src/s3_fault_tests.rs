@@ -247,22 +247,23 @@ async fn flush_retries_back_off_while_the_store_fails() {
         .append_spans(project(), spans_at(&[1]))
         .await
         .unwrap();
-    tokio::time::sleep_until((started + Duration::from_millis(7_500)).into()).await;
+    tokio::time::sleep_until((started + Duration::from_millis(3_500)).into()).await;
     // The spans file is above the 16 KiB single-put size, so its attempt starts a
-    // multipart upload: each attempt makes one of the two calls.
+    // multipart upload: each attempt makes one of the two calls. The attempts are at
+    // about 0, 1 and 3 s, so 2 or 3 of them are made in 3.5 s.
     let attempts = chaos.count(Call::Put) + chaos.count(Call::MultipartStart);
     assert!(
-        (3..=5).contains(&attempts),
-        "{attempts} attempts in 7.5 s: the backoff is not 1, 2, 4, 8 s"
+        (2..=3).contains(&attempts),
+        "{attempts} attempts in 3.5 s: the backoff is not 1, 2, 4 s"
     );
 
     chaos.release();
-    // The next attempt is due at about 15.1 s, so 12 s after the release is
+    // The next attempt is due at about 7 s, 3.5 s after the release, so 6 s is
     // enough for it.
     let released = Instant::now();
     while storage.catalog_rows(Table::Spans) != 1 {
         assert!(
-            released.elapsed() < Duration::from_secs(12),
+            released.elapsed() < Duration::from_secs(6),
             "the flush did not commit after the store recovered"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;

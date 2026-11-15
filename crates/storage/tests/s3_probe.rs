@@ -136,7 +136,7 @@ impl Probe {
                 .take()
                 .expect("curl was spawned with a stdin pipe");
             stdin
-                .write_all(format!("user = \"{key}:{secret}\"\n").as_bytes())
+                .write_all(format!("user = \"{}\"\n", curl_credentials(&key, &secret)).as_bytes())
                 .map_err(|error| format!("write the credentials to curl: {error}"))?;
         }
         let output = child
@@ -155,6 +155,14 @@ impl Probe {
             .map_err(|_| "curl printed no HTTP status".to_owned())?;
         Ok((status, body.to_owned()))
     }
+}
+
+/// The `user = "..."` value of a curl config line: `\` and `"` are escaped, as curl reads quoted
+/// strings with backslash escapes.
+fn curl_credentials(key: &str, secret: &str) -> String {
+    format!("{key}:{secret}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 /// `read_after_write`: a fresh key is readable at once, with its bytes and its size. Flush then query
