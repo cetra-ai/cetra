@@ -337,6 +337,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
         eval,
+        pending: crate::eval::pending::PendingTraces::default(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -346,6 +347,10 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     if let Err(error) = crate::eval::recover(&state).await {
         release_state(state).await;
         return Err(ServeError::Meta(error));
+    }
+    // Losing the load only stops tracking of the traces that were pending, so startup goes on.
+    if let Err(error) = crate::eval::trigger::load(&state).await {
+        tracing::warn!(error = %error, "pending traces could not be loaded; tracking starts empty");
     }
     // The guard is a safety net for judge runs; the server starts without it.
     if let Err(error) = state
@@ -616,7 +621,9 @@ fn spawn_prune(state: AppState) -> JoinHandle<()> {
 }
 
 impl Running {
-    /// Stop accepting, drain HTTP, stop the eval loops and background tasks, flush storage, close `meta.db`.
+    /// Stop accepting, drain HTTP, stop the eval loops and background tasks, wait for detached
+    /// commits, flush the pending traces, the last-used stamps and the usage counters, flush
+    /// storage, close `meta.db`.
     ///
     /// A storage flush error is logged. The lock is released inside
     /// `Storage::shutdown` before that error, and this method still closes
@@ -659,6 +666,9 @@ impl Running {
                 .is_err()
             {
                 tracing::error!("ingest commits did not finish before shutdown");
+            }
+            if let Err(error) = crate::eval::trigger::flush_all(&state).await {
+                tracing::error!(error = %error, "pending traces flush failed");
             }
             if let Err(error) = state.last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
@@ -1005,6 +1015,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spans, 3);
+    }
+
+    #[tokio::test]
+    async fn shutdown_flushes_the_map() {
+        use crate::meta::MetaDb;
+        use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+        use llmobs_core::ids::{ProjectId, SpanId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(with_init(config(dir.path())), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let project_text: String = sqlx::query_scalar("SELECT id FROM projects")
+            .fetch_one(state.meta.reader())
+            .await
+            .unwrap();
+        let project = ProjectId::from_uuid(uuid::Uuid::parse_str(&project_text).unwrap());
+        // A trace rule keeps the project tracked, as the sweeper's per-tick refresh would.
+        let evaluator = uuid::Uuid::now_v7();
+        let rule = uuid::Uuid::now_v7();
+        let now = state.clock.now_ns();
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        project,
+                        "check",
+                        EvaluatorFields {
+                            name: "Same".to_owned(),
+                            config: "{}".to_owned(),
+                            output_score: "{}".to_owned(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_rule(
+                        conn,
+                        NewRule {
+                            id: rule,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        RuleFields {
+                            name: "Every trace".to_owned(),
+                            filter: None,
+                            variable_mapping: "{}".to_owned(),
+                            sample_rate: 1.0,
+                            budget_usd: None,
+                            budget_period: None,
+                            enabled: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // A sweep that read the rules before the insert may still hold a stale tracked set. Every
+        // tick that starts after this sleep tracks the project, so refreshing again is enough.
+        tokio::time::sleep(crate::eval::EvalTiming::DEFAULT.sweep_every * 2).await;
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // An unrooted span: the trace stays pending for the 60 s timeout, so nothing completes it.
+        let mut span = crate::test_support::dataset_span(0);
+        span.parent_span_id = Some(SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1]).unwrap());
+        span.environment = None;
+        span.metadata.clear();
+        state
+            .pending
+            .observe(project, &[span], state.clock.now_ns());
+        running.shutdown().await.unwrap();
+        let meta = MetaDb::open(dir.path()).await.unwrap();
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pending_traces WHERE project_id = ?")
+                .bind(project.to_string())
+                .fetch_one(meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(rows, 1);
+        meta.close().await;
     }
 
     #[tokio::test]

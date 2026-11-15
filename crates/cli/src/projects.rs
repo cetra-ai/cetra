@@ -210,6 +210,7 @@ mod tests {
             "org_id": org_id,
             "slug": slug,
             "name": name,
+            "trace_completion_timeout_s": 60,
             "created_at": "2026-01-01T09:00:00.000000000Z"
         });
         if let Some(role) = role {

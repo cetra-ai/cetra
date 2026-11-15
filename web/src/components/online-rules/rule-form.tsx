@@ -17,6 +17,7 @@ import {
 } from "@/components/evaluators/mapping-table";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { MatchCounter } from "@/components/online-rules/match-counter";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -514,6 +515,15 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
             {filterHelp}
           </p>
           <SectionError message={errors.filter} />
+          {canEdit ? (
+            <MatchCounter
+              org={org}
+              project={project}
+              target={values.target}
+              filter={values.filter}
+              sampleRate={sampleRateOf(values.samplePercent) ?? 1}
+            />
+          ) : null}
         </div>
 
         <div className="flex flex-col gap-2">

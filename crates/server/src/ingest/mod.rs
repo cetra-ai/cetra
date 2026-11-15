@@ -27,6 +27,7 @@ use llmobs_storage::{MediaBlob, Storage};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{IngestConfig, MediaConfig};
+use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::live::LiveBus;
@@ -335,12 +336,14 @@ impl Ingest {
     /// Stores the media, then appends the spans (D-G-8, D-G-9), then counts the billable spans
     /// (every span outside the reserved evaluation environment, D-I-31) and the request bytes
     /// (D-G-30). Nothing is appended when a blob fails, and nothing is counted then. The
-    /// caller's reservation covers the spans until this returns.
+    /// caller's reservation covers the spans until this returns. Then records the trace in the
+    /// trigger's pending map when its project has an online rule (D-I-8; memory only).
     pub(crate) async fn commit(
         &self,
         storage: &Storage,
         usage: &Usage,
         live: &LiveBus,
+        pending: &PendingTraces,
         target: CommitTarget,
         normalized: Normalized,
     ) -> Result<CommitReceipt, IngestError> {
@@ -374,6 +377,7 @@ impl Ingest {
                 .await
                 .map_err(IngestError::Append)?;
             live.publish(target.project_id, &spans);
+            pending.observe(target.project_id, &spans, target.now_ns);
         }
         usage.add(
             target.org_id,
@@ -415,6 +419,7 @@ pub(crate) async fn commit_in_task(
                 &state.storage,
                 &state.usage,
                 &state.live,
+                &state.pending,
                 target,
                 normalized,
             )
@@ -904,6 +909,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -968,6 +974,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -1012,6 +1019,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -1035,6 +1043,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -1102,6 +1111,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 Normalized {
                     spans,
@@ -1126,6 +1136,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn commit_records_tracked_projects_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let normalized = accepted_fixture(
+            &app,
+            &seeded.project,
+            "genai/openai-v2-chat-tool/input.json",
+        )
+        .await;
+        let base = normalized
+            .spans
+            .first()
+            .cloned()
+            .expect("the fixture has a span");
+        let other_trace = llmobs_core::ids::TraceId::from_bytes([9; 16]).expect("not all zero");
+        let production = llmobs_core::span::Span {
+            environment: Some("production".to_owned()),
+            ..base.clone()
+        };
+        let judge = llmobs_core::span::Span {
+            environment: Some(EVAL_ENVIRONMENT.to_owned()),
+            trace_id: other_trace,
+            ..base.clone()
+        };
+        let pending = &app.state.pending;
+        pending.set_tracked(std::collections::HashSet::from([seeded.project.id]));
+        let commit = |spans: Vec<llmobs_core::span::Span>| {
+            app.state.ingest.commit(
+                &app.state.storage,
+                &app.state.usage,
+                &app.state.live,
+                pending,
+                target(&app, &seeded.project),
+                Normalized {
+                    spans,
+                    media: Vec::new(),
+                    rejections: Rejections::default(),
+                },
+            )
+        };
+        commit(vec![production.clone()]).await.expect("committed");
+        assert_eq!(pending.len(), 1);
+        commit(vec![judge]).await.expect("committed");
+        assert_eq!(pending.len(), 1, "an evaluation span is not tracked");
+        pending.set_tracked(std::collections::HashSet::new());
+        assert_eq!(pending.len(), 0);
+        commit(vec![production]).await.expect("committed");
+        assert_eq!(pending.len(), 0, "an untracked project is not tracked");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn commit_after_the_project_is_dropped_is_refused() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -1147,6 +1208,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )

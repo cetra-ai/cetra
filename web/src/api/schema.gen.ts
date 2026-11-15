@@ -1356,6 +1356,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/online-rules/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Count what a rule's filter matches
+         * @description Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).
+         */
+        post: operations["post_online_rule_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/online-rules/{id}": {
         parameters: {
             query?: never;
@@ -3694,6 +3714,43 @@ export interface components {
             /** @description Enabled rules of the whole org, counted for the plan's active-rule limit. */
             org_enabled_rules: number;
         };
+        /** @description The preview's count (D-I-9). */
+        OnlineRulePreview: {
+            /** @description More than 10 000 matched. */
+            capped: boolean;
+            /**
+             * Format: date-time
+             * @description The window that was counted. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: int64
+             * @description Matching traces or spans, at most 10 000.
+             */
+            matched: number;
+            /**
+             * Format: date-time
+             * @description The end of the window that was counted. RFC 3339.
+             */
+            to: string;
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules/preview` body (D-I-9). Absent fields take their
+         *     defaults.
+         *
+         *     Deserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the filter
+         *     is a query over stored data, and nothing logs it.
+         */
+        OnlineRulePreviewRequest: {
+            /** @description Filter DSL over the target's view. Absent or blank matches everything. */
+            filter?: string;
+            /** @description Window start. Default: `to` minus 24 hours. */
+            from?: components["schemas"]["TimeParam"];
+            /** @description The rule's target: the view the filter is read on. */
+            target: components["schemas"]["RuleTarget"];
+            /** @description Window end. Default: now. */
+            to?: components["schemas"]["TimeParam"];
+        };
         /** @description `GET /api/v1/orgs/{org}/entitlements` (D-P-15). */
         OrgEntitlements: {
             /** @description Features the org may use now, in a fixed order. */
@@ -4008,6 +4065,12 @@ export interface components {
             role?: components["schemas"]["OrgRole"];
             /** @description URL slug, unique within the org. */
             slug: string;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules (D-I-7).
+             *     10 to 3600; 60 unless set.
+             */
+            trace_completion_timeout_s: number;
         };
         /**
          * Format: uuid
@@ -5422,6 +5485,12 @@ export interface components {
              * @description Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
              */
             retention_days?: number;
+            /**
+             * Format: int32
+             * @description Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.
+             *     Absent leaves it unchanged.
+             */
+            trace_completion_timeout_s?: number;
         };
         /**
          * @description Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.
@@ -12045,6 +12114,96 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_online_rule_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OnlineRulePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description What the filter matches. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OnlineRulePreview"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

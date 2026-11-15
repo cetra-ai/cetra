@@ -32,7 +32,8 @@ use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, Pers
 use llmobs_server::api::members::{OrgMember, ProjectMember};
 use llmobs_server::api::metrics::MetricsResponse;
 use llmobs_server::api::online_rules::{
-    CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, UpdateOnlineRuleRequest,
+    CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
+    OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
 };
 use llmobs_server::api::openapi::openapi;
 use llmobs_server::api::payload::Payload;
@@ -416,6 +417,7 @@ fn static_files_match_their_types() {
     roundtrip::<OnlineRulePage>("static/online-rules.json");
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
+    roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
@@ -435,6 +437,11 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<UpdateOnlineRuleRequest>(&update_text)
         .unwrap_or_else(|error| panic!("requests/online-rule-update.json: {error}"));
+    // `OnlineRulePreviewRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    let preview_text = fs::read_to_string(api_dir().join("requests/online-rule-preview.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<OnlineRulePreviewRequest>(&preview_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-preview.json: {error}"));
     let test_text = fs::read_to_string(api_dir().join("requests/evaluator-test.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<EvaluatorTestRequest>(&test_text)
@@ -460,6 +467,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator_run", "requests/evaluator-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "post_online_rule_preview",
+            "requests/online-rule-preview.json",
+        ),
         (
             "post_score_definition",
             "requests/score-definition-create.json",
@@ -577,6 +588,7 @@ fn generated_files_roundtrip() {
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);
             }
+            "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
             "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
             "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
             other => panic!("{other} has no round-trip"),

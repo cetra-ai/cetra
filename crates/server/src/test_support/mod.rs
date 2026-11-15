@@ -376,6 +376,7 @@ impl TestApp {
             ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
             eval,
+            pending: crate::eval::pending::PendingTraces::default(),
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
@@ -676,6 +677,7 @@ impl TestApp {
                 &self.state.storage,
                 &self.state.usage,
                 &self.state.live,
+                &self.state.pending,
                 crate::ingest::CommitTarget {
                     org_id: project.org_id,
                     project_id: project.id,
