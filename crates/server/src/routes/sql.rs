@@ -1,6 +1,7 @@
 //! SQL console (spec 05 § SQL console, spec 09, D-H-8).
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ use llmobs_core::ids::ProjectId;
 use llmobs_core::time_serde::parse_rfc3339;
 use llmobs_storage::{ExportFormat, RunError, SQL_MAX_ROWS, SqlRequest, TimeWindow};
 use serde_json::{Map, Value};
+use tokio::sync::oneshot;
 
 use crate::api::common::ProblemCode;
 use crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
@@ -31,6 +33,11 @@ const SQL_BODY_LIMIT: usize = 256 * 1024;
 const MAX_TIMEOUT_MS: i64 = 60_000;
 /// Smallest time limit, ms.
 const MIN_TIMEOUT_MS: i64 = 1_000;
+/// A client that has not taken the next chunk of an export within this long loses the export, so
+/// its memory admission is released (D-H-8; the SSE rule of D-G-34).
+const EXPORT_WRITE_IDLE: Duration = Duration::from_secs(30);
+/// How often the export watchdog checks for an idle client.
+const EXPORT_WATCH_TICK: Duration = Duration::from_secs(1);
 
 pub(crate) fn routes() -> Vec<RouteDef> {
     vec![RouteDef {
@@ -364,16 +371,77 @@ fn export_response(
 }
 
 /// A2's export stream as an HTTP body: counts bytes, turns a `RunError` into a fixed
-/// `io::Error`, and writes the request's log line once, when the stream ends, fails or is
-/// dropped (the client went away).
+/// `io::Error`, and writes the request's log line once, when the stream ends, fails, is dropped
+/// (the client went away) or stalls. The query's stream sits in an [`ExportGate`] that a watchdog
+/// task also holds, so a client that stops reading loses the query without polling the body.
 struct LoggedExport {
-    inner: BoxStream<'static, Result<Bytes, RunError>>,
+    gate: Arc<Mutex<ExportGate>>,
+    /// Dropped with the body, which ends the watchdog.
+    _watchdog: oneshot::Sender<()>,
     project_id: ProjectId,
     format: &'static str,
     query_len: usize,
     started: Instant,
-    bytes: u64,
     outcome: ExportOutcome,
+}
+
+/// State shared by an export body and its watchdog.
+struct ExportGate {
+    /// The query's stream. `None` once the watchdog has released it.
+    inner: Option<BoxStream<'static, Result<Bytes, RunError>>>,
+    /// When the body last yielded an item and has not been polled since.
+    yielded_at: Option<tokio::time::Instant>,
+    bytes: u64,
+    /// Set by whichever of the body or the watchdog writes the log line, so it is written once.
+    logged: bool,
+}
+
+fn lock_gate(gate: &Mutex<ExportGate>) -> MutexGuard<'_, ExportGate> {
+    gate.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Releases the query of an export whose client has not taken the next chunk within
+/// [`EXPORT_WRITE_IDLE`] after an item was yielded (D-H-8). Dropping the query's stream releases
+/// its memory admission. Ends when the body is dropped.
+async fn watch_export(
+    gate: Arc<Mutex<ExportGate>>,
+    mut body_dropped: oneshot::Receiver<()>,
+    project_id: ProjectId,
+    format: &'static str,
+    query_len: usize,
+    started: Instant,
+) {
+    let mut tick = tokio::time::interval(EXPORT_WATCH_TICK);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut body_dropped => return,
+            _ = tick.tick() => {}
+        }
+        let mut state = lock_gate(&gate);
+        if state.logged {
+            return;
+        }
+        let Some(yielded_at) = state.yielded_at else {
+            continue;
+        };
+        if yielded_at.elapsed() < EXPORT_WRITE_IDLE {
+            continue;
+        }
+        state.inner = None;
+        state.logged = true;
+        let bytes = state.bytes;
+        drop(state);
+        log_export(
+            project_id,
+            format,
+            query_len,
+            bytes,
+            started,
+            Some("stalled"),
+        );
+        return;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,13 +460,28 @@ impl LoggedExport {
         query_len: usize,
         started: Instant,
     ) -> Self {
-        Self {
-            inner,
+        let gate = Arc::new(Mutex::new(ExportGate {
+            inner: Some(inner),
+            yielded_at: None,
+            bytes: 0,
+            logged: false,
+        }));
+        let (body_dropped, dropped) = oneshot::channel();
+        tokio::spawn(watch_export(
+            Arc::clone(&gate),
+            dropped,
             project_id,
             format,
             query_len,
             started,
-            bytes: 0,
+        ));
+        Self {
+            gate,
+            _watchdog: body_dropped,
+            project_id,
+            format,
+            query_len,
+            started,
             outcome: ExportOutcome::Running,
         }
     }
@@ -410,7 +493,6 @@ impl std::fmt::Debug for LoggedExport {
             .debug_struct("LoggedExport")
             .field("project_id", &self.project_id)
             .field("format", &self.format)
-            .field("bytes", &self.bytes)
             .field("outcome", &self.outcome)
             .finish_non_exhaustive()
     }
@@ -421,10 +503,18 @@ impl Stream for LoggedExport {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        match this.inner.poll_next_unpin(cx) {
+        let mut gate = lock_gate(&this.gate);
+        gate.yielded_at = None;
+        let Some(inner) = gate.inner.as_mut() else {
+            // The watchdog released the query. Erroring keeps the client from reading a short
+            // body that looks complete (D-H-8).
+            return Poll::Ready(Some(Err(std::io::Error::other("sql export stalled"))));
+        };
+        match inner.poll_next_unpin(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
                 let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                this.bytes = this.bytes.saturating_add(size);
+                gate.bytes = gate.bytes.saturating_add(size);
+                gate.yielded_at = Some(tokio::time::Instant::now());
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(error))) => {
@@ -445,33 +535,61 @@ impl Stream for LoggedExport {
 
 impl Drop for LoggedExport {
     fn drop(&mut self) {
-        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut gate = lock_gate(&self.gate);
+        // The query is released now. The watchdog may still hold the gate until its next tick.
+        gate.inner = None;
+        if std::mem::replace(&mut gate.logged, true) {
+            // The watchdog already wrote the line.
+            return;
+        }
+        let bytes = gate.bytes;
+        drop(gate);
         let kind = match self.outcome {
             ExportOutcome::Running => Some("cancelled"),
             ExportOutcome::Done => None,
             ExportOutcome::Failed(kind) => Some(kind),
         };
-        if kind == Some("internal") {
-            tracing::error!(
-                project_id = %self.project_id,
-                format = self.format,
-                query_len = self.query_len,
-                bytes = self.bytes,
-                kind,
-                duration_ms,
-                "sql query"
-            );
-        } else {
-            tracing::info!(
-                project_id = %self.project_id,
-                format = self.format,
-                query_len = self.query_len,
-                bytes = self.bytes,
-                kind,
-                duration_ms,
-                "sql query"
-            );
-        }
+        log_export(
+            self.project_id,
+            self.format,
+            self.query_len,
+            bytes,
+            self.started,
+            kind,
+        );
+    }
+}
+
+/// The log line of an export: ids, sizes, duration and the end kind (`None` when complete).
+fn log_export(
+    project_id: ProjectId,
+    format: &'static str,
+    query_len: usize,
+    bytes: u64,
+    started: Instant,
+    kind: Option<&'static str>,
+) {
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if kind == Some("internal") {
+        tracing::error!(
+            project_id = %project_id,
+            format,
+            query_len,
+            bytes,
+            kind,
+            duration_ms,
+            "sql query"
+        );
+    } else {
+        tracing::info!(
+            project_id = %project_id,
+            format,
+            query_len,
+            bytes,
+            kind,
+            duration_ms,
+            "sql query"
+        );
     }
 }
 
@@ -533,6 +651,8 @@ fn failure_kind(error: &ApiError) -> &'static str {
 mod tests {
     use axum::Router;
     use axum::http::StatusCode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use axum::routing::get;
     use bytesize::ByteSize;
     use http_body_util::BodyExt;
@@ -1450,6 +1570,86 @@ mod tests {
         assert!(logs.contains("bytes=6"), "{logs}");
         assert!(logs.contains("kind=\"failed\""), "{logs}");
         assert!(!logs.contains("boom"), "{logs}");
+    }
+
+    /// Sets its flag when dropped, as dropping a query releases its memory admission.
+    struct ReleaseFlag(Arc<AtomicBool>);
+
+    impl Drop for ReleaseFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Yields one chunk, then never another item.
+    struct HeldStream {
+        sent: bool,
+        /// Held only for its `Drop`.
+        _release: ReleaseFlag,
+    }
+
+    impl Stream for HeldStream {
+        type Item = Result<Bytes, RunError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.sent {
+                return Poll::Pending;
+            }
+            self.sent = true;
+            Poll::Ready(Some(Ok(Bytes::from_static(b"n\r\n"))))
+        }
+    }
+
+    fn held_export(released: &Arc<AtomicBool>) -> Result<Response, ApiError> {
+        let stream = HeldStream {
+            sent: false,
+            _release: ReleaseFlag(Arc::clone(released)),
+        };
+        export_response(
+            stream.boxed(),
+            SqlFormat::Csv,
+            ProjectId::from_uuid(Uuid::now_v7()),
+            10,
+            Instant::now(),
+            0,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_export_whose_client_stops_reading_releases_the_query() {
+        let released = Arc::new(AtomicBool::new(false));
+        let ((), logs) = crate::test_support::capture_logs(async {
+            let mut body = held_export(&released).unwrap().into_body();
+            let first = body.frame().await.expect("a frame").expect("no error yet");
+            assert_eq!(first.into_data().unwrap(), Bytes::from_static(b"n\r\n"));
+            // The client takes nothing more. Not yet at 29 s; released by 31 s.
+            tokio::time::sleep(Duration::from_secs(29)).await;
+            assert!(!released.load(Ordering::SeqCst));
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert!(released.load(Ordering::SeqCst));
+            let next = body.frame().await;
+            assert!(matches!(next, Some(Err(_))), "{next:?}");
+            drop(body);
+        })
+        .await;
+        assert!(logs.contains("kind=\"stalled\""), "{logs}");
+        assert!(!logs.contains("cancelled"), "{logs}");
+        assert!(logs.contains("bytes=3"), "{logs}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_export_is_not_logged_again_as_stalled() {
+        let released = Arc::new(AtomicBool::new(false));
+        let ((), logs) = crate::test_support::capture_logs(async {
+            let mut body = held_export(&released).unwrap().into_body();
+            assert!(body.frame().await.is_some());
+            drop(body);
+            assert!(released.load(Ordering::SeqCst));
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        })
+        .await;
+        assert!(logs.contains("kind=\"cancelled\""), "{logs}");
+        assert!(!logs.contains("stalled"), "{logs}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

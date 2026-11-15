@@ -52,6 +52,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             handler: post(create_view).layer(DefaultBodyLimit::max(SAVED_VIEW_BODY_LIMIT)),
         },
         RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/saved-views/{id}",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_view),
+        },
+        RouteDef {
             method: Method::PATCH,
             path: "/api/v1/projects/{project}/saved-views/{id}",
             access: Access::Project {
@@ -114,6 +124,25 @@ async fn list_views(
         data: page.rows.into_iter().map(SavedView::from).collect(),
         next_cursor: page.next_cursor,
     }))
+}
+
+/// One view by id, with the list's visibility: a user sees their own and shared views, a key
+/// sees shared views. Any other id, or a private view of someone else, is 404.
+async fn get_view(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ViewPath>,
+) -> Result<error::Json<SavedView>, ApiError> {
+    let row = store::get_visible(
+        state.meta.reader(),
+        access.project.id,
+        viewer(&principal)?,
+        path.id,
+    )
+    .await?;
+    row.map(|row| error::Json(SavedView::from(row)))
+        .ok_or(ApiError::NotFound)
 }
 
 async fn create_view(
@@ -920,6 +949,102 @@ mod tests {
             &format!("{base}/not-a-uuid"),
             &seeded.cookie,
             Some(json!({})),
+        )
+        .await;
+        assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_one_follows_list_visibility() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let (other, _key) = app.add_project(&seeded, "other-bot", None).await;
+        let base = views_path(&seeded);
+        let private = id_of(
+            &create(
+                &app,
+                &seeded.cookie,
+                &base,
+                json!({"kind": "sql", "name": "private", "state": {}}),
+            )
+            .await,
+        );
+        let shared = id_of(
+            &create(
+                &app,
+                &seeded.cookie,
+                &base,
+                json!({"kind": "sql", "name": "shared", "state": {}, "shared": true}),
+            )
+            .await,
+        );
+        let foreign = id_of(
+            &create(
+                &app,
+                &seeded.cookie,
+                &format!("/api/v1/projects/{}/saved-views", other.id),
+                json!({"kind": "sql", "name": "elsewhere", "state": {}, "shared": true}),
+            )
+            .await,
+        );
+        let item = |id: Uuid| format!("{base}/{id}");
+
+        let owner = call(&app, Method::GET, &item(private), &seeded.cookie, None).await;
+        assert_eq!(owner.status, StatusCode::OK);
+        assert_eq!(owner.json::<SavedView>().name, "private");
+
+        let as_member = call(&app, Method::GET, &item(shared), &member.cookie, None).await;
+        assert_eq!(as_member.status, StatusCode::OK);
+        assert_eq!(as_member.json::<SavedView>().name, "shared");
+
+        assert_eq!(
+            call(&app, Method::GET, &item(private), &member.cookie, None)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&app, Method::GET, &item(foreign), &seeded.cookie, None)
+                .await
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                &app,
+                Method::GET,
+                &format!("{base}/01900000-0000-7000-8000-000000009999"),
+                &seeded.cookie,
+                None,
+            )
+            .await
+            .status,
+            StatusCode::NOT_FOUND
+        );
+
+        let key_path = item(shared);
+        let as_key = app
+            .request(Method::GET, &key_path)
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(as_key.status, StatusCode::OK);
+        let key_private = app
+            .request(Method::GET, &item(private))
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(key_private.status, StatusCode::NOT_FOUND);
+
+        let malformed = call(
+            &app,
+            Method::GET,
+            &format!("{base}/not-a-uuid"),
+            &seeded.cookie,
+            None,
         )
         .await;
         assert_eq!(malformed.status, StatusCode::BAD_REQUEST);

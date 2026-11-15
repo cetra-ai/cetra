@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
+import { retryQuery } from "@/api/client";
+import { savedViewQuery } from "@/api/queries";
 import { CLIPPED, NO_CHART } from "@/components/sql/result-chart";
 import { DEFAULT_QUERY } from "@/lib/sql/draft";
 import { EXPORT_ROLE_REASON } from "@/lib/sql/export";
@@ -507,6 +509,120 @@ it("opens a ?view= link over another draft", async () => {
   await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
   await waitFor(() => {
     expect(editorContent().textContent).toBe(SEED_QUERY);
+  });
+});
+
+const PAGE_TWO = "01900000-0000-7000-8000-000000000250";
+const LATE_ID = "01900000-0000-7000-8000-000000000251";
+
+function lateView() {
+  return sqlView({
+    id: LATE_ID,
+    name: "Late arrival",
+    state: { query: "SELECT 'late'", params: {}, range: "24h" },
+  });
+}
+
+it("loads a ?view= link that is on the second page of the list", async () => {
+  const cursors: (string | null)[] = [];
+  server.use(
+    http.get("*/api/v1/projects/:project/saved-views", ({ request }) => {
+      const cursor = new URL(request.url).searchParams.get("cursor");
+      cursors.push(cursor);
+      return HttpResponse.json(
+        cursor === PAGE_TWO
+          ? { data: [lateView()], next_cursor: null }
+          : { data: [sqlView({})], next_cursor: PAGE_TWO },
+      );
+    }),
+  );
+  await renderApp(`/acme/support-bot/sql?view=${LATE_ID}`);
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 'late'");
+  });
+  expect(await screen.findByRole("button", { name: /Late arrival/ })).toBeInTheDocument();
+  expect(cursors[0]).toBeNull();
+  expect(cursors).toContain(PAGE_TWO);
+});
+
+it("loads a ?view= link to a view that no list page holds", async () => {
+  server.use(
+    http.get("*/api/v1/projects/:project/saved-views", () =>
+      HttpResponse.json({ data: [sqlView({})], next_cursor: null }),
+    ),
+    http.get("*/api/v1/projects/:project/saved-views/:id", ({ params }) =>
+      params.id === LATE_ID
+        ? HttpResponse.json(lateView())
+        : problemResponse({ code: "not_found", detail: "Not found" }, 404),
+    ),
+  );
+  await renderApp(`/acme/support-bot/sql?view=${LATE_ID}`);
+  await waitFor(() => {
+    expect(editorContent().textContent).toBe("SELECT 'late'");
+  });
+});
+
+it("drops a ?view= link that cannot be read", async () => {
+  storeDraft("SELECT 'kept'");
+  server.use(
+    http.get("*/api/v1/projects/:project/saved-views", () =>
+      HttpResponse.json({ data: [sqlView({})], next_cursor: null }),
+    ),
+    http.get("*/api/v1/projects/:project/saved-views/:id", () =>
+      problemResponse({ code: "not_found", detail: "Not found" }, 404),
+    ),
+  );
+  const { router } = await renderApp(`/acme/support-bot/sql?view=${LATE_ID}`);
+  await waitFor(() => {
+    expect(router.state.location.search).toEqual({});
+  });
+  expect(editorContent().textContent).toBe("SELECT 'kept'");
+});
+
+it("reads a ?view= link once when the server answers 404", async () => {
+  storeDraft("SELECT 'kept'");
+  const reads: string[] = [];
+  server.use(
+    http.get("*/api/v1/projects/:project/saved-views", () =>
+      HttpResponse.json({ data: [sqlView({})], next_cursor: null }),
+    ),
+    http.get("*/api/v1/projects/:project/saved-views/:id", () => {
+      reads.push("read");
+      return problemResponse({ code: "not_found", detail: "Not found" }, 404);
+    }),
+  );
+  const { router } = await renderApp(`/acme/support-bot/sql?view=${LATE_ID}`, {
+    retry: retryQuery,
+  });
+  await waitFor(() => {
+    expect(router.state.location.search).toEqual({});
+  });
+  expect(reads).toHaveLength(1);
+});
+
+it("does not reopen a deleted view from the cache", async () => {
+  const { router, user, queryClient } = await renderApp(`/acme/support-bot/sql?view=${COST_VIEW}`);
+  await waitFor(() => {
+    expect(router.state.location.search).toEqual({ range: "24h", view: COST_VIEW });
+  });
+  // A by-id read of the view, cached before the delete.
+  queryClient.setQueryData(
+    savedViewQuery("acme", "support-bot", COST_VIEW).queryKey,
+    sqlView({ id: COST_VIEW, name: "Cost per model per day" }),
+  );
+  await user.click(await screen.findByRole("button", { name: /Cost per model per day/ }));
+  await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+  await user.click(screen.getByRole("button", { name: "Delete query" }));
+  await waitFor(() => {
+    expect(router.state.location.search).toEqual({ range: "24h" });
+  });
+  await router.navigate({
+    to: "/$org/$project/sql",
+    params: { org: "acme", project: "support-bot" },
+    search: { view: COST_VIEW },
+  });
+  await waitFor(() => {
+    expect(router.state.location.search).toEqual({});
   });
 });
 

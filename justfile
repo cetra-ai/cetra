@@ -27,6 +27,7 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_retention_hook_aborts_safely
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows
 
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:

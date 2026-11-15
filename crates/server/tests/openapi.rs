@@ -244,6 +244,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "create_saved_view",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/saved-views/{id}",
+        "get_saved_view",
+    ),
+    (
         "patch",
         "/api/v1/projects/{project}/saved-views/{id}",
         "update_saved_view",
@@ -470,6 +475,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "get_user",
     "list_scores",
     "list_saved_views",
+    "get_saved_view",
     "get_metrics",
     "list_deletions",
     "get_deletion",

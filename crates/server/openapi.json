@@ -9198,6 +9198,97 @@
       }
     },
     "/api/v1/projects/{project}/saved-views/{id}": {
+      "get": {
+        "tags": [
+          "saved_views"
+        ],
+        "summary": "Get a saved view",
+        "description": "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        "operationId": "get_saved_view",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Saved view id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The saved view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "saved_views"

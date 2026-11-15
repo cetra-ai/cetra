@@ -1,3 +1,4 @@
+import { queryOptions } from "@tanstack/react-query";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
@@ -325,12 +326,64 @@ export function savedViewsQuery(org: string, project: string, kind: Schema<"Save
   });
 }
 
-/** Saved SQL queries, all in one page (D-H-13: 1,000 is the per-owner cap). */
+/** Page size for saved-view lists. The server allows up to 1,000 per page. */
+const SAVED_VIEW_PAGE = 200;
+/** Most pages one saved SQL query list may take. A list past this is an error, not a hang. */
+const SAVED_QUERY_MAX_PAGES = 1_000;
+
+/**
+ * Every saved SQL query the caller can see, read page by page until `next_cursor` is null.
+ * The per-owner cap (D-H-6, 1,000) does not bound this list: shared views of other members
+ * count too. The result has `next_cursor: null`, so callers see one complete list.
+ * A cursor that repeats, or more than `SAVED_QUERY_MAX_PAGES` pages, throws.
+ */
 export function savedQueriesQuery(org: string, project: string) {
-  return $api.queryOptions("get", "/api/v1/projects/{project}/saved-views", {
+  const { queryKey } = $api.queryOptions("get", "/api/v1/projects/{project}/saved-views", {
     params: {
       path: { project: projectRef(org, project) },
-      query: { kind: "sql", limit: 1000 },
+      query: { kind: "sql", limit: SAVED_VIEW_PAGE },
     },
+  });
+  return queryOptions({
+    queryKey,
+    queryFn: async ({ signal }) => {
+      const views: Schema<"SavedView">[] = [];
+      const seen = new Set<string>();
+      let cursor: string | undefined;
+      for (let page = 1; ; page += 1) {
+        const { data, error } = await api.GET("/api/v1/projects/{project}/saved-views", {
+          params: {
+            path: { project: projectRef(org, project) },
+            query: { kind: "sql", limit: SAVED_VIEW_PAGE, cursor },
+          },
+          signal,
+        });
+        if (error) {
+          throw error;
+        }
+        if (!data) {
+          throw new Error("Empty saved view list response");
+        }
+        views.push(...data.data);
+        cursor = data.next_cursor ?? undefined;
+        if (cursor === undefined) {
+          return { data: views, next_cursor: null };
+        }
+        if (seen.has(cursor)) {
+          throw new Error("Saved view list repeated a page cursor");
+        }
+        if (page >= SAVED_QUERY_MAX_PAGES) {
+          throw new Error("Saved view list has too many pages");
+        }
+        seen.add(cursor);
+      }
+    },
+  });
+}
+
+/** One saved view by id, for a `?view=` link that is not in the list (GET by id, D-H-13). */
+export function savedViewQuery(org: string, project: string, id: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/saved-views/{id}", {
+    params: { path: { project: projectRef(org, project), id } },
   });
 }
