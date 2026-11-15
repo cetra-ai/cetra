@@ -153,7 +153,7 @@ bytes = "1.12"
 futures = "0.3.34"
 strum = { version = "0.28.0", features = ["derive"] }
 insta = { version = "1.49.0", features = ["json"] }
-jsonschema = { version = "0.60.2", default-features = false }
+jsonschema = { version = "0.61.0", default-features = false }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
