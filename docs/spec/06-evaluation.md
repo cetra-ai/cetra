@@ -123,6 +123,8 @@ Shipped as code in `llmobs-eval`; "create from template" copies the prompt into 
 
 Rules are managed under `/online-rules` by project members (D-I-24). Saving a rule checks the filter with storage for the rule's view, the mapping against the evaluator (every variable of a judge prompt mapped; a check's `output`, and `expected` when it needs one; no `expected` or `item.*` expressions; no bare `span.*` in a trace rule) and the budget (judges only, with a priced model) (D-I-30). `target` and `evaluator_id` cannot change. Limits: a name of 1–128 characters, a filter of at most 4 096 bytes, 1–32 variables of at most 1 024 bytes each, `budget_usd` at most 1 000 000, and 500 rules per project (D-I-30). The checks against the evaluator run again in the rule's write transaction, and an evaluator PATCH runs them for every rule of the evaluator in its own write (D-I-19). On the Free plan an org has at most 1 active rule, an enabled one, paused or not; creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction; a smaller limit never disables existing rules (D-I-32).
 
+`POST /online-rules/preview` `{target, filter?, from?, to?}` counts what a filter matches in a window (the last 24 hours by default, at most 30 days), at most 10 000, with strict exclusions; the editor shows the count as the filter is typed (D-I-9).
+
 ### Triggering
 
 - **Span rules:** evaluated in the ingest path after WAL commit, against the span's light columns (the filter DSL is compiled once per rule into a DataFusion `PhysicalExpr` and evaluated on the committed `RecordBatch`). Matches are sampled and enqueued.

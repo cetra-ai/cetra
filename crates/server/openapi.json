@@ -8470,6 +8470,119 @@
         }
       }
     },
+    "/api/v1/projects/{project}/online-rules/preview": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Count what a rule's filter matches",
+        "description": "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+        "operationId": "post_online_rule_preview",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OnlineRulePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the filter matches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRulePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/online-rules/{id}": {
       "get": {
         "tags": [
@@ -15654,6 +15767,64 @@
             "minimum": 0
           }
         }
+      },
+      "OnlineRulePreview": {
+        "type": "object",
+        "description": "The preview's count (D-I-9).",
+        "required": [
+          "matched",
+          "capped",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "capped": {
+            "type": "boolean",
+            "description": "More than 10 000 matched."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window that was counted. RFC 3339."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching traces or spans, at most 10 000.",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The end of the window that was counted. RFC 3339."
+          }
+        }
+      },
+      "OnlineRulePreviewRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/online-rules/preview` body (D-I-9). Absent fields take their\ndefaults.\n\nDeserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the filter\nis a query over stored data, and nothing logs it.",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "Filter DSL over the target's view. Absent or blank matches everything."
+          },
+          "from": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window start. Default: `to` minus 24 hours."
+          },
+          "target": {
+            "$ref": "#/components/schemas/RuleTarget",
+            "description": "The rule's target: the view the filter is read on."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window end. Default: now."
+          }
+        },
+        "additionalProperties": false
       },
       "OrgEntitlements": {
         "type": "object",

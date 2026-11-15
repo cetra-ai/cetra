@@ -682,6 +682,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "post_online_rule_preview",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/online-rule-preview.json",
+            "application/json",
+        ),
+        example(
             "list_eval_jobs",
             BTreeMap::new(),
             BTreeMap::new(),
