@@ -9,13 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
 use super::observe::{
-    ALL_ROWS, LatestScore, observe_latest, observe_scores, observe_scores_by_id,
-    observe_span_detail, observe_spans, observe_trace_detail, observe_traces,
+    ALL_ROWS, LatestScore, SessionRow, observe_alert, observe_filter_trace_ids, observe_kpis,
+    observe_latest, observe_scores, observe_scores_by_id, observe_sessions, observe_span_detail,
+    observe_spans, observe_trace_detail, observe_traces, observe_users, window_of,
 };
 use super::ops::{SPANS, TRACES, score_key_space};
-use super::shape::{P, hex, score_id, span_id, trace_id};
+use super::shape::{DAY_NS, P, day, hex, midnight, score_id, span_id, trace_id};
 use crate::deletion::DeletionStatus;
-use crate::reads::MAX_PAGE;
+use crate::reads::{AlertMeasure, Kpi, KpiName, ListScope, MAX_PAGE};
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
@@ -40,6 +41,7 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
         check_paging(h, project, index);
         check_samples(h, state, project, index);
         check_score_reads(h, model, project, index);
+        check_aggregates(h, state, project, index);
     }
 }
 
@@ -456,4 +458,428 @@ fn trace_mismatch(
         compare("cost_total", cost_same);
     }
     (!differing.is_empty()).then(|| format!("differing fields: {differing:?}"))
+}
+
+/// The days `from..to` after D, as a window of nanoseconds.
+fn days(from: u8, to: u8) -> (i64, i64) {
+    (midnight(day(from)), midnight(day(to)))
+}
+
+/// What the aggregate checks need from one project's visible copies.
+struct Copies {
+    visible: Visible,
+    /// No key has two or more visible copies: every sum is exact.
+    settled: bool,
+}
+
+impl Copies {
+    fn of(state: &ProjectModel) -> Self {
+        let visible = state.visible_spans();
+        let settled = visible.values().all(|ingests| ingests.len() == 1);
+        Self { visible, settled }
+    }
+
+    /// The copies of `row`'s trace beyond one per visible key: what its unmerged re-sends add.
+    fn extra(&self, row: &ExpectedTrace) -> i64 {
+        copies_of(&self.visible, trace_number(&row.trace_id)) - row.span_count
+    }
+}
+
+/// The sums of one group of traces, from the expected rows.
+#[derive(Debug)]
+struct Sums {
+    traces: i64,
+    error_count: i64,
+    /// The copies beyond one per key, summed over the group: an unsettled error sum may exceed
+    /// the expected one by at most this much (each extra copy adds at most one error).
+    extra_errors: i64,
+    total_tokens: Option<i64>,
+    cost_total: Option<f64>,
+}
+
+impl Sums {
+    fn of(rows: &[&ExpectedTrace], copies: &Copies) -> Self {
+        Self {
+            traces: i64::try_from(rows.len()).expect("a model has few traces"),
+            error_count: rows.iter().map(|row| row.error_count).sum(),
+            extra_errors: rows.iter().map(|row| copies.extra(row)).sum(),
+            total_tokens: rows
+                .iter()
+                .filter_map(|row| row.total_tokens)
+                .reduce(|total, value| total + value),
+            cost_total: rows
+                .iter()
+                .filter_map(|row| row.cost_total)
+                .reduce(|total, value| total + value),
+        }
+    }
+}
+
+/// Sessions, users, the windowed and evaluation-excluded trace lists, the metrics KPIs, the
+/// filter deletion scope and the alert values (`check_full` only), per project.
+///
+/// Set-valued parts are exact even when a trace is unsettled. A duplicate adds a copy of a key,
+/// never a trace, and copies of a key share their content, so the traces, their merged start
+/// times, `error_count > 0`, and the sessions and users they belong to are the same as with
+/// one copy each. Sums are exact when the project is settled. Otherwise a duplicate can only
+/// add: a token or cost sum is at least the expected one, and an error sum is at most the
+/// extra copies above it.
+fn check_aggregates(h: &Harness, state: &ProjectModel, project: P, index: usize) {
+    let at = format!("op {index}, project {project:?}");
+    let copies = Copies::of(state);
+    check_trace_lists(h, state, &copies, project, &at);
+    check_sessions_and_users(h, state, &copies, project, &at);
+    check_metrics_and_filter(h, state, &copies, project, &at);
+    check_alerts(h, state, &copies, project, &at);
+}
+
+/// The trace list over days D+1..D+2 (merged `start_time`, evaluation traces kept) and the trace
+/// list without evaluation traces.
+fn check_trace_lists(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, at: &str) {
+    let window = days(1, 2);
+    let windowed = observe_traces(
+        h,
+        project,
+        ListScope {
+            window: Some(window_of(window)),
+            include_eval: true,
+            include_experiments: true,
+        },
+        MAX_PAGE,
+    );
+    compare_trace_rows(
+        state,
+        copies,
+        &windowed,
+        &state.traces_in(Some(window), true),
+        &format!("{at}: the trace list over days D+1..D+2"),
+    );
+    let kept = observe_traces(
+        h,
+        project,
+        ListScope {
+            window: None,
+            include_eval: false,
+            include_experiments: true,
+        },
+        MAX_PAGE,
+    );
+    compare_trace_rows(
+        state,
+        copies,
+        &kept,
+        &state.traces_in(None, false),
+        &format!("{at}: the trace list without evaluation traces"),
+    );
+}
+
+/// Two trace lists: the same trace ids, each once, then each row as `trace_mismatch` compares it.
+fn compare_trace_rows(
+    state: &ProjectModel,
+    copies: &Copies,
+    observed: &[ExpectedTrace],
+    expected: &[ExpectedTrace],
+    what: &str,
+) {
+    let mut observed: Vec<&ExpectedTrace> = observed.iter().collect();
+    let mut expected: Vec<&ExpectedTrace> = expected.iter().collect();
+    observed.sort_by(|a, b| a.trace_id.cmp(&b.trace_id));
+    expected.sort_by(|a, b| a.trace_id.cmp(&b.trace_id));
+    let observed_ids: Vec<&str> = observed.iter().map(|row| row.trace_id.as_str()).collect();
+    let expected_ids: Vec<&str> = expected.iter().map(|row| row.trace_id.as_str()).collect();
+    assert_eq!(
+        observed_ids, expected_ids,
+        "{what}: the trace ids differ from the model's"
+    );
+    for (want, got) in expected.iter().zip(&observed) {
+        let trace = trace_number(&want.trace_id);
+        if let Some(problem) = trace_mismatch(
+            want,
+            got,
+            state.unsettled(trace),
+            copies_of(&copies.visible, trace),
+        ) {
+            panic!("{what}, trace {trace}: {problem}\nexpected {want:?}\nobserved {got:?}");
+        }
+    }
+}
+
+/// `rows` keyed by `key`, which must be unique.
+fn keyed<T>(rows: impl IntoIterator<Item = (String, T)>, what: &str) -> BTreeMap<String, T> {
+    let mut map = BTreeMap::new();
+    for (key, row) in rows {
+        assert!(
+            map.insert(key.clone(), row).is_none(),
+            "{what}: {key} is listed twice"
+        );
+    }
+    map
+}
+
+/// Floats compare with `1e-9`. A sum that may be unsettled is at least the expected one.
+fn float_sum_matches(want: Option<f64>, got: Option<f64>, settled: bool) -> bool {
+    match (want, got) {
+        (None, None) => true,
+        (Some(want), Some(got)) => {
+            if settled {
+                (want - got).abs() <= 1e-9
+            } else {
+                got >= want - 1e-9
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The sums of a group that differ from the observed ones, or `None`.
+fn sums_mismatch(
+    want: &Sums,
+    errors: i64,
+    tokens: Option<i64>,
+    cost: Option<f64>,
+    settled: bool,
+) -> Option<String> {
+    let mut differing: Vec<&str> = Vec::new();
+    let errors_ok = if settled {
+        errors == want.error_count
+    } else {
+        (want.error_count..=want.error_count + want.extra_errors).contains(&errors)
+    };
+    if !errors_ok {
+        differing.push("error_count");
+    }
+    let tokens_ok = match (want.total_tokens, tokens) {
+        (None, None) => true,
+        (Some(want), Some(got)) => {
+            if settled {
+                want == got
+            } else {
+                got >= want
+            }
+        }
+        _ => false,
+    };
+    if !tokens_ok {
+        differing.push("total_tokens");
+    }
+    if !float_sum_matches(want.cost_total, cost, settled) {
+        differing.push("cost_total");
+    }
+    (!differing.is_empty()).then(|| format!("differing sums {differing:?}, expected {want:?}"))
+}
+
+/// `session_list` and `user_list` over all traces: the same keys, the trace counts, and the
+/// session sums.
+fn check_sessions_and_users(
+    h: &Harness,
+    state: &ProjectModel,
+    copies: &Copies,
+    project: P,
+    at: &str,
+) {
+    let rows = state.expected_traces();
+    let mut sessions: BTreeMap<String, Vec<&ExpectedTrace>> = BTreeMap::new();
+    let mut users: BTreeMap<String, Vec<&ExpectedTrace>> = BTreeMap::new();
+    for row in &rows {
+        if let Some(session) = &row.session_id {
+            sessions.entry(session.clone()).or_default().push(row);
+        }
+        if let Some(user) = &row.user_id {
+            users.entry(user.clone()).or_default().push(row);
+        }
+    }
+
+    let observed: BTreeMap<String, SessionRow> = keyed(
+        observe_sessions(h, project)
+            .into_iter()
+            .map(|row| (row.session_id.clone(), row)),
+        &format!("{at}: the session list"),
+    );
+    assert_eq!(
+        observed.keys().collect::<Vec<_>>(),
+        sessions.keys().collect::<Vec<_>>(),
+        "{at}: the session ids differ from the model's"
+    );
+    for (session, members) in &sessions {
+        let got = &observed[session];
+        let want = Sums::of(members, copies);
+        assert_eq!(
+            got.trace_count, want.traces,
+            "{at}: session {session} trace_count"
+        );
+        if let Some(problem) = sums_mismatch(
+            &want,
+            got.error_count,
+            got.total_tokens,
+            got.cost_total,
+            copies.settled,
+        ) {
+            panic!("{at}: session {session}: {problem}\nobserved {got:?}");
+        }
+    }
+
+    let observed_users: BTreeMap<String, i64> =
+        keyed(observe_users(h, project), &format!("{at}: the user list"));
+    assert_eq!(
+        observed_users.keys().collect::<Vec<_>>(),
+        users.keys().collect::<Vec<_>>(),
+        "{at}: the user ids differ from the model's"
+    );
+    for (user, members) in &users {
+        let count = i64::try_from(members.len()).expect("a model has few traces");
+        assert_eq!(observed_users[user], count, "{at}: user {user} trace_count");
+    }
+}
+
+/// One KPI, which must be listed once.
+fn kpi(kpis: &[Kpi], name: KpiName) -> Kpi {
+    let mut found = kpis.iter().filter(|kpi| kpi.name == name);
+    let kpi = found
+        .next()
+        .unwrap_or_else(|| panic!("the metrics have no {name:?} KPI"));
+    assert!(found.next().is_none(), "the metrics list {name:?} twice");
+    *kpi
+}
+
+/// The dashboard KPIs over days D..D+4, and `filter_trace_ids` over the same window.
+fn check_metrics_and_filter(
+    h: &Harness,
+    state: &ProjectModel,
+    copies: &Copies,
+    project: P,
+    at: &str,
+) {
+    let window = days(0, 4);
+    let members = state.traces_in(Some(window), false);
+    let refs: Vec<&ExpectedTrace> = members.iter().collect();
+    let sums = Sums::of(&refs, copies);
+    let errors = i64::try_from(members.iter().filter(|row| row.error_count > 0).count())
+        .expect("a model has few traces");
+
+    let kpis = observe_kpis(h, project, window);
+    assert!(
+        kpis.iter().all(|kpi| kpi.previous.is_none()),
+        "{at}: a KPI has a previous value, but no trace starts before day D"
+    );
+    let traces = kpi(&kpis, KpiName::Traces);
+    let want_traces = (sums.traces > 0).then_some(sums.traces as f64);
+    assert_eq!(
+        traces.value, want_traces,
+        "{at}: the Traces KPI over days D..D+4"
+    );
+    let error_rate = kpi(&kpis, KpiName::ErrorRate);
+    let want_rate = (sums.traces > 0).then(|| errors as f64 / sums.traces as f64);
+    assert!(
+        float_sum_matches(want_rate, error_rate.value, true),
+        "{at}: the ErrorRate KPI is {:?}, expected {want_rate:?}",
+        error_rate.value
+    );
+    let cost = kpi(&kpis, KpiName::CostTotal);
+    assert!(
+        float_sum_matches(sums.cost_total, cost.value, copies.settled),
+        "{at}: the CostTotal KPI is {:?}, expected {:?}",
+        cost.value,
+        sums.cost_total
+    );
+    let tokens = kpi(&kpis, KpiName::TotalTokens);
+    let want_tokens = sums.total_tokens.map(|total| total as f64);
+    assert!(
+        float_sum_matches(want_tokens, tokens.value, copies.settled),
+        "{at}: the TotalTokens KPI is {:?}, expected {want_tokens:?}",
+        tokens.value
+    );
+    // The approximate percentile is not compared; it must only be listed.
+    let _ = kpi(&kpis, KpiName::LatencyP95);
+
+    let mut want_ids: Vec<String> = members.iter().map(|row| row.trace_id.clone()).collect();
+    want_ids.sort();
+    assert_eq!(
+        observe_filter_trace_ids(h, project, window),
+        want_ids,
+        "{at}: filter_trace_ids over days D..D+4 differs from the trace list"
+    );
+}
+
+/// `alert_value` over days D..D+4: the trace measures, and the average of each score name.
+fn check_alerts(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, at: &str) {
+    let window = days(0, 4);
+    let members = state.traces_in(Some(window), false);
+    let refs: Vec<&ExpectedTrace> = members.iter().collect();
+    let sums = Sums::of(&refs, copies);
+    let errors = i64::try_from(members.iter().filter(|row| row.error_count > 0).count())
+        .expect("a model has few traces");
+
+    let rate = observe_alert(h, project, window, AlertMeasure::ErrorRate);
+    let want_rate = (sums.traces > 0).then(|| errors as f64 / sums.traces as f64);
+    assert_eq!(rate.count, sums.traces, "{at}: the ErrorRate alert count");
+    assert!(
+        float_sum_matches(want_rate, rate.value, true),
+        "{at}: the ErrorRate alert is {:?}, expected {want_rate:?}",
+        rate.value
+    );
+
+    let cost = observe_alert(h, project, window, AlertMeasure::Cost);
+    assert_eq!(cost.count, sums.traces, "{at}: the Cost alert count");
+    assert!(
+        float_sum_matches(
+            Some(sums.cost_total.unwrap_or(0.0)),
+            cost.value,
+            copies.settled
+        ),
+        "{at}: the Cost alert is {:?}, expected {:?}",
+        cost.value,
+        sums.cost_total
+    );
+
+    for k in 0..3 {
+        let name = format!("n{k}");
+        let (count, mean) = expected_score_avg(state, window, &name);
+        let got = observe_alert(
+            h,
+            project,
+            window,
+            AlertMeasure::ScoreAvg { name: name.clone() },
+        );
+        assert_eq!(got.count, count, "{at}: the ScoreAvg {name} alert count");
+        // A duplicate span does not change which scores exist, so the mean is exact even when
+        // a trace is unsettled.
+        assert!(
+            float_sum_matches(mean, got.value, true),
+            "{at}: the ScoreAvg {name} alert is {:?}, expected {mean:?}",
+            got.value
+        );
+    }
+}
+
+/// `(count, mean)` of the live trace scores named `name` created in `window`, whose trace passes
+/// the alert's semi-join (`reads/alerts.rs`, `trace_id_plan`): an expected evaluation-free trace
+/// that ends at or after `from` and starts in `[from - 1 day, to)`.
+fn expected_score_avg(
+    state: &ProjectModel,
+    (from, to): (i64, i64),
+    name: &str,
+) -> (i64, Option<f64>) {
+    let traces: BTreeSet<String> = state
+        .traces_in(Some((from - DAY_NS, to)), false)
+        .into_iter()
+        .filter(|row| row.end_time >= from)
+        .map(|row| row.trace_id)
+        .collect();
+    let values: Vec<f64> = state
+        .expected_scores()
+        .into_iter()
+        .filter(|score| {
+            score.target_kind == "trace"
+                && score.name == name
+                && (from..to).contains(&score.created_at)
+                && score
+                    .trace_id
+                    .as_ref()
+                    .is_some_and(|id| traces.contains(id))
+        })
+        .map(|score| score.value_num)
+        .collect();
+    let count = i64::try_from(values.len()).expect("a model has few scores");
+    let mean = (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64);
+    (count, mean)
 }

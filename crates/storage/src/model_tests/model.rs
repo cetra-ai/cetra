@@ -270,6 +270,22 @@ impl ProjectModel {
             .collect()
     }
 
+    /// The expected traces whose merged `start_time` is in `[from, to)` (when `window` is set),
+    /// without evaluation traces unless `include_eval`. The shapes have no experiment traces.
+    pub(super) fn traces_in(
+        &self,
+        window: Option<(i64, i64)>,
+        include_eval: bool,
+    ) -> Vec<ExpectedTrace> {
+        self.expected_traces()
+            .into_iter()
+            .filter(|row| {
+                window.is_none_or(|(from, to)| row.start_time >= from && row.start_time < to)
+                    && (include_eval || row.environment.as_deref() != Some(environment::EVAL))
+            })
+            .collect()
+    }
+
     /// The merge of one trace's visible keys, computed from all of its spans at once.
     fn expected_trace(&self, trace: u8, span_nos: &[u8]) -> ExpectedTrace {
         let shape = trace_shape(self.project, trace);

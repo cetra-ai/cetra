@@ -10,12 +10,16 @@ use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace};
 use super::ops::{SESSIONS, TRACES};
 use super::shape::{P, hex, span_id, trace_id};
+use crate::reads::metrics::metrics;
 use crate::reads::{
-    ListScope, ScoreListRequest, ScoreTargets, SortOrder, SpanListRequest, SpanSort,
-    TraceListRequest, TraceSort, UserDeletionScope, eval_trace_ids, latest_scores, score_list,
-    scores_by_id, span_detail, span_list, trace_detail, trace_list, user_deletion_scope,
+    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
+    ListScope, MAX_FILTER_DELETION_TRACES, MAX_PAGE, MetricsRequest, ScoreListRequest,
+    ScoreTargets, SessionListRequest, SessionSort, SortOrder, SpanListRequest, SpanSort,
+    TraceListRequest, TraceSort, UserDeletionScope, UserListRequest, UserSort, alert_value,
+    eval_trace_ids, filter_trace_ids, latest_scores, score_list, scores_by_id, session_list,
+    span_detail, span_list, trace_detail, trace_list, user_deletion_scope, user_list,
 };
-use crate::views::QueryContext;
+use crate::views::{QueryContext, TimeWindow};
 use llmobs_core::ids::TraceId;
 use llmobs_core::schema::{scores, spans, traces};
 use std::collections::HashSet;
@@ -311,6 +315,182 @@ pub(super) fn observe_latest(harness: &Harness, project: P) -> Vec<LatestScore> 
         }
         rows
     })
+}
+
+/// One row of `session_list` (`reads/sessions.rs`), the columns the checks compare.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SessionRow {
+    pub(super) session_id: String,
+    pub(super) trace_count: i64,
+    pub(super) error_count: i64,
+    pub(super) total_tokens: Option<i64>,
+    pub(super) cost_total: Option<f64>,
+}
+
+/// A window `[from, to)` of nanoseconds, as the reads take it.
+pub(super) fn window_of((from, to): (i64, i64)) -> TimeWindow {
+    TimeWindow::new(from, to).expect("a window with from before to")
+}
+
+/// Every `session_list` row over all traces: no window, evaluation and experiment traces kept.
+pub(super) fn observe_sessions(harness: &Harness, project: P) -> Vec<SessionRow> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = session_list(
+                &ctx,
+                SessionListRequest {
+                    filter: None,
+                    scope: ALL_ROWS,
+                    sort: SessionSort::StartTime,
+                    order: SortOrder::Desc,
+                    limit: MAX_PAGE,
+                    cursor: cursor.as_deref(),
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("session_list on a project");
+            for batch in &page.batches {
+                let sessions = utf8(batch, traces::SESSION_ID);
+                for row in 0..batch.num_rows() {
+                    rows.push(SessionRow {
+                        session_id: sessions.value(row).to_owned(),
+                        trace_count: int(batch, "trace_count", row),
+                        error_count: int(batch, traces::ERROR_COUNT, row),
+                        total_tokens: opt_i64(
+                            column(batch, traces::TOTAL_TOKENS).as_primitive::<Int64Type>(),
+                            row,
+                        ),
+                        cost_total: opt_f64(
+                            column(batch, traces::COST_TOTAL).as_primitive::<Float64Type>(),
+                            row,
+                        ),
+                    });
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        rows
+    })
+}
+
+/// `(user_id, trace_count)` of every `user_list` row over all traces.
+pub(super) fn observe_users(harness: &Harness, project: P) -> Vec<(String, i64)> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = user_list(
+                &ctx,
+                UserListRequest {
+                    filter: None,
+                    scope: ALL_ROWS,
+                    sort: UserSort::TraceCount,
+                    order: SortOrder::Desc,
+                    limit: MAX_PAGE,
+                    cursor: cursor.as_deref(),
+                    timeout: TIMEOUT,
+                },
+            )
+            .await
+            .expect("user_list on a project");
+            for batch in &page.batches {
+                let users = utf8(batch, traces::USER_ID);
+                for row in 0..batch.num_rows() {
+                    rows.push((users.value(row).to_owned(), int(batch, "trace_count", row)));
+                }
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        rows
+    })
+}
+
+/// The KPIs of the dashboard metrics over days D..D+4, as the dashboard requests them: one
+/// day per bucket, no filter, no grouping, evaluation traces excluded, experiments kept.
+pub(super) fn observe_kpis(harness: &Harness, project: P, window: (i64, i64)) -> Vec<Kpi> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        metrics(
+            &ctx,
+            MetricsRequest {
+                window: window_of(window),
+                bucket: Bucket::Fixed(BucketWidth::D1),
+                filter: None,
+                group_by: None,
+                include_eval: false,
+                include_experiments: true,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("metrics on a project")
+        .kpis
+    })
+}
+
+/// The hex trace ids `filter_trace_ids` returns for `window`, evaluation traces excluded.
+pub(super) fn observe_filter_trace_ids(
+    harness: &Harness,
+    project: P,
+    window: (i64, i64),
+) -> Vec<String> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let ids = filter_trace_ids(
+            &ctx,
+            FilterDeletionRequest {
+                filter: None,
+                search: None,
+                window: window_of(window),
+                include_eval: false,
+                include_experiments: true,
+                limit: MAX_FILTER_DELETION_TRACES + 1,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("filter_trace_ids on a project");
+        ids.iter().map(|id| hex(id.as_bytes())).collect()
+    })
+}
+
+/// `alert_value` for `measure` over `window`, with no filter.
+pub(super) fn observe_alert(
+    harness: &Harness,
+    project: P,
+    window: (i64, i64),
+    measure: AlertMeasure,
+) -> AlertValue {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        alert_value(
+            &ctx,
+            AlertValueRequest {
+                window: window_of(window),
+                filter: None,
+                measure,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("alert_value on a project")
+    })
+}
+
+/// One `int64` cell, by column name.
+fn int(batch: &RecordBatch, name: &str, row: usize) -> i64 {
+    column(batch, name).as_primitive::<Int64Type>().value(row)
 }
 
 /// One row of the `scores` view, read by column name.

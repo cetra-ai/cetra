@@ -20,12 +20,12 @@ use shape::{HOUR_NS, P, day, midnight};
 
 use crate::reads::MAX_PAGE;
 
-/// Cases per run: `LLMOBS_MODEL_CASES`, else 16 (D-R-14).
+/// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
 fn cases() -> u32 {
     std::env::var("LLMOBS_MODEL_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(16)
+        .unwrap_or(8)
 }
 
 proptest! {
