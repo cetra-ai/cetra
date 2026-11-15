@@ -11,7 +11,7 @@ Per-project alert rules over four metrics, evaluated in the background over slid
 | `error_rate` | `filter?`, `window`, `comparator`, `threshold` (fraction 0–1), `min_count` (default 20) | traces with `error_count > 0` / traces |
 | `cost` | `filter?`, `window`, `comparator`, `threshold` (USD ≥ 0) | `sum(cost_total)` on traces (0 when none) |
 | `latency_p95` | `filter?`, `window`, `target` (`trace` default, or `llm_span`), `comparator`, `threshold` (ms > 0), `min_count` (default 20) | `approx_percentile_cont(duration_ns, 0.95)` in ms, of traces or of `llm` spans |
-| `score` | `filter?`, `window`, `score_name`, `aggregation` (`avg` default, or `pass_rate`), `comparator`, `threshold` (`pass_rate`: 0–1), `min_count` (default 10) | `avg(value_num)` of live trace/span scores of that name; `pass_rate` keeps boolean scores only |
+| `score` | `filter?`, `window`, `score_name`, `aggregation` (`avg` default, or `pass_rate`), `comparator`, `threshold` (`pass_rate`: 0–1), `min_count` (default 10) | `avg(value_num)` of live trace/span scores of that name created in the window, whose trace started at most 7 days before it (any end time, D-K-17); `pass_rate` keeps boolean scores only |
 
 - `window` ∈ {`1m`, `5m`, `15m`, `1h`, `6h`, `24h`}; `comparator` ∈ {`gt`, `gte`, `lt`, `lte`}; `min_count` 1–1 000 000.
 - `filter` is a **`traces`** filter-DSL expression for every metric; span and score measures keep rows whose trace passes it (as dashboard metrics, 05). Experiment traces are always excluded; evaluation traces (`environment = 'llmobs-eval'`) are excluded unless the filter names `environment` (05 § Default exclusions).
