@@ -708,3 +708,34 @@ async fn a_dropped_project_leaves_no_wal_bytes() {
     wait_until_wal_lacks_marker(dir.path()).await;
     storage.shutdown().await.unwrap();
 }
+
+/// A deletion the traces file has already applied must not hide a trace ingested after it,
+/// even while another deletion of the project is pending (spec 03 §7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reingested_trace_survives_another_pending_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 1, INGEST, INGEST + 10)]))
+        .await
+        .unwrap();
+    storage.shutdown().await.unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST + 100))
+        .await
+        .unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1, "so does the trace");
+    storage.shutdown().await.unwrap();
+}
