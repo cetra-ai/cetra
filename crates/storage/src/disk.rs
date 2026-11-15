@@ -101,6 +101,12 @@ impl Disk {
         self.free.load(Ordering::Acquire)
     }
 
+    /// Bytes held by running compaction jobs.
+    #[cfg(test)]
+    pub(crate) fn reserved(&self) -> u64 {
+        *self.reserved.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Whether ingestion must be refused: `free() < min_free`.
     pub(crate) fn low(&self) -> bool {
         self.free() < self.min_free

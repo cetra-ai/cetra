@@ -16,23 +16,30 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bytesize::ByteSize;
+use object_store::ObjectStore;
+use object_store::memory::InMemory;
 use proptest::prelude::*;
 use uuid::Uuid;
 
 use super::check::{
-    Observed, Read, Strictness, check_full, check_settled_files, compare, days, observe,
+    Observed, Read, Strictness, check_full, check_quiet_state, check_settled_files, compare, days,
+    observe,
 };
-use super::harness::{Harness, HarnessOptions, concurrent_tweaks};
+use super::harness::{Harness, HarnessOptions, MODEL_PUT_SIZES, concurrent_tweaks};
 use super::model::Model;
 use super::observe::ReadFailure;
 use super::ops::{
     Concurrency, MILLI_NS, Op, Passes, SPANS, StepEvent, TRACES, all_deletions_applied, apply,
     apply_storage, drop_day_closed_scores, flushed, keep_newest_copies, new_model, ops_for, send,
+    settle,
 };
 use super::shape::{HOUR_NS, P, day, midnight, span};
+use crate::config::StorageConfig;
 use crate::deletion::DeletionStatus;
 use crate::hooks::HookPoint;
 use crate::reads::AlertMeasure;
+use crate::test_support::parquet_rows;
 use crate::wal::Table;
 
 /// Tokio worker threads of a concurrent life: enough for the drivers' storage calls and the
@@ -76,6 +83,9 @@ pub(super) struct ConcurrentOptions {
     pub(super) gc_every: Duration,
     /// States kept per lane; older ones are dropped (stress runs).
     pub(super) history_keep: usize,
+    /// The case's objects live in an in-memory object store, with the read cache of
+    /// [`concurrent_remote_tweaks`] (R6.6).
+    pub(super) remote: bool,
 }
 
 /// What a lane shares with the readers. The driver publishes every step here.
@@ -894,6 +904,8 @@ pub(super) fn settle_concurrent(
     // 7. The files on disk hold what the models predict.
     let models: Vec<&Model> = lanes.iter().map(|lane| &lane.model).collect();
     check_settled_files(harness, &models);
+    // 8. Nothing in flight, nothing leaked (R6.6). Last: its restart ends the life.
+    check_quiet_state(h);
 }
 
 /// What a case's lane holds between its segments.
@@ -923,12 +935,23 @@ fn case_seed(ops: &[Op]) -> u64 {
 ///
 /// Returns the case's counters; the caller checks them (`regression_concurrent_smoke`).
 pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) -> Stats {
+    let tweaks: fn(&mut StorageConfig) = if options.remote {
+        concurrent_remote_tweaks
+    } else {
+        concurrent_tweaks
+    };
     let mut harness = Harness::with_options(
         HarnessOptions {
             workers: WORKERS,
+            store: options.remote.then(|| {
+                (
+                    Arc::new(InMemory::new()) as Arc<dyn ObjectStore>,
+                    MODEL_PUT_SIZES,
+                )
+            }),
             ..HarnessOptions::default()
         },
-        concurrent_tweaks,
+        tweaks,
     );
     let model = new_model(&harness, (P::A, P::B));
     let mut lanes = vec![LaneState {
@@ -988,6 +1011,13 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) -> St
     stats
 }
 
+/// `concurrent_tweaks` for a remote case (R6.6): a 64 KiB read cache. A model file is a few KiB,
+/// so the cache holds a handful of files, and its readers evict each other's blocks.
+fn concurrent_remote_tweaks(config: &mut StorageConfig) {
+    concurrent_tweaks(config);
+    config.query.read_cache_bytes = Some(ByteSize::kib(64));
+}
+
 /// Cases of the concurrent proptest: `LLMOBS_CONCURRENT_CASES`, else 4 (the budget of § R6.5).
 fn concurrent_cases() -> u32 {
     std::env::var("LLMOBS_CONCURRENT_CASES")
@@ -1029,6 +1059,19 @@ proptest! {
             pace: Duration::from_millis(20),
             gc_every: Duration::from_millis(50),
             history_keep: usize::MAX,
+            remote: false,
+        });
+    }
+
+    /// `concurrent_matches_the_model` with the objects in an in-memory object store (R6.6).
+    #[test]
+    fn concurrent_matches_the_model_remote(ops in concurrent_ops()) {
+        run_concurrent_case(&ops, &ConcurrentOptions {
+            readers: 2,
+            pace: Duration::from_millis(20),
+            gc_every: Duration::from_millis(50),
+            history_keep: usize::MAX,
+            remote: true,
         });
     }
 }
@@ -1208,8 +1251,8 @@ fn a_read_while_an_append_waits_after_its_publish_sees_the_state_after_it() {
     );
 }
 
-#[test]
-fn regression_concurrent_smoke() {
+/// The smoke case, in a local or a remote store.
+fn run_smoke(remote: bool) {
     // Every kind of step and barrier, on lane 0.
     let ops = [
         Op::Append {
@@ -1268,6 +1311,7 @@ fn regression_concurrent_smoke() {
             pace: Duration::from_millis(5),
             gc_every: Duration::from_millis(20),
             history_keep: usize::MAX,
+            remote,
         },
     );
     assert!(stats.matched_reads() > 0, "no read was checked: {stats:?}");
@@ -1280,4 +1324,58 @@ fn regression_concurrent_smoke() {
         2,
         "the explicit compaction and deletion passes: {stats:?}"
     );
+}
+
+#[test]
+fn regression_concurrent_smoke() {
+    run_smoke(false);
+}
+
+#[test]
+fn regression_concurrent_smoke_remote() {
+    run_smoke(true);
+}
+
+/// `object_bytes` reads what a settled file holds, on a local and on a remote harness (R6.6).
+#[test]
+fn object_bytes_reads_both_stores() {
+    for remote in [false, true] {
+        let mut harness = Harness::with_options(
+            HarnessOptions {
+                workers: WORKERS,
+                store: remote.then(|| {
+                    (
+                        Arc::new(InMemory::new()) as Arc<dyn ObjectStore>,
+                        MODEL_PUT_SIZES,
+                    )
+                }),
+                ..HarnessOptions::default()
+            },
+            concurrent_tweaks,
+        );
+        let mut model = new_model(&harness, (P::A, P::B));
+        let mut clock = midnight(day(0)) + 12 * HOUR_NS;
+        let append = Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 3,
+            split: false,
+        };
+        apply(&append, &mut harness, &mut model, &mut clock);
+        settle(&mut harness, &mut model, &mut clock);
+        let files = harness.storage().catalog_files(Table::Spans);
+        assert!(
+            !files.is_empty(),
+            "no span file after the settle (remote {remote})"
+        );
+        for file in &files {
+            let rows = parquet_rows(harness.object_bytes(file)).num_rows();
+            assert_eq!(
+                u64::try_from(rows).expect("a row count"),
+                file.rows,
+                "the rows of {} (remote {remote})",
+                file.path
+            );
+        }
+    }
 }

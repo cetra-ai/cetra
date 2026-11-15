@@ -9,7 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
 use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use arrow::array::AsArray;
 use datafusion::execution::context::{SessionConfig, SessionContext};
@@ -32,6 +35,7 @@ use crate::reads::{AlertMeasure, AlertValue, Kpi, KpiName, ListScope, MAX_PAGE};
 use crate::test_support::{
     Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, parquet_rows, trace_ids_of,
 };
+use crate::wal::Table;
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
@@ -1348,6 +1352,182 @@ fn expected_score_avg(
     let count = i64::try_from(values.len()).expect("a model has few scores");
     let mean = (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64);
     (count, mean)
+}
+
+/// Polls `check` every 10 ms for up to 5 s, then fails with its last finding. For the state a
+/// dropped `QueryContext` or a background task's last step may reach just after the passes.
+fn eventually(what: &str, check: impl Fn() -> Result<(), String>) {
+    let started = Instant::now();
+    loop {
+        match check() {
+            Ok(()) => return,
+            Err(found) if started.elapsed() >= Duration::from_secs(5) => {
+                panic!("{what} after 5 s: {found}")
+            }
+            Err(_) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+/// The object keys under `<data>/objects/tables`, relative to `objects/` (the catalog's paths).
+/// Panics on a temp file, which a settled run must not leave (`.…tmp-…`).
+fn local_table_keys(data: &Path) -> BTreeSet<String> {
+    fn walk(dir: &Path, objects: &Path, keys: &mut BTreeSet<String>) {
+        if !dir.exists() {
+            // No table has been written yet.
+            return;
+        }
+        for entry in std::fs::read_dir(dir).expect("read an objects directory") {
+            let entry = entry.expect("read an objects directory entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, objects, keys);
+                continue;
+            }
+            assert!(
+                !entry.file_name().to_string_lossy().starts_with('.'),
+                "a temp object is left on disk: {}",
+                path.display()
+            );
+            let key = path
+                .strip_prefix(objects)
+                .expect("an object under objects/")
+                .to_string_lossy()
+                .replace('\\', "/");
+            keys.insert(key);
+        }
+    }
+    let objects = data.join("objects");
+    let mut keys = BTreeSet::new();
+    walk(&objects.join("tables"), &objects, &mut keys);
+    keys
+}
+
+/// After `settle_concurrent`: nothing in flight, nothing leaked (R6.6). Checks 1-6 and 8 run
+/// first, then check 7 restarts the harness, so it runs last.
+pub(super) fn check_quiet_state(h: &mut Harness) {
+    {
+        let h: &Harness = h;
+        let storage = h.storage();
+        // 1. Memtables empty.
+        let health = storage.health();
+        assert_eq!(health.memtable_bytes, 0, "memtable bytes after settle");
+        assert_eq!(
+            storage.published_rows(Table::Spans),
+            0,
+            "spans in memtables"
+        );
+        assert_eq!(
+            storage.published_rows(Table::Scores),
+            0,
+            "scores in memtables"
+        );
+        // 2. No compaction claims.
+        assert_eq!(
+            storage.compaction_claims(),
+            0,
+            "compaction claims after settle"
+        );
+        // 3. No query memory held: each query pool returns its bytes on drop.
+        eventually("query memory is still held", || {
+            let used = storage.memory.used();
+            (used == 0)
+                .then_some(())
+                .ok_or_else(|| format!("{used} bytes of query memory are held"))
+        });
+        // 4. No disk reservation.
+        assert_eq!(
+            storage.disk().reserved(),
+            0,
+            "compaction disk reservations after settle"
+        );
+        // 5. No staged rows.
+        eventually("staged rows are left", || {
+            let staged = h
+                .block_on(storage.staged_paths())
+                .expect("list staged objects");
+            staged
+                .is_empty()
+                .then_some(())
+                .ok_or_else(|| format!("{} staged objects are left", staged.len()))
+        });
+        // 6. No orphan objects: the data objects are exactly the active catalog files.
+        let catalog: BTreeSet<String> = [FileTable::Spans, FileTable::Traces, FileTable::Scores]
+            .into_iter()
+            .flat_map(|table| storage.catalog_paths(table))
+            .collect();
+        let stored: BTreeSet<String> = match h.chaos() {
+            None => local_table_keys(h.dir()),
+            Some(chaos) => h.block_on(async {
+                use futures::TryStreamExt;
+                let prefix = object_store::path::Path::from("tables");
+                chaos
+                    .inner()
+                    .list(Some(&prefix))
+                    .map_ok(|meta| meta.location.as_ref().to_owned())
+                    .try_collect()
+                    .await
+                    .expect("list the data objects of the store")
+            }),
+        };
+        let orphans: Vec<&String> = stored.difference(&catalog).collect();
+        let missing: Vec<&String> = catalog.difference(&stored).collect();
+        assert!(
+            orphans.is_empty() && missing.is_empty(),
+            "objects and catalog files differ after settle: {} orphan objects {orphans:?}, {} missing {missing:?}",
+            orphans.len(),
+            missing.len()
+        );
+        // 8. No quarantine: nothing is corrupt in this test.
+        let pending = storage.verify_queue().take(usize::MAX);
+        assert!(
+            pending.is_empty(),
+            "{} files wait for the verify pass after settle",
+            pending.len()
+        );
+        let quarantined: i64 = h.block_on(async {
+            use sqlx::ConnectOptions;
+            let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(h.dir().join("catalog.db"))
+                .read_only(true)
+                .connect()
+                .await
+                .expect("open catalog.db read-only");
+            sqlx::query_scalar("SELECT COUNT(*) FROM data_files WHERE state = 'quarantined'")
+                .fetch_one(&mut connection)
+                .await
+                .expect("count the quarantined files")
+        });
+        assert_eq!(quarantined, 0, "healthy files are quarantined");
+    }
+    // 7. The WAL is fully flushed: a restart replays nothing, and each WAL directory holds at
+    //    most the newest segment that truncation keeps and the one this life writes to.
+    h.restart();
+    let storage = h.storage();
+    assert_eq!(
+        storage.replayed(Table::Spans),
+        0,
+        "spans replayed at the restart"
+    );
+    assert_eq!(
+        storage.replayed(Table::Scores),
+        0,
+        "scores replayed at the restart"
+    );
+    for table in [Table::Spans, Table::Scores] {
+        let dir = h.dir().join("wal").join(table.name());
+        let segments: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read a WAL directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| crate::wal::parse_segment_name(name).is_some())
+            .collect();
+        assert!(
+            segments.len() <= 2,
+            "{} WAL segments after a restart, expected at most 2: {segments:?}",
+            segments.len()
+        );
+    }
 }
 
 /// After `Settle`, the files on disk hold what the model predicts and nothing more (plan § R1.7):
