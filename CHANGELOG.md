@@ -15,6 +15,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- `llmobs login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
+  minutes for a callback that never comes.
 - A password reset (forgot-password link or admin reset link) now revokes the user's personal
   access tokens as well as their web sessions, as a password change already did.
 - A categorical webhook evaluator must list its categories; one saved without them is refused with

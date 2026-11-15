@@ -1,8 +1,9 @@
 //! `llmobs login` and `llmobs logout` (spec 08, D140).
 //!
-//! The callback server accepts one `GET /callback` whose `state` matches and
-//! whose `token` parses as a personal access token. The token is checked with
-//! `GET /api/auth/me` and stored in the credentials file. It is never logged.
+//! The callback server accepts `GET /callback` with a matching `state`. Either the
+//! `token` parses as a personal access token, or `error=access_denied` says the user
+//! cancelled in the browser. The token is checked with `GET /api/auth/me` and stored in
+//! the credentials file. It is never logged.
 
 use std::fs;
 use std::io::{self, Write};
@@ -23,14 +24,24 @@ const WAIT: Duration = Duration::from_secs(5 * 60);
 const READ_LIMIT: usize = 8192;
 
 const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>You can close this window.</p></body></html>";
+const CANCELLED_PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>Sign-in cancelled. You can close this window.</p></body></html>";
+
+/// What one callback request means for the wait.
+#[derive(Debug, PartialEq)]
+enum Callback {
+    Token(String),
+    Cancelled,
+    Refused,
+}
 
 /// `llmobs login`. `output` receives the browser URL, one line.
 ///
 /// # Errors
 ///
 /// Returns an error when the server URL is refused by `credentials::server_url`, the
-/// callback times out, the token is rejected, or the credentials file cannot be written.
-/// The message does not include the token, and a refused URL is never printed.
+/// callback times out or the user cancels in the browser, the token is rejected, or the
+/// credentials file cannot be written. The message does not include the token, and a
+/// refused URL is never printed.
 pub(crate) async fn login(
     raw: &str,
     no_browser: bool,
@@ -46,7 +57,7 @@ pub(crate) async fn login(
         .context("binding the callback")?
         .port();
     let state = new_state().context("generating state")?;
-    let browser = format!("{server}/cli-auth?port={port}&state={state}");
+    let browser = cli_auth_url(&server, port, &state, local_host().as_deref());
     writeln!(output, "{browser}").context("printing the login url")?;
     output.flush().context("printing the login url")?;
     drop(output);
@@ -85,6 +96,35 @@ pub(crate) async fn logout(raw: Option<&str>, credentials: &Path) -> anyhow::Res
     save(credentials, &file)
 }
 
+/// The URL the browser opens. `host` is the machine's name, sanitised before it is sent,
+/// and is left out when nothing usable remains.
+fn cli_auth_url(server: &str, port: u16, state: &str, host: Option<&str>) -> String {
+    let mut url = format!("{server}/cli-auth?port={port}&state={state}");
+    if let Some(host) = host.and_then(sanitise_host) {
+        url.push_str("&host=");
+        url.push_str(&host);
+    }
+    url
+}
+
+/// Keeps only `[A-Za-z0-9.-]`, at most 64 characters. `None` when nothing is left.
+fn sanitise_host(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .take(64)
+        .collect();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// The machine's host name as the operating system reports it, not yet sanitised.
+fn local_host() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| fs::read_to_string("/etc/hostname").ok())
+}
+
 fn new_state() -> anyhow::Result<String> {
     let mut bytes = [0u8; 32];
     rand::rngs::SysRng
@@ -114,21 +154,35 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> anyho
             .await
             .map_err(|_| anyhow::anyhow!("timed out waiting for the browser"))?
             .context("accepting the callback")?;
-        if let Some(token) = handle_callback(socket, expected_state).await {
-            return Ok(token);
+        match handle_callback(socket, expected_state).await {
+            Callback::Token(token) => return Ok(token),
+            Callback::Cancelled => anyhow::bail!("sign-in cancelled in the browser"),
+            Callback::Refused => {}
         }
     }
 }
 
-async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Option<String> {
-    let line = read_request_line(&mut socket).await?;
+async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Callback {
+    let Some(line) = read_request_line(&mut socket).await else {
+        return Callback::Refused;
+    };
     drain_headers(&mut socket).await;
-    match token_from_request_line(&line, expected_state) {
-        Some(token) => {
+    let callback = callback_from_request_line(&line, expected_state);
+    match &callback {
+        Callback::Token(_) => {
             let _ = respond(&mut socket, 200, "OK", "text/html; charset=utf-8", PAGE).await;
-            Some(token)
         }
-        None => {
+        Callback::Cancelled => {
+            let _ = respond(
+                &mut socket,
+                200,
+                "OK",
+                "text/html; charset=utf-8",
+                CANCELLED_PAGE,
+            )
+            .await;
+        }
+        Callback::Refused => {
             let _ = respond(
                 &mut socket,
                 400,
@@ -137,9 +191,9 @@ async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Option<
                 "rejected\n",
             )
             .await;
-            None
         }
     }
+    callback
 }
 
 async fn read_request_line(socket: &mut TcpStream) -> Option<String> {
@@ -212,37 +266,52 @@ async fn respond(
     socket.shutdown().await
 }
 
-fn token_from_request_line(line: &str, expected_state: &str) -> Option<String> {
+fn callback_from_request_line(line: &str, expected_state: &str) -> Callback {
     let mut parts = line.split_whitespace();
-    let method = parts.next()?;
-    let target = parts.next()?;
-    if !method.eq_ignore_ascii_case("GET") {
-        return None;
+    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+        return Callback::Refused;
+    };
+    let Some((path, query)) = target.split_once('?') else {
+        return Callback::Refused;
+    };
+    if !method.eq_ignore_ascii_case("GET") || path != "/callback" {
+        return Callback::Refused;
     }
-    let (path, query) = target.split_once('?')?;
-    if path != "/callback" {
-        return None;
+    let Some(fields) = form_fields(query) else {
+        return Callback::Refused;
+    };
+    if first_field(&fields, "state") != Some(expected_state) {
+        return Callback::Refused;
     }
-    let mut token = None;
-    let mut state = None;
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        let value = percent_decode(value)?;
-        match key {
-            "token" if token.is_none() => token = Some(value),
-            "state" if state.is_none() => state = Some(value),
-            _ => {}
-        }
+    if first_field(&fields, "error") == Some("access_denied") {
+        return Callback::Cancelled;
     }
-    let token = token?;
-    let state = state?;
-    if state != expected_state || !is_personal_token(&token) {
-        return None;
+    match first_field(&fields, "token") {
+        Some(token) if is_personal_token(token) => Callback::Token(token.to_owned()),
+        _ => Callback::Refused,
     }
-    Some(token)
 }
 
-fn percent_decode(value: &str) -> Option<String> {
+fn first_field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Splits `key=value&...` and decodes both sides. `None` when a pair has no `=` or is
+/// not valid percent-encoding.
+fn form_fields(encoded: &str) -> Option<Vec<(String, String)>> {
+    encoded
+        .split('&')
+        .map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((form_decode(key)?, form_decode(value)?))
+        })
+        .collect()
+}
+
+fn form_decode(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -255,6 +324,10 @@ fn percent_decode(value: &str) -> Option<String> {
                 let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
                 out.push(u8::from_str_radix(hex, 16).ok()?);
                 index += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
             }
             byte => {
                 out.push(byte);
@@ -347,6 +420,30 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn the_host_is_sanitised_and_truncated_before_it_is_sent() {
+        assert_eq!(
+            sanitise_host("my host!.local").as_deref(),
+            Some("myhost.local")
+        );
+        assert_eq!(sanitise_host("  !! "), None);
+        let long = "a".repeat(100);
+        assert_eq!(sanitise_host(&long).map(|host| host.len()), Some(64));
+
+        assert_eq!(
+            cli_auth_url("http://h", 5, "st", Some("my host!.local")),
+            "http://h/cli-auth?port=5&state=st&host=myhost.local"
+        );
+        assert_eq!(
+            cli_auth_url("http://h", 5, "st", Some("!!")),
+            "http://h/cli-auth?port=5&state=st"
+        );
+        assert_eq!(
+            cli_auth_url("http://h", 5, "st", None),
+            "http://h/cli-auth?port=5&state=st"
+        );
+    }
+
     #[tokio::test]
     async fn login_refuses_a_url_with_credentials_before_printing() {
         let dir = tempfile::tempdir().unwrap();
@@ -360,6 +457,59 @@ mod tests {
         assert!(!text.contains("user") && !text.contains("pw"));
         assert!(printed.is_empty());
         assert!(!credentials.exists());
+    }
+
+    /// Writes one raw request to the callback and returns the whole response.
+    async fn send_raw(port: u16, request: &[u8]) -> String {
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        socket.write_all(request).await.unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    #[tokio::test]
+    async fn access_denied_ends_the_wait_with_the_cancel_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let waiter = tokio::spawn(async move { wait_for_callback(listener, "state-a").await });
+
+        let response = send_raw(
+            port,
+            b"GET /callback?error=access_denied&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("Sign-in cancelled"));
+
+        let error = waiter.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "sign-in cancelled in the browser");
+    }
+
+    #[tokio::test]
+    async fn access_denied_with_a_wrong_state_keeps_waiting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = format!(
+            "pat-{}-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+            llmobs_core::names::PRODUCT
+        );
+        let waiter = tokio::spawn(async move { wait_for_callback(listener, "state-a").await });
+
+        let refused = send_raw(
+            port,
+            b"GET /callback?error=access_denied&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )
+        .await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+        assert!(!refused.contains("Sign-in cancelled"));
+
+        let request = format!(
+            "GET /callback?token={token}&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        );
+        let accepted = send_raw(port, request.as_bytes()).await;
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
     }
 
     struct LineWriter {
