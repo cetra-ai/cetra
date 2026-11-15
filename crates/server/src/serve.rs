@@ -50,6 +50,20 @@ const GRPC_MAX_STREAMS: u32 = 100;
 /// Requests in flight per gRPC connection (G-1), across all its streams.
 const GRPC_CONCURRENCY_PER_CONNECTION: usize = 32;
 
+/// The time one gRPC request may take, from its headers to its response, body included (G-1,
+/// D-G-29). A stream that stalls is cut here, and its reservation goes with the dropped request.
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The OTLP/gRPC router: the admission layer behind the stream and concurrency limits, with
+/// [`GRPC_REQUEST_TIMEOUT`] (or, in tests, a shorter one) on every request.
+fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::Router {
+    tonic::transport::Server::builder()
+        .timeout(timeout)
+        .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
+        .add_service(grpc::service(state))
+}
+
 /// How often idle rate-limit keys are dropped (D143).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
@@ -432,12 +446,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         Some((listener, addr)) => {
             tracing::info!(grpc_local_addr = %addr, "listening");
             let (tx, rx) = oneshot::channel();
-            let service = grpc::service(state.clone());
+            let router = grpc_router(state.clone(), GRPC_REQUEST_TIMEOUT);
             let serve = tokio::spawn(async move {
-                tonic::transport::Server::builder()
-                    .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
-                    .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
-                    .add_service(service)
+                router
                     .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
                         let _ = rx.await;
                     })
@@ -1269,6 +1280,91 @@ mod tests {
             .expect_err("the message is over the limit");
         assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
         drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    /// A gRPC export whose headers arrive and whose body never does (G-1, D-G-29): the admitted
+    /// reservation is held while it stalls, and the request timeout cuts it and gives it back.
+    #[tokio::test]
+    async fn a_stalled_grpc_export_is_cut_and_releases_its_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = running.state.clone().expect("the server is running");
+        // A second listener with a short timeout: the default one is 30 s.
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let serve =
+            tokio::spawn(
+                grpc_router(state.clone(), Duration::from_millis(300))
+                    .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
+                        let _ = stop_rx.await;
+                    }),
+            );
+
+        // The channel, with the body swapped for one that never yields: headers go out, then
+        // nothing, so the server waits in the body read while holding its reservation.
+        let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let stalled = tower::ServiceBuilder::new()
+            .map_request(|request: axum::http::Request<tonic::body::Body>| {
+                let (parts, _) = request.into_parts();
+                let never =
+                    futures::stream::pending::<Result<http_body::Frame<bytes::Bytes>, io::Error>>();
+                let body = http_body_util::StreamBody::new(never);
+                axum::http::Request::from_parts(parts, tonic::body::Body::new(body))
+            })
+            .service(channel);
+        let mut client = TraceServiceClient::new(stalled);
+        let export = tokio::spawn(async move {
+            client
+                .export(authorized(decode_json(TRACES.as_bytes()).unwrap()))
+                .await
+        });
+
+        // While it stalls, the budget is held.
+        let mut held = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_err() {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(held, "the stalled export holds its reservation");
+
+        // The timeout cuts it, and the reservation comes back.
+        let outcome = tokio::time::timeout(Duration::from_secs(10), export)
+            .await
+            .expect("the stalled export is cut")
+            .unwrap();
+        assert!(outcome.is_err(), "a cut export is not accepted");
+        let mut freed = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_ok() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(freed, "the reservation is released after the timeout");
+
+        let _ = stop_tx.send(());
+        serve.await.unwrap().unwrap();
         running.shutdown().await.unwrap();
     }
 
