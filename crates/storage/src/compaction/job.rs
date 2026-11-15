@@ -979,6 +979,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compacted_files_carry_the_format_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..2_u8 {
+            let base = at(10, 0, 0) + i64::from(index) * 60 * 1_000_000_000;
+            storage = flush_cycle(
+                &config,
+                storage,
+                span_rows(&[span_row(1, index, base, base + 1_000_000_000)]),
+            )
+            .await;
+        }
+        let report = storage.compact(at(11, 0, 0)).await.unwrap();
+        assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+        let files = storage.catalog_files(crate::wal::Table::Spans);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].level, 1);
+
+        let bytes = std::fs::read(dir.path().join("objects").join(&files[0].path)).unwrap();
+        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(bytes))
+            .unwrap();
+        assert_eq!(
+            crate::parquet::file_format_version(&metadata),
+            Some(crate::format::FORMAT_VERSION),
+            "the L1 output carries the format version"
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_merge_collapses_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let config = config_in(dir.path(), quiet_compaction(3), Duration::from_secs(3_600));

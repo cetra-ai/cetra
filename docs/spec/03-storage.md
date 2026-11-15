@@ -145,7 +145,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 | Bloom filters | `trace_id`, `session_id`, `user_id` (fpp 0.01) on `spans`; `trace_id`, `session_id`, `user_id` on `traces`; `trace_id`, `score_id` on `scores` |
 | Sort order (within a file) | `spans`: `trace_id, start_time` · `traces`: `start_time, trace_id` (the `trace_id` tie-break makes files byte-identical across runs) · `scores`: `created_at` (declared in file metadata so DataFusion can exploit it; declared only because the writer sorted) |
 | Time slicing (across files) | every file covers a contiguous `[min_time, max_time]` slice; see below |
-| KV metadata | `llmobs.table`, `llmobs.schema_version`, `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time` |
+| KV metadata | `llmobs.table`, `llmobs.schema_version`, `llmobs.format_version`, `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`. `llmobs.schema_version` is the row normalization version; `llmobs.format_version` is the file format (§ 12). |
 
 **Time-sliced files, trace-sorted rows** (same pattern as Opik, LangWatch and Laminar, which partition by time and sort by trace ID inside the partition):
 
@@ -552,7 +552,7 @@ From the first public release (D185), a data directory written by any release mu
 |---|---|---|
 | Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
 | WAL | an 8-byte header at the start of every segment (§1) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
-| Parquet | KV key `llmobs.format_version` in every file (§3) (M8) | not read at query time: the directory marker comes first. Checked by the golden tests. |
+| Parquet | KV key `llmobs.format_version` in every file (§3) | not read at query time: the directory marker comes first. Checked by the golden tests. |
 
 `llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
 
