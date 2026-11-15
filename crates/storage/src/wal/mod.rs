@@ -11,13 +11,14 @@ pub(crate) mod writer;
 pub(crate) use replay::replay;
 pub(crate) use segment::SegmentWriter;
 
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use arrow::datatypes::SchemaRef;
 
 use llmobs_core::schema::{scores_schema, spans_schema};
+
+use crate::fs;
 
 /// Which WAL a record belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +82,6 @@ pub(crate) fn parse_segment_name(name: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Makes a new directory entry durable. `path` is the directory itself.
-pub(crate) fn sync_dir(path: &Path) -> io::Result<()> {
-    let dir = File::open(path)?;
-    dir.sync_all()
-}
-
 /// How many segment files [`truncate_segments`] deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TruncateOutcome {
@@ -109,18 +104,18 @@ pub(crate) fn truncate_segments(dir: &Path, flushed_seq: u64) -> io::Result<Trun
     for index in 0..segments.len() - 1 {
         let covered = segments[index + 1].0.saturating_sub(1);
         if covered <= flushed_seq {
-            std::fs::remove_file(&segments[index].1)?;
+            fs::remove_file(&segments[index].1)?;
             deleted += 1;
         }
     }
     if deleted > 0 {
-        sync_dir(dir)?;
+        fs::sync_dir(dir)?;
     }
     Ok(TruncateOutcome { deleted })
 }
 
 fn list_segment_files(dir: &Path) -> io::Result<Vec<(u64, PathBuf)>> {
-    let entries = std::fs::read_dir(dir)?;
+    let entries = fs::read_dir(dir)?;
     let mut segments = Vec::new();
     for entry in entries {
         let entry = entry?;

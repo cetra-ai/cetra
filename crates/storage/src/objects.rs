@@ -10,7 +10,6 @@
 #![allow(dead_code)]
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -33,9 +32,9 @@ use uuid::Uuid;
 use crate::catalog::{FileId, FileTable};
 use crate::config::{ObjectStoreUrl, S3Config, StorageConfig};
 use crate::error::ObjectError;
+use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::read_cache::{CacheStore, ReadCache, cached_name};
-use crate::wal;
 use tokio::io::AsyncReadExt;
 
 /// DataFusion keys a registered store by scheme, host, and port. The path is
@@ -251,11 +250,29 @@ impl Objects {
     /// Deletes one object. A missing object is success. Used by GC.
     pub(crate) async fn delete(&self, path: &str) -> Result<(), ObjectError> {
         validate_key(path)?;
-        let location = object_key(path)?;
-        match self.store.delete(&location).await {
-            Ok(()) => Ok(()),
-            Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(source) => Err(ObjectError::store("deleting object", path, source)),
+        match &self.kind {
+            Kind::Local { root } => {
+                let root = root.clone();
+                let key = path.to_owned();
+                tokio::task::spawn_blocking(move || delete_local(&root, &key))
+                    .await
+                    .map_err(|source| {
+                        ObjectError::io(
+                            "deleting object",
+                            Path::new(path),
+                            io::Error::other(source),
+                        )
+                    })?
+                    .map(|_| ())
+            }
+            Kind::Remote => {
+                let location = object_key(path)?;
+                match self.store.delete(&location).await {
+                    Ok(()) => Ok(()),
+                    Err(object_store::Error::NotFound { .. }) => Ok(()),
+                    Err(source) => Err(ObjectError::store("deleting object", path, source)),
+                }
+            }
         }
     }
 
@@ -301,14 +318,33 @@ impl Objects {
     /// Size of `path`, then [`Self::delete`]. A missing object is `0`.
     pub(crate) async fn delete_len(&self, path: &str) -> Result<u64, ObjectError> {
         validate_key(path)?;
-        let location = object_key(path)?;
-        let bytes = match self.store.head(&location).await {
-            Ok(meta) => meta.size,
-            Err(object_store::Error::NotFound { .. }) => 0,
-            Err(source) => return Err(ObjectError::store("reading object metadata", path, source)),
-        };
-        self.delete(path).await?;
-        Ok(bytes)
+        match &self.kind {
+            Kind::Local { root } => {
+                let root = root.clone();
+                let key = path.to_owned();
+                tokio::task::spawn_blocking(move || delete_local(&root, &key))
+                    .await
+                    .map_err(|source| {
+                        ObjectError::io(
+                            "deleting object",
+                            Path::new(path),
+                            io::Error::other(source),
+                        )
+                    })?
+            }
+            Kind::Remote => {
+                let location = object_key(path)?;
+                let bytes = match self.store.head(&location).await {
+                    Ok(meta) => meta.size,
+                    Err(object_store::Error::NotFound { .. }) => 0,
+                    Err(source) => {
+                        return Err(ObjectError::store("reading object metadata", path, source));
+                    }
+                };
+                self.delete(path).await?;
+                Ok(bytes)
+            }
+        }
     }
 
     /// Creates the temp file for the object `key` and returns it opened for
@@ -365,15 +401,14 @@ impl Objects {
             }
             Kind::Remote => {
                 // Scratch files: no fsync of the spill directory is needed.
-                tokio::fs::create_dir_all(&self.spill_dir)
-                    .await
-                    .map_err(|source| {
-                        ObjectError::io("creating spill directory", &self.spill_dir, source)
-                    })?;
                 let temp = self.spill_dir.join(format!("{}.parquet", Uuid::now_v7()));
                 let opened = tokio::task::spawn_blocking({
                     let temp = temp.clone();
+                    let spill_dir = self.spill_dir.clone();
                     move || {
+                        fs::create_dir_all(&spill_dir).map_err(|source| {
+                            ObjectError::io("creating spill directory", &spill_dir, source)
+                        })?;
                         OpenOptions::new()
                             .read(true)
                             .write(true)
@@ -456,8 +491,9 @@ impl Objects {
                                 |_| Ok(()),
                             )?;
                     } else {
-                        let reader =
-                            Arc::new(tokio::sync::Mutex::new(tokio::fs::File::from_std(file)));
+                        let reader = Arc::new(tokio::sync::Mutex::new(tokio::fs::File::from_std(
+                            file.into_std(),
+                        )));
                         put_multi(&store, &key, move || {
                             let reader = Arc::clone(&reader);
                             let temp = temp.clone();
@@ -589,8 +625,7 @@ fn registered_url() -> Result<RegisteredUrl, ObjectError> {
 
 fn prepare_local_root(root: &Path) -> Result<(PathBuf, LocalFileSystem), ObjectError> {
     create_dir_chain(root)?;
-    let root = root
-        .canonicalize()
+    let root = fs::canonicalize(root)
         .map_err(|source| ObjectError::io("opening object store", root, source))?;
     let store = LocalFileSystem::new_with_prefix(&root).map_err(ObjectError::client)?;
     Ok((root, store))
@@ -708,7 +743,7 @@ fn publish_local(
             source,
         ));
     }
-    wal::sync_dir(directory)
+    fs::sync_dir(directory)
         .map_err(|source| ObjectError::io("syncing object directory", directory, source))?;
     Ok(())
 }
@@ -767,6 +802,22 @@ where
         .await
         .map_err(|source| ObjectError::upload(path, source))?;
     Ok(())
+}
+
+/// Unlinks the local object `key` under `root` and returns its size before the
+/// unlink. A missing object is success, with size 0.
+fn delete_local(root: &Path, key: &str) -> Result<u64, ObjectError> {
+    let path = root.join(key);
+    let size = match fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => return Err(ObjectError::io("reading object metadata", &path, source)),
+    };
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(size),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(size),
+        Err(source) => Err(ObjectError::io("deleting object", &path, source)),
+    }
 }
 
 /// Removes one temp file; a missing file is success.
@@ -854,7 +905,7 @@ fn create_dir_chain(path: &Path) -> Result<(), ObjectError> {
         match fs::create_dir(dir) {
             Ok(()) => {
                 if let Some(parent) = dir.parent() {
-                    wal::sync_dir(parent).map_err(|source| {
+                    fs::sync_dir(parent).map_err(|source| {
                         ObjectError::io("syncing object directory", parent, source)
                     })?;
                 }
@@ -885,7 +936,7 @@ fn create_dir_chain_from(root: &Path, relative: &Path) -> Result<(), ObjectError
         match fs::create_dir(&current) {
             Ok(()) => {
                 if let Some(parent) = current.parent() {
-                    wal::sync_dir(parent).map_err(|source| {
+                    fs::sync_dir(parent).map_err(|source| {
                         ObjectError::io("syncing object directory", parent, source)
                     })?;
                 }
@@ -904,8 +955,7 @@ fn create_dir_chain_from(root: &Path, relative: &Path) -> Result<(), ObjectError
 }
 
 fn try_exists(path: &Path) -> Result<bool, ObjectError> {
-    path.try_exists()
-        .map_err(|source| ObjectError::io("checking object", path, source))
+    fs::try_exists(path).map_err(|source| ObjectError::io("checking object", path, source))
 }
 
 fn validate_key(path: &str) -> Result<(), ObjectError> {

@@ -12,7 +12,6 @@
 //! disk monitor gives blocks back while it is below `min_free` (see `disk`).
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::io::{self, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -34,6 +33,7 @@ use uuid::Uuid;
 
 use crate::disk::Disk;
 use crate::error::OpenError;
+use crate::fs;
 use crate::open_io;
 
 /// Block size of the S3 read cache.
@@ -838,6 +838,7 @@ fn remove_dir(path: &Path) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::ops::Range;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;

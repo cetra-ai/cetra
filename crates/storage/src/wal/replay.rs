@@ -13,6 +13,7 @@ use std::path::Path;
 use arrow::array::RecordBatch;
 
 use crate::error::WalError;
+use crate::fs;
 use crate::wal::record::{Decoded, decode_next, read_batch};
 use crate::wal::{Table, segment_name};
 
@@ -55,8 +56,8 @@ pub(crate) fn replay(
 
     for (index, (first_seq, path)) in segments.iter().enumerate() {
         let name = segment_name(*first_seq);
-        let bytes = std::fs::read(path)
-            .map_err(|source| WalError::io("reading WAL segment", path, source))?;
+        let bytes =
+            fs::read(path).map_err(|source| WalError::io("reading WAL segment", path, source))?;
         let is_last = index + 1 == segments.len();
         let mut scan = Scan {
             table,
@@ -181,7 +182,7 @@ fn truncate_tail(
     dropped: usize,
     scan: &mut Scan<'_>,
 ) -> Result<(), WalError> {
-    let file = std::fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
         .write(true)
         .open(path)
         .map_err(|source| WalError::io("truncating WAL segment", path, source))?;
@@ -231,8 +232,8 @@ fn as_u64(len: usize) -> u64 {
 }
 
 fn list_segments(dir: &Path) -> Result<Vec<(u64, std::path::PathBuf)>, WalError> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|source| WalError::io("reading WAL directory", dir, source))?;
+    let entries =
+        fs::read_dir(dir).map_err(|source| WalError::io("reading WAL directory", dir, source))?;
     let mut segments = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| WalError::io("reading WAL directory", dir, source))?;

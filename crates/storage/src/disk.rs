@@ -10,6 +10,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
+use crate::fs;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -135,8 +137,7 @@ impl Drop for DiskReservation {
 
 /// Free bytes of the file system holding `path`: `f_bavail * f_frsize`.
 fn free_bytes(path: &Path) -> io::Result<u64> {
-    let stat = rustix::fs::statvfs(path)?;
-    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    Ok(fs::space(path)?.free)
 }
 
 /// Size of the file system holding `path`: `f_blocks * f_frsize`. Sizes the
@@ -146,8 +147,7 @@ pub(crate) fn total_bytes(path: &Path) -> Result<u64, OpenError> {
 }
 
 fn total_bytes_io(path: &Path) -> io::Result<u64> {
-    let stat = rustix::fs::statvfs(path)?;
-    Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
+    Ok(fs::space(path)?.total)
 }
 
 /// A running monitor task. Drop cancels it.

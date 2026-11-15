@@ -10,7 +10,7 @@
 
 #![warn(missing_docs)]
 
-use std::fs::{File, OpenOptions};
+use crate::fs::{File, OpenOptions};
 use std::io;
 use std::num::NonZeroUsize;
 use std::ops::Range;
@@ -40,7 +40,6 @@ use crate::objects::Objects;
 use crate::read_state::{Published, ReadState};
 use crate::verify::{Suspects, VerifyQueue};
 use crate::wal::Table;
-use crate::wal::sync_dir;
 use crate::wal::writer::{WalWriterHandle, WriterExit, WriterParams, spawn};
 use crate::wal::{SegmentWriter, replay};
 
@@ -54,6 +53,7 @@ pub(crate) mod disk;
 pub mod error;
 mod filter;
 pub(crate) mod flush;
+pub(crate) mod fs;
 pub(crate) mod gc;
 pub(crate) mod media;
 pub(crate) mod memory;
@@ -1242,7 +1242,7 @@ fn prepare_layout(data_dir: &Path) -> Result<File, OpenError> {
 /// crashed. DataFusion removes its own on a clean drop. Returns how many were
 /// removed; a missing entry is not an error.
 fn remove_spill_files(spill_dir: &Path) -> Result<usize, OpenError> {
-    let entries = std::fs::read_dir(spill_dir)
+    let entries = fs::read_dir(spill_dir)
         .map_err(|source| open_io("removing query spill files", spill_dir, source))?;
     let mut removed = 0;
     for entry in entries {
@@ -1254,9 +1254,9 @@ fn remove_spill_files(spill_dir: &Path) -> Result<usize, OpenError> {
             .map_err(|source| open_io("removing query spill files", &path, source))?
             .is_dir();
         let result = if is_dir {
-            std::fs::remove_dir_all(&path)
+            fs::remove_dir_all(&path)
         } else {
-            std::fs::remove_file(&path)
+            fs::remove_file(&path)
         };
         match result {
             Ok(()) => removed += 1,
@@ -1538,10 +1538,11 @@ fn validate_batch(
 }
 
 fn ensure_dir(path: &Path) -> Result<(), OpenError> {
-    match std::fs::create_dir(path) {
+    match fs::create_dir(path) {
         Ok(()) => {
             if let Some(parent) = path.parent() {
-                sync_dir(parent).map_err(|source| open_io("syncing directory", parent, source))?;
+                fs::sync_dir(parent)
+                    .map_err(|source| open_io("syncing directory", parent, source))?;
             }
             Ok(())
         }
@@ -1556,7 +1557,6 @@ fn lock_dir(data_dir: &Path) -> Result<File, OpenError> {
         .read(true)
         .write(true)
         .create(true)
-        .truncate(false)
         .open(&path)
         .map_err(|source| open_io("opening lock file", &path, source))?;
     match file.try_lock() {
@@ -1570,7 +1570,7 @@ fn lock_dir(data_dir: &Path) -> Result<File, OpenError> {
             return Err(open_io("locking data directory", data_dir, source));
         }
     }
-    sync_dir(data_dir).map_err(|source| open_io("syncing directory", data_dir, source))?;
+    fs::sync_dir(data_dir).map_err(|source| open_io("syncing directory", data_dir, source))?;
     Ok(file)
 }
 
@@ -1598,6 +1598,7 @@ fn share_hooks(hooks: &Hooks) -> Hooks {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{File, OpenOptions};
     use std::sync::Arc;
     use std::time::Duration;
 

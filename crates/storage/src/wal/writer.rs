@@ -5,7 +5,6 @@
 //! into the memtable. A write or sync that fails ends the task: the group is
 //! truncated, its acks are `WalFailed`, and nothing is retried.
 
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,6 +18,7 @@ use tokio::task::JoinHandle;
 use crate::AppendReceipt;
 use crate::config::WalSync;
 use crate::error::{AppendError, WalError};
+use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::memtable::Memtable;
 use crate::read_state::{Published, ReadState};
@@ -386,7 +386,7 @@ fn discard_unacked(written: Written) {
         if let Err(err) = truncate_path(&old, written.mark) {
             tracing::error!(%err, "truncating unacknowledged WAL group");
         }
-        if let Err(err) = std::fs::remove_file(&new_path) {
+        if let Err(err) = fs::remove_file(&new_path) {
             tracing::error!(%err, "removing empty WAL segment");
         }
         return;
