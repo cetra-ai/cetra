@@ -120,6 +120,7 @@ docs/                        decisions, specs, plans, research
 - `token` depends on no workspace crate. `server` and `tools/license` use it, and so does the control plane (by git commit).
 - `server` depends on `core`, `otel`, `storage`, `eval` and `token`; `cli` depends on `server`, `core` and `ui`.
 - `ui` depends on no workspace crate.
+- A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `llmobs-cli`'s end-to-end test uses `llmobs-capture`'s mock provider (D-I-43).
 
 ## Parallel work and ownership
 

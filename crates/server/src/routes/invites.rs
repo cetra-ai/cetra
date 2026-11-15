@@ -24,6 +24,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::invites::{self, INVITE_TTL_NS, InviteRow, Inviter};
 use crate::meta::members;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, normalize_email};
 
 use super::orgs::page_named;
@@ -301,6 +302,10 @@ async fn accept_invite(
                 else {
                     return Ok(Accepted::Missing);
                 };
+                // A suspended or deleting org takes no new members.
+                if org.state != "active" {
+                    return Ok(Accepted::Missing);
+                }
                 if invite.email != caller_email {
                     return Ok(Accepted::WrongEmail);
                 }
@@ -339,7 +344,8 @@ async fn accept_invite(
                         .fetch_one(&mut *conn)
                         .await?;
                 if verified.is_none() {
-                    users::set_email_verified(conn, caller_id, now).await?;
+                    users::set_email_verified(conn, caller_id, now, EmailVerifiedVia::Invite)
+                        .await?;
                 }
                 Ok(Accepted::Done {
                     membership: OrgMembership {
@@ -494,6 +500,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -503,9 +510,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -524,6 +537,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         now,
@@ -867,6 +881,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_inactive_org_takes_no_member() {
+        // Review 2026-11-15 #8: accept ignored the org's state.
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest_cookie = cookie_pair(
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        let org_id = org.id.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
+                        .bind(org_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)
+                })
+            })
+            .await
+            .unwrap();
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest_cookie)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 404, "{}", body(&accepted));
+    }
+
+    #[tokio::test]
     async fn accept_checks_the_email_and_is_idempotent() {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
@@ -874,9 +932,15 @@ mod tests {
         let org = create_org(&app, &ada).await;
         let guest_id = insert_unverified(&app, "guest@example.com").await;
         let guest_cookie = cookie_pair(
-            &start_session(&app.state, guest_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
 
@@ -980,9 +1044,15 @@ mod tests {
         let viewer_id = insert_unverified(&app, "viewer@example.com").await;
         add_member(&app, org.id, viewer_id, OrgRole::Viewer).await;
         let viewer_cookie = cookie_pair(
-            &start_session(&app.state, viewer_id, None, None, None)
-                .await
-                .unwrap(),
+            &start_session(
+                &app.state,
+                viewer_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
         );
         let kept = app
             .request(

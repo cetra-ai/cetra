@@ -39,6 +39,7 @@ use super::alerts::{
     CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
@@ -327,6 +328,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<EvalJob>();
     set.insert_page::<EvalJob>("EvalJobPage");
     set.insert::<RunEvaluatorRequest>();
+    set.insert::<BackfillStatus>();
+    set.insert::<Backfill>();
+    set.insert_page::<Backfill>("BackfillPage");
+    set.insert::<CreateBackfillRequest>();
+    set.insert::<BackfillEstimate>();
     set
 }
 
@@ -735,6 +741,7 @@ fn paths() -> Paths {
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
     let paths = eval_job_paths(paths);
+    let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
@@ -1439,10 +1446,14 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let mut orgs = PathItem::new(HttpMethod::Get, list_orgs);
     orgs.post = Some(post_org);
-    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners)")
+    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners, session only)")
         .description(Some(
-            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.",
+            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
         ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<DropParams>(vec![path_string(
             "org",
             "Org UUID or slug.",
@@ -1582,7 +1593,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "End a user's sessions and personal tokens",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -1600,7 +1611,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "Disable a user",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -1618,7 +1629,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         "Delete a user",
     )
     .description(Some(
-        "Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+        "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
     ))
     .securities(Some(internal_user_security()))
     .request_body(Some(json_body("InternalUserRef")))
@@ -1671,11 +1682,15 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     let delete_project = operation(
         "delete_project",
         "projects",
-        "Delete a project (org admins; API keys are refused)",
+        "Delete a project (org admins; session only)",
     )
     .description(Some(
-        "Answers 202; the project is gone from every route at once and its data is erased in the background.",
+        "Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
     ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<DropParams>(vec![project_param()])))
     .responses(responses(
         "202",
@@ -2259,7 +2274,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_scores", "scores", "Write scores")
         .description(Some(
-            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order.",
+            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("ScoreBatch")))
@@ -2271,7 +2286,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let delete = operation("delete_score", "scores", "Delete a score")
         .description(Some(
-            "Appends a deleted version of the score. Its `created_at` is kept.",
+            "Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).",
         ))
         .parameters(Some(vec![
             project_param(),
@@ -2672,6 +2687,69 @@ fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/{{id}}/run"),
             PathItem::new(HttpMethod::Post, run),
+        )
+}
+
+fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation(
+        "list_backfills",
+        "evaluation",
+        "List an online rule's backfills",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 backfills of the rule; the list is not paged.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "BackfillPage",
+            "The rule's latest 50 backfills, newest first.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let estimate = operation(
+        "post_backfill_estimate",
+        "evaluation",
+        "Estimate an online rule backfill",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("CreateBackfillRequest")))
+    .responses(responses(
+        "200",
+        json_of::<BackfillEstimate>("What the backfill would read and cost."),
+        READ_ERRORS,
+    ))
+    .build();
+    let create = operation("post_backfill", "evaluation", "Start an online rule backfill")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .request_body(Some(json_body("CreateBackfillRequest")))
+        .responses(responses(
+            "202",
+            json_of::<Backfill>("The started backfill."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/backfills/estimate"),
+            PathItem::new(HttpMethod::Post, estimate),
         )
 }
 

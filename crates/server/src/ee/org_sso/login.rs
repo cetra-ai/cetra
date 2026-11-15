@@ -28,6 +28,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
 use crate::http::error::{self, ApiError};
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{NewUser, UserRow, normalize_email};
 use crate::meta::{
     MetaError, identities, invites, members, orgs, personal_tokens, users, web_sessions,
@@ -499,13 +500,13 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                 now,
             )
             .await?;
-            if user.email_verified_at.is_none() {
+            if !user.email_proven() {
                 // D148's defence against a pre-registered account: the unverified password and
                 // its sessions and tokens go when the provider links it.
                 web_sessions::delete_user_sessions(conn, user.id, None).await?;
                 revoked = personal_tokens::revoke_user_tokens(conn, user.id, now).await?;
                 users::set_password_hash(conn, user.id, None, now).await?;
-                users::set_email_verified(conn, user.id, now).await?;
+                users::set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
             }
             linked = true;
             user.id
@@ -518,6 +519,7 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                     name: input.name.clone(),
                     password_hash: None,
                     email_verified_at: Some(now),
+                    email_verified_via: Some(EmailVerifiedVia::Idp),
                     is_instance_admin: false,
                 },
                 now,
@@ -652,6 +654,7 @@ mod tests {
                             name: None,
                             password_hash: Some("unused-hash".to_owned()),
                             email_verified_at: verified.then_some(now),
+                            email_verified_via: verified.then_some(EmailVerifiedVia::MailToken),
                             is_instance_admin: admin,
                         },
                         now,

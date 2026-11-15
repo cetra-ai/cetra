@@ -9,14 +9,28 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Upgrade notes
 
+- The control plane's `users/revoke`, `users/disable` and `users/delete` calls must now send
+  `email` with `subject`; a body without it is refused with 400.
+- Migration `0015` adds `users.email_verified_via` and `web_sessions.via_provider`. Verified accounts
+  that exist already have no recorded origin and count as unproven: when an identity provider links
+  one of them, its password is cleared. With `auth.enforce_sso_domains`, sessions that predate the
+  upgrade stop resolving for the listed domains, and those users sign in again through their provider.
+- The cloud control plane must sign `method` and `path` claims in its `control_plane` tokens; a token
+  without them is refused (D-P-71).
 - With `auth.signup = open`, an email alert channel that lists an address which is not a verified,
   enabled member of its org is refused on its next edit, and its deliveries skip that address and are
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
+- An `LLMOBS_AUTH__OIDC__*` environment variable other than
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
+  server at start; such variables used to be ignored. Remove them.
 
 ### Added
 
+- Auth: an `[[auth.oidc]]` provider's client secret can come from
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
+  `llmobs.toml` (D-S-2).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
@@ -43,6 +57,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- Auth: with `auth.disable_password = true`, instance admins can still sign in with their
+  password at `/login?password=1`, change it, and set it from a reset link
+  (`llmobs admin reset-password`) (D-S-3).
+- Deletion, project and organization drop dialogs no longer promise erasure within 24 hours: data is hidden within seconds, removed within 24 hours, and its stored copies are purged after the storage grace period (`storage.gc.grace`, D181).
 - Alert email is capped at 1,000 messages per org per UTC day, "Send test" is limited to 5 a minute
   per user and per channel, and when signup is open an email channel may only list verified
   members of its org (D-K-19).
@@ -55,9 +73,37 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
   the token stays out of browser history. A token created by the sign-in page expires after 90
   days; run `llmobs login` again when it does.
+- `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
+  `api_key` again (400 on `api_key`), so a new host never receives the stored key.
+- Web UI: with password sign-in off and exactly one sign-in provider, the login page and, for a
+  visitor without a session, the invite page go straight to that provider; signing out lands on a
+  page that does not. Instance admins sign in with their password at `/login?password=1`, which the
+  login page links to (D-S-4, D-S-5, D-S-6).
+- Internal API: `POST /api/internal/v1/users/{revoke,disable,delete}` take `{subject, email}` and
+  find a user who never signed in through the control plane by email (D-S-9).
 
 ### Fixed
 
+- Web UI: the sidebar opens on screens under 768 px (a trigger above the page); session ids show in full in the session header; the traces list refreshes after "Delete matching…" once storage hides the rows, and the deletion history says its trace count includes evaluation traces; Enter submits the Save view and Rename view dialogs.
+- Security review of the auth code: an invitation no longer counts as proof of an email address, so
+  linking Google, GitHub or an org's identity provider clears the password of an account made with an
+  invitation (D-P-66).
+- API keys can no longer list the org's members through `GET /projects/{project}/members` (D-P-67).
+- An instance admin cannot mint a reset link for the owner of an org they are not a member of (D-P-68).
+- `auth.enforce_sso_domains` now also ends password sessions, personal access tokens and password
+  resets of the listed domains (D-P-69).
+- Dropping a project or an org needs a browser session; a personal access token gets 403 (D-P-70).
+- Control-plane tokens are valid for one method and path only (D-P-71).
+- Org SSO domains are re-checked daily; a domain whose TXT record is gone stops being verified
+  (D-P-72).
+- Auth security review (`docs/research/auth/review-2026-11-15.md`): deleting another project's
+  evaluator answers 404 instead of naming that project's online rules; deleting another org's
+  connection answers 404 while it is in use; a control-plane org creation clears the password,
+  sessions and tokens of an unverified account it makes owner; a disabled owner no longer counts as
+  the org's last owner; an invitation to an org that is not active cannot be accepted; a trusted
+  proxy seen as an IPv4-mapped IPv6 address is trusted; a config file with a TOML syntax error no
+  longer prints the offending line.
+- Online evaluation: an exhausted Anthropic credit balance or Gemini daily quota now pauses the rule at once, like OpenAI's; the egress guard also denies `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, `64:ff9b:1::/48`, `2002::/16` and `fec0::/10`; a judge or webhook header can no longer override `content-type` or the auth header.
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.

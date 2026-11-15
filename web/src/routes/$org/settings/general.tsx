@@ -133,7 +133,7 @@ function OrgGeneralPage() {
       </form>
       <DangerZone
         title="Delete organization"
-        description="Deletes the organization, all its projects and their data, its members and invitations. Data is erased within 24 hours. This cannot be undone."
+        description="Deletes the organization, all its projects and their data, its members and invitations. Data is removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
         buttonLabel="Delete organization…"
         disabledReason={canDelete ? undefined : "Only owners can delete the organization"}
         onOpen={() => {
@@ -145,7 +145,7 @@ function OrgGeneralPage() {
           open={dropOpen}
           onOpenChange={setDropOpen}
           title={`Delete organization ${data.name}?`}
-          description="Deletes the organization, all its projects and their data, its members and invitations. Data is erased within 24 hours. This cannot be undone."
+          description="Deletes the organization, all its projects and their data, its members and invitations. Data is removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
           expected={data.slug}
           inputLabel={`Type the organization slug "${data.slug}" to confirm`}
           confirmLabel="Delete organization"

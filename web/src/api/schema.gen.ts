@@ -439,7 +439,7 @@ export interface paths {
         put?: never;
         /**
          * Delete a user
-         * @description Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
          */
         post: operations["post_internal_user_delete"];
         delete?: never;
@@ -459,7 +459,7 @@ export interface paths {
         put?: never;
         /**
          * Disable a user
-         * @description Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
          */
         post: operations["post_internal_user_disable"];
         delete?: never;
@@ -479,7 +479,7 @@ export interface paths {
         put?: never;
         /**
          * End a user's sessions and personal tokens
-         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
          */
         post: operations["post_internal_user_revoke"];
         delete?: never;
@@ -727,8 +727,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete an organization (owners)
-         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.
+         * Delete an organization (owners, session only)
+         * @description Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_org"];
         options?: never;
@@ -1074,8 +1074,8 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Delete a project (org admins; API keys are refused)
-         * @description Answers 202; the project is gone from every route at once and its data is erased in the background.
+         * Delete a project (org admins; session only)
+         * @description Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).
          */
         delete: operations["delete_project"];
         options?: never;
@@ -1595,6 +1595,50 @@ export interface paths {
         patch: operations["patch_online_rule"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/online-rules/{id}/backfills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an online rule's backfills
+         * @description Any project member can read. The newest 50 backfills of the rule; the list is not paged.
+         */
+        get: operations["list_backfills"];
+        put?: never;
+        /**
+         * Start an online rule backfill
+         * @description Project members and above. API keys cannot call it. Starts a backfill: up to `max_targets` targets of the window, newest first, are sampled and queued at the lowest priority, skipping targets the rule already scored. 409 when the rule is disabled or paused, or already has a running backfill (D-I-25).
+         */
+        post: operations["post_backfill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Estimate an online rule backfill
+         * @description Project members and above. API keys cannot call it. Counts the rule's targets in the window (at most `max_targets`, newest first, evaluation and experiment traces left out), how many the sample rate keeps, and, for an LLM judge, the tokens and cost they would use. Targets the rule already scored are counted; the run skips them (D-I-38, D-I-40).
+         */
+        post: operations["post_backfill_estimate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/online-rules/{id}/resume": {
         parameters: {
             query?: never;
@@ -1744,7 +1788,7 @@ export interface paths {
         put?: never;
         /**
          * Write scores
-         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order.
+         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.
          */
         post: operations["create_scores"];
         delete?: never;
@@ -1765,7 +1809,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a score
-         * @description Appends a deleted version of the score. Its `created_at` is kept.
+         * @description Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).
          */
         delete: operations["delete_score"];
         options?: never;
@@ -2390,7 +2434,10 @@ export interface components {
             org_create_allowed: boolean;
             /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
             org_create_url?: string;
-            /** @description Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set. */
+            /**
+             * @description Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+             *     set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
+             */
             password_enabled: boolean;
             /** @description Configured OAuth and OIDC providers. */
             providers: components["schemas"]["AuthProvider"][];
@@ -2417,6 +2464,123 @@ export interface components {
             /** @description Provider id: `github`, `google`, or `oidc:<name>`. */
             id: string;
         };
+        /** @description A backfill of one online rule (D-I-25). */
+        Backfill: {
+            /**
+             * Format: date-time
+             * @description Start time. RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who started the backfill. Omitted when that user is unknown.
+             */
+            created_by?: string;
+            /**
+             * Format: int64
+             * @description Jobs inserted or re-queued so far.
+             */
+            enqueued: number;
+            /** @description Why the backfill failed. Present exactly when `status` is `failed`. */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description End time. Omitted while the backfill runs. RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: date-time
+             * @description Window start, inclusive. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: uuid
+             * @description Backfill id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Targets read so far, at most `max_targets`.
+             */
+            matched: number;
+            /**
+             * Format: int32
+             * @description Most targets the backfill reads.
+             */
+            max_targets: number;
+            /**
+             * Format: uuid
+             * @description The rule the backfill runs for.
+             */
+            rule_id: string;
+            /**
+             * Format: double
+             * @description Sample rate the backfill used.
+             */
+            sample_rate: number;
+            /** @description Where the backfill stands. */
+            status: components["schemas"]["BackfillStatus"];
+            /**
+             * Format: date-time
+             * @description Window end, exclusive. RFC 3339.
+             */
+            to: string;
+        };
+        /**
+         * @description What a backfill would read and cost (D-I-42). The estimate is an upper bound: it does not
+         *     subtract targets the rule already scored.
+         */
+        BackfillEstimate: {
+            /** @description More than `max_targets` matched. */
+            capped: boolean;
+            /**
+             * Format: double
+             * @description Estimated cost in USD. Judges with a priced model only.
+             */
+            estimated_cost_usd?: number;
+            /**
+             * Format: int64
+             * @description Input tokens the sampled targets would send. Judges only.
+             */
+            estimated_input_tokens?: number;
+            /**
+             * Format: int64
+             * @description Output tokens the sampled targets would ask for. Judges only.
+             */
+            estimated_output_tokens?: number;
+            /**
+             * Format: date-time
+             * @description The window that was counted. RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: int64
+             * @description Targets in the window, at most `max_targets`.
+             */
+            matched: number;
+            /**
+             * Format: int64
+             * @description Targets the sample rate keeps.
+             */
+            sampled: number;
+            /**
+             * Format: date-time
+             * @description The end of the window that was counted. RFC 3339.
+             */
+            to: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        BackfillPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Backfill"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Where a backfill stands (D-I-39).
+         * @enum {string}
+         */
+        BackfillStatus: "running" | "done" | "failed";
         /** @description Inline base64 media, before extraction replaces it with a URI. */
         BlobPart: {
             /** @description Base64 payload. */
@@ -2559,6 +2723,29 @@ export interface components {
             name?: string;
             /** @description Secret keys default to ingest, read, and write. Public keys default to feedback. */
             scopes?: components["schemas"]["ApiKeyScope"][];
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/online-rules/{id}/backfills` body, and the body of its
+         *     `estimate` operation (D-I-38, D-I-42). Absent `sample_rate` takes the rule's rate.
+         */
+        CreateBackfillRequest: {
+            /** @description Window start, inclusive. RFC 3339 timestamp or epoch milliseconds. */
+            from: components["schemas"]["TimeParam"];
+            /**
+             * Format: int32
+             * @description Most targets the backfill reads, 1 to 10 000 (D-I-25).
+             */
+            max_targets: number;
+            /**
+             * Format: double
+             * @description Sample rate, above 0 and at most 1. Omitted: the rule's sample rate (D-I-40).
+             */
+            sample_rate?: number;
+            /**
+             * @description Window end, exclusive. At least 5 minutes ago; `to - from` at most 30 days. Same
+             *     formats as `from`.
+             */
+            to: components["schemas"]["TimeParam"];
         };
         /** @description Body of `POST /channels`. Send the fields of `kind` only. */
         CreateChannelRequest: {
@@ -3426,8 +3613,16 @@ export interface components {
              */
             sole_owner_of: string[];
         };
-        /** @description Body of the `users` routes (D-P-39): the user's subject at the control plane's provider. */
+        /**
+         * @description Body of the `users` routes (D-P-39, D-S-9): the user's subject at the control plane's
+         *     provider, and its email for a user the subject does not find.
+         */
         InternalUserRef: {
+            /**
+             * @description Email, normalized like every email (D136). Used only when no identity has the subject,
+             *     and then only for a user with no identity at that provider (D-S-9).
+             */
+            email: string;
             /** @description The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`. */
             subject: string;
         };
@@ -13501,6 +13696,251 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_backfills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule's latest 50 backfills, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_backfill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBackfillRequest"];
+            };
+        };
+        responses: {
+            /** @description The started backfill. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Backfill"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_backfill_estimate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Online rule id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateBackfillRequest"];
+            };
+        };
+        responses: {
+            /** @description What the backfill would read and cost. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillEstimate"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

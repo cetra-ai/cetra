@@ -4,7 +4,7 @@ import { clearUserData } from "@/api/auth";
 import { $api } from "@/api/client";
 import { setSigningOut } from "@/api/session";
 
-/** POST /api/auth/logout, then /login. A failed logout still leaves the page. */
+/** POST /api/auth/logout, then /login?signed_out=1, which never starts a provider (D-S-6). A failed logout still leaves the page. */
 export function useSignOut(): { signOut: () => void; pending: boolean } {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -12,7 +12,7 @@ export function useSignOut(): { signOut: () => void; pending: boolean } {
   // drop a callback passed to `mutate` (README § Pitfalls).
   const logout = $api.useMutation("post", "/api/auth/logout", {
     onSettled: () => {
-      void navigate({ to: "/login" }).finally(() => {
+      void navigate({ to: "/login", search: { signed_out: true } }).finally(() => {
         clearUserData(queryClient);
         setSigningOut(false);
       });

@@ -5,6 +5,7 @@ import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import scoresFixture from "../../../../../../../fixtures/api/responses/scores.json";
+import backfillsFixture from "../../../../../../../fixtures/api/static/backfills.json";
 import ruleFixture from "../../../../../../../fixtures/api/static/online-rule.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
@@ -240,4 +241,60 @@ it("reloads the eval jobs after a resume", async () => {
   await user.click(screen.getByRole("button", { name: "Resume" }));
 
   await waitFor(() => expect(jobReads).toBeGreaterThan(reads));
+});
+
+it("lets a viewer see the backfills without the button", async () => {
+  server.use(projectAs("viewer"));
+  await renderApp(RULE_URL);
+
+  expect(await screen.findByRole("table", { name: "Backfills" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Run on existing data" })).toBeNull();
+});
+
+it("does not backfill a disabled rule", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () =>
+      HttpResponse.json({ ...ruleFixture, enabled: false }),
+    ),
+  );
+  await renderApp(RULE_URL);
+
+  expect(await screen.findByRole("button", { name: "Run on existing data" })).toBeDisabled();
+  expect(screen.getByText("Enable the rule to run it on existing data.")).toBeInTheDocument();
+});
+
+it("does not backfill a paused rule", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id", () =>
+      HttpResponse.json({
+        ...ruleFixture,
+        paused_reason: "errors",
+        paused_at: NOW,
+        paused_detail: "error rate 60 %",
+      }),
+    ),
+  );
+  await renderApp(RULE_URL);
+
+  expect(await screen.findByRole("button", { name: "Run on existing data" })).toBeDisabled();
+  expect(screen.getByText("Resume the rule to run it on existing data.")).toBeInTheDocument();
+});
+
+it("does not start a backfill while one runs", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/online-rules/:id/backfills", () =>
+      HttpResponse.json({
+        data: [{ ...backfillsFixture.data[0], status: "running", finished_at: undefined }],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await renderApp(RULE_URL);
+
+  await screen.findByRole("button", { name: "Run on existing data" });
+  // The button is enabled until the backfill list arrives; the wrapper then remounts it, so query it again.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Run on existing data" })).toBeDisabled(),
+  );
+  expect(screen.getByText("A backfill of this rule is running.")).toBeInTheDocument();
 });

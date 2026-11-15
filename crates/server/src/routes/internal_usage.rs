@@ -120,7 +120,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::test_support::{TestApp, TestResponse, control_plane_token};
+    use crate::test_support::{TestApp, TestResponse};
     use llmobs_core::ids::{OrgId, ProjectId};
 
     /// Nanoseconds of an RFC 3339 instant.
@@ -140,7 +140,7 @@ mod tests {
 
     async fn get(app: &TestApp, token: &str, query: &str) -> TestResponse {
         app.request(Method::GET, &format!("/api/internal/v1/usage{query}"))
-            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {token}"))
+            .control_plane(token)
             .send()
             .await
     }
@@ -178,12 +178,7 @@ mod tests {
     async fn rows_are_summed_per_org_and_day_in_order() {
         let app = TestApp::new().await;
         let (first, second) = seed_usage(&app).await;
-        let response = get(
-            &app,
-            &control_plane_token("usage"),
-            "?from=2026-01-01&to=2026-01-03",
-        )
-        .await;
+        let response = get(&app, "usage", "?from=2026-01-01&to=2026-01-03").await;
         assert_eq!(response.status.as_u16(), 200);
         let page: Page<InternalUsageRow> = response.json();
         assert_eq!(page.next_cursor, None);
@@ -207,8 +202,8 @@ mod tests {
     async fn pages_follow_the_cursor_to_the_end() {
         let app = TestApp::new().await;
         seed_usage(&app).await;
-        let token = control_plane_token("usage");
-        let full: Page<InternalUsageRow> = get(&app, &token, "?from=2026-01-01&to=2026-01-03")
+        let token = "usage";
+        let full: Page<InternalUsageRow> = get(&app, token, "?from=2026-01-01&to=2026-01-03")
             .await
             .json();
 
@@ -222,7 +217,7 @@ mod tests {
                 }
                 None => "?from=2026-01-01&to=2026-01-03&limit=2".to_owned(),
             };
-            let response = get(&app, &token, &query).await;
+            let response = get(&app, token, &query).await;
             assert_eq!(response.status.as_u16(), 200);
             let page: Page<InternalUsageRow> = response.json();
             assert!(page.data.len() <= 2);
@@ -242,13 +237,13 @@ mod tests {
     async fn the_range_is_inclusive_and_at_most_92_days() {
         let app = TestApp::new().await;
         seed_usage(&app).await;
-        let token = control_plane_token("usage");
+        let token = "usage";
         // 2026-01-01 + 92 days is 2026-04-03.
-        let allowed = get(&app, &token, "?from=2026-01-01&to=2026-04-03").await;
+        let allowed = get(&app, token, "?from=2026-01-01&to=2026-04-03").await;
         assert_eq!(allowed.status.as_u16(), 200);
-        let refused = get(&app, &token, "?from=2026-01-01&to=2026-04-04").await;
+        let refused = get(&app, token, "?from=2026-01-01&to=2026-04-04").await;
         assert_eq!(refused.status.as_u16(), 400);
-        let inverted = get(&app, &token, "?from=2026-01-03&to=2026-01-01").await;
+        let inverted = get(&app, token, "?from=2026-01-03&to=2026-01-01").await;
         assert_eq!(inverted.status.as_u16(), 400);
     }
 
@@ -256,7 +251,7 @@ mod tests {
     async fn missing_or_bad_dates_are_refused() {
         let app = TestApp::new().await;
         seed_usage(&app).await;
-        let token = control_plane_token("usage");
+        let token = "usage";
         for query in [
             "?to=2026-01-03",
             "?from=2026-01-01",
@@ -264,7 +259,7 @@ mod tests {
             "?from=yesterday&to=2026-01-03",
             "?from=2026-01-01&to=2026-02-30",
         ] {
-            let response = get(&app, &token, query).await;
+            let response = get(&app, token, query).await;
             assert_eq!(response.status.as_u16(), 400, "{query}");
         }
     }
@@ -273,13 +268,13 @@ mod tests {
     async fn limit_is_between_1_and_10000() {
         let app = TestApp::new().await;
         seed_usage(&app).await;
-        let token = control_plane_token("usage");
+        let token = "usage";
         let base = "?from=2026-01-01&to=2026-01-03";
         for limit in ["0", "10001", "-1"] {
-            let response = get(&app, &token, &format!("{base}&limit={limit}")).await;
+            let response = get(&app, token, &format!("{base}&limit={limit}")).await;
             assert_eq!(response.status.as_u16(), 400, "limit {limit}");
         }
-        let response = get(&app, &token, &format!("{base}&limit=10000")).await;
+        let response = get(&app, token, &format!("{base}&limit=10000")).await;
         assert_eq!(response.status.as_u16(), 200);
         let page: Value = response.json();
         assert_eq!(page["data"].as_array().map(Vec::len), Some(4));
@@ -289,7 +284,7 @@ mod tests {
     async fn a_bad_cursor_is_refused() {
         let app = TestApp::new().await;
         seed_usage(&app).await;
-        let token = control_plane_token("usage");
+        let token = "usage";
         let not_json = URL_SAFE_NO_PAD.encode(b"not json");
         let bad_day = encode_cursor("2026-13-01", Uuid::now_v7()).unwrap();
         let unpadded = encode_cursor("2026-1-5", Uuid::now_v7()).unwrap();
@@ -301,7 +296,7 @@ mod tests {
         ] {
             let response = get(
                 &app,
-                &token,
+                token,
                 &format!("?from=2026-01-01&to=2026-01-03&cursor={cursor}"),
             )
             .await;
@@ -316,7 +311,7 @@ mod tests {
         let seeded = app.seed().await;
         let query = "?from=2026-01-01&to=2026-01-03";
 
-        let orgs = get(&app, &control_plane_token("orgs"), query).await;
+        let orgs = get(&app, "orgs", query).await;
         assert_eq!(orgs.status.as_u16(), 403);
 
         let session = app

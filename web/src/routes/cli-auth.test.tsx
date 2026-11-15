@@ -18,6 +18,9 @@ beforeEach(() => {
     navigate: (url) => {
       urls.push(url);
     },
+    replace: (url) => {
+      urls.push(url);
+    },
     submit: (url, fields) => {
       forms.push({ url, fields });
     },

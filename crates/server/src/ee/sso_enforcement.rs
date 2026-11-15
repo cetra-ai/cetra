@@ -160,4 +160,131 @@ mod tests {
             .as_bool()
             .unwrap()
     }
+
+    /// Auth review #12 (D-P-69): listing a domain also stops the password sessions, personal
+    /// access tokens and resets of that domain, not only new logins.
+    #[tokio::test]
+    async fn enforced_domains_lose_password_sessions_tokens_and_resets() {
+        use crate::auth::OrgRole;
+        use crate::auth::secret::{self, KeyKind};
+        use crate::auth::session::{SessionOrigin, start_session};
+        use crate::meta::personal_tokens::{self, NewToken};
+
+        let key = license_key(&["sso_enforcement"]);
+        let app = TestApp::with_mailer_config(move |config| {
+            sso_config(config);
+            config.license_key = Some(crate::config::Secret::new(key));
+        })
+        .await;
+        let seeded = app.seed().await;
+        let listed = crate::test_support::member_in_org(
+            &app,
+            seeded.org_id,
+            "x@sso.example",
+            OrgRole::Member,
+        )
+        .await;
+        let other = crate::test_support::member_in_org(
+            &app,
+            seeded.org_id,
+            "y@other.example",
+            OrgRole::Member,
+        )
+        .await;
+        let me = |cookie: String| {
+            let app = &app;
+            async move {
+                app.request(Method::GET, "/api/auth/me")
+                    .header("cookie", &cookie)
+                    .send()
+                    .await
+                    .status
+            }
+        };
+        // A session no provider started stops resolving; other domains are untouched.
+        assert_eq!(me(listed.cookie.clone()).await, 401);
+        assert_eq!(me(other.cookie.clone()).await, 200);
+        // A provider's session passes.
+        let header = start_session(&app.state, listed.id, None, None, SessionOrigin::Provider)
+            .await
+            .unwrap();
+        let provider_cookie = header
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        assert_eq!(me(provider_cookie).await, 200);
+
+        // A personal access token of the domain is refused.
+        let minted = secret::new_key(KeyKind::Personal).unwrap();
+        let bearer = format!("Bearer {}", minted.plaintext);
+        let now = app.state.clock.now_ns();
+        let user_id = listed.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    personal_tokens::insert_token(
+                        conn,
+                        NewToken {
+                            user_id,
+                            name: "ci".to_owned(),
+                            prefix: minted.prefix,
+                            hash: minted.hash,
+                            scopes: vec![crate::auth::roles::KeyScope::Read],
+                            expires_at: None,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let pat = app
+            .request(Method::GET, "/api/auth/me")
+            .header("authorization", &bearer)
+            .send()
+            .await;
+        assert_eq!(pat.status, 401);
+
+        // Forgot sends nothing, and a reset token minted earlier is refused.
+        let forgot = app
+            .request(Method::POST, "/api/auth/password/forgot")
+            .json(&serde_json::json!({ "email": "x@sso.example" }))
+            .send()
+            .await;
+        assert_eq!(forgot.status, 204);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(app.sent().is_empty());
+        let token = secret::new_opaque_token().unwrap();
+        let hash = token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &hash,
+                        user_id,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-llmobs-1" }))
+            .send()
+            .await;
+        assert_eq!(reset.status, 403);
+        assert_eq!(reset.problem().code, ProblemCode::SsoRequired);
+    }
 }

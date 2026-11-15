@@ -100,6 +100,9 @@ pub(crate) enum ProjectPerm {
     ManageSettings,
     /// Project member overrides.
     ManageMembers,
+    /// The org's member list as seen from a project: names, emails and roles. An API key never
+    /// reads it (D-P-67).
+    ViewMembers,
     /// Write and delete scores (spec 08: member and above).
     Annotate,
     /// Evaluators, online rules, score definitions, test and manual runs (D-I-24).
@@ -210,7 +213,7 @@ impl ProjectPerm {
     /// Lowest effective project role that may perform this.
     pub(crate) fn min_role(self) -> Role {
         match self {
-            Self::View | Self::Query => Role::Viewer,
+            Self::View | Self::Query | Self::ViewMembers => Role::Viewer,
             Self::Annotate | Self::ManageEvaluation | Self::ManageAlerts => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
@@ -225,6 +228,7 @@ impl ProjectPerm {
             | Self::ManageSettings
             | Self::ManageMembers
             | Self::ManageAlerts
+            | Self::ViewMembers
             | Self::Drop => None,
         }
     }
@@ -295,6 +299,8 @@ mod tests {
         assert!(ProjectPerm::Drop.key_scope().is_none());
         assert!(ProjectPerm::ManageSettings.key_scope().is_none());
         assert!(ProjectPerm::ManageMembers.key_scope().is_none());
+        assert_eq!(ProjectPerm::ViewMembers.min_role(), Role::Viewer);
+        assert!(ProjectPerm::ViewMembers.key_scope().is_none());
         // Score writes: viewer no; member, admin and owner yes.
         assert_eq!(ProjectPerm::Annotate.min_role(), Role::Member);
         assert_eq!(ProjectPerm::Annotate.key_scope(), Some(KeyScope::Write));

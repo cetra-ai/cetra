@@ -1459,6 +1459,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recover_fails_running_backfills() {
+        use crate::meta::backfills::{
+            BackfillEnd, NewBackfill, finish_backfill, insert_backfill, list_backfills,
+        };
+
+        let (app, seeded) = seeded_app(16).await;
+        let evaluator = check(&app, &seeded).await;
+        let rule = Uuid::now_v7();
+        let project = seeded.project.id;
+        let (done, running) = (Uuid::now_v7(), Uuid::now_v7());
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_rule(
+                        conn,
+                        NewRule {
+                            id: rule,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        RuleFields {
+                            name: "Same".to_owned(),
+                            filter: None,
+                            variable_mapping: "{}".to_owned(),
+                            sample_rate: 1.0,
+                            budget_usd: None,
+                            budget_period: None,
+                            enabled: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    let new = |id: Uuid| NewBackfill {
+                        id,
+                        rule_id: rule,
+                        from_ns: now - 60_000_000_000,
+                        to_ns: now - 20_000_000_000,
+                        max_targets: 10,
+                        sample_rate: 1.0,
+                        created_by: None,
+                    };
+                    insert_backfill(conn, new(done), now).await?;
+                    finish_backfill(conn, done, BackfillEnd::Done, now).await?;
+                    insert_backfill(conn, new(running), now).await?;
+                    Ok::<_, MetaError>(())
+                })
+            })
+            .await
+            .expect("a rule and two backfills");
+
+        crate::eval::recover(&app.state).await.expect("recover");
+        let rows = list_backfills(app.state.meta.reader(), rule)
+            .await
+            .expect("list");
+        let find = |id: Uuid| rows.iter().find(|row| row.id == id).expect("listed");
+        let interrupted = find(running);
+        assert_eq!(interrupted.status, "failed");
+        assert_eq!(interrupted.error.as_deref(), Some("interrupted"));
+        assert!(interrupted.finished_at.is_some());
+        assert_eq!(find(done).status, "done");
+    }
+
+    #[tokio::test]
     async fn shutdown_drains_then_aborts() {
         let (app, seeded) = seeded_app(16).await;
         let trace_id = trace(0x1d);

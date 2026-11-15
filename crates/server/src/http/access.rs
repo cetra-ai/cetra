@@ -163,6 +163,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::eval_jobs::routes());
     routes.extend(crate::routes::evaluators::routes());
     routes.extend(crate::routes::online_rules::routes());
+    routes.extend(crate::routes::backfills::routes());
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());
     routes.extend(crate::routes::sql::routes());
@@ -332,7 +333,14 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
             }
         }
         Access::ControlPlane { scope } => match &principal {
-            Principal::ControlPlane { scope: held, .. } if held.as_str() == scope => {}
+            Principal::ControlPlane {
+                scope: held,
+                method,
+                path,
+                ..
+            } if held.as_str() == scope
+                && method.as_str() == parts.method.as_str()
+                && path.as_str() == parts.uri.path() => {}
             _ => return Err(forbidden()),
         },
     }
@@ -850,14 +858,21 @@ mod tests {
             name: None,
             password_hash: None,
             email_verified_at: None,
+            email_verified_via: None,
             is_instance_admin: admin,
         }
     }
 
     async fn cookie(app: &TestApp, user_id: uuid::Uuid) -> HeaderValueCookie {
-        let header = start_session(&app.state, user_id, None, None, None)
-            .await
-            .unwrap();
+        let header = start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let pair = header.to_str().unwrap().split_once(';').unwrap().0;
         HeaderValueCookie(pair.to_owned())
     }
@@ -1082,7 +1097,7 @@ mod tests {
         let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
         let org = app.seed().await.org_id;
         let before = crate::entitlements::of(&app.state, org);
-        let control_plane = format!("Bearer {}", control_plane_token("orgs"));
+        let control_plane = format!("Bearer {}", control_plane_token("orgs", "GET", "/"));
         let org_bearer = format!(
             "Bearer {}",
             org_token(
@@ -1169,8 +1184,23 @@ mod tests {
         ])
         .await;
         let people = people(&app).await;
-        let orgs = format!("Bearer {}", control_plane_token("orgs"));
-        let usage = format!("Bearer {}", control_plane_token("usage"));
+        let orgs = format!(
+            "Bearer {}",
+            control_plane_token("orgs", "GET", "/t/control")
+        );
+        let usage = format!(
+            "Bearer {}",
+            control_plane_token("usage", "GET", "/t/control")
+        );
+        // Auth review #14 (D-P-71): the token names its method and path.
+        let other_path = format!(
+            "Bearer {}",
+            control_plane_token("orgs", "GET", "/t/control/other")
+        );
+        let other_method = format!(
+            "Bearer {}",
+            control_plane_token("orgs", "POST", "/t/control")
+        );
 
         let anonymous = app.request(Method::GET, "/t/control").send().await;
         assert_outcome(
@@ -1185,6 +1215,14 @@ mod tests {
             .send()
             .await;
         assert_outcome(&allowed, StatusCode::OK, "allowed", "orgs token");
+        for (case, bearer) in [("other path", &other_path), ("other method", &other_method)] {
+            let replayed = app
+                .request(Method::GET, "/t/control")
+                .header("authorization", bearer)
+                .send()
+                .await;
+            assert_outcome(&replayed, StatusCode::FORBIDDEN, "denied-403", case);
+        }
         let other_scope = app
             .request(Method::GET, "/t/control")
             .header("authorization", &usage)

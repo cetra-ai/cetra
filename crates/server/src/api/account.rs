@@ -15,7 +15,8 @@ use uuid::Uuid;
 pub struct AuthConfig {
     /// No user exists yet, so the UI shows the setup page.
     pub setup_required: bool,
-    /// Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set.
+    /// Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+    /// set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
     pub password_enabled: bool,
     /// Who may create an account after bootstrap.
     pub signup: SignupPolicy,

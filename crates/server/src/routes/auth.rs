@@ -17,7 +17,7 @@ use crate::auth::password::check_policy;
 use crate::auth::principal::{self, Principal};
 use crate::auth::reset::{ResetError, reset_link, verification_link};
 use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
-use crate::auth::session::{clear_cookie, resolve_cookie_header, start_session};
+use crate::auth::session::{SessionOrigin, clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
@@ -31,6 +31,7 @@ use crate::meta::members;
 use crate::meta::orgs::orgs_of_user;
 use crate::meta::password_resets::{delete_user_resets, use_reset, valid_reset};
 use crate::meta::personal_tokens::revoke_user_tokens;
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, UserRow, normalize_email};
 use crate::meta::web_sessions::{delete_session, delete_user_sessions};
 
@@ -185,7 +186,7 @@ async fn setup(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         Some(ip),
-        None,
+        SessionOrigin::Password,
     )
     .await?;
     let trace_completion_timeout_s = created.created.project.completion_timeout_s();
@@ -222,11 +223,6 @@ async fn login(
     headers: HeaderMap,
     error::Json(body): error::Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    if state.config.auth.disable_password {
-        return Err(ApiError::Forbidden {
-            code: ProblemCode::Forbidden,
-        });
-    }
     let Ok(email) = normalize_email(&body.email) else {
         return Err(ApiError::Unauthorized);
     };
@@ -287,6 +283,13 @@ async fn login(
             code: ProblemCode::SsoRequired,
         });
     }
+    // Password login is off for everyone but instance admins, who are never linked to
+    // an identity (D148, D-S-3). Checked after the password verifies, like the block above.
+    if state.config.auth.disable_password && !user.is_instance_admin {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
+        });
+    }
     if state.config.auth.require_email_verification && user.email_verified_at.is_none() {
         return Err(ApiError::Forbidden {
             code: ProblemCode::EmailNotVerified,
@@ -341,11 +344,6 @@ async fn reset_password(
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
-    if state.config.auth.disable_password {
-        return Err(ApiError::Forbidden {
-            code: ProblemCode::Forbidden,
-        });
-    }
     if !is_opaque_token(&body.token) {
         return Err(invalid_link());
     }
@@ -357,9 +355,18 @@ async fn reset_password(
     let Some(user) = users::user_by_id(state.meta.reader(), user_id).await? else {
         return Err(invalid_link());
     };
-    if crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin {
+    if crate::ee::sso_enforcement::requires_sso(&state, &user.email)
+        || (crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin)
+    {
         return Err(ApiError::Forbidden {
             code: ProblemCode::SsoRequired,
+        });
+    }
+    // Only instance admins set a password while password login is off (D-S-3); the token
+    // stays unused.
+    if state.config.auth.disable_password && !user.is_instance_admin {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::Forbidden,
         });
     }
     check_policy(&body.password, &user.email)
@@ -457,6 +464,7 @@ async fn forgot_password(
     let now = state.clock.now_ns();
     if let Some(user) = users::user_by_email(state.meta.reader(), &email).await?
         && user.disabled_at.is_none()
+        && !crate::ee::sso_enforcement::requires_sso(&state, &email)
         && !(crate::ee::org_sso::enforces(&state, &email) && !user.is_instance_admin)
         && mail_allowed(&state, &email, now)
     {
@@ -486,7 +494,7 @@ async fn verify_email(
                 else {
                     return Ok(None);
                 };
-                users::set_email_verified(conn, id, now).await?;
+                users::set_email_verified(conn, id, now, EmailVerifiedVia::MailToken).await?;
                 Ok(Some(()))
             })
         })
@@ -623,10 +631,13 @@ async fn signup(
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let Some((pending, _)) = invites::invite_by_hash_tx(conn, &hash, now).await?
+                    let Some((pending, org)) = invites::invite_by_hash_tx(conn, &hash, now).await?
                     else {
                         return Ok(InvitedSignup::Missing);
                     };
+                    if org.state != "active" {
+                        return Ok(InvitedSignup::Missing);
+                    }
                     if pending.email != email_for_insert {
                         return Ok(InvitedSignup::Missing);
                     }
@@ -650,6 +661,7 @@ async fn signup(
                             name: name_for_insert,
                             password_hash: Some(password_hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::Invite),
                             is_instance_admin: false,
                         },
                         now,
@@ -692,6 +704,7 @@ async fn signup(
                         name: name_for_insert,
                         password_hash: Some(password_hash),
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,
@@ -760,7 +773,7 @@ async fn session_cookie(
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok()),
         ip,
-        None,
+        SessionOrigin::Password,
     )
     .await
 }
@@ -1129,6 +1142,7 @@ mod tests {
                             name: Some("Ada".to_owned()),
                             password_hash: hash,
                             email_verified_at: verified_at,
+                            email_verified_via: verified_at.map(|_| EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -1388,6 +1402,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -1489,8 +1504,8 @@ mod tests {
             .json(&login_body("ada@example.com", PASSWORD))
             .send()
             .await;
-        assert_eq!(login_refused.status, 403);
-        assert_eq!(login_refused.problem().code, ProblemCode::Forbidden);
+        assert_eq!(login_refused.status, 401);
+        assert_eq!(login_refused.problem().code, ProblemCode::Unauthorized);
 
         let open = TestApp::with_config(|config| {
             config.auth.signup = SignupPolicy::Open;
@@ -1864,16 +1879,162 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reset_is_forbidden_when_password_login_is_disabled() {
+    async fn instance_admins_log_in_with_a_password_when_password_login_is_off() {
         let app = TestApp::with_config(|config| config.auth.disable_password = true).await;
-        let response = app
-            .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": "nope", "password": "llmobs-ok2" }))
+        let admin = insert_account(&app, "root@example.com", Some(PASSWORD), true).await;
+        make_instance_admin(&app, admin).await;
+        insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+
+        let admin_login = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("root@example.com", PASSWORD))
             .send()
             .await;
-        assert_eq!(response.status, 403);
-        assert_eq!(response.problem().code, ProblemCode::Forbidden);
-        assert!(response.problem().detail.is_none());
+        assert_eq!(admin_login.status, 200);
+        let cookie = session_cookie(&admin_login);
+        let me = app
+            .request(Method::GET, "/api/auth/me")
+            .header(axum::http::header::COOKIE.as_str(), &cookie)
+            .send()
+            .await;
+        assert_eq!(me.status, 200);
+
+        let ada_login = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", PASSWORD))
+            .send()
+            .await;
+        assert_eq!(ada_login.status, 403);
+        assert_eq!(ada_login.problem().code, ProblemCode::Forbidden);
+        assert!(ada_login.problem().detail.is_none());
+
+        let before = verifies(&app);
+        let ada_wrong = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", "wrong-password-1"))
+            .send()
+            .await;
+        assert_eq!(ada_wrong.status, 401);
+        assert_eq!(ada_wrong.problem().code, ProblemCode::Unauthorized);
+        assert_eq!(verifies(&app), before + 1, "the password is checked first");
+
+        let admin_wrong = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("root@example.com", "wrong-password-1"))
+            .send()
+            .await;
+        assert_eq!(admin_wrong.status, 401);
+
+        let missing = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("missing@example.com", PASSWORD))
+            .send()
+            .await;
+        assert_eq!(missing.status, 401);
+
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(!config.password_enabled);
+    }
+
+    #[tokio::test]
+    async fn only_instance_admins_reset_a_password_when_password_login_is_off() {
+        let app = TestApp::with_config(|config| config.auth.disable_password = true).await;
+        let bad = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({ "token": "nope", "password": "new-llmobs-1" }))
+            .send()
+            .await;
+        assert_eq!(bad.status, 400);
+        assert_eq!(
+            bad.problem().detail.as_deref(),
+            Some("invalid or expired link")
+        );
+
+        let ada = insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let admin = insert_account(&app, "root@example.com", Some(PASSWORD), true).await;
+        make_instance_admin(&app, admin).await;
+
+        let now = app.state.clock.now_ns();
+        let ada_token = crate::auth::secret::new_opaque_token().expect("token");
+        let ada_hash = ada_token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &ada_hash,
+                        ada,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let ada_reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({
+                "token": ada_token.plaintext,
+                "password": "new-llmobs-1",
+            }))
+            .send()
+            .await;
+        assert_eq!(ada_reset.status, 403);
+        assert_eq!(ada_reset.problem().code, ProblemCode::Forbidden);
+        let ada_old = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", PASSWORD))
+            .send()
+            .await;
+        assert_eq!(ada_old.status, 403);
+
+        let admin_token = crate::auth::secret::new_opaque_token().expect("token");
+        let admin_hash = admin_token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &admin_hash,
+                        admin,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let admin_reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({
+                "token": admin_token.plaintext,
+                "password": "new-llmobs-1",
+            }))
+            .send()
+            .await;
+        assert_eq!(admin_reset.status, 204);
+        let new_login = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("root@example.com", "new-llmobs-1"))
+            .send()
+            .await;
+        assert_eq!(new_login.status, 200);
+        let old_login = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("root@example.com", PASSWORD))
+            .send()
+            .await;
+        assert_eq!(old_login.status, 401);
     }
 
     #[tokio::test]
@@ -2094,6 +2255,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -2107,7 +2269,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user_id, None, None, None)
+        let cookie = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
             .await
             .unwrap();
         let pair = cookie
@@ -2243,6 +2405,12 @@ mod tests {
         assert_eq!(known.status, 403);
         assert_eq!(known.problem().code, ProblemCode::Forbidden);
         same_response(&known, &unknown);
+        assert!(app.sent().is_empty());
+
+        let root = insert_account(&app, "root@example.com", Some(PASSWORD), true).await;
+        make_instance_admin(&app, root).await;
+        let admin_forgot = post_forgot(&app, "root@example.com").await;
+        assert_eq!(admin_forgot.status, 403);
         assert!(app.sent().is_empty());
     }
 
@@ -2482,6 +2650,7 @@ mod tests {
                             name: None,
                             password_hash: Some(hash),
                             email_verified_at: Some(now),
+                            email_verified_via: Some(EmailVerifiedVia::MailToken),
                             is_instance_admin: admin,
                         },
                         now,

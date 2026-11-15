@@ -226,7 +226,8 @@ impl<'de> Deserialize<'de> for PublicUrl {
 ///
 /// GitHub and Google accept the split env form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`,
 /// `LLMOBS_AUTH__GOOGLE__CLIENT_SECRET`, and the other scalar fields).
-/// `[[auth.oidc]]` is TOML only. `LLMOBS_AUTH__OIDC__*` is ignored.
+/// `[[auth.oidc]]` providers are defined in TOML; only their client secret has an env
+/// form, `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` (D-S-2).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSettings {
@@ -251,7 +252,7 @@ pub struct AuthSettings {
     /// Google OIDC, when configured.
     #[serde(default)]
     pub google: Option<GoogleAuth>,
-    /// Generic OIDC providers, in config order. TOML only.
+    /// Generic OIDC providers, in config order. TOML, plus each one's client secret from the env.
     #[serde(default)]
     pub oidc: Vec<OidcAuth>,
 }
@@ -312,7 +313,9 @@ pub struct OidcAuth {
     pub issuer: String,
     /// OAuth client id.
     pub client_id: String,
-    /// OAuth client secret.
+    /// OAuth client secret. Optional in the file when
+    /// `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` sets it (D-S-2); required after loading.
+    #[serde(default = "empty_secret")]
     pub client_secret: Secret<String>,
     /// Must include `openid`. Default `openid`, `email`, `profile`.
     #[serde(
@@ -714,7 +717,7 @@ pub enum ConfigError {
     /// `reason` is static. It is never a secret, an email, or the issuer URL.
     #[error("{key}: {reason}")]
     Provider {
-        /// Dotted path, for example `auth.oidc.okta.issuer`.
+        /// Dotted path, for example `auth.oidc.okta.issuer`, or the name of the environment variable at fault.
         key: String,
         /// Static rule.
         reason: &'static str,
@@ -756,6 +759,10 @@ fn default_oidc_scopes() -> Vec<String> {
     ]
 }
 
+fn empty_secret() -> Secret<String> {
+    Secret(String::new())
+}
+
 fn default_log_level() -> String {
     "info".to_owned()
 }
@@ -779,8 +786,45 @@ fn load_from(toml: Option<&str>, env: &[(&str, &str)]) -> Result<ServerConfig, C
     let data_dir = path_string(&data_dir)?;
     figment = figment.merge(Serialized::default("storage.data_dir", data_dir));
     let mut config: ServerConfig = figment.extract().map_err(map_figment)?;
+    apply_oidc_env(&mut config.auth, env)?;
     validate(&mut config)?;
     Ok(config)
+}
+
+/// The variable that sets provider `name`'s client secret (D-S-2): `cloud` →
+/// `LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET`, `my-idp` → `…__MY_IDP__CLIENT_SECRET`.
+fn oidc_env_name(name: &str) -> String {
+    format!(
+        "LLMOBS_AUTH__OIDC__{}__CLIENT_SECRET",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// Applies `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` to the `[[auth.oidc]]` provider of
+/// that name (D-S-2). Any other `LLMOBS_AUTH__OIDC__*` variable, and one naming no
+/// provider, is an error that names the variable, never its value. Names compare without
+/// regard to case, like every `LLMOBS_` variable.
+fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), ConfigError> {
+    for (name, value) in env {
+        let Some(dotted) = split_key(name) else {
+            continue;
+        };
+        if dotted != "auth.oidc" && !dotted.starts_with("auth.oidc.") {
+            continue;
+        }
+        let provider = auth
+            .oidc
+            .iter_mut()
+            .find(|provider| name.eq_ignore_ascii_case(&oidc_env_name(&provider.name)));
+        let Some(provider) = provider else {
+            return Err(ConfigError::Provider {
+                key: name.to_ascii_uppercase(),
+                reason: "only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file",
+            });
+        };
+        provider.client_secret = Secret((*value).to_owned());
+    }
+    Ok(())
 }
 
 fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
@@ -826,6 +870,13 @@ fn path_string(path: &Path) -> Result<String, ConfigError> {
 
 fn map_figment(error: figment::Error) -> ConfigError {
     for part in error.clone() {
+        // The toml parser quotes the offending line, which may hold a secret. Its first line
+        // names the position only.
+        let text = part.to_string();
+        if part.path.is_empty() && text.starts_with("TOML parse error") {
+            let position = text.lines().next().unwrap_or("TOML parse error").to_owned();
+            return ConfigError::Figment(Box::new(figment::Error::from(position)));
+        }
         if let Some(key) = secret_key(&part.path) {
             // Figment's own text can quote the rejected URL, password included.
             // Only the static reason is kept.
@@ -1605,8 +1656,8 @@ impl Provider for EnvSource<'_> {
         let mut dict = Dict::new();
         for (name, value) in self.pairs {
             if let Some(dotted) = split_key(name) {
-                // `[[auth.oidc]]` is a TOML array. The split form cannot name an
-                // element, so those variables are ignored rather than merged.
+                // `[[auth.oidc]]` is a TOML array, which the split form cannot index.
+                // `apply_oidc_env` reads these variables after extraction (D-S-2).
                 if dotted == "auth.oidc" || dotted.starts_with("auth.oidc.") {
                     continue;
                 }
@@ -1719,7 +1770,7 @@ mod tests {
 
     use super::{
         ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
-        SmtpUrl, Tls, issuer_problem, load_from,
+        SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
     };
     use crate::api::account::SignupPolicy;
 
@@ -1961,6 +2012,21 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("http_addr"), "{text}");
         assert!(!text.contains("nope"), "{text}");
+    }
+
+    /// Review 2026-11-15 #7: a TOML syntax error quoted the offending line, so a typo next to
+    /// a secret printed the secret.
+    #[test]
+    fn toml_syntax_errors_omit_the_line() {
+        for toml in [
+            "smtp_url = \"smtp://u:hunter2@x.com\" junk\n",
+            "smtp_url = \"smtp://u:hunter2@x.com\n",
+            "[auth.github]\nclient_secret = hunter2\n",
+        ] {
+            let text = load_from(Some(toml), &[]).unwrap_err().to_string();
+            assert!(text.contains("TOML parse error at line"), "{text}");
+            assert!(!text.contains("hunter2"), "{text}");
+        }
     }
 
     #[test]
@@ -2705,27 +2771,17 @@ mod tests {
     }
 
     #[test]
-    fn github_client_secret_stays_a_string_and_oidc_env_is_ignored() {
+    fn github_client_secret_stays_a_string() {
         let config = load_from(
             None,
             &[
                 ("LLMOBS_AUTH__GITHUB__CLIENT_ID", "gh-client"),
                 ("LLMOBS_AUTH__GITHUB__CLIENT_SECRET", "987654321"),
-                ("LLMOBS_AUTH__OIDC__0__NAME", "okta"),
-                ("LLMOBS_AUTH__OIDC__0__CLIENT_SECRET", "from-env"),
             ],
         )
         .expect("env github");
         let github = config.auth.github.expect("github");
         assert_eq!(github.client_secret.expose(), "987654321");
-        assert!(config.auth.oidc.is_empty());
-
-        let kept = load_from(
-            Some(oidc("client_secret = \"from-toml\"").as_str()),
-            &[("LLMOBS_AUTH__OIDC__0__CLIENT_SECRET", "from-env")],
-        )
-        .expect("toml oidc");
-        assert_eq!(kept.auth.oidc[0].client_secret.expose(), "from-toml");
 
         let error = load_from(
             Some("[auth.github]\nclient_id = \"gh\"\nclient_secret = 987654321\n"),
@@ -2762,6 +2818,107 @@ mod tests {
             lines.push(line.trim().to_owned());
         }
         format!("[[auth.oidc]]\n{}\n", lines.join("\n"))
+    }
+
+    const OIDC_WITHOUT_SECRET: &str = r#"
+[[auth.oidc]]
+name = "my-idp"
+display_name = "My IdP"
+issuer = "https://idp.example"
+client_id = "client"
+"#;
+
+    #[test]
+    fn oidc_client_secret_comes_from_the_env() {
+        let config = load_from(
+            Some(OIDC_WITHOUT_SECRET),
+            &[("LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "987654321")],
+        )
+        .expect("env secret");
+        // An all-digit secret stays a string: it never goes through figment's env parser.
+        assert_eq!(config.auth.oidc[0].client_secret.expose(), "987654321");
+        assert!(!format!("{:?}", config.auth.oidc[0]).contains("987654321"));
+    }
+
+    #[test]
+    fn oidc_env_name_ignores_case() {
+        let config = load_from(
+            Some(OIDC_WITHOUT_SECRET),
+            &[("llmobs_auth__oidc__my_idp__client_secret", "from-env")],
+        )
+        .expect("lower-case secret");
+        assert_eq!(config.auth.oidc[0].client_secret.expose(), "from-env");
+    }
+
+    #[test]
+    fn oidc_env_secret_wins_over_the_file() {
+        let config = load_from(
+            Some(&oidc("")),
+            &[("LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET", "from-env")],
+        )
+        .expect("env wins");
+        assert_eq!(config.auth.oidc[0].client_secret.expose(), "from-env");
+    }
+
+    #[test]
+    fn oidc_secret_is_still_required() {
+        assert_rejected(
+            OIDC_WITHOUT_SECRET,
+            "auth.oidc.my-idp.client_secret",
+            "client secret is required",
+        );
+        let error = load_from(
+            Some(OIDC_WITHOUT_SECRET),
+            &[("LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "")],
+        )
+        .expect_err("empty env secret");
+        assert_eq!(
+            error.to_string(),
+            "auth.oidc.my-idp.client_secret: client secret is required"
+        );
+    }
+
+    #[test]
+    fn stray_oidc_env_is_refused() {
+        for var in [
+            "LLMOBS_AUTH__OIDC__OTHER__CLIENT_SECRET",
+            "LLMOBS_AUTH__OIDC__0__CLIENT_SECRET",
+            "LLMOBS_AUTH__OIDC__OKTA__CLIENT_ID",
+            "LLMOBS_AUTH__OIDC__0__NAME",
+        ] {
+            let error =
+                load_from(Some(&oidc("")), &[(var, "leaked-value")]).expect_err("stray variable");
+            let text = error.to_string();
+            assert_eq!(
+                text,
+                format!(
+                    "{var}: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
+                )
+            );
+            assert!(!text.contains("leaked-value"), "{text}");
+        }
+    }
+
+    #[test]
+    fn oidc_env_without_any_provider_is_refused() {
+        let error = load_from(None, &[("LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET", "x")])
+            .expect_err("no provider");
+        assert_eq!(
+            error.to_string(),
+            "LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file"
+        );
+    }
+
+    #[test]
+    fn oidc_env_name_maps_dashes() {
+        assert_eq!(
+            oidc_env_name("cloud"),
+            "LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET"
+        );
+        assert_eq!(
+            oidc_env_name("my-idp-2"),
+            "LLMOBS_AUTH__OIDC__MY_IDP_2__CLIENT_SECRET"
+        );
     }
 
     const PROVIDERS_TOML: &str = r#"
