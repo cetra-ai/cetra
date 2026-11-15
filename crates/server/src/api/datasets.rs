@@ -362,12 +362,21 @@ pub struct ImportMapping {
 }
 
 /// One rejected row of an import or a preview.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ImportRowError {
     /// CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line.
     pub row: i64,
     /// Why the row was rejected.
     pub message: String,
+}
+
+// `Debug` is hand-written: the row only, never the message (AGENTS.md § Privacy).
+impl fmt::Debug for ImportRowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImportRowError")
+            .field("row", &self.row)
+            .finish_non_exhaustive()
+    }
 }
 
 /// `?format=&partial=` of the preview.
@@ -401,16 +410,16 @@ pub enum ExportFormat {
 
 /// `?version=&format=` of the export.
 #[derive(Debug, Clone, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct ExportParams {
     /// The version to export; default the latest.
     pub version: Option<i64>,
     /// Default `jsonl`.
-    #[serde(default)]
     pub format: Option<ExportFormat>,
 }
 
 /// The head of a file as the import wizard shows it (D-J-6).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ImportPreview {
     pub format: ImportFormat,
     /// CSV: the header. JSONL: the top-level keys of the shown rows, in first-seen order.
@@ -422,6 +431,19 @@ pub struct ImportPreview {
     pub errors: Vec<ImportRowError>,
     /// More rows follow, or the head was cut.
     pub truncated: bool,
+}
+
+// `Debug` is hand-written: counts and flags only, never the rows (AGENTS.md § Privacy).
+impl fmt::Debug for ImportPreview {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImportPreview")
+            .field("format", &self.format)
+            .field("columns", &self.columns.len())
+            .field("rows", &self.rows.len())
+            .field("errors", &self.errors.len())
+            .field("truncated", &self.truncated)
+            .finish()
+    }
 }
 
 /// The outcome of an import.
@@ -539,5 +561,34 @@ mod tests {
         let text = format!("{stored:?}");
         assert!(text.contains("version: 3"), "{text}");
         assert!(!text.contains("canary-stored"), "{text}");
+    }
+
+    #[test]
+    fn import_debug_prints_no_content() {
+        let preview = ImportPreview {
+            format: ImportFormat::Jsonl,
+            columns: vec!["canary-column".to_owned()],
+            rows: vec![json!({"input": "canary-row"})],
+            errors: vec![ImportRowError {
+                row: 7,
+                message: "canary-message".to_owned(),
+            }],
+            truncated: true,
+        };
+        let text = format!("{preview:?}");
+        assert!(text.contains("truncated: true"), "{text}");
+        assert!(text.contains("rows: 1"), "{text}");
+        for canary in ["canary-column", "canary-row", "canary-message"] {
+            assert!(!text.contains(canary), "{text}");
+        }
+        let error = format!(
+            "{:?}",
+            ImportRowError {
+                row: 3,
+                message: "canary-error".to_owned(),
+            }
+        );
+        assert!(error.contains("row: 3"), "{error}");
+        assert!(!error.contains("canary-error"), "{error}");
     }
 }

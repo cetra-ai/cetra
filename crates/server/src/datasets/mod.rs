@@ -19,6 +19,8 @@ pub(crate) const MAX_DESCRIPTION_CHARS: usize = 2_000;
 pub(crate) const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 /// Largest item: `input` + `expected_output` + `metadata`, serialized, in bytes.
 pub(crate) const MAX_ITEM_BYTES: usize = 1024 * 1024;
+/// Deepest nesting of objects and arrays in an item's `input`, `expected_output` or `metadata`.
+pub(crate) const MAX_JSON_DEPTH: usize = 100;
 /// Items in one batch add.
 pub(crate) const MAX_BATCH_ITEMS: usize = 1_000;
 /// Schema failures listed when a schema change is refused.
@@ -135,6 +137,25 @@ pub(crate) fn check_item(prefix: &str, item: &ItemValues, schemas: &Schemas) -> 
         let field = if prefix.is_empty() { "item" } else { prefix };
         errors.push(field_error(field, "is larger than 1 MiB"));
     }
+    if json_depth(&item.input) > MAX_JSON_DEPTH {
+        errors.push(field_error(&input_field, "is nested too deeply"));
+    }
+    if item
+        .expected_output
+        .as_ref()
+        .is_some_and(|expected| json_depth(expected) > MAX_JSON_DEPTH)
+    {
+        errors.push(field_error(
+            &field_path(prefix, "expected_output"),
+            "is nested too deeply",
+        ));
+    }
+    if map_depth(&item.metadata) > MAX_JSON_DEPTH {
+        errors.push(field_error(
+            &field_path(prefix, "metadata"),
+            "is nested too deeply",
+        ));
+    }
     let input_schema = schemas.input.as_ref().filter(|_| !item.input.is_null());
     if let Some(message) = input_schema.and_then(|v| first_failure(v, &item.input)) {
         errors.push(field_error(&input_field, &message));
@@ -194,6 +215,28 @@ fn field_error(field: &str, message: &str) -> FieldError {
         message: message.to_owned(),
         position: None,
     }
+}
+
+/// The nesting depth of `value`: the objects and arrays around its deepest value (`1` for `[]`,
+/// `0` for a scalar). Iterative, so a deep value cannot overflow the stack.
+pub(crate) fn json_depth(value: &Value) -> usize {
+    let mut deepest = 0;
+    let mut stack: Vec<(&Value, usize)> = vec![(value, 0)];
+    while let Some((node, outer)) = stack.pop() {
+        let children: Box<dyn Iterator<Item = &Value>> = match node {
+            Value::Array(items) => Box::new(items.iter()),
+            Value::Object(map) => Box::new(map.values()),
+            _ => continue,
+        };
+        deepest = deepest.max(outer + 1);
+        stack.extend(children.map(|child| (child, outer + 1)));
+    }
+    deepest
+}
+
+/// The nesting depth of a metadata object, as [`json_depth`] counts it.
+fn map_depth(map: &Map<String, Value>) -> usize {
+    1 + map.values().map(json_depth).max().unwrap_or(0)
 }
 
 /// The serialized size of an item's three values, in bytes.
@@ -332,5 +375,58 @@ mod tests {
         let text = format!("{values:?}");
         assert!(!text.contains("canary-debug"));
         assert!(text.contains("bytes"));
+    }
+
+    /// `depth` arrays around `1`, built without recursion.
+    fn nested(depth: usize) -> Value {
+        let mut value = json!(1);
+        for _ in 0..depth {
+            value = Value::Array(vec![value]);
+        }
+        value
+    }
+
+    #[test]
+    fn json_depth_counts_objects_and_arrays() {
+        assert_eq!(json_depth(&json!(1)), 0);
+        assert_eq!(json_depth(&json!("text")), 0);
+        assert_eq!(json_depth(&json!([])), 1);
+        assert_eq!(json_depth(&json!({"a": [{}]})), 3);
+        assert_eq!(json_depth(&json!([1, [2], [[3]]])), 3);
+        assert_eq!(json_depth(&nested(100)), MAX_JSON_DEPTH);
+        assert_eq!(map_depth(&Map::new()), 1);
+        let metadata = json!({"a": {"b": [1]}});
+        let map = metadata.as_object().expect("object");
+        assert_eq!(map_depth(map), json_depth(&metadata));
+    }
+
+    #[test]
+    fn items_nested_past_100_levels_are_refused() {
+        let no_schemas = Schemas::compile(None, None).expect("compiles");
+        let deep = ItemValues {
+            input: nested(MAX_JSON_DEPTH),
+            expected_output: Some(nested(MAX_JSON_DEPTH)),
+            metadata: Map::from_iter([("k".to_owned(), nested(MAX_JSON_DEPTH - 1))]),
+        };
+        assert!(check_item("", &deep, &no_schemas).is_empty());
+
+        let too_deep = ItemValues {
+            input: nested(MAX_JSON_DEPTH + 1),
+            expected_output: Some(nested(MAX_JSON_DEPTH + 1)),
+            metadata: Map::from_iter([("k".to_owned(), nested(MAX_JSON_DEPTH))]),
+        };
+        let errors = check_item("items[4]", &too_deep, &no_schemas);
+        let fields: Vec<(&str, &str)> = errors
+            .iter()
+            .map(|error| (error.field.as_str(), error.message.as_str()))
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                ("items[4].input", "is nested too deeply"),
+                ("items[4].expected_output", "is nested too deeply"),
+                ("items[4].metadata", "is nested too deeply"),
+            ]
+        );
     }
 }

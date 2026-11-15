@@ -1267,6 +1267,10 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
+        (
+            "UpdateDatasetRequest",
+            &["description", "input_schema", "expected_schema"],
+        ),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()

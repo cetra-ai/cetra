@@ -516,6 +516,9 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
 const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
+    ("UpdateDatasetRequest", "description"),
+    ("UpdateDatasetRequest", "input_schema"),
+    ("UpdateDatasetRequest", "expected_schema"),
 ];
 
 /// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that

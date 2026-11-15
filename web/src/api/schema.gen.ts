@@ -6337,11 +6337,11 @@ export interface components {
          */
         UpdateDatasetRequest: {
             /** @description New description, when present. `null` clears it. */
-            description?: string;
+            description?: string | null;
             /** @description New expected-output schema, when present. `null` clears it. */
-            expected_schema?: Record<string, never>;
+            expected_schema?: Record<string, never> | null;
             /** @description New input schema, when present. `null` clears it. */
-            input_schema?: Record<string, never>;
+            input_schema?: Record<string, never> | null;
             /** @description New name, when present. Same rules as on create. */
             name?: string;
         };

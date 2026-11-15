@@ -22959,15 +22959,24 @@
         "description": "`PATCH /api/v1/projects/{project}/datasets/{dataset}` body. An absent field is unchanged;\n`null` clears `description` or a schema.",
         "properties": {
           "description": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "New description, when present. `null` clears it."
           },
           "expected_schema": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "description": "New expected-output schema, when present. `null` clears it."
           },
           "input_schema": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "description": "New input schema, when present. `null` clears it."
           },
           "name": {

@@ -1,5 +1,6 @@
 //! Parses dataset imports: CSV with a column mapping and JSONL (D-J-6). Pure functions: no database, no I/O.
 
+use std::collections::HashSet;
 use std::fmt;
 
 use csv::ByteRecord;
@@ -23,6 +24,12 @@ pub(crate) const MAX_LISTED_ERRORS: usize = 100;
 pub(crate) const MAX_COLUMNS: usize = 1_000;
 /// The longest key of `input.<key>`, `expected.<key>` or `metadata.<key>`, in characters.
 pub(crate) const MAX_KEY_CHARS: usize = 200;
+/// Columns in a CSV header at most.
+pub(crate) const MAX_HEADER_COLUMNS: usize = 10_000;
+/// Characters of an unknown key shown in a row error; a longer key is cut and marked with `…`.
+const MAX_SHOWN_KEY_CHARS: usize = 40;
+/// Keys of a JSONL line that the JSONL export writes and an import ignores (D-J-7).
+const EXPORT_ONLY_KEYS: [&str; 3] = ["id", "source_trace_id", "source_span_id"];
 
 /// Where a column goes, parsed from `ImportColumn::target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,7 +108,8 @@ pub(crate) enum FileError {
     /// The mapping is invalid. Each entry is a field error with `field = "mapping.columns[<i>]…"`.
     #[error("invalid mapping")]
     Mapping(Vec<FieldError>),
-    /// The CSV header is missing, empty, not UTF-8, or has empty or duplicate names.
+    /// The CSV header is missing, empty, not UTF-8, has empty or duplicate names, has more than
+    /// `MAX_HEADER_COLUMNS` columns, or (a partial head) holds no data record.
     #[error("{0}")]
     Header(String),
     /// More than `MAX_ROWS` data rows.
@@ -338,11 +346,11 @@ fn jsonl_item(line: &[u8]) -> Result<ItemValues, String> {
     let Value::Object(mut object) = value else {
         return Err("the line is not a JSON object".to_owned());
     };
-    if let Some(key) = object
-        .keys()
-        .find(|key| !matches!(key.as_str(), "input" | "expected_output" | "metadata"))
-    {
-        return Err(format!("unknown key {key}"));
+    if let Some(key) = object.keys().find(|key| {
+        !matches!(key.as_str(), "input" | "expected_output" | "metadata")
+            && !EXPORT_ONLY_KEYS.contains(&key.as_str())
+    }) {
+        return Err(format!("unknown key {}", shown_key(key)));
     }
     let input = match object.remove("input") {
         None | Some(Value::Null) => return Err("the line has no input".to_owned()),
@@ -364,14 +372,31 @@ fn jsonl_item(line: &[u8]) -> Result<ItemValues, String> {
     })
 }
 
-/// The header record as column names. Names are non-empty and unique.
+/// The shown form of an unknown key: its first `MAX_SHOWN_KEY_CHARS` characters, then `…` when cut.
+fn shown_key(key: &str) -> String {
+    if key.chars().count() > MAX_SHOWN_KEY_CHARS {
+        let cut: String = key.chars().take(MAX_SHOWN_KEY_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        key.to_owned()
+    }
+}
+
+/// The header record as column names. Names are non-empty and unique, and there are at most
+/// `MAX_HEADER_COLUMNS` of them. Duplicates are found with a set, in one pass.
 fn header_names(record: Option<Result<ByteRecord, csv::Error>>) -> Result<Vec<String>, FileError> {
     let record = match record {
         None => return Err(FileError::Header("the file has no header".to_owned())),
         Some(Err(_)) => return Err(FileError::Header("the header cannot be read".to_owned())),
         Some(Ok(record)) => record,
     };
+    if record.len() > MAX_HEADER_COLUMNS {
+        return Err(FileError::Header(format!(
+            "the header has more than {MAX_HEADER_COLUMNS} columns"
+        )));
+    }
     let mut names: Vec<String> = Vec::with_capacity(record.len());
+    let mut seen: HashSet<&str> = HashSet::with_capacity(record.len());
     for (index, field) in record.iter().enumerate() {
         let number = index + 1;
         let name = std::str::from_utf8(field)
@@ -381,10 +406,14 @@ fn header_names(record: Option<Result<ByteRecord, csv::Error>>) -> Result<Vec<St
                 "column {number} has an empty name"
             )));
         }
-        if let Some(earlier) = names.iter().position(|known| known == name) {
+        if !seen.insert(name) {
+            // Only on this error path: the earlier column with the same name (always found).
+            let earlier = names
+                .iter()
+                .position(|known| known == name)
+                .map_or(0, |position| position + 1);
             return Err(FileError::Header(format!(
-                "column {number} repeats the name of column {}",
-                earlier + 1
+                "column {number} repeats the name of column {earlier}"
             )));
         }
         names.push(name.to_owned());
@@ -405,6 +434,12 @@ fn preview_csv(bytes: &[u8], partial: bool) -> Result<PreviewRows, FileError> {
     let mut records = records.into_iter();
     let columns = header_names(records.next())?;
     let data: Vec<Result<ByteRecord, csv::Error>> = records.collect();
+    if partial && data.is_empty() {
+        // Only the header is left, and it may be cut too: nothing can be shown.
+        return Err(FileError::Header(
+            "the head is too short to read".to_owned(),
+        ));
+    }
     let truncated = partial || data.len() > PREVIEW_ROWS;
     let mut rows = Vec::new();
     let mut errors = Vec::new();
@@ -909,9 +944,67 @@ y,z
 
     #[test]
     fn jsonl_unknown_key() {
-        let parsed = parse_jsonl(br#"{"input":1,"id":"x"}"#).expect("parses");
+        let parsed = parse_jsonl(br#"{"input":1,"other":"x"}"#).expect("parses");
         assert!(parsed.items.is_empty());
-        assert_eq!(row_messages(&parsed.errors), vec![(1, "unknown key id")]);
+        assert_eq!(row_messages(&parsed.errors), vec![(1, "unknown key other")]);
+    }
+
+    #[test]
+    fn jsonl_ignores_the_export_only_keys() {
+        let text = r#"{"id":"0190","input":1,"source_trace_id":"a1","source_span_id":"b1"}"#;
+        let parsed = parse_jsonl(text.as_bytes()).expect("parses");
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.items[0].1.input, json!(1));
+        assert_eq!(parsed.items[0].1.expected_output, None);
+    }
+
+    #[test]
+    fn jsonl_unknown_key_is_cut_to_40_characters() {
+        let long = "k".repeat(60);
+        let text = format!("{{\"input\":1,\"{long}\":2}}\n");
+        let parsed = parse_jsonl(text.as_bytes()).expect("parses");
+        let expected = format!("unknown key {}…", "k".repeat(40));
+        assert_eq!(row_messages(&parsed.errors), vec![(1, expected.as_str())]);
+
+        let exact = "k".repeat(40);
+        let text = format!("{{\"input\":1,\"{exact}\":2}}\n");
+        let parsed = parse_jsonl(text.as_bytes()).expect("parses");
+        let expected = format!("unknown key {exact}");
+        assert_eq!(row_messages(&parsed.errors), vec![(1, expected.as_str())]);
+    }
+
+    #[test]
+    fn header_with_too_many_columns_is_refused() {
+        let names: Vec<String> = (0..20_000).map(|i| format!("c{i}")).collect();
+        let text = format!("{}\n", names.join(","));
+        let error =
+            parse_csv(text.as_bytes(), &mapping(&[("c0", "input")])).expect_err("20000 columns");
+        assert_eq!(
+            error,
+            FileError::Header("the header has more than 10000 columns".to_owned())
+        );
+
+        let names: Vec<String> = (0..MAX_HEADER_COLUMNS).map(|i| format!("c{i}")).collect();
+        let text = format!("{}\n", names.join(","));
+        let parsed = parse_csv(text.as_bytes(), &mapping(&[("c0", "input")])).expect("10000");
+        assert!(parsed.items.is_empty());
+    }
+
+    #[test]
+    fn partial_head_with_only_a_header_is_refused() {
+        let error = preview(b"q,a\n", ImportFormat::Csv, true).expect_err("header only");
+        assert_eq!(
+            error,
+            FileError::Header("the head is too short to read".to_owned())
+        );
+        let error = preview(b"q,a\nhi,x", ImportFormat::Csv, true).expect_err("cut record");
+        assert_eq!(
+            error,
+            FileError::Header("the head is too short to read".to_owned())
+        );
+        let preview = preview(b"q,a\n", ImportFormat::Csv, false).expect("whole header");
+        assert_eq!(preview.columns, vec!["q", "a"]);
+        assert!(preview.rows.is_empty());
     }
 
     #[test]

@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::multipart::{MultipartError, MultipartRejection};
-use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Multipart, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -75,11 +74,7 @@ const IMPORT_BODY_LIMIT: usize = import::MAX_FILE_BYTES + 1024 * 1024;
 const MAPPING_BYTES: usize = 1024 * 1024;
 
 /// Imports parsed at once in this process; each holds its file in memory.
-#[cfg(not(test))]
 const IMPORTS_AT_ONCE: usize = 2;
-/// Tests run many imports in parallel threads; they must not see 503.
-#[cfg(test)]
-const IMPORTS_AT_ONCE: usize = 64;
 static IMPORTS: Semaphore = Semaphore::const_new(IMPORTS_AT_ONCE);
 
 /// The whole multipart body must arrive within this time, so a slow sender cannot hold an
@@ -421,7 +416,7 @@ async fn list_datasets(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<DatasetListParams>,
 ) -> Result<error::Json<Page<Dataset>>, ApiError> {
-    let needle = params.q.as_deref().filter(|q| !q.trim().is_empty());
+    let needle = params.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
     let rows = store::list_datasets(state.meta.reader(), access.project.id, needle).await?;
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
@@ -909,7 +904,9 @@ fn encode_rows(rows: &[ItemRow], format: ExportFormat, with_header: bool) -> io:
             } else {
                 Vec::new()
             };
-            let mut writer = csv::Writer::from_writer(Vec::new());
+            let mut writer = csv::WriterBuilder::new()
+                .terminator(csv::Terminator::CRLF)
+                .from_writer(Vec::new());
             for row in rows {
                 writer
                     .write_record([
@@ -1259,20 +1256,18 @@ async fn preview_import(
     Extension(access): Extension<ProjectAccess>,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
     error::Query(params): error::Query<PreviewParams>,
-    body: Result<Bytes, BytesRejection>,
+    body: Body,
 ) -> Result<error::Json<ImportPreview>, ApiError> {
     let project = access.project.id;
     // Reading the dataset proves the caller may see it; the preview uses no schema.
     let row = find(&state, project, &dataset).await?;
-    let bytes = body.map_err(|rejection| {
-        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-            ApiError::PayloadTooLarge {
-                detail: "a preview takes at most 1 MiB",
-            }
-        } else {
-            bad_request_text("the body cannot be read")
-        }
-    })?;
+    // Read here, not by an extractor, so the body is under the upload deadline (D-J-6).
+    let bytes = upload_deadline(
+        axum::body::to_bytes(body, PREVIEW_BODY_LIMIT),
+        UPLOAD_TIMEOUT,
+    )
+    .await?
+    .map_err(preview_body_failed)?;
     tracing::debug!(
         dataset_id = %row.id,
         project_id = %project,
@@ -1737,13 +1732,14 @@ async fn read_parts(mut multipart: Multipart) -> Result<Parts, ApiError> {
     })
 }
 
-/// The file name as stored in the version description: control characters removed, cut to
-/// 200 characters; `upload` when absent or empty after that.
+/// The file name as stored in the version description: control, zero-width, bidi and line or
+/// paragraph separator characters removed, cut to 200 characters; `upload` when absent or empty
+/// after that.
 fn clean_file_name(name: Option<&str>) -> String {
     let cleaned: String = name
         .unwrap_or("")
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_format_control(*c))
         .take(200)
         .collect();
     if cleaned.is_empty() {
@@ -1761,6 +1757,26 @@ async fn upload_deadline<T>(fut: impl Future<Output = T>, limit: Duration) -> Re
             detail: Some("the upload took too long".to_owned()),
             errors: Vec::new(),
         })
+}
+
+/// Zero-width spaces and marks (U+200B–U+200F), line and paragraph separators and bidi
+/// embedding and isolate controls (U+2028–U+202E, U+2066–U+2069).
+fn is_format_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// A preview body that cannot be read: 413 past 1 MiB, 400 otherwise.
+fn preview_body_failed(error: axum::Error) -> ApiError {
+    if error.into_inner().is::<http_body_util::LengthLimitError>() {
+        ApiError::PayloadTooLarge {
+            detail: "a preview takes at most 1 MiB",
+        }
+    } else {
+        bad_request_text("the body cannot be read")
+    }
 }
 
 fn multipart_failed(error: &MultipartError) -> ApiError {
@@ -2389,6 +2405,14 @@ mod tests {
             Some("text/csv; charset=utf-8")
         );
         assert!(response.body.starts_with(CSV_HEADER));
+        // Every line ends with CRLF, the header's terminator: no bare LF.
+        let lines = response.body.iter().filter(|byte| **byte == b'\n').count();
+        let crlf = response
+            .body
+            .windows(2)
+            .filter(|pair| pair[0] == b'\r' && pair[1] == b'\n')
+            .count();
+        assert_eq!((lines, crlf), (3, 3));
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
             .from_reader(response.body.as_ref());
@@ -2456,6 +2480,30 @@ mod tests {
         let response = get(&app, &seeded, "faq/export?format=csv").await;
         assert_eq!(response.status, 200);
         assert_eq!(response.body.as_ref(), CSV_HEADER);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_trims_the_needle() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        create_ok(&app, &seeded, "other").await;
+        let trailing: Value = get(&app, &seeded, "?q=faq%20").await.json();
+        assert_eq!(trailing["data"][0]["name"], "faq");
+        assert_eq!(trailing["data"].as_array().unwrap().len(), 1);
+        let padded: Value = get(&app, &seeded, "?q=%20%20FAQ%20").await.json();
+        assert_eq!(padded["data"].as_array().unwrap().len(), 1);
+        let blank: Value = get(&app, &seeded, "?q=%20%20").await.json();
+        assert_eq!(blank["data"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_rejects_unknown_parameters() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = get(&app, &seeded, "faq/export?format=csv&colour=red").await;
+        assert_eq!(response.status, 400);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3234,6 +3282,10 @@ mod tests {
         (format!("multipart/form-data; boundary={BOUNDARY}"), body)
     }
 
+    /// The import tests share [`IMPORTS`]. Each import holds a read guard while it runs, so the
+    /// permit test can hold every permit under the write guard without a 503 in another test.
+    static IMPORT_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
     /// `POST …/import?format=` with a `file` part named `file_name`.
     async fn import(
         app: &TestApp,
@@ -3244,6 +3296,7 @@ mod tests {
         file: &[u8],
         mapping: Option<&str>,
     ) -> TestResponse {
+        let _gate = IMPORT_GATE.read().await;
         let (content_type, body) = multipart(file_name, file, mapping);
         app.request(
             Method::POST,
@@ -3344,6 +3397,108 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status, 403);
+    }
+
+    /// `(input, expected_output, metadata)` of every live item, as sorted JSON texts.
+    fn item_texts(list: &Value) -> Vec<String> {
+        let mut texts: Vec<String> = list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                json!({
+                    "input": item["input"],
+                    "expected_output": item["expected_output"],
+                    "metadata": item["metadata"],
+                })
+                .to_string()
+            })
+            .collect();
+        texts.sort();
+        texts
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exported_jsonl_imports_back_unchanged() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "input": { "q": "a" }, "expected_output": "x", "metadata": { "t": "one" } },
+                { "input": ["b", 2] },
+                { "input": "c", "expected_output": { "n": [1] } }
+            ] }),
+        )
+        .await;
+        let export = get(&app, &seeded, "faq/export").await;
+        assert_eq!(export.status, 200);
+
+        create_ok(&app, &seeded, "copy").await;
+        let imported = import(
+            &app,
+            &seeded,
+            "copy",
+            "jsonl",
+            "export.jsonl",
+            &export.body,
+            None,
+        )
+        .await;
+        assert_eq!(
+            imported.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&imported.body)
+        );
+        let body: Value = imported.json();
+        assert_eq!(body["imported"], 3);
+        assert_eq!(body["error_count"], 0);
+
+        let original = get(&app, &seeded, "faq/items").await.json();
+        let copied = get(&app, &seeded, "copy/items").await.json();
+        assert_eq!(item_texts(&copied), item_texts(&original));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_refuses_a_value_nested_past_100_levels() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        // 120 levels parse (serde_json stops at 127); `input.x` adds one more.
+        let deep = format!("{}1{}", "[".repeat(120), "]".repeat(120));
+        let file = format!("x\n{deep}\nhi\n");
+        let mapping = r#"{"columns":[{"column":"x","target":"input.x"}]}"#;
+        let response = import(
+            &app,
+            &seeded,
+            "faq",
+            "csv",
+            "data.csv",
+            file.as_bytes(),
+            Some(mapping),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        assert_eq!(body["imported"], 1);
+        assert_eq!(
+            body["errors"],
+            json!([{ "row": 1, "message": "input: is nested too deeply" }])
+        );
+        let items = get(&app, &seeded, "faq/items").await;
+        assert_eq!(items.status, 200);
+        let items: Value = items.json();
+        assert_eq!(items["data"].as_array().unwrap().len(), 1);
+        assert_eq!(items["data"][0]["input"], json!({ "x": "hi" }));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3463,6 +3618,15 @@ mod tests {
         assert_eq!(clean_file_name(Some("\u{1}")), "upload");
         assert_eq!(clean_file_name(Some("a\u{7}b.csv")), "ab.csv");
         assert_eq!(clean_file_name(Some(&"a".repeat(250))), "a".repeat(200));
+        // Zero-width, bidi and line or paragraph separator characters go too.
+        let hidden = "a\u{200B}b\u{200F}c\u{2028}d\u{202E}e\u{2066}f\u{2069}g.csv";
+        assert_eq!(clean_file_name(Some(hidden)), "abcdefg.csv");
+        // Characters next to the ranges stay.
+        assert_eq!(
+            clean_file_name(Some("\u{200A}\u{2010}\u{202F}\u{2070}é.csv")),
+            "\u{200A}\u{2010}\u{202F}\u{2070}é.csv"
+        );
+        assert_eq!(clean_file_name(Some("\u{200B}\u{2066}")), "upload");
     }
 
     #[tokio::test]
@@ -3684,16 +3848,65 @@ mod tests {
         assert_eq!(read_only.status, 403);
     }
 
-    #[test]
-    fn import_permit_is_refused_when_busy() {
-        let imports = Semaphore::new(1);
-        let held = import_permit(&imports).expect("one permit");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_permit_is_refused_when_busy() {
+        let _gate = IMPORT_GATE.write().await;
+        assert_eq!(IMPORTS.available_permits(), IMPORTS_AT_ONCE);
+        let first = import_permit(&IMPORTS).expect("first permit");
+        let second = import_permit(&IMPORTS).expect("second permit");
         assert!(matches!(
-            import_permit(&imports),
+            import_permit(&IMPORTS),
             Err(ApiError::Unavailable { .. })
         ));
+        drop(first);
+        let third = import_permit(&IMPORTS).expect("a freed permit");
+        drop((second, third));
+        assert_eq!(IMPORTS.available_permits(), IMPORTS_AT_ONCE);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_is_503_while_both_permits_are_held() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let _gate = IMPORT_GATE.write().await;
+        let held = (
+            import_permit(&IMPORTS).expect("first permit"),
+            import_permit(&IMPORTS).expect("second permit"),
+        );
+        let (content_type, body) = multipart("data.jsonl", b"{\"input\":1}\n", None);
+        let response = app
+            .request(
+                Method::POST,
+                &format!("{}/faq/import?format=jsonl", base(&seeded)),
+            )
+            .header("cookie", &seeded.cookie)
+            .header("content-type", &content_type)
+            .body(body)
+            .send()
+            .await;
         drop(held);
-        assert!(import_permit(&imports).is_ok());
+        assert_eq!(response.status, 503);
+        let stored: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(stored["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_of_a_non_multipart_body_is_415() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = app
+            .request(
+                Method::POST,
+                &format!("{}/faq/import?format=jsonl", base(&seeded)),
+            )
+            .header("cookie", &seeded.cookie)
+            .header("content-type", "text/plain")
+            .body(b"{\"input\":1}\n".to_vec())
+            .send()
+            .await;
+        assert_eq!(response.status, 415);
     }
 
     #[tokio::test(flavor = "multi_thread")]
