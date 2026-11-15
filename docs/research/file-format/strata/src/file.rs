@@ -466,6 +466,33 @@ impl StrataFile {
         segments: &[(SegmentRef, Kind)],
         kind: ScanKind,
     ) -> Result<Vec<Vec<u8>>> {
+        self.fetch_with(segments, kind, |slice, r, k| {
+            decode_segment(slice, r.offset, k)
+        })
+        .await
+    }
+
+    /// Like `fetch`, but also returns each segment's stored bytes as in the file (header
+    /// included), next to its decoded body.
+    pub(crate) async fn fetch_stored(
+        &self,
+        segments: &[(SegmentRef, Kind)],
+        kind: ScanKind,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.fetch_with(segments, kind, |slice, r, k| {
+            Ok((slice.to_vec(), decode_segment(slice, r.offset, k)?))
+        })
+        .await
+    }
+
+    /// The body of `fetch`, with the decoding step given by `f`. `f` gets the slice of the
+    /// whole segment, header included, and is called once per segment, in input order.
+    async fn fetch_with<T>(
+        &self,
+        segments: &[(SegmentRef, Kind)],
+        kind: ScanKind,
+        f: impl Fn(&[u8], &SegmentRef, Kind) -> Result<T>,
+    ) -> Result<Vec<T>> {
         if segments.is_empty() {
             return Ok(Vec::new());
         }
@@ -504,7 +531,7 @@ impl StrataFile {
             let slice = part
                 .get(at..at.checked_add(len).ok_or_else(corrupt)?)
                 .ok_or_else(corrupt)?;
-            bodies.push(decode_segment(slice, r.offset, *segment_kind)?);
+            bodies.push(f(slice, r, *segment_kind)?);
         }
 
         let fetched_bytes: u64 = merged

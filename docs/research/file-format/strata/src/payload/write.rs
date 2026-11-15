@@ -2,9 +2,12 @@
 //! builder, each row's chunk ids go into refs pages, and the header ties the parts together.
 
 use std::collections::HashSet;
+use std::ops::Range;
+use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, StringArray};
+use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
 use arrow::datatypes::DataType;
+use xxhash_rust::xxh3::xxh3_128;
 
 use super::chunk::chunk_value;
 use super::frames::{FrameBuilder, frame_of};
@@ -123,11 +126,31 @@ pub(crate) fn write_payload_column(
         chunk_refs += ids.len() as u64;
         rows.push(Some(ids));
     }
+    check_chunk_refs(chunk_refs)?;
+    finish_payload_column(frames, rows, chunk_refs, codec, frame_codec, out)
+}
+
+/// Refuses a column with more chunk references than a read can return.
+fn check_chunk_refs(chunk_refs: u64) -> Result<()> {
     if chunk_refs > MAX_READ_IDS as u64 {
         return Err(StrataError::Unsupported {
             what: "more than 2^28 chunk references in one column".to_string(),
         });
     }
+    Ok(())
+}
+
+/// Writes the parts of a payload column after its chunks are known: the open frame, then the
+/// refs pages, edge groups, filters and header. `rows` holds each row's chunk ids, `chunk_refs`
+/// their total.
+pub(crate) fn finish_payload_column(
+    mut frames: FrameBuilder,
+    rows: Vec<Option<Vec<u32>>>,
+    chunk_refs: u64,
+    codec: &mut SegmentCodec,
+    frame_codec: &mut SegmentCodec,
+    out: &mut Out,
+) -> Result<(SegmentRef, PayloadStats)> {
     frames.finish(frame_codec, out)?;
 
     let mut ref_pages = Vec::with_capacity(rows.len().div_ceil(REFS_PAGE_ROWS));
@@ -283,6 +306,117 @@ pub(crate) fn write_payload_column(
         rollup: rollup_kept,
     };
     Ok((header_seg, stats))
+}
+
+/// One input frame kept for copying during a merge.
+pub(crate) struct CopiedFrame {
+    /// The whole frame segment as stored in its input, header included.
+    pub stored: Vec<u8>,
+    /// The frame's raw body.
+    pub raw: Vec<u8>,
+    /// The ranges of the frame's chunks in `raw`, in id order.
+    pub ranges: Vec<Range<usize>>,
+    /// Id of the frame's first chunk in its input.
+    pub first_chunk: u32,
+}
+
+/// The inputs of a merged payload column.
+pub(crate) struct PayloadCopy {
+    /// Per input: its frames, in frame order.
+    pub frames: Vec<Vec<CopiedFrame>>,
+    /// Per input: each row's chunk ids in that input (`None` for a null row).
+    pub rows: Vec<Vec<Option<Vec<u32>>>>,
+    /// The (input, row) source of each output row.
+    pub sources: Arc<Vec<(usize, usize)>>,
+}
+
+/// A column handed to the file writer: its values, and for a merged payload column also the
+/// inputs' frames, so that they can be copied.
+pub(crate) enum SourceColumn {
+    /// A column to encode from its values.
+    Array(ArrayRef),
+    /// A merged payload column: its values, plus the inputs' frames.
+    Payload(ArrayRef, PayloadCopy),
+}
+
+/// Writes a merged payload column (S10 step 4). An input frame whose chunks are all new to the
+/// output, and not repeated within the frame, is copied byte for byte. Every other chunk is
+/// added one by one, and its bytes are taken from the input frame's raw body.
+///
+/// The chunks come from the input frames, so the input values are not decoded. The header,
+/// refs pages and frames were read once for `read_column` and once for the merge: an accepted
+/// cost of the prototype.
+pub(crate) fn write_payload_merged(
+    copy: PayloadCopy,
+    codec: &mut SegmentCodec,
+    frame_codec: &mut SegmentCodec,
+    out: &mut Out,
+) -> Result<(SegmentRef, PayloadStats)> {
+    let merge_corrupt = || StrataError::Corrupt {
+        what: "merge chunk id",
+        offset: 0,
+    };
+    let PayloadCopy {
+        frames: inputs,
+        rows: input_rows,
+        sources,
+    } = copy;
+    let mut frames = FrameBuilder::new();
+    // Per input: the output id of each of its chunk ids, indexed by the input id.
+    let mut remap: Vec<Vec<u32>> = inputs.iter().map(|_| Vec::new()).collect();
+    for (input_frames, map) in inputs.iter().zip(remap.iter_mut()) {
+        for frame in input_frames {
+            if frame.first_chunk as usize != map.len() {
+                return Err(merge_corrupt());
+            }
+            let chunks: Vec<&[u8]> = frame
+                .ranges
+                .iter()
+                .map(|range| frame.raw.get(range.clone()).ok_or_else(merge_corrupt))
+                .collect::<Result<_>>()?;
+            let mut seen = HashSet::new();
+            let fresh = chunks.iter().all(|chunk| {
+                let hash = xxh3_128(chunk);
+                !frames.has(hash) && seen.insert(hash)
+            });
+            if fresh {
+                let ids = frames.copy_frame(
+                    &frame.stored,
+                    &frame.raw,
+                    &frame.ranges,
+                    frame_codec,
+                    out,
+                )?;
+                map.extend(ids);
+            } else {
+                for chunk in chunks {
+                    map.push(frames.add(chunk, frame_codec, out)?);
+                }
+            }
+        }
+    }
+
+    let mut chunk_refs = 0u64;
+    let mut rows: Vec<Option<Vec<u32>>> = Vec::with_capacity(sources.len());
+    for &(input, row) in sources.iter() {
+        let ids = input_rows
+            .get(input)
+            .and_then(|input_rows| input_rows.get(row))
+            .ok_or_else(merge_corrupt)?;
+        let Some(ids) = ids else {
+            rows.push(None);
+            continue;
+        };
+        let map = remap.get(input).ok_or_else(merge_corrupt)?;
+        let mapped = ids
+            .iter()
+            .map(|&id| map.get(id as usize).copied().ok_or_else(merge_corrupt))
+            .collect::<Result<Vec<u32>>>()?;
+        chunk_refs += mapped.len() as u64;
+        rows.push(Some(mapped));
+    }
+    check_chunk_refs(chunk_refs)?;
+    finish_payload_column(frames, rows, chunk_refs, codec, frame_codec, out)
 }
 
 #[cfg(test)]

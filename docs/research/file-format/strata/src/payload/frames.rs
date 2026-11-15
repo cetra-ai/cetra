@@ -9,7 +9,7 @@ use xxhash_rust::xxh3::xxh3_128;
 use super::trigram::add_trigrams;
 use super::{EDGE, FRAME_INITIAL_RATIO, FRAME_MAX_EST, FRAME_MAX_RAW};
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, Out};
+use crate::format::{Cursor, Out, SEGMENT_HEADER_LEN};
 use crate::segment::{Codec, Kind, SegmentCodec, encode_segment};
 
 /// One frame of the frame table: where it is, its raw size and the ids it holds.
@@ -130,6 +130,89 @@ impl FrameBuilder {
         self.next_id
     }
 
+    /// Whether a chunk with this hash is already stored.
+    pub(crate) fn has(&self, hash: u128) -> bool {
+        self.ids.contains_key(&hash)
+    }
+
+    /// Closes the open frame (if any), then appends `stored` (a whole PayloadFrame segment,
+    /// header included, already checked) to `out` unchanged. Its chunks are `raw[ranges[k]]`;
+    /// they must all be new to the builder. They get the next ids, which are returned in order.
+    pub(crate) fn copy_frame(
+        &mut self,
+        stored: &[u8],
+        raw: &[u8],
+        ranges: &[Range<usize>],
+        frame_codec: &mut SegmentCodec,
+        out: &mut Out,
+    ) -> Result<Vec<u32>> {
+        let corrupt = |offset: u64| StrataError::Corrupt {
+            what: "copied frame",
+            offset,
+        };
+        let too_large = || StrataError::Unsupported {
+            what: "a payload frame of more than 4 GiB".to_string(),
+        };
+        // Checked before anything is written, so a bad range leaves the builder unchanged.
+        let chunks: Vec<&[u8]> = ranges
+            .iter()
+            .map(|range| {
+                raw.get(range.clone())
+                    .ok_or_else(|| corrupt(out.len() as u64))
+            })
+            .collect::<Result<_>>()?;
+        let n_chunks = u32::try_from(ranges.len()).map_err(|_| StrataError::Unsupported {
+            what: "more than 4 billion chunks in a frame".to_string(),
+        })?;
+        let len = u32::try_from(stored.len()).map_err(|_| too_large())?;
+        let raw_len = u32::try_from(raw.len()).map_err(|_| too_large())?;
+
+        self.finish(frame_codec, out)?;
+        let first = self.next_id;
+        let offset = out.len() as u64;
+        out.bytes(stored);
+        let mut ids = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            let id = self.next_id;
+            self.next_id = self
+                .next_id
+                .checked_add(1)
+                .ok_or_else(|| StrataError::Unsupported {
+                    what: "more than 4 billion chunks".to_string(),
+                })?;
+            self.ids.insert(xxh3_128(chunk), id);
+            self.tails.push(
+                chunk
+                    .get(chunk.len().saturating_sub(EDGE)..)
+                    .unwrap_or_default()
+                    .to_vec(),
+            );
+            self.heads.push(
+                chunk
+                    .get(..chunk.len().min(EDGE))
+                    .unwrap_or_default()
+                    .to_vec(),
+            );
+            ids.push(id);
+        }
+        self.frame_trigrams.push(chunk_trigrams(chunks.into_iter()));
+        self.frames.push(FrameEntry {
+            offset,
+            len,
+            raw_len,
+            first_chunk: first,
+            n_chunks,
+        });
+        self.stored_bytes += u64::from(len);
+        self.raw_total += raw.len() as u64;
+        self.stored_total += stored.len().saturating_sub(SEGMENT_HEADER_LEN) as u64;
+        if self.stored_total > 0 {
+            self.ratio = self.raw_total as f64 / self.stored_total as f64;
+        }
+        self.cur_first = self.next_id;
+        Ok(ids)
+    }
+
     /// Writes the open frame as one segment and records it.
     fn close(&mut self, codec: &mut SegmentCodec, out: &mut Out) -> Result<()> {
         let n_chunks =
@@ -160,22 +243,27 @@ impl FrameBuilder {
         if self.stored_total > 0 {
             self.ratio = self.raw_total as f64 / self.stored_total as f64;
         }
-        // Trigrams never span two chunks, so each chunk is hashed on its own.
-        let mut trigrams = HashSet::new();
         let mut start = 0usize;
-        for &end in &self.cur_ends {
-            let end = end as usize;
-            if let Some(chunk) = self.cur.get(start..end) {
-                add_trigrams(chunk, &mut trigrams);
-            }
-            start = end;
-        }
-        self.frame_trigrams.push(trigrams);
+        let chunks = self.cur_ends.iter().filter_map(|&end| {
+            let chunk = self.cur.get(start..end as usize);
+            start = end as usize;
+            chunk
+        });
+        self.frame_trigrams.push(chunk_trigrams(chunks));
         self.cur.clear();
         self.cur_ends.clear();
         self.cur_first = self.next_id;
         Ok(())
     }
+}
+
+/// The trigram hashes of `chunks`, each chunk on its own: trigrams never span two chunks.
+pub(crate) fn chunk_trigrams<'a>(chunks: impl Iterator<Item = &'a [u8]>) -> HashSet<u32> {
+    let mut trigrams = HashSet::new();
+    for chunk in chunks {
+        add_trigrams(chunk, &mut trigrams);
+    }
+    trigrams
 }
 
 /// The index of the frame that holds chunk `id`, or `None` when no frame holds it. `frames`

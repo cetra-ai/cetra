@@ -22,7 +22,7 @@ use crate::narrow::{
     BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, is_utf8_map,
     numeric_of,
 };
-use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats};
+use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats, SourceColumn};
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
 use crate::shred::{Shredded, shred};
 
@@ -173,7 +173,7 @@ impl StrataWriter {
             &self.sort_key,
             &self.config,
             self.rows,
-            |i| std::future::ready(self.column(i)),
+            |i| std::future::ready(self.column(i).map(SourceColumn::Array)),
         ))
     }
 
@@ -199,7 +199,8 @@ fn filter_body(values: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Writes a file of `rows` rows whose column `i` is `column(i).await`. The rows must already
-/// be sorted by `sort_key` (schema indexes); this is not checked here.
+/// be sorted by `sort_key` (schema indexes); this is not checked here. A payload column that
+/// comes with its inputs' frames has them copied where possible (S10 step 4).
 pub(crate) async fn write_file<F, Fut>(
     schema: &SchemaRef,
     sort_key: &[usize],
@@ -209,7 +210,7 @@ pub(crate) async fn write_file<F, Fut>(
 ) -> Result<(Vec<u8>, FileSummary)>
 where
     F: FnMut(usize) -> Fut,
-    Fut: Future<Output = Result<ArrayRef>>,
+    Fut: Future<Output = Result<SourceColumn>>,
 {
     let mut out = Out(Vec::new());
     write_file_header(&mut out);
@@ -225,18 +226,26 @@ where
     let mut pending_maps: Vec<PendingMap> = Vec::new();
     let first_sort_column = sort_key.first().copied();
     for (index, field) in schema.fields().iter().enumerate() {
-        let array = column(index).await?;
+        let (array, copy) = match column(index).await? {
+            SourceColumn::Array(array) => (array, None),
+            SourceColumn::Payload(array, copy) => (array, Some(copy)),
+        };
         let column_id = u32::try_from(index).map_err(|_| StrataError::Unsupported {
             what: "more than 4 billion columns".to_string(),
         })?;
         if payload::is_payload(array.as_ref(), config) {
-            let (header, stats) = payload::write_payload_column(
-                array.as_ref(),
-                config,
-                &mut codec,
-                &mut frame_codec,
-                &mut out,
-            )?;
+            let (header, stats) = match copy {
+                Some(copy) => {
+                    payload::write_payload_merged(copy, &mut codec, &mut frame_codec, &mut out)?
+                }
+                None => payload::write_payload_column(
+                    array.as_ref(),
+                    config,
+                    &mut codec,
+                    &mut frame_codec,
+                    &mut out,
+                )?,
+            };
             let pages_offset =
                 u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
                     what: "more than 4 GiB of block-table page references".to_string(),

@@ -14,6 +14,12 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::format::MAX_ROWS;
+use crate::hot::Layer;
+use crate::io::ScanKind;
+use crate::payload::{
+    CopiedFrame, PayloadCopy, SourceColumn, decode_fetched_frame, frame_segments_of, is_payload,
+    read_header, read_rows,
+};
 use crate::reader::read_column;
 use crate::writer::{FileSummary, StrataWriter, sort_key_indexes, write_file};
 
@@ -59,7 +65,9 @@ pub async fn merge(
         .collect();
     if kept.is_empty() {
         return write_file(&schema, &key_indexes, &config, 0, |i| {
-            std::future::ready(Ok(new_empty_array(schema.field(i).data_type())))
+            std::future::ready(Ok(SourceColumn::Array(new_empty_array(
+                schema.field(i).data_type(),
+            ))))
         })
         .await;
     }
@@ -104,16 +112,75 @@ pub async fn merge(
     drop(key_rows);
 
     let live: &[Arc<StrataFile>] = &kept;
+    let config_ref: &Config = &config;
     let sources = Arc::new(sources);
-    write_file(&schema, &key_indexes, &config, total, move |i| {
+    write_file(&schema, &key_indexes, config_ref, total, move |i| {
         let sources = Arc::clone(&sources);
         async move {
             let arrays = try_join_all(live.iter().map(|file| read_column(file, i))).await?;
-            let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
-            Ok(interleave(&refs, &sources)?)
+            let array = {
+                let refs: Vec<&dyn Array> = arrays.iter().map(|array| array.as_ref()).collect();
+                interleave(&refs, &sources)?
+            };
+            drop(arrays);
+            // Frames are copied only when every input stores the column as a payload column and
+            // the merged column is one too (S10 step 4).
+            let stored_as_payload = live.iter().all(|file| {
+                file.directory()
+                    .get(i)
+                    .is_some_and(|record| record.layer == Layer::Payload)
+            });
+            if !stored_as_payload || !is_payload(array.as_ref(), config_ref) {
+                return Ok(SourceColumn::Array(array));
+            }
+            let (frames, rows): (Vec<_>, Vec<_>) =
+                try_join_all(live.iter().map(|file| read_payload_input(file, i)))
+                    .await?
+                    .into_iter()
+                    .unzip();
+            Ok(SourceColumn::Payload(
+                array,
+                PayloadCopy {
+                    frames,
+                    rows,
+                    sources,
+                },
+            ))
         }
     })
     .await
+}
+
+/// Reads the frames of payload column `column` of one input, each with its stored bytes, and
+/// the rows' chunk ids. The header is cached after `read_column`, and the refs and frames are
+/// read again here: an accepted cost of the prototype.
+async fn read_payload_input(
+    file: &StrataFile,
+    column: usize,
+) -> Result<(Vec<CopiedFrame>, Vec<Option<Vec<u32>>>)> {
+    let header = read_header(file, column).await?;
+    let indexes: Vec<usize> = (0..header.frames.len()).collect();
+    let segments = frame_segments_of(&header, &indexes)?;
+    let stored = file.fetch_stored(&segments, ScanKind::Scan).await?;
+    let mut frames = Vec::with_capacity(stored.len());
+    for (entry, (stored, raw)) in header.frames.iter().zip(stored) {
+        let (raw, ranges) = decode_fetched_frame(entry, raw)?;
+        frames.push(CopiedFrame {
+            stored,
+            raw,
+            ranges,
+            first_chunk: entry.first_chunk,
+        });
+    }
+    let at = file
+        .directory()
+        .get(column)
+        .map(|record| record.payload_offset)
+        .ok_or_else(|| StrataError::Schema {
+            reason: format!("column {column} is not a payload column"),
+        })?;
+    let rows = read_rows(file, &header, at).await?;
+    Ok((frames, rows))
 }
 
 /// A schema-level input error with the given reason.
@@ -140,9 +207,13 @@ fn row_count_error() -> StrataError {
 )]
 mod tests {
     use super::*;
+    use crate::payload::{chunk_value, frame_segments_of, payload_contains, read_header};
+    use crate::segment::{Kind, decode_segment};
     use crate::testgen::{assert_same, batch, wide_batch};
-    use arrow::array::{RecordBatch, UInt32Array};
+    use arrow::array::{FixedSizeBinaryArray, RecordBatch, StringArray, UInt32Array};
+    use arrow::buffer::Buffer;
     use arrow::compute::take_record_batch;
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
@@ -182,10 +253,10 @@ mod tests {
         open(write(&rows, &SORT, config.clone()).0).await
     }
 
-    #[tokio::test]
-    async fn merged_columns_equal_a_one_go_write() {
+    /// Four inputs of `wide_batch(8_000)` written with `config`; the merged columns equal the
+    /// columns of a one-go write.
+    async fn assert_merged_columns_equal_one_go(config: Config) {
         let rows = wide_batch(8_000);
-        let config = Config::default();
         let mut inputs = Vec::new();
         for part in 0..4 {
             inputs.push(part_of(&rows, 4, part, &config).await);
@@ -199,6 +270,26 @@ mod tests {
             let want = read_column(&one_go, column).await.unwrap();
             assert_same(got.as_ref(), want.as_ref());
         }
+    }
+
+    #[tokio::test]
+    async fn merged_columns_equal_a_one_go_write() {
+        assert_merged_columns_equal_one_go(Config::default()).await;
+    }
+
+    #[tokio::test]
+    async fn merged_payload_columns_equal_a_one_go_write() {
+        let config = Config {
+            payload_min_avg: 0,
+            ..Config::default()
+        };
+        let rows = wide_batch(8_000);
+        let input = part_of(&rows, 4, 0, &config).await;
+        for name in ["blob", "uid", "span_kind"] {
+            let column = rows.schema().index_of(name).unwrap();
+            assert_eq!(input.directory()[column].layer, Layer::Payload, "{name}");
+        }
+        assert_merged_columns_equal_one_go(config).await;
     }
 
     #[tokio::test]
@@ -301,6 +392,181 @@ mod tests {
             merge(std::slice::from_ref(&file), &SORT, Config::default()).await,
             Err(StrataError::Unsorted { .. })
         ));
+    }
+
+    const SEED_A: u64 = 0x9e37_79b9_7f4a_7c15;
+    const SEED_B: u64 = 0xbf58_476d_1ce4_e5b9;
+    const SEED_C: u64 = 0x94d0_49bb_1331_11eb;
+
+    /// `n` lowercase strings of `len` bytes each, from an xorshift stream (`seed` non-zero).
+    fn random_values(n: usize, len: usize, seed: u64) -> Vec<String> {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..n)
+            .map(|_| {
+                (0..len)
+                    .map(|_| char::from(b'a' + (next() % 26) as u8))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `[trace_id FixedSizeBinary(16) non-null, body Utf8 non-null]`.
+    fn body_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("body", DataType::Utf8, false),
+        ]))
+    }
+
+    /// One row per (trace id, value), in the given order.
+    fn bodies(ids: &[u128], values: &[String]) -> RecordBatch {
+        let raw: Vec<u8> = ids.iter().flat_map(|id| id.to_be_bytes()).collect();
+        let trace_id = FixedSizeBinaryArray::try_new(16, Buffer::from_vec(raw), None).unwrap();
+        let body = StringArray::from(values.iter().map(String::as_str).collect::<Vec<&str>>());
+        RecordBatch::try_new(body_schema(), vec![Arc::new(trace_id), Arc::new(body)]).unwrap()
+    }
+
+    /// Two opened inputs sorted by `["trace_id"]`: `a_values[k]` has trace id `2k` and
+    /// `b_values[k]` has trace id `2k + 1`, so the merge alternates between them.
+    async fn two_inputs(
+        a_values: &[String],
+        b_values: &[String],
+        config: &Config,
+    ) -> (Arc<StrataFile>, Arc<StrataFile>) {
+        let even: Vec<u128> = (0..a_values.len() as u128).map(|k| 2 * k).collect();
+        let odd: Vec<u128> = (0..b_values.len() as u128).map(|k| 2 * k + 1).collect();
+        let a = open(write(&bodies(&even, a_values), &["trace_id"], config.clone()).0).await;
+        let b = open(write(&bodies(&odd, b_values), &["trace_id"], config.clone()).0).await;
+        (a, b)
+    }
+
+    /// The stored bytes and decoded body of every frame of payload column `column`.
+    async fn stored_frames(file: &StrataFile, column: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let header = read_header(file, column).await.unwrap();
+        let indexes: Vec<usize> = (0..header.frames.len()).collect();
+        let segments = frame_segments_of(&header, &indexes).unwrap();
+        file.fetch_stored(&segments, ScanKind::Scan).await.unwrap()
+    }
+
+    /// The decoded `body` column, one string per row.
+    async fn body_rows(file: &StrataFile) -> Vec<String> {
+        let column = read_column(file, 1).await.unwrap();
+        let strings = column.as_any().downcast_ref::<StringArray>().unwrap();
+        (0..strings.len())
+            .map(|row| strings.value(row).to_string())
+            .collect()
+    }
+
+    /// The values interleaved as the merge orders them: `a[k]` then `b[k]`, for each k.
+    fn interleaved(a: &[String], b: &[String]) -> Vec<String> {
+        a.iter()
+            .zip(b)
+            .flat_map(|(x, y)| [x.clone(), y.clone()])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn merged_frames_are_copied_byte_for_byte() {
+        let config = Config::default();
+        let a_values = random_values(300, 2_000, SEED_A);
+        let b_values = random_values(300, 2_000, SEED_B);
+        let (a, b) = two_inputs(&a_values, &b_values, &config).await;
+        let frames_a = stored_frames(&a, 1).await;
+        let frames_b = stored_frames(&b, 1).await;
+        assert!(frames_a.len() >= 10, "{} frames in A", frames_a.len());
+        assert!(frames_b.len() >= 10, "{} frames in B", frames_b.len());
+
+        let (bytes, _) = merge(&[Arc::clone(&a), Arc::clone(&b)], &["trace_id"], config)
+            .await
+            .unwrap();
+        let merged = open(bytes).await;
+        let got = stored_frames(&merged, 1).await;
+        // Every input frame is copied: the output's frames are A's, then B's, unchanged.
+        let want: Vec<&Vec<u8>> = frames_a
+            .iter()
+            .chain(&frames_b)
+            .map(|(stored, _)| stored)
+            .collect();
+        assert_eq!(got.len(), want.len(), "frames of the merged column");
+        for ((stored, body), want) in got.iter().zip(&want) {
+            assert_eq!(stored, *want);
+            assert_eq!(
+                &decode_segment(stored, 0, Kind::PayloadFrame).unwrap(),
+                body
+            );
+        }
+        println!("copied frames: {} of {}", got.len(), want.len());
+        assert_eq!(body_rows(&merged).await, interleaved(&a_values, &b_values));
+    }
+
+    #[tokio::test]
+    async fn shared_chunks_are_stored_once() {
+        let config = Config::default();
+        let values = random_values(300, 2_000, SEED_A);
+        let even: Vec<u128> = (0..300).map(|k| 2 * k).collect();
+        let odd: Vec<u128> = (0..300).map(|k| 2 * k + 1).collect();
+        // The same values under different trace ids: B's chunks are all already stored.
+        let (a_bytes, a_summary) = write(&bodies(&even, &values), &["trace_id"], config.clone());
+        let (b_bytes, _) = write(&bodies(&odd, &values), &["trace_id"], config.clone());
+        let expected = a_summary.columns[1].payload.as_ref().unwrap().unique_chunks;
+        let (a, b) = (open(a_bytes).await, open(b_bytes).await);
+        let (bytes, summary) = merge(&[a, b], &["trace_id"], config).await.unwrap();
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        assert_eq!(stats.unique_chunks, expected, "unique chunks");
+        let merged = open(bytes).await;
+        assert_eq!(body_rows(&merged).await, interleaved(&values, &values));
+    }
+
+    #[tokio::test]
+    async fn needles_across_copied_chunks_are_found() {
+        let config = Config::default();
+        let a_values = random_values(40, 30_000, SEED_A);
+        let b_values = random_values(40, 30_000, SEED_B);
+        let (a, b) = two_inputs(&a_values, &b_values, &config).await;
+        let (bytes, summary) = merge(&[a, b], &["trace_id"], config).await.unwrap();
+        let stats = summary.columns[1].payload.as_ref().unwrap();
+        assert!(stats.chunk_refs > 80, "{} chunk refs", stats.chunk_refs);
+
+        let merged = open(bytes).await;
+        let rows = body_rows(&merged).await;
+        // Every needle that crosses a chunk boundary, then random 16-byte substrings.
+        let mut needles: Vec<String> = Vec::new();
+        for value in &rows {
+            let bytes = value.as_bytes();
+            let chunks = chunk_value(bytes);
+            for range in chunks.iter().take(chunks.len().saturating_sub(1)) {
+                let end = range.end;
+                if end >= 8 && end + 8 <= bytes.len() {
+                    needles.push(value[end - 8..end + 8].to_string());
+                }
+            }
+        }
+        let mut state = SEED_C;
+        for _ in 0..10 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let row = (state as usize) % rows.len();
+            let value = &rows[row];
+            let at = ((state >> 32) as usize) % (value.len() - 16);
+            needles.push(value[at..at + 16].to_string());
+        }
+        for needle in &needles {
+            let want: Vec<bool> = rows
+                .iter()
+                .map(|value| value.contains(needle.as_str()))
+                .collect();
+            let got = payload_contains(&merged, 1, needle.as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(got.rows, want, "needle {needle:?}");
+        }
     }
 
     #[test]

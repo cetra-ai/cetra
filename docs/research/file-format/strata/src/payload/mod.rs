@@ -12,14 +12,19 @@ mod trigram;
 mod varint;
 mod write;
 
+#[cfg(test)]
+pub(crate) use chunk::chunk_value;
+pub(crate) use frames::decode_fetched_frame;
 pub(crate) use header::PayloadHeader;
 pub(crate) use read::{
-    build_values, decode_frames, decode_header, frame_segments, ids_of, read_header,
-    read_payload_column, refs_segments,
+    build_values, decode_frames, decode_header, frame_segments, frame_segments_of, ids_of,
+    read_header, read_payload_column, read_rows, refs_segments,
 };
 pub(crate) use search::payload_contains;
 pub use write::PayloadStats;
-pub(crate) use write::{is_payload, write_payload_column};
+pub(crate) use write::{
+    CopiedFrame, PayloadCopy, SourceColumn, is_payload, write_payload_column, write_payload_merged,
+};
 
 /// Format constants of version 0.
 ///
