@@ -3039,8 +3039,8 @@
         "tags": [
           "orgs"
         ],
-        "summary": "Delete an organization (owners)",
-        "description": "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.",
+        "summary": "Delete an organization (owners, session only)",
+        "description": "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
         "operationId": "delete_org",
         "parameters": [
           {
@@ -3133,7 +3133,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "patch": {
         "tags": [
@@ -5661,8 +5666,8 @@
         "tags": [
           "projects"
         ],
-        "summary": "Delete a project (org admins; API keys are refused)",
-        "description": "Answers 202; the project is gone from every route at once and its data is erased in the background.",
+        "summary": "Delete a project (org admins; session only)",
+        "description": "Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
         "operationId": "delete_project",
         "parameters": [
           {
@@ -5755,7 +5760,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       },
       "patch": {
         "tags": [
