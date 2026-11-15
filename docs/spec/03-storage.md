@@ -240,6 +240,8 @@ An added file is refused when its project is dropped (§7) or its day is before 
 
 If a precondition fails, the transaction rolls back and the job gets a conflict: its outputs stay staged and are collected by GC, and the job retries later.
 
+A commit that fails with a SQLite I/O error (`SQLITE_IOERR`, `_READ`, `_WRITE`, `_FSYNC`, `_DIR_FSYNC` or `_TRUNCATE`) stops the committer: every later catalog call fails until a restart, and health reports it (D-R-6). The commit's frames may already be in `catalog.db-wal`, so the restart, not a retry, decides whether it happened.
+
 **Claims.** Background jobs claim their input files in memory before reading them, so compaction and the deletion rewriter never work on the same file. Claims don't survive a restart and need not: an interrupted job is simply redone.
 
 **Metadata cache.** One process-wide DataFusion `RuntimeEnv` is built at open; each `Storage::query` derives its own from it with a different memory pool (§6), sharing the caches, the object store and the spill directory. `query.metadata_cache_bytes` (default 512 MiB; zero disables it) is `CacheManagerConfig`'s file-metadata cache limit. The cache stores decoded Parquet footers. With a cache configured, DataFusion also loads column and offset indexes into that metadata. Bloom-filter bitsets are not part of it: the footer records their offsets, and a pruning read fetches the bitset from the object. Files are immutable, so entries never go stale. There is no custom `ParquetFileReaderFactory`.
@@ -452,6 +454,7 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Free disk under `storage.min_free_bytes` (default 2 GiB) | Free disk is measured every second: the least free of the file systems holding `data_dir` and, in local mode, the object store root. Below the threshold `append_spans`, `append_scores` and `put_media` fail with `DiskFull` (503). Flush, compaction, GC, retention and deletions keep running: they reclaim space. A compaction job reserves its input size before it starts and is deferred to a later pass when it doesn't fit (§5); flushes don't reserve (D-A1-9) |
 | WAL write or fsync error | pending and new appends fail with `WalFailed` (503), health reports it, restart required (§1) |
 | Local object fsync error (publish, delete, startup walk) | the job fails; every later local object write and delete fails with `SyncFailed`, so every flush attempt and every compaction job fails, on each retry or pass, until a restart; health reports it (`/readyz` 503); restart required. Reads continue (D-R-6) |
+| `catalog.db` I/O error at a commit | the committer stops; every flush attempt, compaction pass, deletion pass, retention, drop and GC run fails, on each retry or pass, until a restart; appends continue until backpressure; health reports it (`/readyz` 503); restart required (D-R-6) |
 | Object store errors during flush | retry after 1 s, doubling up to 60 s (§2), while the memtable keeps the data and backpressure applies past the hard limit |
 | Ambiguous upload (error reported, object may exist) | retried under a new name; the old one is collected from `staged_objects` (§2) |
 | Crash | WAL replay before ingestion opens; staged objects are GC'd |

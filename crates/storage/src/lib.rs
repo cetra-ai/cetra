@@ -138,6 +138,10 @@ pub struct StorageHealth {
     /// A local object fsync failed. Until a restart, every flush attempt and every
     /// compaction job fails, and GC deletes nothing (D-R-6).
     pub objects_sync_failed: bool,
+    /// A `catalog.db` commit failed with an I/O error. Until a restart, every catalog
+    /// call fails: flush attempts, compaction and deletion passes, retention, drops and
+    /// GC (D-R-6).
+    pub catalog_failed: bool,
     /// Accounted bytes of both memtables.
     pub memtable_bytes: u64,
     /// `storage.memtable.hard_limit`. Each table is checked against this on its own.
@@ -786,6 +790,7 @@ impl Storage {
             spans_wal_failed: self.spans.shared().failed(),
             scores_wal_failed: self.scores.shared().failed(),
             objects_sync_failed: self.objects.sync_failed(),
+            catalog_failed: self.committer.stopped(),
             memtable_bytes: spans.saturating_add(scores),
             memtable_hard_limit: self.hard_limit,
         }
@@ -3069,6 +3074,44 @@ mod tests {
 
         let storage = Storage::open(config).await.unwrap();
         assert!(!storage.health().objects_sync_failed);
+        assert_eq!(span_ids(&storage).await.len(), 2);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_catalog_fsync_error_makes_storage_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.flush.max_age = Duration::from_millis(500);
+        let storage = Storage::open(config.clone()).await.unwrap();
+        storage.hooks().arm_fail(HookPoint::CatalogFsync);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        while !storage.health().catalog_failed {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "a failed catalog fsync never reached health()"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        storage
+            .append_spans(project(), spans_at(&[2]))
+            .await
+            .unwrap();
+
+        let stopping = std::time::Instant::now();
+        storage.shutdown().await.unwrap();
+        assert!(
+            stopping.elapsed() < Duration::from_secs(5),
+            "shutdown waited for flush retries that cannot succeed"
+        );
+
+        let storage = Storage::open(config).await.unwrap();
+        assert!(!storage.health().catalog_failed);
         assert_eq!(span_ids(&storage).await.len(), 2);
         storage.shutdown().await.unwrap();
     }

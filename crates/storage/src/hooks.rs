@@ -29,6 +29,12 @@ pub(crate) enum HookPoint {
     ///
     /// `fail` rolls the transaction back. The in-memory catalog stays as it was.
     CatalogCommit,
+    /// Replaces the SQLite commit of `commit_inner`, after `CatalogCommit`.
+    ///
+    /// `fail` rolls the transaction back and returns `SQLITE_IOERR_FSYNC` as the
+    /// commit's error, as a failed fsync would (D-R-6).
+    #[cfg_attr(not(test), allow(dead_code))]
+    CatalogFsync,
     /// Before the bytes of a local object are written to the temp file.
     ObjectWrite,
     /// Before `sync_all` on a local object temp file.
@@ -81,7 +87,7 @@ pub(crate) enum HookPoint {
 
 #[cfg(test)]
 impl HookPoint {
-    const COUNT: usize = 24;
+    const COUNT: usize = 25;
 
     const fn index(self) -> usize {
         match self {
@@ -109,6 +115,7 @@ impl HookPoint {
             Self::MediaAfterPut => 21,
             Self::MediaBeforeDelete => 22,
             Self::QuarantineBeforeCommit => 23,
+            Self::CatalogFsync => 24,
         }
     }
 }

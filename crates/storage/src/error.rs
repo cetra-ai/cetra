@@ -267,6 +267,10 @@ pub enum CatalogError {
         /// The offending `data_files.id`.
         file: Uuid,
     },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 /// One staged-object collection failed.
@@ -315,6 +319,10 @@ pub enum CommitError {
         #[source]
         source: sqlx::Error,
     },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 impl CommitError {
