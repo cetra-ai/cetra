@@ -49,7 +49,7 @@ it("shows role, retention and slug", async () => {
   expect(support).toHaveTextContent("support-bot");
 
   const playground = screen.getByRole("row", { name: /Playground/ });
-  expect(playground).toHaveTextContent("Default");
+  expect(playground).toHaveTextContent("Forever");
   expect(playground).toHaveTextContent("playground");
 });
 
