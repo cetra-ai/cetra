@@ -199,6 +199,10 @@ mod fault {
             let aborting = lock(&self.inner.abort_at).contains(&point);
             if aborting {
                 // The crash child is a separate process. Aborting it is the point.
+                // A lossy root of the child first loses what a power loss may drop
+                // (track R, D-R-4); the guards stay held until the abort.
+                #[cfg(test)]
+                let _lossy_guards = crate::fs::lossy::crash_before_abort();
                 #[allow(clippy::exit)]
                 std::process::abort();
             }

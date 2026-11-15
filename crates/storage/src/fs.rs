@@ -1,16 +1,24 @@
 //! Every local file call of the storage engine (track R, D-R-5).
 //!
 //! Each function is the `std::fs` call it is named after. The generic bounds
-//! match `std::fs`, so call sites compile unchanged. SQLite and DataFusion do
-//! their own I/O and are not seen here.
+//! match `std::fs`, so call sites compile unchanged. Under `cfg(test)`, a call
+//! on a path under a root registered in lossy mode (`lossy::Lossy`) is
+//! recorded, so a test can drop what a power loss may drop. SQLite and
+//! DataFusion do their own I/O and are not seen here.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+pub(crate) mod lossy;
 
 /// `std::fs::File`.
 #[derive(Debug)]
 pub(crate) struct File {
     inner: std::fs::File,
+    /// Set when the file is under a lossy root.
+    #[cfg(test)]
+    tracked: Option<lossy::Tracked>,
 }
 
 /// `std::fs::OpenOptions`, with only the flags this crate sets.
@@ -54,6 +62,19 @@ impl OpenOptions {
     }
 
     pub(crate) fn open<P: AsRef<Path>>(&self, path: P) -> io::Result<File> {
+        #[cfg(test)]
+        {
+            if let Some(root) = lossy::route(path.as_ref()) {
+                return root.open(path.as_ref(), self);
+            }
+        }
+        self.to_std(path.as_ref()).map(File::from_std)
+    }
+
+    /// The `std::fs` options with the same flags. `truncate` is never set: it
+    /// is passed as `false` explicitly whenever `create` is, which keeps clippy's
+    /// `suspicious_open_options` quiet.
+    fn to_std(&self, path: &Path) -> io::Result<std::fs::File> {
         let mut options = std::fs::OpenOptions::new();
         options
             .read(self.read)
@@ -62,29 +83,57 @@ impl OpenOptions {
             .create(self.create)
             .create_new(self.create_new);
         if self.create {
-            // Never truncate: the flag is set explicitly so that clippy's
-            // `suspicious_open_options` is satisfied.
             options.truncate(false);
         }
-        options.open(path).map(|inner| File { inner })
+        options.open(path)
     }
 }
 
 impl File {
+    fn from_std(inner: std::fs::File) -> File {
+        File {
+            inner,
+            #[cfg(test)]
+            tracked: None,
+        }
+    }
+
     /// Read-only.
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> io::Result<File> {
-        std::fs::File::open(path).map(|inner| File { inner })
+        OpenOptions {
+            read: true,
+            ..OpenOptions::default()
+        }
+        .open(path)
     }
 
     pub(crate) fn sync_all(&self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            if let Some(tracked) = &self.tracked {
+                return tracked.sync(&self.inner, std::fs::File::sync_all);
+            }
+        }
         self.inner.sync_all()
     }
 
     pub(crate) fn sync_data(&self) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            if let Some(tracked) = &self.tracked {
+                return tracked.sync(&self.inner, std::fs::File::sync_data);
+            }
+        }
         self.inner.sync_data()
     }
 
     pub(crate) fn set_len(&self, len: u64) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            if let Some(tracked) = &self.tracked {
+                return tracked.set_len(&self.inner, len);
+            }
+        }
         self.inner.set_len(len)
     }
 
@@ -106,6 +155,12 @@ impl File {
 
 impl Write for File {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        #[cfg(test)]
+        {
+            if let Some(tracked) = &self.tracked {
+                return tracked.write(&mut self.inner, buf);
+            }
+        }
         self.inner.write(buf)
     }
 
@@ -128,28 +183,52 @@ impl Seek for File {
 
 #[inline]
 pub(crate) fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.create_dir(path.as_ref());
+        }
+    }
     std::fs::create_dir(path)
 }
 
 #[inline]
 pub(crate) fn create_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.create_dir_all(path.as_ref());
+        }
+    }
     std::fs::create_dir_all(path)
 }
 
 #[inline]
 pub(crate) fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.remove_file(path.as_ref());
+        }
+    }
     std::fs::remove_file(path)
 }
 
 #[inline]
 pub(crate) fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.remove_dir(path.as_ref());
+        }
+    }
     std::fs::remove_dir(path)
 }
 
 /// `std::fs::remove_dir_all` semantics: a missing path is `NotFound`, and a
 /// symlink is removed, not followed. Each entry is removed by its own call
 /// (`remove_file` for files, `remove_dir` bottom-up for directories), so the
-/// lossy shim of R2.2 records every step.
+/// lossy shim records every step.
 pub(crate) fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref();
     let meta = std::fs::symlink_metadata(path)?;
@@ -170,18 +249,30 @@ pub(crate) fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
 
 #[inline]
 pub(crate) fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(from.as_ref()) {
+            return root.rename(from.as_ref(), to.as_ref());
+        }
+    }
     std::fs::rename(from, to)
-}
-
-#[inline]
-pub(crate) fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
-    std::fs::read(path)
 }
 
 /// Creates or truncates `path`, then writes all of `bytes`.
 #[inline]
 pub(crate) fn write<P: AsRef<Path>, B: AsRef<[u8]>>(path: P, bytes: B) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.write(path.as_ref(), bytes.as_ref());
+        }
+    }
     std::fs::write(path, bytes)
+}
+
+#[inline]
+pub(crate) fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
+    std::fs::read(path)
 }
 
 #[inline]
@@ -212,6 +303,12 @@ pub(crate) fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 /// Opens the directory and `sync_all`s it, which makes its entries durable.
 #[inline]
 pub(crate) fn sync_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if let Some(root) = lossy::route(path.as_ref()) {
+            return root.sync_dir(path.as_ref());
+        }
+    }
     std::fs::File::open(path)?.sync_all()
 }
 
