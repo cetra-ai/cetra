@@ -20,6 +20,7 @@ pub mod members;
 pub mod metrics;
 pub mod online_rules;
 pub mod openapi;
+pub mod org_sso;
 pub mod payload;
 pub mod saved_views;
 pub mod schema;

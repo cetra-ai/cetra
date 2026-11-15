@@ -139,6 +139,8 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::projects::routes());
     routes.extend(crate::routes::members::routes());
     routes.extend(crate::ee::project_roles::routes());
+    routes.extend(crate::ee::org_sso::settings::routes());
+    routes.extend(crate::ee::org_sso::login::routes());
     routes.extend(crate::routes::entitlements::routes());
     routes.extend(crate::routes::usage::routes());
     routes.extend(crate::routes::internal_members::routes());
@@ -853,7 +855,7 @@ mod tests {
     }
 
     async fn cookie(app: &TestApp, user_id: uuid::Uuid) -> HeaderValueCookie {
-        let header = start_session(&app.state, user_id, None, None)
+        let header = start_session(&app.state, user_id, None, None, None)
             .await
             .unwrap();
         let pair = header.to_str().unwrap().split_once(';').unwrap().0;

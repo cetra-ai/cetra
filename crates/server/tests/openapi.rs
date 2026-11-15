@@ -16,6 +16,8 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_oauth_authorize",
     ),
     ("get", "/api/auth/callback/{provider}", "get_oauth_callback"),
+    ("get", "/api/auth/sso/authorize", "get_sso_authorize"),
+    ("post", "/api/auth/sso/discover", "post_sso_discover"),
     ("get", "/api/auth/config", "get_auth_config"),
     ("post", "/api/auth/setup", "post_setup"),
     ("post", "/api/auth/login", "post_login"),
@@ -70,6 +72,33 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_org_entitlements",
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
+    ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
+    (
+        "put",
+        "/api/v1/orgs/{org}/sso/provider",
+        "put_org_sso_provider",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/provider",
+        "delete_org_sso_provider",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains",
+        "post_org_sso_domain",
+    ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+        "post_org_sso_domain_verify",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/domains/{id}",
+        "delete_org_sso_domain",
+    ),
     (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
@@ -615,6 +644,8 @@ fn document_lint() {
             *id,
             "get_auth_config"
                 | "get_oauth_authorize"
+                | "get_sso_authorize"
+                | "post_sso_discover"
                 | "get_oauth_callback"
                 | "post_setup"
                 | "post_login"
@@ -652,6 +683,13 @@ fn document_lint() {
                 | "get_admin_settings"
                 | "get_admin_license"
                 | "post_admin_settings_test_email"
+                | "get_org_sso"
+                | "put_org_sso_provider"
+                | "delete_org_sso_provider"
+                | "patch_org_sso"
+                | "post_org_sso_domain"
+                | "post_org_sso_domain_verify"
+                | "delete_org_sso_domain"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -673,6 +711,10 @@ fn document_lint() {
             expected_errors.extend(["401", "429"]);
         } else if *id == "get_oauth_authorize" {
             expected_errors.extend(["404"]);
+        } else if *id == "get_sso_authorize" {
+            expected_errors.extend(["429"]);
+        } else if *id == "post_sso_discover" {
+            expected_errors.extend(["400", "429"]);
         } else if *id == "get_oauth_callback" {
             // Failure is a redirect, not a problem response.
         } else if *id == "post_setup" || *id == "post_signup" {
@@ -757,8 +799,13 @@ fn document_lint() {
             || *id == "update_channel"
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
+            || *id == "put_org_sso_provider"
+            || *id == "post_org_sso_domain"
+            || *id == "patch_org_sso"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {

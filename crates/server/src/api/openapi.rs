@@ -78,6 +78,10 @@ use super::online_rules::{
     OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
     UpdateOnlineRuleRequest,
 };
+use super::org_sso::{
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
+    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -174,6 +178,16 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<JitRole>();
+    set.insert::<OrgSsoProvider>();
+    set.insert::<DomainStatus>();
+    set.insert::<OrgSsoDomain>();
+    set.insert::<OrgSso>();
+    set.insert::<PutOrgSsoProvider>();
+    set.insert::<AddOrgSsoDomain>();
+    set.insert::<PatchOrgSso>();
+    set.insert::<SsoDiscoverRequest>();
+    set.insert::<SsoDiscovery>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -709,6 +723,7 @@ fn paths() -> Paths {
     let paths = auth_paths(paths);
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
+    let paths = org_sso_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -875,7 +890,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -1060,7 +1075,54 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             &[401, 403, 404, 429],
         ))
         .build();
+    let sso_authorize = operation(
+        "get_sso_authorize",
+        "auth",
+        "Start an org's single sign-on login",
+    )
+    .description(Some(
+        "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![
+        query_string("domain", "The email domain, e.g. `acme.com`.", false),
+        query_string(
+            "redirect",
+            "Relative path to open after a successful login.",
+            false,
+        ),
+    ]))
+    .responses(responses(
+        "302",
+        redirect_to("Redirect to the identity provider, or to `/login?error=sso_unavailable`."),
+        &[429],
+    ))
+    .build();
+    let sso_discover = operation(
+        "post_sso_discover",
+        "auth",
+        "Ask whether an email's domain signs in through an org",
+    )
+    .description(Some(
+        "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+    ))
+    .securities(Some(Vec::new()))
+    .request_body(Some(json_body("SsoDiscoverRequest")))
+    .responses(responses(
+        "200",
+        json_of::<SsoDiscovery>("Whether the domain signs in through an org."),
+        &[400, 429],
+    ))
+    .build();
     paths
+        .path(
+            "/api/auth/sso/discover",
+            PathItem::new(HttpMethod::Post, sso_discover),
+        )
+        .path(
+            "/api/auth/sso/authorize",
+            PathItem::new(HttpMethod::Get, sso_authorize),
+        )
         .path(
             "/api/auth/authorize/{provider}",
             PathItem::new(HttpMethod::Get, authorize),
@@ -1106,6 +1168,158 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let org_param = path_string("org", "Org UUID or slug.");
+    let get = operation(
+        "get_org_sso",
+        "orgs",
+        "Read the org's identity provider and domains",
+    )
+    .description(Some(
+        "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The org's SSO settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put = operation(
+        "put_org_sso_provider",
+        "orgs",
+        "Save the org's identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_sso_provider",
+        "orgs",
+        "Remove the org's identity provider",
+    )
+    .description(Some(
+        "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![org_param]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The provider is removed.")
+            .build(),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let mut provider = PathItem::new(HttpMethod::Put, put);
+    provider.delete = Some(delete);
+    let patch_settings = operation(
+        "patch_org_sso",
+        "orgs",
+        "Turn the org's identity provider on, off or enforced",
+    )
+    .description(Some(
+        "Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("PatchOrgSso")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let add_domain = operation(
+        "post_org_sso_domain",
+        "orgs",
+        "Add an email domain to the org's SSO",
+    )
+    .description(Some(
+        "Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("AddOrgSsoDomain")))
+    .responses(responses(
+        "201",
+        json_of::<OrgSso>("The SSO settings, with the new domain pending."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let verify = operation(
+        "post_org_sso_domain_verify",
+        "orgs",
+        "Verify an email domain with its DNS TXT record",
+    )
+    .description(Some(
+        "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings, with the domain verified."),
+        &[401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let remove_domain = operation(
+        "delete_org_sso_domain",
+        "orgs",
+        "Remove an email domain from the org's SSO",
+    )
+    .description(Some(
+        "Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The domain is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch_settings);
+    paths
+        .path("/api/v1/orgs/{org}/sso", settings)
+        .path("/api/v1/orgs/{org}/sso/provider", provider)
+        .path(
+            "/api/v1/orgs/{org}/sso/domains",
+            PathItem::new(HttpMethod::Post, add_domain),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+            PathItem::new(HttpMethod::Post, verify),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}",
+            PathItem::new(HttpMethod::Delete, remove_domain),
+        )
+}
+
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let org_param = path_string("org", "Org UUID or slug.");
@@ -1121,7 +1335,10 @@ fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_org_invite", "orgs", "Invite a member by email")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param.clone()]))
         .request_body(Some(json_body("CreateInviteRequest")))
         .responses(responses(
@@ -1537,7 +1754,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let patch_org = operation("patch_org_member", "orgs", "Change an organization role")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param, user_param.clone()]))
         .request_body(Some(json_body("UpdateOrgMemberRequest")))
         .responses(responses(
@@ -1547,7 +1767,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete_org = operation("delete_org_member", "orgs", "Remove an organization member")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![
             path_string("org", "Org UUID or slug."),
             user_param.clone(),
@@ -1576,7 +1799,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         "projects",
         "Set a project role override",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(vec![project_param(), user_param.clone()]))
     .request_body(Some(json_body("SetProjectOverrideRequest")))
     .responses(responses(
@@ -1730,7 +1956,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
 fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let list = operation("list_api_keys", "projects", "List API keys")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<PageParams>(vec![project_param()])))
         .responses(responses(
             "200",
@@ -1742,7 +1971,10 @@ fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_api_key", "projects", "Create an API key")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateApiKeyRequest")))
         .responses(responses(
@@ -1779,7 +2011,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "List personal access tokens",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<PageParams>(Vec::new())))
     .responses(responses(
         "200",
@@ -1795,7 +2030,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "Create a personal access token",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .request_body(Some(json_body("CreatePersonalTokenRequest")))
     .responses(responses(
         "201",

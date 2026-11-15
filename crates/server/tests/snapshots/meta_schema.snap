@@ -350,6 +350,37 @@ CREATE TABLE org_members (
 index org_members_user
 CREATE INDEX org_members_user ON org_members(user_id)
 
+table org_sso_domains
+CREATE TABLE org_sso_domains (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,               -- lowercase, no trailing dot
+    token TEXT NOT NULL,                -- 32 lowercase hex; the TXT value's random part (public)
+    verified_at INTEGER,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (org_id, domain)
+)
+
+index org_sso_domains_verified
+CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL
+
+table org_sso_providers
+CREATE TABLE org_sso_providers (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
+    org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    enabled INTEGER NOT NULL DEFAULT 0,
+    enforced INTEGER NOT NULL DEFAULT 0,
+    jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
+    last_login_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+
 table org_window_ends
 CREATE TABLE org_window_ends (
     org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -538,6 +569,14 @@ index sqlite_autoindex_org_entitlements_1
 
 index sqlite_autoindex_org_members_1
 
+index sqlite_autoindex_org_sso_domains_1
+
+index sqlite_autoindex_org_sso_domains_2
+
+index sqlite_autoindex_org_sso_providers_1
+
+index sqlite_autoindex_org_sso_providers_2
+
 index sqlite_autoindex_org_window_ends_1
 
 index sqlite_autoindex_orgs_1
@@ -615,7 +654,7 @@ CREATE TABLE web_sessions (
     expires_at INTEGER NOT NULL,
     user_agent TEXT,
     ip TEXT
-)
+, sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL)
 
 index web_sessions_user
 CREATE INDEX web_sessions_user ON web_sessions(user_id)

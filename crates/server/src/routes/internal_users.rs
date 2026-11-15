@@ -305,7 +305,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let header = start_session(&app.state, id, None, None).await.unwrap();
+        let header = start_session(&app.state, id, None, None, None)
+            .await
+            .unwrap();
         let cookie = header
             .to_str()
             .unwrap()

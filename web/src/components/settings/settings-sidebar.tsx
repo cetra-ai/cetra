@@ -1,6 +1,7 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import type { ReactNode } from "react";
+import { $api } from "@/api/client";
 import { orgSettingsNav, projectSettingsNav } from "@/components/settings/settings-nav";
 import {
   Sidebar,
@@ -27,6 +28,8 @@ export function SettingsSidebar({
   children: ReactNode;
 }) {
   const matchRoute = useMatchRoute();
+  const me = $api.useQuery("get", "/api/auth/me");
+  const role = me.data?.orgs.find((candidate) => candidate.slug === org)?.role;
 
   return (
     <SidebarProvider className="h-[calc(100dvh-40px)] overflow-hidden">
@@ -83,18 +86,20 @@ export function SettingsSidebar({
             <SidebarGroupLabel>Organization</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu aria-label="Organization settings">
-                {orgSettingsNav.map((item) => (
-                  <SidebarMenuItem key={item.to}>
-                    <SidebarMenuButton
-                      asChild
-                      isActive={Boolean(matchRoute({ to: item.to, params: { org } }))}
-                    >
-                      <Link to={item.to} params={{ org }}>
-                        {item.label}
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
+                {orgSettingsNav
+                  .filter((item) => !item.ownerOnly || role === "owner")
+                  .map((item) => (
+                    <SidebarMenuItem key={item.to}>
+                      <SidebarMenuButton
+                        asChild
+                        isActive={Boolean(matchRoute({ to: item.to, params: { org } }))}
+                      >
+                        <Link to={item.to} params={{ org }}>
+                          {item.label}
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>

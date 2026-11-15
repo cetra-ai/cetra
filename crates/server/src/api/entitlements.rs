@@ -17,14 +17,17 @@ pub enum Feature {
     ProjectRoles,
     /// Instance-wide `auth.enforce_sso_domains`: an enterprise licence.
     SsoEnforcement,
+    /// Per-org OIDC providers, domains and enforcement (M5): Teams add-on or an enterprise licence.
+    OrgSso,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::RetentionManagement,
         Self::ProjectRoles,
         Self::SsoEnforcement,
+        Self::OrgSso,
     ];
 
     /// The wire name.
@@ -33,12 +36,16 @@ impl Feature {
             Self::RetentionManagement => "retention_management",
             Self::ProjectRoles => "project_roles",
             Self::SsoEnforcement => "sso_enforcement",
+            Self::OrgSso => "org_sso",
         }
     }
 
     /// Enterprise features live in `ee` and are never granted by config (D-P-10).
     pub fn is_ee(self) -> bool {
-        matches!(self, Self::ProjectRoles | Self::SsoEnforcement)
+        matches!(
+            self,
+            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso
+        )
     }
 
     /// The feature named `name`; `None` for a name this build does not know.
@@ -54,6 +61,9 @@ impl Feature {
                 "Per-project roles need the Teams add-on or an enterprise licence."
             }
             Self::SsoEnforcement => "SSO enforcement needs an enterprise licence.",
+            Self::OrgSso => {
+                "Single sign-on for an organization needs the Teams add-on or an enterprise licence."
+            }
         }
     }
 }

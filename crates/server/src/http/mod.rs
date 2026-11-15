@@ -92,6 +92,8 @@ pub(crate) struct AppInner {
     pub(crate) pending: crate::eval::pending::PendingTraces,
     /// Per-org span rate (D-P-19, D-P-35).
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
+    /// Per-org SSO routing (track P M5).
+    pub(crate) org_sso: crate::ee::org_sso::OrgSso,
 }
 
 impl AppState {

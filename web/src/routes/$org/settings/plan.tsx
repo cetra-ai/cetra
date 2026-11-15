@@ -29,12 +29,13 @@ export const Route = createFileRoute("/$org/settings/plan")({
   component: OrgPlanPage,
 });
 
-const FEATURES: Feature[] = ["retention_management", "project_roles", "sso_enforcement"];
+const FEATURES: Feature[] = ["retention_management", "project_roles", "sso_enforcement", "org_sso"];
 
 const FEATURE_NAMES: Record<Feature, string> = {
   retention_management: "Retention management",
   project_roles: "Project roles",
   sso_enforcement: "SSO enforcement",
+  org_sso: "Single sign-on",
 };
 
 const USAGE_CHART: ChartConfig = {

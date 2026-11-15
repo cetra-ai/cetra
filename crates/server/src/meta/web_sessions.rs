@@ -3,6 +3,7 @@
 //! `id` is the SHA-256 hex of the cookie value. The plaintext never lands here.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use llmobs_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -20,6 +21,8 @@ pub(crate) struct NewSession {
     pub(crate) user_agent: Option<String>,
     /// Client IP of D142, as text.
     pub(crate) ip: Option<String>,
+    /// The org whose identity provider signed the user in (D-P-59); `None` otherwise.
+    pub(crate) sso_org_id: Option<OrgId>,
 }
 
 /// A session that is still valid, with its user.
@@ -34,6 +37,8 @@ pub(crate) struct SessionRow {
     pub(crate) last_seen_at: i64,
     /// When the session stops resolving, nanoseconds. `expires_at <= now` is gone.
     pub(crate) expires_at: i64,
+    /// The org whose provider started the session, D-P-59.
+    pub(crate) sso_org_id: Option<OrgId>,
 }
 
 impl std::fmt::Debug for SessionRow {
@@ -43,6 +48,7 @@ impl std::fmt::Debug for SessionRow {
             .field("user_id", &self.user.id)
             .field("last_seen_at", &self.last_seen_at)
             .field("expires_at", &self.expires_at)
+            .field("sso_org_id", &self.sso_org_id)
             .finish_non_exhaustive()
     }
 }
@@ -61,6 +67,7 @@ struct SessionRecord {
     disabled_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    sso_org_id: Option<String>,
 }
 
 /// Inserts a session. `user_agent` is cut to 256 characters.
@@ -76,8 +83,8 @@ pub(crate) async fn insert_session(
 ) -> Result<(), MetaError> {
     sqlx::query(
         "INSERT INTO web_sessions \
-         (id, user_id, created_at, last_seen_at, expires_at, user_agent, ip) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (id, user_id, created_at, last_seen_at, expires_at, user_agent, ip, sso_org_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&session.hash)
     .bind(session.user_id.to_string())
@@ -86,6 +93,7 @@ pub(crate) async fn insert_session(
     .bind(expires_at)
     .bind(clip_user_agent(session.user_agent.as_deref()))
     .bind(&session.ip)
+    .bind(session.sso_org_id.map(|org| org.to_string()))
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -107,7 +115,7 @@ pub(crate) async fn session_user(
         "SELECT web_sessions.id AS session_id, web_sessions.last_seen_at, \
          web_sessions.expires_at, users.id AS user_id, users.email, users.name, \
          users.password_hash, users.email_verified_at, users.is_instance_admin, \
-         users.disabled_at, users.created_at, users.updated_at \
+         users.disabled_at, users.created_at, users.updated_at, web_sessions.sso_org_id \
          FROM web_sessions \
          JOIN users ON users.id = web_sessions.user_id \
          WHERE web_sessions.id = ? AND web_sessions.expires_at > ? \
@@ -238,6 +246,17 @@ fn session_row(record: SessionRecord) -> Result<SessionRow, MetaError> {
         },
         last_seen_at: record.last_seen_at,
         expires_at: record.expires_at,
+        sso_org_id: record
+            .sso_org_id
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map(OrgId::from_uuid)
+                    .map_err(|_| MetaError::Corrupt {
+                        table: "web_sessions",
+                        column: "sso_org_id",
+                    })
+            })
+            .transpose()?,
     })
 }
 
@@ -288,6 +307,7 @@ mod tests {
                         user_id,
                         user_agent: Some(agent),
                         ip: Some(ip.to_string()),
+                        sso_org_id: None,
                     },
                     now,
                     now + 1,
@@ -322,6 +342,7 @@ mod tests {
                             user_id,
                             user_agent: None,
                             ip: None,
+                            sso_org_id: None,
                         },
                         now,
                         expires_at,
@@ -356,6 +377,7 @@ mod tests {
                         user_id,
                         user_agent: None,
                         ip: None,
+                        sso_org_id: None,
                     },
                     now,
                     now,
@@ -368,6 +390,7 @@ mod tests {
                         user_id,
                         user_agent: None,
                         ip: None,
+                        sso_org_id: None,
                     },
                     now,
                     now + 1,

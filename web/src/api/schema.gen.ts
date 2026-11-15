@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * Finish an OAuth or OIDC login
-         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.
+         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).
          */
         get: operations["get_oauth_callback"];
         put?: never;
@@ -242,6 +242,46 @@ export interface paths {
         put?: never;
         /** Create an account */
         post: operations["post_signup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/sso/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start an org's single sign-on login
+         * @description Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.
+         */
+        get: operations["get_sso_authorize"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/sso/discover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask whether an email's domain signs in through an org
+         * @description Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.
+         */
+        post: operations["post_sso_discover"];
         delete?: never;
         options?: never;
         head?: never;
@@ -889,6 +929,114 @@ export interface paths {
         /** Create a project */
         post: operations["post_project"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's identity provider and domains
+         * @description The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).
+         */
+        get: operations["get_org_sso"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Turn the org's identity provider on, off or enforced
+         * @description Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).
+         */
+        patch: operations["patch_org_sso"];
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an email domain to the org's SSO
+         * @description Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
+         */
+        post: operations["post_org_sso_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove an email domain from the org's SSO
+         * @description Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).
+         */
+        delete: operations["delete_org_sso_domain"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/domains/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify an email domain with its DNS TXT record
+         * @description Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
+         */
+        post: operations["post_org_sso_domain_verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/provider": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the org's identity provider
+         * @description Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).
+         */
+        put: operations["put_org_sso_provider"];
+        post?: never;
+        /**
+         * Remove the org's identity provider
+         * @description Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).
+         */
+        delete: operations["delete_org_sso_provider"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1866,6 +2014,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description `POST /api/v1/orgs/{org}/sso/domains`. */
+        AddOrgSsoDomain: {
+            /** @description The email domain, e.g. `acme.com`. Punycode for internationalized names. */
+            domain: string;
+        };
         /** @description `GET /api/v1/admin/license`. Never contains the key. */
         AdminLicense: {
             /** @description Customer name. Omitted with `none` and `invalid`. */
@@ -2247,6 +2400,11 @@ export interface components {
             signup: components["schemas"]["SignupPolicy"];
             /** @description SMTP is configured, so password reset and verification email can be sent. */
             smtp_enabled: boolean;
+            /**
+             * @description The login page asks for the email first: some domain signs in through an org's
+             *     provider (D-P-60).
+             */
+            sso_discovery: boolean;
         };
         /**
          * @description One OAuth or OIDC provider the UI can start a login with.
@@ -2784,6 +2942,11 @@ export interface components {
          */
         DeliveryStatus: "pending" | "sent" | "failed";
         /**
+         * @description Whether the org has proved the domain.
+         * @enum {string}
+         */
+        DomainStatus: "pending" | "verified";
+        /**
          * @description User summary plus the most recent sessions.
          *
          *     Spec 09 § Response shapes.
@@ -3096,7 +3259,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "retention_management" | "project_roles" | "sso_enforcement";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -3331,6 +3494,11 @@ export interface components {
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
         };
+        /**
+         * @description Role given to people who join through the org's provider (D-P-56).
+         * @enum {string}
+         */
+        JitRole: "viewer" | "member";
         /** @description Job counts of a rule, by status. */
         JobCounts: {
             /**
@@ -3992,6 +4160,76 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
+        /** @description `GET /api/v1/orgs/{org}/sso` and every settings write. */
+        OrgSso: {
+            /** @description The redirect URI to register at the identity provider. */
+            callback_url: string;
+            /** @description Ordered by domain. */
+            domains: components["schemas"]["OrgSsoDomain"][];
+            /** @description The provider, when the org has one. */
+            provider?: components["schemas"]["OrgSsoProvider"];
+        };
+        /** @description One email domain of the org and how to prove it. */
+        OrgSsoDomain: {
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Lowercase domain name. */
+            domain: string;
+            /**
+             * Format: uuid
+             * @description The domain row id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last lookup, found or not. Omitted before the first one.
+             */
+            last_checked_at?: string;
+            /** @description Pending or verified. */
+            status: components["schemas"]["DomainStatus"];
+            /** @description TXT record name, `_llmobs-verify.<domain>`. */
+            txt_name: string;
+            /** @description TXT record value, `llmobs-verify=<token>`. */
+            txt_value: string;
+            /**
+             * Format: date-time
+             * @description When the TXT record was found. Omitted while pending.
+             */
+            verified_at?: string;
+        };
+        /** @description The org's identity provider. The client secret is write-only. */
+        OrgSsoProvider: {
+            /** @description The OAuth client id. */
+            client_id: string;
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Shown on the login page. */
+            display_name: string;
+            /** @description Discovery sends users to this provider (D-P-57). */
+            enabled: boolean;
+            /** @description Password and other sign-ins are refused for the org's domains (D-P-58). */
+            enforced: boolean;
+            /** @description The OIDC issuer URL. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+            /**
+             * Format: date-time
+             * @description The last successful sign-in through the provider. Absent before the first one.
+             */
+            last_login_at?: string;
+            /**
+             * Format: date-time
+             * @description Last change to the settings.
+             */
+            updated_at: string;
+        };
         /** @description `GET /api/v1/orgs/{org}/usage`. */
         OrgUsage: {
             /** @description Days with usage, oldest first. Days without usage are absent. */
@@ -4010,6 +4248,13 @@ export interface components {
         };
         /** @description One part of a canonical message. Spec 01 § Canonical message format. */
         Part: components["schemas"]["TextPart"] | components["schemas"]["ReasoningPart"] | components["schemas"]["ToolCallPart"] | components["schemas"]["ToolCallResponsePart"] | components["schemas"]["UriPart"] | components["schemas"]["BlobPart"] | components["schemas"]["UnknownPart"];
+        /** @description `PATCH /api/v1/orgs/{org}/sso`: the flags, each optional. */
+        PatchOrgSso: {
+            /** @description Discovery sends users to the provider (D-P-57). */
+            enabled?: boolean;
+            /** @description Enforce SSO for the org's verified domains (D-P-58). */
+            enforced?: boolean;
+        };
         /**
          * @description Why a rule is paused (D-I-14, D-I-15).
          * @enum {string}
@@ -4196,6 +4441,19 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
+        PutOrgSsoProvider: {
+            /** @description The OAuth client id; 1 to 255 characters. */
+            client_id: string;
+            /** @description Required when creating, and when the issuer or client id changes; omit to keep it. */
+            client_secret?: string;
+            /** @description Shown on the login page; 1 to 100 characters. */
+            display_name: string;
+            /** @description The OIDC issuer URL; `https`, or `http` on a loopback host. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+        };
         /** @description `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential. */
         PutOrgTokenRequest: {
             /** @description A signed `kind: org` token. Never logged. */
@@ -5139,6 +5397,19 @@ export interface components {
             rows: Record<string, never>[];
             /** @description More rows matched than `limit`; `rows` holds the first `limit`. */
             truncated: boolean;
+        };
+        /** @description `POST /api/auth/sso/discover`. `Debug` omits the email. */
+        SsoDiscoverRequest: {
+            /** @description The address the person typed on the login page. */
+            email: string;
+        };
+        /**
+         * @description Whether the email's domain signs in through an org's provider (D-P-60). A function of the
+         *     domain only.
+         */
+        SsoDiscovery: {
+            /** @description True when the domain's org has an enabled provider. */
+            sso: boolean;
         };
         /**
          * @description How the provider is asked to fill the answer schema.
@@ -6280,6 +6551,80 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sso_authorize: {
+        parameters: {
+            query?: {
+                /** @description The email domain, e.g. `acme.com`. */
+                domain?: string;
+                /** @description Relative path to open after a successful login. */
+                redirect?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the identity provider, or to `/login?error=sso_unavailable`. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_sso_discover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SsoDiscoverRequest"];
+            };
+        };
+        responses: {
+            /** @description Whether the domain signs in through an org. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SsoDiscovery"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -9344,6 +9689,512 @@ export interface operations {
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_sso: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_org_sso: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchOrgSso"];
+            };
+        };
+        responses: {
+            /** @description The SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_sso_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddOrgSsoDomain"];
+            };
+        };
+        responses: {
+            /** @description The SSO settings, with the new domain pending. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_sso_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Domain id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The domain is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_org_sso_domain_verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Domain id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The SSO settings, with the domain verified. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgSsoProvider"];
+            };
+        };
+        responses: {
+            /** @description The saved SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The provider is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {

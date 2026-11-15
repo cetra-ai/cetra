@@ -39,7 +39,7 @@ pub(crate) struct OrgRow {
 /// UI routes an org slug must not take. Project slugs use [`PROJECT_RESERVED`] instead.
 const RESERVED: &[&str] = &[
     "account", "admin", "api", "assets", "cli-auth", "healthz", "invite", "login", "logout", "mcp",
-    "readyz", "reset", "settings", "setup", "signup", "static", "v1", "verify",
+    "readyz", "reset", "settings", "setup", "signup", "sso", "static", "v1", "verify",
 ];
 
 /// Org-level UI routes a project slug must not take. A project `settings` would take the
@@ -188,11 +188,17 @@ pub(crate) async fn insert_org(
 }
 
 /// Deletes the org row; foreign keys cascade to members, invites, connections and projects.
+/// The org's SSO identities go too: they reference users, not the org, so no key cascades
+/// them (track P M5, D-P-52).
 ///
 /// # Errors
 ///
-/// Returns [`MetaError::Db`] when the delete fails.
+/// Returns [`MetaError::Db`] when a delete fails.
 pub(crate) async fn delete_org(conn: &mut SqliteConnection, id: OrgId) -> Result<(), MetaError> {
+    sqlx::query("DELETE FROM identities WHERE provider = ?")
+        .bind(format!("org:{id}"))
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("DELETE FROM orgs WHERE id = ?")
         .bind(id.to_string())
         .execute(&mut *conn)
@@ -407,6 +413,7 @@ mod tests {
             assert_eq!(validate_slug(slug), Err(SlugError::Invalid), "{slug}");
         }
         assert_eq!(validate_slug("admin"), Err(SlugError::Reserved));
+        assert_eq!(validate_slug("sso"), Err(SlugError::Reserved));
         assert_eq!(slug_from_name("Acme, Inc."), "acme-inc");
         assert_eq!(slug_from_name("!!!"), "org");
         assert_eq!(slug_from_name("Admin"), "admin-1");

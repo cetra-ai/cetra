@@ -20,6 +20,7 @@ import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
+import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
@@ -43,6 +44,7 @@ export interface WriteOperation {
 export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "post_login", method: "post", path: "/api/auth/login" },
   { operationId: "post_logout", method: "post", path: "/api/auth/logout" },
+  { operationId: "post_sso_discover", method: "post", path: "/api/auth/sso/discover" },
   { operationId: "post_signup", method: "post", path: "/api/auth/signup" },
   { operationId: "post_setup", method: "post", path: "/api/auth/setup" },
   { operationId: "post_password_forgot", method: "post", path: "/api/auth/password/forgot" },
@@ -65,6 +67,24 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "delete_org_member", method: "delete", path: "/api/v1/orgs/{org}/members/{user}" },
   { operationId: "post_org_invite", method: "post", path: "/api/v1/orgs/{org}/invites" },
   { operationId: "delete_org_invite", method: "delete", path: "/api/v1/orgs/{org}/invites/{id}" },
+  { operationId: "put_org_sso_provider", method: "put", path: "/api/v1/orgs/{org}/sso/provider" },
+  {
+    operationId: "delete_org_sso_provider",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/provider",
+  },
+  { operationId: "post_org_sso_domain", method: "post", path: "/api/v1/orgs/{org}/sso/domains" },
+  {
+    operationId: "post_org_sso_domain_verify",
+    method: "post",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+  },
+  {
+    operationId: "delete_org_sso_domain",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}",
+  },
+  { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -236,6 +256,7 @@ const PROJECT_OVERRIDES = ["admin", "member", "viewer", "none"] as const;
 const RESPONSES: Record<string, Respond> = {
   post_login: () => HttpResponse.json(meDocument),
   post_logout: () => noContent(),
+  post_sso_discover: () => HttpResponse.json({ sso: false }),
   post_signup: () => HttpResponse.json(signupResponseDocument, { status: 201 }),
   post_setup: () => HttpResponse.json(setupResponseDocument, { status: 201 }),
   post_password_forgot: () => noContent(),
@@ -295,6 +316,12 @@ const RESPONSES: Record<string, Respond> = {
   },
   delete_org_member: () => noContent(),
   delete_org_invite: () => noContent(),
+  put_org_sso_provider: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_provider: () => noContent(),
+  post_org_sso_domain: () => HttpResponse.json(orgSsoDocument, { status: 201 }),
+  post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_domain: () => noContent(),
+  patch_org_sso: () => HttpResponse.json(orgSsoDocument),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {

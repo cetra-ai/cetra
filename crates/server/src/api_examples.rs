@@ -441,6 +441,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "get_org_sso",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-sso.json",
+            "application/json",
+        ),
+        example(
             "get_org_usage",
             params(&[("org", "acme")]),
             BTreeMap::new(),

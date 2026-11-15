@@ -6,6 +6,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use llmobs_core::ids::OrgId;
 use oauth2::{
     AuthorizationCode, ClientId, ClientSecret, EndpointMaybeSet, EndpointNotSet, EndpointSet,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope,
@@ -18,6 +19,91 @@ use tokio::sync::RwLock;
 
 use super::{ExchangeError, LoginClaims, OidcError};
 use crate::config::{AutoProvision as ConfigProvision, GoogleAuth, OidcAuth, Secret};
+
+/// Response bodies from an identity provider are capped here (D-P-53).
+const MAX_IDP_BODY: usize = 1024 * 1024;
+
+/// The HTTP client of an identity provider (D-P-53). `policy: Some` (an org's provider)
+/// refuses a URL that fails `allows_url` before sending: reqwest does not call the guarded
+/// resolver for IP-literal hosts. `policy: None` (operator providers from `[auth]`) sends as
+/// before. Bodies are capped at 1 MiB.
+#[derive(Debug, Clone)]
+pub(crate) struct IdpHttp {
+    client: reqwest::Client,
+    policy: Option<llmobs_eval::EgressPolicy>,
+}
+
+/// Why an identity-provider request failed. No variant holds the URL or a body.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IdpHttpError {
+    /// The address is not allowed by the org's egress policy (D166, D-P-53).
+    #[error("identity provider address refused")]
+    Denied,
+    /// The response body passed the cap.
+    #[error("identity provider response too large")]
+    TooLarge,
+    /// The request could not be sent or read.
+    #[error("identity provider request failed")]
+    Request,
+}
+
+impl IdpHttp {
+    /// The client of an operator provider (`[[auth.oidc]]`, Google): no address check.
+    pub(crate) fn operator(client: reqwest::Client) -> Self {
+        Self {
+            client,
+            policy: None,
+        }
+    }
+
+    /// The client of an org's provider: every request is checked against `policy` first.
+    /// `client` must come from [`llmobs_eval::identity_http_client`] with the same policy.
+    pub(crate) fn guarded(client: reqwest::Client, policy: llmobs_eval::EgressPolicy) -> Self {
+        Self {
+            client,
+            policy: Some(policy),
+        }
+    }
+
+    /// One request: the policy check, then the client, then the capped body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IdpHttpError::Denied`] before sending when the policy refuses the URL,
+    /// [`IdpHttpError::TooLarge`] past the body cap, and [`IdpHttpError::Request`] for any
+    /// other failure.
+    pub(crate) async fn send(
+        &self,
+        request: oauth2::HttpRequest,
+    ) -> Result<oauth2::HttpResponse, IdpHttpError> {
+        let (parts, body) = request.into_parts();
+        let url = reqwest::Url::parse(&parts.uri.to_string()).map_err(|_| IdpHttpError::Request)?;
+        if self.policy.is_some_and(|policy| !policy.allows_url(&url)) {
+            return Err(IdpHttpError::Denied);
+        }
+        let mut response = self
+            .client
+            .request(parts.method, url)
+            .headers(parts.headers)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| IdpHttpError::Request)?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mut collected = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| IdpHttpError::Request)? {
+            if collected.len().saturating_add(chunk.len()) > MAX_IDP_BODY {
+                return Err(IdpHttpError::TooLarge);
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        let mut out = oauth2::http::Response::new(collected);
+        *out.status_mut() = status;
+        *out.headers_mut() = headers;
+        Ok(out)
+    }
+}
 
 /// How the issuer and the hosted-domain claim are interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +147,7 @@ pub(crate) struct OidcProvider {
     allowed_domains: Vec<String>,
     auto_provision: Option<AutoProvision>,
     link_existing_by_email: bool,
-    http: reqwest::Client,
+    http: IdpHttp,
     metadata: RwLock<Option<(CoreProviderMetadata, i64)>>,
 }
 
@@ -81,7 +167,7 @@ impl OidcProvider {
             settings.allowed_domains.clone(),
             None,
             settings.link_existing_by_email,
-            http,
+            IdpHttp::operator(http),
         )
     }
 
@@ -104,6 +190,32 @@ impl OidcProvider {
                 .map(provision)
                 .transpose()?,
             settings.link_existing_by_email,
+            IdpHttp::operator(http),
+        )
+    }
+
+    /// An org's provider (D-P-52, D-P-53): id `org:<org_id>`, default scopes, no domain list,
+    /// no auto-provision, no linking flag (the org flow decides). `http` must be
+    /// `IdpHttp::guarded(llmobs_eval::identity_http_client(policy)?, policy)`.
+    pub(crate) fn for_org(
+        org_id: OrgId,
+        display_name: &str,
+        issuer: &str,
+        client_id: &str,
+        client_secret: Secret<String>,
+        http: IdpHttp,
+    ) -> Result<Self, OidcError> {
+        Self::new(
+            OidcKind::Generic,
+            format!("org:{org_id}"),
+            display_name.trim().to_owned(),
+            issuer,
+            client_id,
+            client_secret,
+            default_scopes(),
+            Vec::new(),
+            None,
+            false,
             http,
         )
     }
@@ -123,7 +235,7 @@ impl OidcProvider {
             Vec::new(),
             None,
             false,
-            http,
+            IdpHttp::operator(http),
         )
     }
 
@@ -177,7 +289,12 @@ impl OidcProvider {
         {
             return Ok(cached.clone());
         }
-        match CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http).await {
+        let http = self.http.clone();
+        let call = move |request: oauth2::HttpRequest| {
+            let http = http.clone();
+            async move { http.send(request).await }
+        };
+        match CoreProviderMetadata::discover_async(self.issuer.clone(), &call).await {
             Ok(fresh) => {
                 *self.metadata.write().await = Some((fresh.clone(), now));
                 Ok(fresh)
@@ -207,7 +324,12 @@ impl OidcProvider {
         &self,
         now: i64,
     ) -> Result<CoreProviderMetadata, OidcError> {
-        match CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http).await {
+        let http = self.http.clone();
+        let call = move |request: oauth2::HttpRequest| {
+            let http = http.clone();
+            async move { http.send(request).await }
+        };
+        match CoreProviderMetadata::discover_async(self.issuer.clone(), &call).await {
             Ok(fresh) => {
                 *self.metadata.write().await = Some((fresh.clone(), now));
                 Ok(fresh)
@@ -232,6 +354,9 @@ impl OidcProvider {
         now: i64,
     ) -> Result<(String, String), ExchangeError> {
         let metadata = self.metadata(now).await.map_err(exchange_unavailable)?;
+        if !self.authorization_endpoint_allowed(metadata.authorization_endpoint().url()) {
+            return Err(ExchangeError::Refused);
+        }
         let client = self.client(metadata, redirect_uri)?;
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         let verifier = verifier.secret().clone();
@@ -271,11 +396,16 @@ impl OidcProvider {
     ) -> Result<LoginClaims, ExchangeError> {
         let metadata = self.metadata(now).await.map_err(exchange_unavailable)?;
         let client = self.client(metadata, redirect_uri)?;
+        let http = self.http.clone();
+        let call = move |request: oauth2::HttpRequest| {
+            let http = http.clone();
+            async move { http.send(request).await }
+        };
         let token = client
             .exchange_code(AuthorizationCode::new(code.to_owned()))
             .map_err(|_| ExchangeError::Rejected)?
             .set_pkce_verifier(PkceCodeVerifier::new(verifier.to_owned()))
-            .request_async(&self.http)
+            .request_async(&call)
             .await
             .map_err(|error| token_error(&error))?;
         let Some(id_token) = token.id_token() else {
@@ -303,13 +433,27 @@ impl OidcProvider {
         Ok(LoginClaims {
             subject,
             email: claims.email().map(|email| email.to_string()),
-            email_verified: matches!(claims.email_verified(), Some(true)),
+            email_verified: claims.email_verified(),
             hd: hosted_domain(id_token),
             name: claims
                 .name()
                 .and_then(|localized| localized.get(None))
                 .map(|name| name.to_string()),
         })
+    }
+
+    /// Whether the browser may be sent to the discovered authorization endpoint. An org's
+    /// provider needs `https` (or `http` on a loopback host when private networks are allowed)
+    /// and an address its egress policy allows; operator providers are trusted.
+    fn authorization_endpoint_allowed(&self, url: &reqwest::Url) -> bool {
+        let Some(policy) = self.http.policy else {
+            return true;
+        };
+        let scheme_ok = url.scheme() == "https"
+            || (url.scheme() == "http"
+                && policy.allow_private_network
+                && crate::config::loopback_host(url));
+        scheme_ok && policy.allows_url(url)
     }
 
     fn client(
@@ -339,7 +483,7 @@ impl OidcProvider {
         allowed_domains: Vec<String>,
         auto_provision: Option<AutoProvision>,
         link_existing_by_email: bool,
-        http: reqwest::Client,
+        http: IdpHttp,
     ) -> Result<Self, OidcError> {
         let issuer = IssuerUrl::new(issuer.to_owned()).map_err(|_| OidcError::Invalid)?;
         Ok(Self {
@@ -537,5 +681,119 @@ mod tests {
         let text = error.to_string();
         assert_eq!(text, "identity provider metadata is unavailable");
         assert!(!text.contains("127.0.0.1"), "{text}");
+    }
+
+    fn guarded(allow_private_network: bool) -> IdpHttp {
+        let policy = llmobs_eval::EgressPolicy {
+            allow_private_network,
+        };
+        IdpHttp::guarded(
+            llmobs_eval::identity_http_client(policy).expect("client"),
+            policy,
+        )
+    }
+
+    fn org_provider(issuer: &str, http: IdpHttp) -> OidcProvider {
+        OidcProvider::for_org(
+            OrgId::new_v7(),
+            " Acme SSO ",
+            issuer,
+            "acme-client",
+            secret("acme-secret"),
+            http,
+        )
+        .expect("org provider")
+    }
+
+    #[test]
+    fn for_org_names_the_provider_by_org_and_keeps_the_secret_out_of_debug() {
+        let org = OrgId::new_v7();
+        let provider = OidcProvider::for_org(
+            org,
+            " Acme SSO ",
+            "https://idp.example",
+            "acme-client",
+            secret("acme-secret"),
+            guarded(false),
+        )
+        .expect("org provider");
+        assert_eq!(provider.id(), format!("org:{org}"));
+        assert_eq!(provider.display_name(), "Acme SSO");
+        assert_eq!(provider.kind, OidcKind::Generic);
+        assert!(provider.allowed_domains().is_empty());
+        assert!(provider.auto_provision().is_none());
+        assert!(!provider.link_existing_by_email());
+        assert!(!format!("{provider:?}").contains("acme-secret"));
+    }
+
+    #[tokio::test]
+    async fn guarded_metadata_loads_when_private_egress_is_allowed() {
+        let idp = MockIdp::start().await;
+        let provider = org_provider(idp.issuer(), guarded(true));
+        let metadata = provider.metadata(0).await.expect("metadata");
+        assert_eq!(metadata.issuer().as_str(), idp.issuer());
+        assert_eq!(idp.discovery_hits(), 1);
+    }
+
+    #[tokio::test]
+    async fn guarded_literal_ip_is_refused_before_sending() {
+        let idp = MockIdp::start().await;
+        let provider = org_provider(idp.issuer(), guarded(false));
+        let error = provider.metadata(0).await.expect_err("literal loopback");
+        assert!(matches!(error, OidcError::Unavailable));
+        assert_eq!(idp.discovery_hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn guarded_host_name_is_refused_by_the_resolver() {
+        let idp = MockIdp::start().await;
+        let mut provider = org_provider(idp.issuer(), guarded(false));
+        let localhost = idp.issuer().replace("127.0.0.1", "localhost");
+        provider.point_at(&localhost);
+        let error = provider.metadata(0).await.expect_err("localhost");
+        assert!(matches!(error, OidcError::Unavailable));
+        assert_eq!(idp.discovery_hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_refuses_a_metadata_address() {
+        let request = oauth2::http::Request::builder()
+            .method(oauth2::http::Method::GET)
+            .uri("http://169.254.169.254/latest")
+            .body(Vec::new())
+            .expect("request");
+        let error = guarded(false)
+            .send(request)
+            .await
+            .expect_err("metadata address");
+        assert!(matches!(error, IdpHttpError::Denied));
+        assert_eq!(error.to_string(), "identity provider address refused");
+    }
+
+    #[tokio::test]
+    async fn send_caps_the_body() {
+        use axum::Router;
+        use axum::routing::get;
+
+        let app = Router::new().route("/big", get(|| async { vec![0_u8; 2 * 1024 * 1024] }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let request = oauth2::http::Request::builder()
+            .method(oauth2::http::Method::GET)
+            .uri(format!("http://127.0.0.1:{port}/big"))
+            .body(Vec::new())
+            .expect("request");
+        let error = guarded(true)
+            .send(request)
+            .await
+            .expect_err("body over the cap");
+        assert!(matches!(error, IdpHttpError::TooLarge));
+        assert_eq!(error.to_string(), "identity provider response too large");
     }
 }

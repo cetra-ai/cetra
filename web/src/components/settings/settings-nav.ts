@@ -1,8 +1,9 @@
 export const orgSettingsNav = [
-  { to: "/$org/settings/general", label: "General" },
-  { to: "/$org/settings/plan", label: "Plan" },
-  { to: "/$org/settings/members", label: "Members" },
-  { to: "/$org/settings/llm-connections", label: "LLM connections" },
+  { to: "/$org/settings/general", label: "General", ownerOnly: false },
+  { to: "/$org/settings/plan", label: "Plan", ownerOnly: false },
+  { to: "/$org/settings/members", label: "Members", ownerOnly: false },
+  { to: "/$org/settings/llm-connections", label: "LLM connections", ownerOnly: false },
+  { to: "/$org/settings/sso", label: "Single sign-on", ownerOnly: true },
 ] as const;
 
 export const projectSettingsNav = [

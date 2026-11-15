@@ -5,6 +5,7 @@ pub(crate) mod hook_receiver;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
+pub(crate) mod oauth;
 
 use std::future::Future;
 use std::io::{self, Write};
@@ -348,6 +349,13 @@ impl TestApp {
         .await
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
+        let org_sso = crate::ee::org_sso::OrgSso::new(
+            llmobs_eval::EgressPolicy {
+                allow_private_network: config.security.allow_private_network_egress,
+            },
+            crate::ee::org_sso::dns::TxtResolver::fixed(),
+        )
+        .expect("org SSO state");
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -378,10 +386,16 @@ impl TestApp {
                 permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
             ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            org_sso,
             backup_slot: tokio::sync::Mutex::new(()),
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
         });
+        state
+            .org_sso
+            .reload(&state.meta, &state.secrets, &state.config.auth)
+            .await
+            .expect("org SSO reload");
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
         } else if let Some(routes) = routes {
@@ -394,6 +408,16 @@ impl TestApp {
             state,
             router,
         }
+    }
+
+    /// Sets the TXT records the fixed resolver answers for `name`.
+    pub(crate) fn dns_txt(&self, name: &str, values: &[&str]) {
+        self.state.org_sso.dns.set(name, values);
+    }
+
+    /// Makes every TXT lookup fail (P8's 503 test).
+    pub(crate) fn dns_fail(&self, fail: bool) {
+        self.state.org_sso.dns.set_fail(fail);
     }
 
     pub(crate) fn request(&self, method: Method, path: &str) -> TestRequest {
@@ -470,7 +494,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        let cookie = session_cookie(self, user_id).await;
+        let cookie = session_cookie_via(self, user_id, None).await;
         Seeded {
             user_id,
             org_id,
@@ -551,34 +575,7 @@ impl TestApp {
     /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
     /// session cookie for them.
     pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
-        let now = self.state.clock.now_ns();
-        let org_id = seeded.org_id;
-        let email = email.to_owned();
-        let id = self
-            .state
-            .meta
-            .write(move |conn| {
-                Box::pin(async move {
-                    let user = insert_user(
-                        conn,
-                        NewUser {
-                            email,
-                            name: None,
-                            password_hash: None,
-                            email_verified_at: None,
-                            is_instance_admin: false,
-                        },
-                        now,
-                    )
-                    .await?;
-                    add_org_member(conn, org_id, user.id, role, now).await?;
-                    Ok(user.id)
-                })
-            })
-            .await
-            .unwrap();
-        let cookie = session_cookie(self, id).await;
-        Member { id, cookie }
+        member_in_org(self, seeded.org_id, email, role).await
     }
 
     /// A personal access token for `user_id`, returned as its plaintext: scope `read`, plus
@@ -661,7 +658,7 @@ impl TestApp {
             })
             .await
             .unwrap();
-        session_cookie(self, user_id).await
+        session_cookie_via(self, user_id, None).await
     }
 }
 
@@ -841,8 +838,14 @@ async fn insert_key(
     Ok(())
 }
 
-async fn session_cookie(app: &TestApp, user_id: Uuid) -> String {
-    let header = start_session(&app.state, user_id, None, None)
+/// A session for `user_id`, started through `sso_org`'s provider when given, as a `cookie`
+/// header value (`llmobs_session=<token>`): the `Set-Cookie` value up to its first `;`.
+pub(crate) async fn session_cookie_via(
+    app: &TestApp,
+    user_id: Uuid,
+    sso_org: Option<OrgId>,
+) -> String {
+    let header = start_session(&app.state, user_id, None, None, sso_org)
         .await
         .unwrap();
     header
@@ -1218,6 +1221,161 @@ impl Write for LogBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// A new user `email` with org role `role` in `org`, and a session cookie for them.
+pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: OrgRole) -> Member {
+    let now = app.state.clock.now_ns();
+    let email = email.to_owned();
+    let id = app
+        .state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let user = insert_user(
+                    conn,
+                    NewUser {
+                        email,
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: None,
+                        is_instance_admin: false,
+                    },
+                    now,
+                )
+                .await?;
+                add_org_member(conn, org, user.id, role, now).await?;
+                Ok(user.id)
+            })
+        })
+        .await
+        .unwrap();
+    let cookie = session_cookie_via(app, id, None).await;
+    Member { id, cookie }
+}
+
+/// Saves the org's provider pointing at `idp` (the mock's client id and secret), with the
+/// flags given, verifies `domain` in `meta.db`, sets `last_login_at` to now (as if Test
+/// sign-in had run), and reloads the routing.
+pub(crate) async fn configure_org_sso(
+    app: &TestApp,
+    org: OrgId,
+    idp: &mock_idp::MockIdp,
+    domain: &str,
+    enabled: bool,
+    enforced: bool,
+) {
+    use crate::api::org_sso::JitRole;
+    use crate::ee::org_sso::store::{self, DomainRow, ProviderWrite};
+    let id = Uuid::now_v7();
+    let sealed = app
+        .state
+        .secrets
+        .seal(mock_idp::CLIENT_SECRET.as_bytes(), store::secret_aad(&id))
+        .expect("seal");
+    let token = crate::ee::org_sso::dns::new_token().expect("token");
+    let now = app.state.clock.now_ns();
+    let issuer = idp.issuer().to_owned();
+    let domain = domain.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let write = ProviderWrite {
+                    display_name: "Acme Okta".to_owned(),
+                    issuer,
+                    client_id: mock_idp::CLIENT_ID.to_owned(),
+                    client_secret_enc: Some(sealed),
+                    jit_role: JitRole::Viewer,
+                };
+                store::put_provider(conn, org, id, write, now).await?;
+                store::set_flags(conn, org, enabled, enforced, now).await?;
+                store::set_last_login(conn, org, now).await?;
+                let row = DomainRow {
+                    id: Uuid::now_v7(),
+                    org_id: org,
+                    domain,
+                    token,
+                    verified_at: None,
+                    last_checked_at: None,
+                    created_at: now,
+                };
+                let domain_id = row.id;
+                store::insert_domain(conn, &row).await?;
+                store::mark_verified(conn, domain_id, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    reload_org_sso(app).await;
+}
+
+/// Rebuilds the routing from `meta.db`, the job the server runs after every org SSO write.
+pub(crate) async fn reload_org_sso(app: &TestApp) {
+    app.state
+        .org_sso
+        .reload(&app.state.meta, &app.state.secrets, &app.state.config.auth)
+        .await
+        .expect("org SSO reload");
+}
+
+/// Makes `user_id` an instance admin.
+pub(crate) async fn make_instance_admin(app: &TestApp, user_id: Uuid) {
+    let now = app.state.clock.now_ns();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                users::set_instance_admin(conn, user_id, true, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+}
+
+/// A second org `slug` (name = slug) with a new non-admin owner `owner_email` and that owner's
+/// session.
+pub(crate) async fn second_org(app: &TestApp, slug: &str, owner_email: &str) -> (OrgId, Member) {
+    let org = OrgId::new_v7();
+    let now = app.state.clock.now_ns();
+    let slug = slug.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                insert_org(conn, org, &slug, &slug, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    let owner = member_in_org(app, org, owner_email, OrgRole::Owner).await;
+    (org, owner)
+}
+
+/// An org SSO test app: private egress allowed, a licence listing `org_sso`, `seed()`, and a
+/// non-admin owner `owner@acme.test` of the seeded org `acme`.
+pub(crate) async fn org_sso_app() -> (TestApp, Seeded, Member) {
+    org_sso_app_with(|_| {}).await
+}
+
+/// [`org_sso_app`] with `tweak` applied after its settings.
+pub(crate) async fn org_sso_app_with(
+    tweak: impl FnOnce(&mut ServerConfig),
+) -> (TestApp, Seeded, Member) {
+    let app = TestApp::with_config(move |config| {
+        config.security.allow_private_network_egress = true;
+        config.license_key = Some(crate::config::Secret::new(license_key(&["org_sso"])));
+        tweak(config);
+    })
+    .await;
+    let seeded = app.seed().await;
+    let owner = app
+        .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+        .await;
+    (app, seeded, owner)
 }
 
 /// The OTLP key the tests send with, also the project key of [`with_init`].

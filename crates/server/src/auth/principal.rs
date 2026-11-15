@@ -55,6 +55,8 @@ pub(crate) enum Principal {
         user: AuthUser,
         /// SHA-256 hex of the cookie. Not the cookie value.
         session_hash: String,
+        /// The org whose provider started this session, D-P-59.
+        sso_org: Option<llmobs_core::ids::OrgId>,
     },
     /// A project API key. `Debug` omits the hash.
     ApiKey {
@@ -203,6 +205,7 @@ pub(crate) async fn authenticate(
                     email: row.user.email,
                 },
                 session_hash: row.hash,
+                sso_org: row.sso_org_id,
             }),
             refresh,
         ),
@@ -339,6 +342,11 @@ async fn pat_principal(
     if row.disabled_at.is_some() {
         return Err(ApiError::Unauthorized);
     }
+    // D-P-58: under enforcement a personal access token is always refused, so a token made
+    // while the revocation committed does not work.
+    if !row.is_instance_admin && crate::ee::org_sso::enforces(state, &row.email) {
+        return Err(ApiError::Unauthorized);
+    }
     state.token_last_used.record(cached.id, now);
     Ok(Principal::Pat {
         user: AuthUser {
@@ -411,13 +419,20 @@ mod tests {
                 email: "ada@example.com".to_owned(),
             },
             session_hash: "not-a-cookie".to_owned(),
+            sso_org: None,
         };
         let text = format!("{principal:?}");
-        let Principal::Session { user, session_hash } = &principal else {
+        let Principal::Session {
+            user,
+            session_hash,
+            sso_org,
+        } = &principal
+        else {
             panic!("expected a session");
         };
         assert_eq!(user.email, "ada@example.com");
         assert_eq!(session_hash, "not-a-cookie");
+        assert_eq!(*sso_org, None);
         assert!(!text.contains(&user.email), "{text}");
         assert!(!text.contains(session_hash), "{text}");
     }

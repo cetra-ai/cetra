@@ -539,6 +539,8 @@ mod tests {
             serde_json::to_string(&Feature::ProjectRoles).unwrap(),
             "\"project_roles\""
         );
+        assert_eq!(Feature::from_name("org_sso"), Some(Feature::OrgSso));
+        assert!(Feature::OrgSso.is_ee());
         assert_eq!(Feature::from_name("audit_logs"), None);
         assert!(Feature::ALL.len() <= 32);
     }
@@ -675,6 +677,17 @@ mod tests {
         let app = TestApp::with_license(&["project_roles"]).await;
         assert!(require(&app.state, org, Feature::ProjectRoles).is_ok());
         assert!(require(&app.state, org, Feature::SsoEnforcement).is_err());
+    }
+
+    #[tokio::test]
+    async fn org_sso_follows_the_license() {
+        let org = OrgId::new_v7();
+        let app = TestApp::new().await;
+        assert!(!of(&app.state, org).allows(Feature::OrgSso));
+
+        let app = TestApp::with_license(&["org_sso"]).await;
+        assert!(of(&app.state, org).allows(Feature::OrgSso));
+        assert!(require(&app.state, org, Feature::OrgSso).is_ok());
     }
 
     #[tokio::test]

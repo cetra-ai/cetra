@@ -322,6 +322,45 @@ async fn entitlements_in(
     })
 }
 
+/// Turns an org's SSO off: the provider is disabled and not enforced (D-P-63). `org` is a slug
+/// or an id, as [`entitlements`] takes it. A running server applies it within 60 seconds.
+///
+/// Returns `false` when the org has no identity provider.
+///
+/// # Errors
+///
+/// Returns [`AdminError::OrgNotFound`] when no org has that id or slug, or another
+/// [`AdminError`] when the database is missing or unreadable.
+pub async fn org_sso_disable(config: &ServerConfig, org: &str) -> Result<bool, AdminError> {
+    let meta = open_meta(config).await?;
+    let outcome = org_sso_disable_in(&meta, org).await;
+    meta.close().await;
+    outcome
+}
+
+async fn org_sso_disable_in(meta: &MetaDb, org: &str) -> Result<bool, AdminError> {
+    let row = match org.parse::<OrgId>() {
+        Ok(id) => org_by_id(meta.reader(), id).await,
+        Err(_) => org_by_slug(meta.reader(), org).await,
+    }
+    .map_err(map_meta)?
+    .ok_or(AdminError::OrgNotFound)?;
+    let id = row.id;
+    let now = Clock::System.now_ns();
+    let changed = meta
+        .write(move |conn| {
+            Box::pin(async move {
+                crate::ee::org_sso::store::set_flags(conn, id, false, false, now).await
+            })
+        })
+        .await
+        .map_err(map_meta)?;
+    if changed {
+        tracing::info!(target: "audit", org_id = %id, actor = "cli", "org sso disabled");
+    }
+    Ok(changed)
+}
+
 /// What [`reapply_deletions`] did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReapplyReport {
@@ -831,6 +870,48 @@ mod tests {
         let mut config = app.state.config.clone();
         config.data_dir = dir.path().to_path_buf();
         (dir, config)
+    }
+
+    #[tokio::test]
+    async fn org_sso_disable_turns_a_provider_and_enforcement_off() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let write = crate::ee::org_sso::store::ProviderWrite {
+                    display_name: "Acme".to_owned(),
+                    issuer: "https://idp.example".to_owned(),
+                    client_id: "client".to_owned(),
+                    client_secret_enc: Some(vec![1]),
+                    jit_role: crate::api::org_sso::JitRole::Viewer,
+                };
+                crate::ee::org_sso::store::put_provider(conn, org, Uuid::now_v7(), write, 1)
+                    .await?;
+                crate::ee::org_sso::store::set_flags(conn, org, true, true, 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        let row = crate::ee::org_sso::store::provider(db.reader(), org)
+            .await
+            .unwrap()
+            .expect("provider kept");
+        assert!(!row.enabled && !row.enforced);
+        db.close().await;
+
+        // Disabling again finds the provider row, so it still reports a change.
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        assert!(matches!(
+            org_sso_disable(&config, "nobody").await,
+            Err(AdminError::OrgNotFound)
+        ));
     }
 
     #[tokio::test]
