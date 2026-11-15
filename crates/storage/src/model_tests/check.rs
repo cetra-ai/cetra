@@ -193,12 +193,27 @@ pub(super) async fn observe(storage: &Storage, read: &Read) -> Result<Observed, 
     })
 }
 
+/// How strictly a span list's keys are compared with the model (`compare_span_keys`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Strictness {
+    /// M1: nothing runs in the background, so each visible span key is listed exactly once.
+    Exact,
+    /// M6: a background flush or compaction may not have merged a re-sent copy yet, so a key is
+    /// listed up to its visible copies (§ The rule).
+    Concurrent,
+}
+
 /// Compares `observed`, what `read` returned, with the state of `model` that `read` names. `Err`
 /// holds a printable description of the first difference (expected and observed).
-pub(super) fn compare(model: &Model, read: &Read, observed: &Observed) -> Result<(), String> {
+pub(super) fn compare(
+    model: &Model,
+    read: &Read,
+    observed: &Observed,
+    strictness: Strictness,
+) -> Result<(), String> {
     match (read, observed) {
         (Read::Spans(project), Observed::Spans(rows)) => {
-            compare_span_keys(model.project(*project), rows)
+            compare_span_keys(model.project(*project), rows, strictness)
         }
         (Read::Traces(project), Observed::Traces(rows)) => {
             compare_traces(model.project(*project), rows)
@@ -263,7 +278,7 @@ pub(super) fn check_read(h: &Harness, model: &Model, read: &Read, index: usize) 
 
 /// [`compare`], panicking with the op index and the read on a difference.
 pub(super) fn check_observed(model: &Model, read: &Read, observed: &Observed, index: usize) {
-    if let Err(diff) = compare(model, read, observed) {
+    if let Err(diff) = compare(model, read, observed, Strictness::Exact) {
         panic!("op {index}, {read:?}: {diff}");
     }
 }
@@ -506,12 +521,13 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
     (!differing.is_empty()).then(|| format!("differing fields: {differing:?}"))
 }
 
-/// `span_list` shows each visible span key at least once and at most once per visible copy: the
-/// keys read equal the visible keys, and a key repeats only up to its copies (a copy that a
+/// `span_list` shows each visible span key: the keys read equal the visible keys. Each key is
+/// listed once, or, under `Strictness::Concurrent`, up to once per visible copy (a copy that a
 /// flush or compaction has not merged yet is listed too, R6.5 § The rule).
 fn compare_span_keys(
     state: &ProjectModel,
     observed: &[(i64, String, String)],
+    strictness: Strictness,
 ) -> Result<(), String> {
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (_, trace, span) in observed {
@@ -539,7 +555,11 @@ fn compare_span_keys(
     }
     for (key, count) in &counts {
         let copies = expected[key];
-        if *count < 1 || *count > copies {
+        let most = match strictness {
+            Strictness::Exact => 1,
+            Strictness::Concurrent => copies,
+        };
+        if *count < 1 || *count > most {
             return Err(format!(
                 "span {key:?} is listed {count} times, the model has {copies} visible copies"
             ));

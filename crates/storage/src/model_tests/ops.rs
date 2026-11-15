@@ -336,6 +336,28 @@ pub(super) enum Concurrency {
     Concurrent,
 }
 
+/// What the explicit `Compact` and `ApplyDeletions` passes of one `apply_storage` call reported.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct Passes {
+    /// Passes run (0 or 1 per call).
+    pub(super) run: u64,
+    /// Passes that reported `failed > 0`.
+    pub(super) lost_passes: u64,
+    /// Jobs that failed or lost a conflict, summed over the passes.
+    pub(super) lost_jobs: u64,
+}
+
+impl Passes {
+    /// The outcome of one pass that reported `failed` jobs.
+    fn of_pass(failed: u64) -> Self {
+        Self {
+            run: 1,
+            lost_passes: u64::from(failed > 0),
+            lost_jobs: failed,
+        }
+    }
+}
+
 /// Runs one op against storage and the model. `clock` advances first (by one microsecond,
 /// and by the op's own hours for `Compact`). Ops that need `&mut Harness` (`Restart`, `Crash`,
 /// `LossyCrash`, `Settle`) run here; the rest run in `apply_storage`.
@@ -360,14 +382,16 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             *clock += MICRO_NS;
             settle(harness, model, clock);
         }
-        _ => apply_storage(
-            op,
-            harness,
-            model,
-            clock,
-            Concurrency::Sequential,
-            &mut |_| {},
-        ),
+        _ => {
+            apply_storage(
+                op,
+                harness,
+                model,
+                clock,
+                Concurrency::Sequential,
+                &mut |_| {},
+            );
+        }
     }
 }
 
@@ -378,7 +402,7 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
 /// (`Compact`, `Gc`, `ApplyDeletions`, `Verify`, `EvictCache`) report nothing.
 ///
 /// Never called with `Restart`, `Crash`, `LossyCrash` or `Settle`: those need `&mut Harness`, so
-/// they run in `apply`.
+/// they run in `apply`. Returns what an explicit compaction or deletion pass reported.
 pub(super) fn apply_storage(
     op: &Op,
     h: &Harness,
@@ -386,8 +410,9 @@ pub(super) fn apply_storage(
     clock: &mut i64,
     mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
-) {
+) -> Passes {
     *clock += MICRO_NS;
+    let mut passes = Passes::default();
     match *op {
         Op::Append {
             project,
@@ -418,7 +443,7 @@ pub(super) fn apply_storage(
         }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            compact(h, *clock, mode);
+            passes = compact(h, *clock, mode);
         }
         Op::Gc => collect_obsolete(h),
         Op::Score {
@@ -442,11 +467,12 @@ pub(super) fn apply_storage(
         }
         Op::ApplyDeletions { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            apply_deletions(h, *clock, mode);
+            passes = apply_deletions(h, *clock, mode);
         }
         Op::Retention { project, keep } => retention(h, model, project, keep, step),
         Op::DropB => drop_b(h, model, step),
     }
+    passes
 }
 
 /// How many times a concurrent run retries a refused append before the case fails (R6.5).
@@ -852,32 +878,48 @@ fn injected_so_far(harness: &Harness) -> u64 {
 
 /// One compaction pass. A concurrent run may lose a conflict (a background job, or another lane's
 /// retention or drop, took its inputs), so only a sequential run asserts `failed == 0`.
-fn compact(harness: &Harness, clock: i64, mode: Concurrency) {
+fn compact(harness: &Harness, clock: i64, mode: Concurrency) -> Passes {
     let before = injected_so_far(harness);
     match harness.block_on(harness.storage().compact(clock)) {
-        Ok(report) => assert!(
-            mode == Concurrency::Concurrent || report.failed == 0 || allow_failure(harness, before),
-            "a compaction job failed without an injected fault"
-        ),
-        Err(error) => assert!(
-            allow_failure(harness, before),
-            "compact failed without an injected fault: {error:?}"
-        ),
+        Ok(report) => {
+            assert!(
+                mode == Concurrency::Concurrent
+                    || report.failed == 0
+                    || allow_failure(harness, before),
+                "a compaction job failed without an injected fault"
+            );
+            Passes::of_pass(report.failed)
+        }
+        Err(error) => {
+            assert!(
+                allow_failure(harness, before),
+                "compact failed without an injected fault: {error:?}"
+            );
+            Passes::default()
+        }
     }
 }
 
 /// One deletion pass; as `compact`, a concurrent run may lose a conflict.
-fn apply_deletions(harness: &Harness, clock: i64, mode: Concurrency) {
+fn apply_deletions(harness: &Harness, clock: i64, mode: Concurrency) -> Passes {
     let before = injected_so_far(harness);
     match harness.block_on(harness.storage().apply_deletions(clock)) {
-        Ok(report) => assert!(
-            mode == Concurrency::Concurrent || report.failed == 0 || allow_failure(harness, before),
-            "a deletion job failed without an injected fault"
-        ),
-        Err(error) => assert!(
-            allow_failure(harness, before),
-            "apply_deletions failed without an injected fault: {error:?}"
-        ),
+        Ok(report) => {
+            assert!(
+                mode == Concurrency::Concurrent
+                    || report.failed == 0
+                    || allow_failure(harness, before),
+                "a deletion job failed without an injected fault"
+            );
+            Passes::of_pass(report.failed)
+        }
+        Err(error) => {
+            assert!(
+                allow_failure(harness, before),
+                "apply_deletions failed without an injected fault: {error:?}"
+            );
+            Passes::default()
+        }
     }
 }
 

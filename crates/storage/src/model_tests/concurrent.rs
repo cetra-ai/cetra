@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -18,16 +19,19 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use uuid::Uuid;
 
-use super::check::{Read, check_full, check_settled_files, compare, days, observe};
+use super::check::{
+    Observed, Read, Strictness, check_full, check_settled_files, compare, days, observe,
+};
 use super::harness::{Harness, HarnessOptions, concurrent_tweaks};
 use super::model::Model;
 use super::observe::ReadFailure;
 use super::ops::{
-    Concurrency, MILLI_NS, Op, SPANS, StepEvent, TRACES, all_deletions_applied, apply,
+    Concurrency, MILLI_NS, Op, Passes, SPANS, StepEvent, TRACES, all_deletions_applied, apply,
     apply_storage, drop_day_closed_scores, flushed, keep_newest_copies, new_model, ops_for, send,
 };
 use super::shape::{HOUR_NS, P, day, midnight, span};
 use crate::deletion::DeletionStatus;
+use crate::hooks::HookPoint;
 use crate::reads::AlertMeasure;
 use crate::wal::Table;
 
@@ -52,6 +56,14 @@ const ABORT_AFTER: Duration = Duration::from_secs(10);
 
 /// How long a background job may keep its claims after the settle passes (`settle_concurrent`).
 const CLAIMS_WAIT: Duration = Duration::from_secs(30);
+
+/// After the drivers stop, the readers keep reading for this long, and until each of them has
+/// matched `TAIL_READS` reads: the reads of a quiet lane, with the background work still running.
+const TAIL: Duration = Duration::from_millis(300);
+const TAIL_READS: u64 = 20;
+
+/// The most time the readers may spend on the tail, however few reads they match.
+const TAIL_LIMIT: Duration = Duration::from_secs(10);
 
 /// Parameters of one concurrent case.
 #[derive(Debug, Clone)]
@@ -117,8 +129,40 @@ pub(super) struct Stats {
     pub(super) wait_limit: AtomicU64,
     /// Reads that matched a state other than `S_lo`.
     pub(super) matched_later: AtomicU64,
+    /// Obsolete files the collections deleted, and those still in use by a snapshot.
     pub(super) gc_deleted: AtomicU64,
     pub(super) gc_in_use: AtomicU64,
+    /// Explicit compaction and deletion passes run, the ones that reported lost jobs, and the
+    /// jobs they lost. A concurrent run tolerates lost jobs; it must not lose them all.
+    pub(super) passes: AtomicU64,
+    pub(super) lost_passes: AtomicU64,
+    pub(super) lost_jobs: AtomicU64,
+}
+
+impl Stats {
+    /// Adds the explicit passes of one `apply_storage` call.
+    fn add_passes(&self, passes: Passes) {
+        self.passes.fetch_add(passes.run, SeqCst);
+        self.lost_passes.fetch_add(passes.lost_passes, SeqCst);
+        self.lost_jobs.fetch_add(passes.lost_jobs, SeqCst);
+    }
+
+    /// Matched reads, over every kind.
+    fn matched_reads(&self) -> u64 {
+        self.reads.iter().map(|count| count.load(SeqCst)).sum()
+    }
+}
+
+/// The flags and counters that the threads of a run share.
+#[derive(Clone, Copy)]
+struct Run<'a> {
+    /// Set to wind the threads down: when the run ends, or when one of them failed.
+    stop: &'a AtomicBool,
+    /// Set only when a thread failed (it panicked, or the watchdog stopped a stuck run). A read
+    /// that mismatches after a normal stop is still a finding; after a failure it may be the
+    /// victim of the stopped run.
+    failed: &'a AtomicBool,
+    stats: &'a Stats,
 }
 
 impl Lane {
@@ -296,7 +340,7 @@ struct Exit<'a> {
     thread: &'a Thread,
     finished: &'a AtomicUsize,
     lane: Option<Arc<Lane>>,
-    stop: &'a AtomicBool,
+    run: Run<'a>,
 }
 
 impl Drop for Exit<'_> {
@@ -305,7 +349,8 @@ impl Drop for Exit<'_> {
             lane.set_idle(true);
         }
         if thread::panicking() {
-            self.stop.store(true, SeqCst);
+            self.run.failed.store(true, SeqCst);
+            self.run.stop.store(true, SeqCst);
         }
         self.thread.idle();
         self.finished.fetch_add(1, SeqCst);
@@ -325,14 +370,12 @@ fn publish(lane: &Lane, event: StepEvent<'_>, keep: usize, stats: &Stats) {
 
 /// One lane's ops, on its driver thread: each op runs with the step callback of the lane, then
 /// the pause.
-#[allow(clippy::too_many_arguments)] // the run's shared stop flag, stats and exit counter
 fn driver(
     h: &Harness,
     lane: &mut LaneState,
     ops: &[Op],
     options: &ConcurrentOptions,
-    stop: &AtomicBool,
-    stats: &Stats,
+    run: Run<'_>,
     thread: &Thread,
     finished: &AtomicUsize,
 ) {
@@ -340,22 +383,23 @@ fn driver(
         thread,
         finished,
         lane: Some(Arc::clone(&lane.shared)),
-        stop,
+        run,
     };
     for (index, op) in ops.iter().enumerate() {
-        if stop.load(SeqCst) {
+        if run.stop.load(SeqCst) {
             return;
         }
         thread.start(format!("op {index} {op:?}"));
         lane.model.ops_applied += 1;
-        apply_storage(
+        let passes = apply_storage(
             op,
             h,
             &mut lane.model,
             &mut lane.clock,
             Concurrency::Concurrent,
-            &mut |event| publish(&lane.shared, event, options.history_keep, stats),
+            &mut |event| publish(&lane.shared, event, options.history_keep, run.stats),
         );
+        run.stats.add_passes(passes);
         thread.idle();
         thread::sleep(options.pace);
     }
@@ -444,27 +488,88 @@ fn check_deletion_status(h: &Harness, lane: &Lane, lane_index: usize, id: Uuid, 
     }
 }
 
+/// The highest state a read may have seen, once it returned (§ The rule): `in_flight` is read
+/// before `published`, so a step that was in flight may have published since.
+fn upper_bound(lane: &Lane) -> usize {
+    let flying = lane.in_flight.load(SeqCst);
+    let done = lane.published.load(SeqCst);
+    done + usize::from(flying)
+}
+
+/// The first of `states` (`states[i]` is `S_{lo + i}`) that `observed` matches, as its index in the
+/// history. Otherwise, every state's difference.
+fn first_match(
+    states: &[Arc<Model>],
+    lo: usize,
+    read: &Read,
+    observed: &Observed,
+) -> Result<usize, Vec<String>> {
+    let mut differences = Vec::new();
+    for (offset, state) in states.iter().enumerate() {
+        match compare(state, read, observed, Strictness::Concurrent) {
+            Ok(()) => return Ok(lo + offset),
+            Err(difference) => differences.push(format!("S_{}: {difference}", lo + offset)),
+        }
+    }
+    Err(differences)
+}
+
+/// Checks `observed`, a read that started at `lo` and that `hi` bounds, against the states it may
+/// have seen. Returns the index of the state it matched, or `None` when the check is skipped (a
+/// state is missing, or the run stops). A mismatch panics, unless a thread failed: then the read
+/// is the victim of the stopped run, not a finding of its own.
+fn check_observed_read(
+    lane: &Lane,
+    lane_index: usize,
+    read: &Read,
+    (lo, hi): (usize, usize),
+    observed: &Observed,
+    run: Run<'_>,
+) -> Option<usize> {
+    let states = match lane.states(lo, hi, run.stop) {
+        Ok(states) => states,
+        Err(miss) => {
+            count_miss(&miss, run.stats);
+            return None;
+        }
+    };
+    match first_match(&states, lo, read, observed) {
+        Ok(matched) => Some(matched),
+        Err(differences) => {
+            if run.failed.load(SeqCst) {
+                return None;
+            }
+            panic!(
+                "lane {lane_index}, {read:?}, lo {lo}, hi {hi}: observed {observed:?} matches none \
+                 of the {} states the read may have seen:\n{}",
+                states.len(),
+                differences.join("\n")
+            );
+        }
+    }
+}
+
 /// One reader thread: reads until `stop`, each read on one snapshot, each checked against the
-/// states its snapshot may have.
-#[allow(clippy::too_many_arguments)] // the run's shared stop flag, stats and exit counter
+/// states its snapshot may have. `progress` counts the matched reads.
+#[allow(clippy::too_many_arguments)] // the run's shared flags, the exit counter and the progress
 fn reader(
     h: &Harness,
     lanes: &[Arc<Lane>],
     pairs: &[(P, P)],
     seed: u64,
-    stop: &AtomicBool,
-    stats: &Stats,
+    run: Run<'_>,
     thread: &Thread,
     finished: &AtomicUsize,
+    progress: &AtomicU64,
 ) {
     let _exit = Exit {
         thread,
         finished,
         lane: None,
-        stop,
+        run,
     };
     let mut rng = XorShift(seed.max(1));
-    while !stop.load(SeqCst) {
+    while !run.stop.load(SeqCst) {
         let lane_index = usize::try_from(rng.below(lanes.len() as u64)).unwrap_or(0);
         let lane = &lanes[lane_index];
         let (a, b) = pairs[lane_index];
@@ -473,10 +578,10 @@ fn reader(
         let kind = pick_kind(&mut rng);
         // `lo` is read before the snapshot: the state it names is in the snapshot.
         let lo = lane.published.load(SeqCst);
-        let at_lo = match lane.states(lo, lo, stop) {
+        let at_lo = match lane.states(lo, lo, run.stop) {
             Ok(states) => states,
             Err(miss) => {
-                count_miss(&miss, stats);
+                count_miss(&miss, run.stats);
                 continue;
             }
         };
@@ -490,7 +595,8 @@ fn reader(
             }
             let id = deletions[usize::try_from(rng.below(deletions.len() as u64)).unwrap_or(0)].id;
             check_deletion_status(h, lane, lane_index, id, thread);
-            stats.reads[kind as usize].fetch_add(1, SeqCst);
+            run.stats.reads[kind as usize].fetch_add(1, SeqCst);
+            progress.fetch_add(1, SeqCst);
             continue;
         }
         let read = build_read(kind, project, model, &mut rng);
@@ -500,56 +606,24 @@ fn reader(
         let observed = match observed {
             Ok(observed) => observed,
             Err(ReadFailure::Busy) => {
-                stats.busy.fetch_add(1, SeqCst);
+                run.stats.busy.fetch_add(1, SeqCst);
                 continue;
             }
             Err(ReadFailure::Error(text)) => {
                 panic!("lane {lane_index}, {read:?}, lo {lo}: the read failed: {text}")
             }
         };
-        // `hi` is read after the read returned, in this order (§ The rule).
-        let flying = lane.in_flight.load(SeqCst);
-        let done = lane.published.load(SeqCst);
-        let hi = done + usize::from(flying);
-        let states = match lane.states(lo, hi, stop) {
-            Ok(states) => states,
-            Err(miss) => {
-                count_miss(&miss, stats);
-                continue;
-            }
+        // `hi` is read after the read returned (§ The rule).
+        let hi = upper_bound(lane);
+        let Some(matched) = check_observed_read(lane, lane_index, &read, (lo, hi), &observed, run)
+        else {
+            continue;
         };
-        let mut matched = None;
-        let mut differences = Vec::new();
-        for (offset, state) in states.iter().enumerate() {
-            match compare(state, &read, &observed) {
-                Ok(()) => {
-                    matched = Some(offset);
-                    break;
-                }
-                Err(difference) => differences.push(format!("S_{}: {difference}", lo + offset)),
-            }
+        run.stats.reads[kind as usize].fetch_add(1, SeqCst);
+        if matched > lo {
+            run.stats.matched_later.fetch_add(1, SeqCst);
         }
-        match matched {
-            Some(offset) => {
-                stats.reads[kind as usize].fetch_add(1, SeqCst);
-                if offset > 0 {
-                    stats.matched_later.fetch_add(1, SeqCst);
-                }
-            }
-            None => {
-                // Another thread failed and stopped the run: this read may be the stopped
-                // step's victim, not a finding of its own.
-                if stop.load(SeqCst) {
-                    break;
-                }
-                panic!(
-                    "lane {lane_index}, {read:?}, lo {lo}, hi {hi}: observed {observed:?} \
-                     matches none of the {} states the read may have seen:\n{}",
-                    states.len(),
-                    differences.join("\n")
-                );
-            }
-        }
+        progress.fetch_add(1, SeqCst);
     }
 }
 
@@ -564,28 +638,21 @@ fn count_miss(miss: &Miss, stats: &Stats) {
 
 /// The GC thread: an obsolete-file collection with no grace, every `every`. Only the reference
 /// counts protect a reader's files (spec 03 §5).
-fn gc_thread(
-    h: &Harness,
-    every: Duration,
-    stop: &AtomicBool,
-    stats: &Stats,
-    thread: &Thread,
-    finished: &AtomicUsize,
-) {
+fn gc_thread(h: &Harness, every: Duration, run: Run<'_>, thread: &Thread, finished: &AtomicUsize) {
     let _exit = Exit {
         thread,
         finished,
         lane: None,
-        stop,
+        run,
     };
-    while !stop.load(SeqCst) {
+    while !run.stop.load(SeqCst) {
         thread.start("collecting obsolete files".to_owned());
         let report = h
             .block_on(h.storage().collect_obsolete(Duration::ZERO))
             .expect("obsolete-file collection");
         thread.idle();
-        stats.gc_deleted.fetch_add(report.deleted, SeqCst);
-        stats.gc_in_use.fetch_add(report.in_use, SeqCst);
+        run.stats.gc_deleted.fetch_add(report.deleted, SeqCst);
+        run.stats.gc_in_use.fetch_add(report.in_use, SeqCst);
         thread::sleep(every);
     }
 }
@@ -595,7 +662,13 @@ fn gc_thread(
 /// not return within `ABORT_AFTER` aborts the process, so a hung test fails rather than blocks
 /// CI. The dump goes to stderr with `writeln!`, since libtest captures `eprintln!` and drops it
 /// when the process aborts.
-fn watchdog(threads: &[Thread], finished: &AtomicUsize, total: usize, stop: &AtomicBool) {
+fn watchdog(
+    threads: &[Thread],
+    finished: &AtomicUsize,
+    total: usize,
+    stop: &AtomicBool,
+    failed: &AtomicBool,
+) {
     loop {
         if finished.load(SeqCst) >= total {
             return;
@@ -611,6 +684,7 @@ fn watchdog(threads: &[Thread], finished: &AtomicUsize, total: usize, stop: &Ato
             continue;
         };
         dump(threads);
+        failed.store(true, SeqCst);
         stop.store(true, SeqCst);
         let until = Instant::now() + ABORT_AFTER;
         while finished.load(SeqCst) < total && Instant::now() < until {
@@ -637,7 +711,8 @@ fn dump(threads: &[Thread]) {
 }
 
 /// Runs the ops of every lane at once, each lane on its driver thread, with the readers, the GC
-/// thread and the watchdog, until every driver is done. No op may be a barrier.
+/// thread and the watchdog. When the drivers are done the readers go on for the tail (`TAIL`),
+/// then the run stops. No op may be a barrier.
 pub(super) fn run_segment(
     h: &Harness,
     lanes: &mut [LaneState],
@@ -666,33 +741,58 @@ pub(super) fn run_segment(
     let total = threads.len();
     let finished = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
+    let failed = AtomicBool::new(false);
+    let progress: Vec<AtomicU64> = (0..options.readers).map(|_| AtomicU64::new(0)).collect();
+    let run = Run {
+        stop: &stop,
+        failed: &failed,
+        stats,
+    };
     let (driver_threads, rest) = threads.split_at(lanes.len());
     let (reader_threads, gc) = rest.split_at(options.readers);
     let drivers: Vec<(&mut LaneState, &[Op])> = lanes.iter_mut().zip(ops.iter().copied()).collect();
-    let (shared, pairs, threads, finished, stop) = (&shared, &pairs, &threads, &finished, &stop);
+    let (shared, pairs, threads, finished, progress, stop, failed) = (
+        &shared, &pairs, &threads, &finished, &progress, &stop, &failed,
+    );
     thread::scope(|scope| {
         let handles: Vec<_> = drivers
             .into_iter()
             .zip(driver_threads)
             .map(|((lane, lane_ops), thread)| {
                 scope.spawn(move || {
-                    driver(h, lane, lane_ops, options, stop, stats, thread, finished);
+                    driver(h, lane, lane_ops, options, run, thread, finished);
                 })
             })
             .collect();
         for (index, thread) in reader_threads.iter().enumerate() {
             let reader_seed = seed.wrapping_add(index as u64);
+            let count = &progress[index];
             scope.spawn(move || {
-                reader(h, shared, pairs, reader_seed, stop, stats, thread, finished);
+                reader(h, shared, pairs, reader_seed, run, thread, finished, count);
             });
         }
-        scope.spawn(move || gc_thread(h, options.gc_every, stop, stats, &gc[0], finished));
-        scope.spawn(move || watchdog(threads, finished, total, stop));
+        scope.spawn(move || gc_thread(h, options.gc_every, run, &gc[0], finished));
+        scope.spawn(move || watchdog(threads, finished, total, stop, failed));
         for handle in handles {
             if let Err(payload) = handle.join() {
                 stop.store(true, SeqCst);
+                failed.store(true, SeqCst);
                 std::panic::resume_unwind(payload);
             }
+        }
+        // The tail: the readers keep reading on the quiet lanes until each has matched
+        // `TAIL_READS` reads, and `TAIL` has passed, or `TAIL_LIMIT` has.
+        let tail_from = Instant::now();
+        let before: Vec<u64> = progress.iter().map(|count| count.load(SeqCst)).collect();
+        while !stop.load(SeqCst) && tail_from.elapsed() < TAIL_LIMIT {
+            let enough = progress
+                .iter()
+                .zip(&before)
+                .all(|(count, before)| count.load(SeqCst) >= before + TAIL_READS);
+            if enough && tail_from.elapsed() >= TAIL {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
         stop.store(true, SeqCst);
     });
@@ -718,6 +818,7 @@ pub(super) fn settle_concurrent(
     h: &mut Harness,
     lanes: &mut [LaneState],
     options: &ConcurrentOptions,
+    stats: &Stats,
 ) {
     // 1. Everything in files, the WAL models updated for the restart.
     h.restart();
@@ -777,9 +878,11 @@ pub(super) fn settle_concurrent(
     harness
         .block_on(harness.storage().collect_staged(Duration::ZERO))
         .expect("collect_staged while settling");
-    harness
+    let report = harness
         .block_on(harness.storage().collect_obsolete(Duration::ZERO))
         .expect("obsolete-file collection while settling");
+    stats.gc_deleted.fetch_add(report.deleted, SeqCst);
+    stats.gc_in_use.fetch_add(report.in_use, SeqCst);
     // 6. Each lane's model as storage has it now, and each lane's collapsed state published.
     for lane in lanes.iter_mut() {
         keep_newest_copies(&mut lane.model.a);
@@ -801,15 +904,25 @@ fn is_barrier(op: &Op) -> bool {
     )
 }
 
-/// The seed of a segment's readers: one per barrier index, so a case's read mix is reproducible.
-fn segment_seed(index: usize) -> u64 {
-    0x5eed_u64.wrapping_add(index as u64)
+/// The seed of a segment's readers: the case's seed and the segment's barrier index, so a case's
+/// read mix is reproducible and differs between cases.
+fn segment_seed(case: u64, index: usize) -> u64 {
+    case.wrapping_add((index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// The seed of a case: a hash of its ops, which are printed the same way in every run.
+fn case_seed(ops: &[Op]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{ops:?}").hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Lane 0 (A, B); its ops are cut into segments at the barriers, which run between segments.
 /// Each barrier is followed by `check_full` (M1's, sequential: nothing of the test is in flight,
 /// but the new life's background tasks are running).
-pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) {
+///
+/// Returns the case's counters; the caller checks them (`regression_concurrent_smoke`).
+pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) -> Stats {
     let mut harness = Harness::with_options(
         HarnessOptions {
             workers: WORKERS,
@@ -824,6 +937,7 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) {
         clock: midnight(day(0)) + 12 * HOUR_NS,
     }];
     let stats = Stats::default();
+    let seed = case_seed(ops);
     let mut start = 0;
     for (index, op) in ops.iter().enumerate() {
         if !is_barrier(op) {
@@ -835,12 +949,12 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) {
                 &mut lanes,
                 &[&ops[start..index]],
                 options,
-                segment_seed(index),
+                segment_seed(seed, index),
                 &stats,
             );
         }
         match op {
-            Op::Settle => settle_concurrent(&mut harness, &mut lanes, options),
+            Op::Settle => settle_concurrent(&mut harness, &mut lanes, options, &stats),
             Op::LossyCrash { .. } => {
                 panic!("a lossy crash has no concurrent check: see concurrent_ops")
             }
@@ -858,13 +972,20 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) {
             &mut lanes,
             &[&ops[start..]],
             options,
-            segment_seed(ops.len()),
+            segment_seed(seed, ops.len()),
             &stats,
         );
     }
-    settle_concurrent(&mut harness, &mut lanes, options);
+    settle_concurrent(&mut harness, &mut lanes, options, &stats);
     check_full(&harness, &mut lanes[0].model, ops.len());
+    assert!(
+        stats.passes.load(SeqCst) == 0
+            || stats.lost_passes.load(SeqCst) < stats.passes.load(SeqCst),
+        "every one of the {} explicit compaction and deletion passes lost its jobs",
+        stats.passes.load(SeqCst)
+    );
     eprintln!("concurrent case: {stats:?}");
+    stats
 }
 
 /// Cases of the concurrent proptest: `LLMOBS_CONCURRENT_CASES`, else 4 (the budget of § R6.5).
@@ -1012,6 +1133,81 @@ fn background_flush_runs_without_ops() {
     assert_eq!(harness.storage().published_rows(Table::Spans), 0);
 }
 
+/// The pause of a read is a state the model has not pushed yet: while the append waits at
+/// `AfterPublish`, its publish is in storage and its state is not in the lane, so the reader's
+/// `hi` is `S_{lo + 1}` and `flying` is what raised it. The check runs once the append returns.
+#[test]
+fn a_read_while_an_append_waits_after_its_publish_sees_the_state_after_it() {
+    let harness = Harness::with_options(
+        HarnessOptions {
+            workers: WORKERS,
+            ..HarnessOptions::default()
+        },
+        concurrent_tweaks,
+    );
+    let mut model = new_model(&harness, (P::A, P::B));
+    let lane = Lane::new(&model);
+    let mut clock = midnight(day(0)) + 12 * HOUR_NS;
+    let stats = Stats::default();
+    let stop = AtomicBool::new(false);
+    let failed = AtomicBool::new(false);
+    let run = Run {
+        stop: &stop,
+        failed: &failed,
+        stats: &stats,
+    };
+    let op = Op::Append {
+        project: P::A,
+        trace: 0,
+        count: 3,
+        split: false,
+    };
+    let read = Read::Spans(P::A);
+    let hooks = harness.storage().hooks();
+    hooks.hold(HookPoint::AfterPublish);
+    let (lo, hi, observed, matched) = thread::scope(|scope| {
+        let append = scope.spawn(|| {
+            apply_storage(
+                &op,
+                &harness,
+                &mut model,
+                &mut clock,
+                Concurrency::Concurrent,
+                &mut |event| publish(&lane, event, usize::MAX, &stats),
+            )
+        });
+        let started = Instant::now();
+        while hooks.waiting_at(HookPoint::AfterPublish) == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the append did not reach AfterPublish"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        // The reader, while the append is paused: `lo`, the read, then `hi`.
+        let lo = lane.published.load(SeqCst);
+        let observed: Observed = harness
+            .block_on(observe(harness.storage(), &read))
+            .expect("the read while the append is paused");
+        let hi = upper_bound(&lane);
+        hooks.release(HookPoint::AfterPublish);
+        append.join().expect("the append");
+        let matched = check_observed_read(&lane, 0, &read, (lo, hi), &observed, run);
+        (lo, hi, observed, matched)
+    });
+    assert_eq!(lo, 0, "the lane has published only S_0 before the append");
+    assert_eq!(
+        hi,
+        lo + 1,
+        "the append in flight may have published S_1 only"
+    );
+    assert_eq!(
+        matched,
+        Some(lo + 1),
+        "the read matches S_1, not S_0: {observed:?}"
+    );
+}
+
 #[test]
 fn regression_concurrent_smoke() {
     // Every kind of step and barrier, on lane 0.
@@ -1042,6 +1238,8 @@ fn regression_concurrent_smoke() {
             project: P::A,
             picks: vec![1],
         },
+        Op::Compact { hours: 1 },
+        Op::ApplyDeletions { hours: 1 },
         Op::Append {
             project: P::B,
             trace: 0,
@@ -1063,7 +1261,7 @@ fn regression_concurrent_smoke() {
         Op::Crash,
         Op::Settle,
     ];
-    run_concurrent_case(
+    let stats = run_concurrent_case(
         &ops,
         &ConcurrentOptions {
             readers: 2,
@@ -1071,5 +1269,15 @@ fn regression_concurrent_smoke() {
             gc_every: Duration::from_millis(20),
             history_keep: usize::MAX,
         },
+    );
+    assert!(stats.matched_reads() > 0, "no read was checked: {stats:?}");
+    assert!(
+        stats.gc_deleted.load(SeqCst) > 0,
+        "no obsolete file was deleted: {stats:?}"
+    );
+    assert_eq!(
+        stats.passes.load(SeqCst),
+        2,
+        "the explicit compaction and deletion passes: {stats:?}"
     );
 }
