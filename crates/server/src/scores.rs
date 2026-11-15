@@ -1319,6 +1319,7 @@ mod tests {
         )
         .await
         .unwrap();
+        app.state.clock.advance(std::time::Duration::from_secs(60));
         delete(&app.state, &seeded.project, by_b, api_id)
             .await
             .unwrap();

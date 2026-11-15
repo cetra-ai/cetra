@@ -160,9 +160,12 @@ export function draftError(draft: Draft, definition: ScoreDefinition): string | 
   }
 }
 
+/** A plain decimal number: no hex, binary or octal forms, which `Number` would also accept. */
+const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
 function numericError(text: string, definition: ScoreDefinition): string | undefined {
   const value = Number(text);
-  if (!Number.isFinite(value)) {
+  if (!DECIMAL.test(text.trim()) || !Number.isFinite(value)) {
     return "Enter a number.";
   }
   const min = definition.min_value;

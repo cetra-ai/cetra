@@ -187,6 +187,9 @@ describe("draftError", () => {
   it("checks numbers against their range", () => {
     const helpfulness = definition("helpfulness");
     expect(draftError(draft("abc"), helpfulness)).toBe("Enter a number.");
+    expect(draftError(draft("0x10"), helpfulness)).toBe("Enter a number.");
+    expect(draftError(draft("0b1"), helpfulness)).toBe("Enter a number.");
+    expect(draftError(draft(" 0.5 "), helpfulness)).toBeUndefined();
     expect(draftError(draft("1.5"), helpfulness)).toBe("Enter a number from 0 to 1.");
     expect(draftError(draft("0.5"), helpfulness)).toBeUndefined();
 
