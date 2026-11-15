@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use futures::TryStreamExt;
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use serde_json::{Map, Value};
 use sqlx::{AssertSqlSafe, SqliteConnection, SqlitePool};
@@ -529,6 +530,129 @@ pub(crate) async fn get_live_item_tx(
     .fetch_optional(&mut *conn)
     .await?;
     record.map(item_from).transpose()
+}
+
+/// One live item of a dataset at its `current_version`, for the `dataset_items` SQL view
+/// (D-J-15). The JSON fields are the stored text. `Debug` is hand-written: ids and sizes only.
+#[derive(Clone, PartialEq)]
+pub(crate) struct ViewItem {
+    pub(crate) dataset_id: Uuid,
+    pub(crate) dataset_name: String,
+    pub(crate) dataset_version: i64,
+    pub(crate) item_id: Uuid,
+    /// JSON text.
+    pub(crate) input: String,
+    /// JSON text, `None` when absent.
+    pub(crate) expected_output: Option<String>,
+    /// JSON text.
+    pub(crate) metadata: String,
+    pub(crate) source_trace_id: Option<TraceId>,
+    pub(crate) source_span_id: Option<SpanId>,
+    pub(crate) created_at: i64,
+}
+
+impl ViewItem {
+    /// The summed byte lengths of the three JSON texts.
+    fn text_bytes(&self) -> usize {
+        self.input.len()
+            + self.expected_output.as_ref().map_or(0, String::len)
+            + self.metadata.len()
+    }
+}
+
+impl fmt::Debug for ViewItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewItem")
+            .field("dataset_id", &self.dataset_id)
+            .field("dataset_version", &self.dataset_version)
+            .field("item_id", &self.item_id)
+            .field("bytes", &self.text_bytes())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`view_rows`] returns.
+pub(crate) enum ViewItems {
+    Rows(Vec<ViewItem>),
+    /// More than `max_rows` rows or more than `max_text_bytes` of text (D-J-15).
+    TooLarge,
+}
+
+#[derive(sqlx::FromRow)]
+struct ViewRecord {
+    dataset_id: String,
+    dataset_name: String,
+    current_version: i64,
+    item_id: String,
+    input: String,
+    expected_output: Option<String>,
+    metadata: String,
+    source_trace_id: Option<Vec<u8>>,
+    source_span_id: Option<Vec<u8>>,
+    created_at: i64,
+}
+
+/// The live items of every dataset of `project` at its current version, ordered by dataset id
+/// then item id, for the `dataset_items` SQL view (D-J-15). Rows are streamed; reading stops
+/// with `TooLarge` as soon as the rows exceed `max_rows` or the summed text exceeds
+/// `max_text_bytes`.
+pub(crate) async fn view_rows(
+    pool: &SqlitePool,
+    project: ProjectId,
+    max_rows: usize,
+    max_text_bytes: usize,
+) -> Result<ViewItems, MetaError> {
+    let mut records = sqlx::query_as::<_, ViewRecord>(
+        "SELECT d.id AS dataset_id, d.name AS dataset_name, d.current_version, i.item_id, \
+         i.input, i.expected_output, \
+         i.metadata, i.source_trace_id, i.source_span_id, i.created_at \
+         FROM dataset_items i JOIN datasets d ON d.id = i.dataset_id \
+         WHERE d.project_id = ?1 \
+         AND i.valid_from_version <= d.current_version \
+         AND (i.valid_to_version IS NULL OR i.valid_to_version > d.current_version) \
+         ORDER BY d.id, i.item_id",
+    )
+    .bind(project.to_string())
+    .fetch(pool);
+    let mut rows = Vec::new();
+    let mut text_bytes = 0_usize;
+    while let Some(record) = records.try_next().await? {
+        let row = view_item_from(record)?;
+        if rows.len() >= max_rows {
+            return Ok(ViewItems::TooLarge);
+        }
+        text_bytes = text_bytes.saturating_add(row.text_bytes());
+        if text_bytes > max_text_bytes {
+            return Ok(ViewItems::TooLarge);
+        }
+        rows.push(row);
+    }
+    Ok(ViewItems::Rows(rows))
+}
+
+fn view_item_from(record: ViewRecord) -> Result<ViewItem, MetaError> {
+    Ok(ViewItem {
+        dataset_id: parse_uuid(&record.dataset_id, "datasets", "id")?,
+        dataset_name: record.dataset_name,
+        dataset_version: record.current_version,
+        item_id: parse_uuid(&record.item_id, "dataset_items", "item_id")?,
+        input: record.input,
+        expected_output: record.expected_output,
+        metadata: record.metadata,
+        source_trace_id: record
+            .source_trace_id
+            .map(|bytes| {
+                TraceId::from_slice(&bytes).map_err(|_| corrupt("dataset_items", "source_trace_id"))
+            })
+            .transpose()?,
+        source_span_id: record
+            .source_span_id
+            .map(|bytes| {
+                SpanId::from_slice(&bytes).map_err(|_| corrupt("dataset_items", "source_span_id"))
+            })
+            .transpose()?,
+        created_at: record.created_at,
+    })
 }
 
 /// The `WHERE` form of the dataset read for `key`. Only constants are spliced.
@@ -1131,6 +1255,103 @@ mod tests {
         };
         let printed = format!("{item:?} {row:?}");
         assert!(!printed.contains("canary-debug"), "{printed}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn view_rows_are_the_current_versions() {
+        use super::{ViewItems, view_rows};
+        let (_dir, db) = crate::meta::test_db().await;
+        let org_id = org(&db).await;
+        let project = project(&db, org_id).await;
+        let faq = create(&db, project, "faq").await;
+        let other = create(&db, project, "other").await;
+        let (a, b, c) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        write(
+            &db,
+            faq,
+            change(
+                vec![],
+                vec![revision(a, json!("a1")), revision(b, json!("b1"))],
+                "add 2 items",
+            ),
+        )
+        .await
+        .unwrap();
+        write(
+            &db,
+            faq,
+            change(vec![a], vec![revision(a, json!("a2"))], "edit a"),
+        )
+        .await
+        .unwrap();
+        write(
+            &db,
+            other,
+            change(vec![], vec![revision(c, json!("c1"))], "add c"),
+        )
+        .await
+        .unwrap();
+        write(&db, other, change(vec![c], vec![], "delete c"))
+            .await
+            .unwrap();
+        // Another project's items are not in the view.
+        let elsewhere = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_project(conn, org_id, "Billing", "billing", None, NOW)
+                        .await
+                        .map(|row| row.id)
+                })
+            })
+            .await
+            .unwrap();
+        let dataset = create(&db, elsewhere, "elsewhere").await;
+        write(
+            &db,
+            dataset,
+            change(vec![], vec![revision(Uuid::now_v7(), json!("x"))], "add"),
+        )
+        .await
+        .unwrap();
+
+        let ViewItems::Rows(rows) = view_rows(db.reader(), project, 100, 10_000).await.unwrap()
+        else {
+            panic!("the view is within its budget");
+        };
+        let mut found: Vec<(Uuid, i64, String)> = rows
+            .iter()
+            .map(|row| (row.item_id, row.dataset_version, row.input.clone()))
+            .collect();
+        found.sort();
+        let mut expected = vec![(a, 2, "\"a2\"".to_owned()), (b, 2, "\"b1\"".to_owned())];
+        expected.sort();
+        assert_eq!(found, expected);
+        assert!(rows.iter().all(|row| row.dataset_name == "faq"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn view_rows_stop_at_the_budget() {
+        use super::{ViewItems, view_rows};
+        let (_dir, db) = crate::meta::test_db().await;
+        let project = project(&db, org(&db).await).await;
+        let dataset = create(&db, project, "faq").await;
+        // Each item is `"x"` (3 bytes) and `{}` (2 bytes): 5 bytes, 15 in all.
+        let items = (0..3)
+            .map(|_| revision(Uuid::now_v7(), json!("x")))
+            .collect();
+        write(&db, dataset, change(vec![], items, "add 3"))
+            .await
+            .unwrap();
+
+        let too_many_rows = view_rows(db.reader(), project, 2, 10_000).await.unwrap();
+        assert!(matches!(too_many_rows, ViewItems::TooLarge));
+        let too_much_text = view_rows(db.reader(), project, 100, 14).await.unwrap();
+        assert!(matches!(too_much_text, ViewItems::TooLarge));
+        let exact = view_rows(db.reader(), project, 3, 15).await.unwrap();
+        let ViewItems::Rows(rows) = exact else {
+            panic!("three rows of 15 bytes fit the budget");
+        };
+        assert_eq!(rows.len(), 3);
     }
 
     fn hex(text: &str) -> Vec<u8> {

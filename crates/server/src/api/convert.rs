@@ -1134,6 +1134,7 @@ pub(crate) fn schema_response() -> SchemaResponse {
     SchemaResponse {
         views: llmobs_storage::view_catalog()
             .into_iter()
+            .chain(crate::datasets::sql_views::catalog())
             .map(|view| ViewSchema {
                 name: view_name(view.view),
                 description: view.description.to_owned(),
