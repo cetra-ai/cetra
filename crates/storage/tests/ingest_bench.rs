@@ -26,28 +26,29 @@
     clippy::too_many_lines
 )]
 
+#[allow(dead_code)] // each test target uses part of the shared helpers
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::array::RecordBatch;
 use bytesize::ByteSize;
-use futures::TryStreamExt;
+use common::machine::{dir_bytes, machine};
+use common::rng::Rng;
+use common::s3::S3Env;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::enums::{SpanKind, SpanStatus};
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
-    CompactionConfig, FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config,
-    StorageConfig, WalConfig,
+    CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
 use llmobs_storage::error::AppendError;
 use llmobs_storage::{CompactionReport, Storage};
-use object_store::aws::AmazonS3Builder;
-use object_store::{ObjectStore, ObjectStoreExt};
 
 const SEED: u64 = 1;
 const BATCH_SPANS: usize = 1_000;
@@ -58,30 +59,6 @@ const POOL: usize = 16;
 const SPAN_NS: i64 = 1_000_000;
 const HOUR_NS: i64 = 3_600 * 1_000_000_000;
 const MIB: f64 = 1024.0 * 1024.0;
-
-// ---------------------------------------------------------------- RNG
-
-/// Seeded xorshift64* — no `rand` dependency, identical for a given seed.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound as u64) as usize
-    }
-}
 
 // ---------------------------------------------------------------- data
 
@@ -206,37 +183,12 @@ fn build_batch(rng: &mut Rng, pool: &[String], traces: &AtomicU64, now: i64) -> 
 
 // ---------------------------------------------------------------- config
 
-/// The S3 target (D119), when `LLMOBS_TEST_S3_ENDPOINT` is set.
-struct S3Target {
-    endpoint: String,
-    bucket: String,
-    prefix: String,
-}
-
-fn s3_target() -> Option<S3Target> {
-    let endpoint = std::env::var("LLMOBS_TEST_S3_ENDPOINT").ok()?;
-    let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET");
-    Some(S3Target {
-        endpoint,
-        bucket,
-        prefix: format!("ingest-bench-{}", uuid::Uuid::now_v7()),
-    })
-}
-
-fn config(dir: &Path, s3: Option<&S3Target>) -> StorageConfig {
+fn config(dir: &Path, s3: Option<&S3Env>, prefix: &str) -> StorageConfig {
     let (object_store, s3_config) = match s3 {
-        Some(t) => (
-            Some(ObjectStoreUrl::S3 {
-                bucket: t.bucket.clone(),
-                prefix: t.prefix.clone(),
-            }),
-            S3Config {
-                region: Some("us-east-1".to_owned()),
-                endpoint: Some(t.endpoint.clone()),
-                force_path_style: true,
-                allow_http: t.endpoint.starts_with("http://"),
-            },
-        ),
+        Some(target) => {
+            let (url, s3_config) = target.config(prefix);
+            (Some(url), s3_config)
+        }
         None => (None, S3Config::default()),
     };
     StorageConfig {
@@ -261,118 +213,6 @@ fn config(dir: &Path, s3: Option<&S3Target>) -> StorageConfig {
         },
         deletion: Default::default(),
     }
-}
-
-// ---------------------------------------------------------------- S3 helpers
-
-/// Copied from `tests/s3.rs`.
-async fn delete_prefix(endpoint: &str, bucket: &str, prefix: &str) -> Result<(), String> {
-    let http = endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(bucket)
-        .with_endpoint(endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(prefix);
-    let locations: Vec<object_store::path::Path> = store
-        .list(Some(&root))
-        .map_ok(|meta| meta.location)
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())?;
-    for location in locations {
-        store
-            .delete(&location)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// Total size of the objects under the bench prefix.
-async fn s3_bytes(target: &S3Target) -> Result<u64, String> {
-    let http = target.endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(&target.bucket)
-        .with_endpoint(&target.endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(target.prefix.as_str());
-    let metas: Vec<object_store::ObjectMeta> = store
-        .list(Some(&root))
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(metas.iter().map(|meta| meta.size).sum())
-}
-
-// ---------------------------------------------------------------- machine
-
-fn read_line(path: &str, prefix: &str) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .map(|line| {
-            line[prefix.len()..]
-                .trim()
-                .trim_start_matches(':')
-                .trim()
-                .to_owned()
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn command(args: &[&str]) -> String {
-    Command::new(args[0])
-        .args(&args[1..])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn machine() -> String {
-    let cpu = read_line("/proc/cpuinfo", "model name");
-    let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let mem = read_line("/proc/meminfo", "MemTotal:");
-    let disk = command(&["lsblk", "-d", "-o", "NAME,ROTA,MODEL"])
-        .lines()
-        .nth(1)
-        .unwrap_or("unknown")
-        .trim()
-        .to_owned();
-    let kernel = command(&["uname", "-r"]);
-    let commit = command(&["git", "rev-parse", "HEAD"]);
-    format!(
-        "CPU {cpu}, {cores} threads, RAM {mem}, disk [{disk}], kernel {kernel}, commit {}",
-        &commit[..commit.len().min(12)]
-    )
-}
-
-fn dir_bytes(dir: &Path) -> u64 {
-    fn walk(path: &Path, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                walk(&p, total);
-            } else if let Ok(meta) = p.metadata() {
-                *total += meta.len();
-            }
-        }
-    }
-    let mut total = 0;
-    walk(dir, &mut total);
-    total
 }
 
 // ---------------------------------------------------------------- ingest
@@ -444,8 +284,9 @@ async fn ingest_benchmark() {
     }
     std::fs::create_dir_all(&dir).unwrap();
 
-    let s3 = s3_target();
-    let config = config(&dir, s3.as_ref());
+    let s3 = S3Env::from_env();
+    let prefix = format!("ingest-bench-{}", uuid::Uuid::now_v7());
+    let config = config(&dir, s3.as_ref(), &prefix);
     let storage = Arc::new(Storage::open(config.clone()).await.unwrap());
 
     let mut rng = Rng::new(SEED);
@@ -492,7 +333,13 @@ async fn ingest_benchmark() {
     drop(storage);
     let storage = Storage::open(config.clone()).await.unwrap();
     let flushed = match &s3 {
-        Some(t) => s3_bytes(t).await.unwrap(),
+        Some(t) => t
+            .list(&prefix)
+            .await
+            .unwrap()
+            .iter()
+            .map(|meta| meta.size)
+            .sum(),
         None => dir_bytes(&dir.join("objects")),
     };
     println!("drain: shutdown flushed in {drain_secs:.2} s; flushed object bytes {flushed}");
@@ -530,16 +377,17 @@ async fn ingest_benchmark() {
     );
 
     if let Some(t) = &s3 {
-        delete_prefix(&t.endpoint, &t.bucket, &t.prefix)
-            .await
-            .unwrap();
-        println!("deleted prefix {}", t.prefix);
+        t.delete_prefix(&prefix).await.unwrap();
+        println!("deleted {}", t.describe(&prefix));
     }
 
+    let store = match &s3 {
+        Some(t) => format!("S3 {}", t.describe(&prefix)),
+        None => "local disk".to_owned(),
+    };
     println!("\n## M6.6 ingest benchmark\n");
-    println!("Machine: {}", machine());
+    println!("Machine: {}", machine(&dir));
     println!(
-        "Store: {}, ingest {secs} s, {writers} writers, batches of {BATCH_SPANS} spans, {SPANS_PER_TRACE} spans per trace, flush.max_bytes 256 MiB, memtable.hard_limit 1 GiB, min_free_bytes 0, compaction.interval 1 h",
-        if s3.is_some() { "S3" } else { "local disk" },
+        "Store: {store}, ingest {secs} s, {writers} writers, batches of {BATCH_SPANS} spans, {SPANS_PER_TRACE} spans per trace, flush.max_bytes 256 MiB, memtable.hard_limit 1 GiB, min_free_bytes 0, compaction.interval 1 h",
     );
 }

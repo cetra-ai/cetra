@@ -29,32 +29,34 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use bytesize::ByteSize;
 use chrono::{TimeZone, Utc};
+use common::machine::{dir_bytes, machine};
+use common::rng::Rng;
+use common::s3::S3Env;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use futures::TryStreamExt;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::enums::{SpanKind, SpanStatus};
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
-    AnchorConfig, FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config,
-    StorageConfig, WalConfig, WalSync,
+    AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
+    WalSync,
 };
 use llmobs_storage::{
     Bucket, BucketWidth, ListScope, MetricsRequest, Page, ProjectQuery, QueryContext, QueryOptions,
     SortOrder, TimeWindow, TraceListRequest, TraceSort, metrics, trace_detail, trace_list,
     trace_list_plan,
 };
-use object_store::aws::AmazonS3Builder;
-use object_store::{ObjectStore, ObjectStoreExt};
 
 // ---------------------------------------------------------------- constants
+
+#[allow(dead_code)] // each test target uses part of the shared helpers
+mod common;
 
 const SEED: u64 = 1;
 const DEFAULT_TRACES: usize = 5_000_000;
@@ -115,48 +117,6 @@ const MODELS: [&str; 6] = [
     "mistral-large",
 ];
 const ENVIRONMENTS: [&str; 3] = ["production", "staging", "llmobs-eval"];
-
-// ---------------------------------------------------------------- RNG
-
-/// Seeded xorshift64* — no `rand` dependency, identical for a given seed.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// Uniform `f64` in `[0, 1)`.
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1_u64 << 53) as f64
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound as u64) as usize
-    }
-
-    /// Standard normal via Box–Muller.
-    fn normal(&mut self) -> f64 {
-        let u1 = self.unit().max(f64::MIN_POSITIVE);
-        let u2 = self.unit();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-
-    /// Log-normal with a given median and p99.
-    fn lognormal(&mut self, median: f64, p99: f64) -> f64 {
-        let sigma = (p99 / median).ln() / 2.326_347_874_040_840_8;
-        (median.ln() + sigma * self.normal()).exp()
-    }
-}
 
 fn trace_id(index: usize) -> TraceId {
     let mut bytes = [0_u8; 16];
@@ -483,18 +443,10 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
 
 fn config(backend: &Backend, max_bytes: ByteSize, read_cache: Option<ByteSize>) -> StorageConfig {
     let (object_store, s3) = match &backend.s3 {
-        Some(t) => (
-            Some(ObjectStoreUrl::S3 {
-                bucket: t.bucket.clone(),
-                prefix: S3_PREFIX.to_owned(),
-            }),
-            S3Config {
-                region: Some("us-east-1".to_owned()),
-                endpoint: Some(t.endpoint.clone()),
-                force_path_style: true,
-                allow_http: t.endpoint.starts_with("http://"),
-            },
-        ),
+        Some(t) => {
+            let (url, s3) = t.config(S3_PREFIX);
+            (Some(url), s3)
+        }
         None => (None, S3Config::default()),
     };
     StorageConfig {
@@ -545,25 +497,6 @@ fn count_spans_files(dir: &Path) -> usize {
     count
 }
 
-fn dir_bytes(dir: &Path) -> u64 {
-    fn walk(path: &Path, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                walk(&p, total);
-            } else if let Ok(meta) = p.metadata() {
-                *total += meta.len();
-            }
-        }
-    }
-    let mut total = 0;
-    walk(dir, &mut total);
-    total
-}
-
 // ---------------------------------------------------------------- manifest
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -585,12 +518,7 @@ struct Manifest {
 /// `LLMOBS_TEST_S3_ENDPOINT` is set (D119).
 struct Backend {
     dir: PathBuf,
-    s3: Option<S3Target>,
-}
-
-struct S3Target {
-    endpoint: String,
-    bucket: String,
+    s3: Option<S3Env>,
 }
 
 /// The fixed S3 prefix, so the dataset is reused across runs.
@@ -598,12 +526,7 @@ const S3_PREFIX: &str = "trace-bench";
 
 impl Backend {
     fn from_env(dir: PathBuf) -> Self {
-        let s3 = std::env::var("LLMOBS_TEST_S3_ENDPOINT")
-            .ok()
-            .map(|endpoint| S3Target {
-                endpoint,
-                bucket: std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET"),
-            });
+        let s3 = S3Env::from_env();
         Self { dir, s3 }
     }
 }
@@ -634,59 +557,13 @@ impl CacheMode {
     }
 }
 
-/// Copied from `tests/s3.rs`.
-async fn delete_prefix(endpoint: &str, bucket: &str, prefix: &str) -> Result<(), String> {
-    let http = endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(bucket)
-        .with_endpoint(endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(prefix);
-    let locations: Vec<object_store::path::Path> = store
-        .list(Some(&root))
-        .map_ok(|meta| meta.location)
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())?;
-    for location in locations {
-        store
-            .delete(&location)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// Every object under the bench prefix.
-async fn s3_listing(s3: &S3Target) -> Result<Vec<object_store::ObjectMeta>, String> {
-    let http = s3.endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(&s3.bucket)
-        .with_endpoint(&s3.endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(S3_PREFIX);
-    store
-        .list(Some(&root))
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())
-}
-
 /// Spans Parquet files and bytes of the dataset: the directory's for local
 /// mode, the listed objects' for S3.
 async fn dataset_files(backend: &Backend) -> (usize, u64) {
     match &backend.s3 {
         None => (count_spans_files(&backend.dir), dir_bytes(&backend.dir)),
         Some(s3) => {
-            let metas = s3_listing(s3).await.unwrap();
+            let metas = s3.list(S3_PREFIX).await.unwrap();
             let count = metas
                 .iter()
                 .filter(|meta| {
@@ -806,9 +683,7 @@ async fn generate(
     let begun = Instant::now();
     let dir = backend.dir.as_path();
     if let Some(s3) = &backend.s3 {
-        delete_prefix(&s3.endpoint, &s3.bucket, S3_PREFIX)
-            .await
-            .unwrap();
+        s3.delete_prefix(S3_PREFIX).await.unwrap();
     }
     if dir.exists() {
         std::fs::remove_dir_all(dir).unwrap();
@@ -909,50 +784,6 @@ async fn generate(
     )
     .unwrap();
     (files, begun.elapsed(), manifest)
-}
-
-// ---------------------------------------------------------------- machine
-
-fn read_line(path: &str, prefix: &str) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .map(|line| {
-            line[prefix.len()..]
-                .trim()
-                .trim_start_matches(':')
-                .trim()
-                .to_owned()
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn command(args: &[&str]) -> String {
-    Command::new(args[0])
-        .args(&args[1..])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn machine() -> String {
-    let cpu = read_line("/proc/cpuinfo", "model name");
-    let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let mem = read_line("/proc/meminfo", "MemTotal:");
-    let disk = command(&["lsblk", "-d", "-o", "NAME,ROTA,MODEL"])
-        .lines()
-        .nth(1)
-        .unwrap_or("unknown")
-        .trim()
-        .to_owned();
-    let kernel = command(&["uname", "-r"]);
-    let commit = command(&["git", "rev-parse", "HEAD"]);
-    format!(
-        "CPU {cpu}, {cores} threads, RAM {mem}, disk [{disk}], kernel {kernel}, commit {}",
-        &commit[..commit.len().min(12)]
-    )
 }
 
 // ---------------------------------------------------------------- timing
@@ -1415,17 +1246,14 @@ async fn trace_benchmark() {
     // Markdown table.
     let (_, dataset_bytes) = dataset_files(&backend).await;
     let store = match (&backend.s3, cache) {
-        (Some(s3), Some(mode)) => format!(
-            "S3 s3://{}/{S3_PREFIX} at {}, read cache {}",
-            s3.bucket,
-            s3.endpoint,
-            mode.name()
-        ),
+        (Some(s3), Some(mode)) => {
+            format!("S3 {}, read cache {}", s3.describe(S3_PREFIX), mode.name())
+        }
         _ => "local disk".to_owned(),
     };
     println!("\n## M3 implementation\n");
     println!("Store: {store}");
-    println!("Machine: {}", machine());
+    println!("Machine: {}", machine(&backend.dir));
     println!(
         "Dataset: {} traces, {} spans files ({}), {} bytes, generated in {:.1} s, target_partitions {PARTITIONS}, {} traces with a 1–3 h late group",
         manifest.traces,
