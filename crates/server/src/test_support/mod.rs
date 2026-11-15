@@ -169,8 +169,8 @@ pub(crate) fn set_limits(
 }
 
 /// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
-/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
-pub(crate) fn control_plane_token(scope: &str) -> String {
+/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope, for one request (D-P-71).
+pub(crate) fn control_plane_token(scope: &str, method: &str, path: &str) -> String {
     sign_token(&serde_json::json!({
         "kind": "control_plane",
         "id": Uuid::now_v7().to_string(),
@@ -178,6 +178,8 @@ pub(crate) fn control_plane_token(scope: &str) -> String {
         "expires_at": "2026-01-01T00:05:00Z",
         "audience": PublicUrl::default().origin(),
         "scope": scope,
+        "method": method,
+        "path": path,
     }))
 }
 
@@ -946,6 +948,17 @@ impl TestRequest {
             HeaderValue::from_str(value).unwrap(),
         );
         self
+    }
+
+    /// Authenticates as the control plane with a token of `scope` for this request only: its
+    /// method and path (D-P-71).
+    pub(crate) fn control_plane(self, scope: &str) -> Self {
+        let token = control_plane_token(
+            scope,
+            self.method.as_str(),
+            self.path.split('?').next().unwrap_or_default(),
+        );
+        self.header("authorization", &format!("Bearer {token}"))
     }
 
     pub(crate) fn body(mut self, body: impl Into<Bytes>) -> Self {

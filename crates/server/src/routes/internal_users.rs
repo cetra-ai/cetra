@@ -255,17 +255,13 @@ mod tests {
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, TestResponse, capture_logs, control_plane_token};
+    use crate::test_support::{TestApp, TestResponse, capture_logs};
 
     const PROVIDER: &str = "oidc:cloud";
 
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
-    }
-
     async fn post_user(app: &TestApp, route: &str, token: &str, subject: &str) -> TestResponse {
         app.request(Method::POST, &format!("/api/internal/v1/users/{route}"))
-            .header(header::AUTHORIZATION.as_str(), &bearer(token))
+            .control_plane(token)
             .json(&json!({ "subject": subject }))
             .send()
             .await
@@ -362,7 +358,7 @@ mod tests {
 
     async fn orgs_with(app: &TestApp, token: &str) -> TestResponse {
         app.request(Method::GET, "/api/v1/orgs")
-            .header(header::AUTHORIZATION.as_str(), &bearer(token))
+            .header("authorization", &format!("Bearer {token}"))
             .send()
             .await
     }
@@ -380,7 +376,7 @@ mod tests {
         assert_eq!(orgs_with(&app, &pat).await.status, 200);
         assert_eq!(session_me(&app, &user.cookie).await.status, 200);
 
-        let token = control_plane_token("users");
+        let token = "users";
         let revoked = post_user(&app, "revoke", &token, "sub-rev").await;
         assert_eq!(revoked.status, 204);
 
@@ -398,7 +394,7 @@ mod tests {
         let pat = app.personal_token(user.id, false).await;
         assert_eq!(orgs_with(&app, &pat).await.status, 200);
 
-        let token = control_plane_token("users");
+        let token = "users";
         let disabled = post_user(&app, "disable", &token, "sub-dis").await;
         assert_eq!(disabled.status, 204);
 
@@ -421,7 +417,7 @@ mod tests {
     async fn disabling_twice_keeps_the_first_disabled_at() {
         let app = TestApp::new().await;
         let user = linked_user(&app, "twice@example.com", "sub-twice", false).await;
-        let token = control_plane_token("users");
+        let token = "users";
 
         assert_eq!(
             post_user(&app, "disable", &token, "sub-twice").await.status,
@@ -495,7 +491,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = control_plane_token("users");
+        let token = "users";
         let deleted = post_user(&app, "delete", &token, "sub-del").await;
         assert_eq!(deleted.status, 200);
         let body: Value = deleted.json();
@@ -532,10 +528,8 @@ mod tests {
     async fn delete_logs_no_identity_details() {
         let app = TestApp::new().await;
         let user = linked_user(&app, "quiet@example.com", "sub-quiet", false).await;
-        let (response, logs) = capture_logs(async {
-            post_user(&app, "delete", &control_plane_token("users"), "sub-quiet").await
-        })
-        .await;
+        let (response, logs) =
+            capture_logs(async { post_user(&app, "delete", "users", "sub-quiet").await }).await;
         assert_eq!(response.status, 200);
         assert!(logs.contains("user deleted"));
         assert!(logs.contains("control_plane"));
@@ -548,7 +542,7 @@ mod tests {
     async fn instance_admins_are_refused() {
         let app = TestApp::new().await;
         linked_user(&app, "admin@example.com", "sub-admin", true).await;
-        let token = control_plane_token("users");
+        let token = "users";
         for route in ["revoke", "disable", "delete"] {
             let refused = post_user(&app, route, &token, "sub-admin").await;
             assert_eq!(refused.status, 403, "{route}");
@@ -568,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_subjects() {
         let app = TestApp::new().await;
-        let token = control_plane_token("users");
+        let token = "users";
         assert_eq!(
             post_user(&app, "revoke", &token, "nobody").await.status,
             404
@@ -587,7 +581,7 @@ mod tests {
         let app = TestApp::new().await;
         let user = linked_user(&app, "scope@example.com", "sub-scope", false).await;
         for route in ["revoke", "disable", "delete"] {
-            let usage = post_user(&app, route, &control_plane_token("usage"), "sub-scope").await;
+            let usage = post_user(&app, route, "usage", "sub-scope").await;
             assert_eq!(usage.status, 403, "{route}");
         }
         let session = app
@@ -622,7 +616,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let token = control_plane_token("users");
+        let token = "users";
         let unknown = post_user(&app, "revoke", &token, "sub-other").await;
         assert_eq!(unknown.status, 404);
         assert_eq!(session_me(&app, &user.cookie).await.status, 200);

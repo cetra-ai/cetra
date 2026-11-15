@@ -250,7 +250,7 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::auth::session::start_session;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, capture_logs, control_plane_token};
+    use crate::test_support::{TestApp, capture_logs};
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -424,10 +424,7 @@ mod tests {
         let id = Uuid::now_v7();
         let created = app
             .request(Method::POST, "/api/internal/v1/orgs")
-            .header(
-                header::AUTHORIZATION.as_str(),
-                &format!("Bearer {}", control_plane_token("orgs")),
-            )
+            .control_plane("orgs")
             .json(&serde_json::json!({
                 "id": id,
                 "name": "Cloud",

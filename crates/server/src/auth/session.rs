@@ -280,15 +280,9 @@ mod tests {
             .unwrap();
         assert_eq!(row.sso_org_id, Some(org));
 
-        let by_password = start_session(
-            &app.state,
-            user_id,
-            None,
-            None,
-            crate::auth::session::SessionOrigin::Password,
-        )
-        .await
-        .unwrap();
+        let by_password = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
         let (row, _) = resolve_session(&app.state, &token_of(&by_password), now)
             .await
             .unwrap()
@@ -357,7 +351,7 @@ mod tests {
             user(&https).await,
             None,
             None,
-            crate::auth::session::SessionOrigin::Password,
+            SessionOrigin::Password,
         )
         .await
         .unwrap();
@@ -378,15 +372,9 @@ mod tests {
     async fn refresh_waits_an_hour_and_thirty_idle_days_expire() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(
-            &app.state,
-            user_id,
-            None,
-            None,
-            crate::auth::session::SessionOrigin::Password,
-        )
-        .await
-        .unwrap();
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
         let token = token_of(&header);
         let started = app.state.clock.now_ns();
 
@@ -432,15 +420,9 @@ mod tests {
     async fn a_disabled_user_and_a_garbage_cookie_do_not_resolve() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(
-            &app.state,
-            user_id,
-            None,
-            None,
-            crate::auth::session::SessionOrigin::Password,
-        )
-        .await
-        .unwrap();
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
         let token = token_of(&header);
         let now = app.state.clock.now_ns();
         app.state
@@ -470,15 +452,9 @@ mod tests {
     async fn the_first_cookie_that_resolves_wins() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let header = start_session(
-            &app.state,
-            user_id,
-            None,
-            None,
-            crate::auth::session::SessionOrigin::Password,
-        )
-        .await
-        .unwrap();
+        let header = start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
         let token = token_of(&header);
         let unknown = new_opaque_token().unwrap().plaintext;
         let now = app.state.clock.now_ns();

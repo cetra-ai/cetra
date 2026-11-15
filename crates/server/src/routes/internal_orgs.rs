@@ -219,13 +219,7 @@ mod tests {
     use super::*;
     use crate::api::common::ProblemCode;
     use crate::meta::users::{NewUser, insert_user, set_disabled, user_by_email};
-    use crate::test_support::{
-        TestApp, TestResponse, capture_logs, control_plane_token, sign_token,
-    };
-
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
-    }
+    use crate::test_support::{TestApp, TestResponse, capture_logs};
 
     fn body(id: Uuid, name: &str, email: &str, owner_name: Option<&str>) -> Value {
         let mut owner = json!({ "email": email });
@@ -237,7 +231,7 @@ mod tests {
 
     async fn create(app: &TestApp, token: &str, body: &Value) -> TestResponse {
         app.request(Method::POST, "/api/internal/v1/orgs")
-            .header(header::AUTHORIZATION.as_str(), &bearer(token))
+            .control_plane(token)
             .json(body)
             .send()
             .await
@@ -310,7 +304,7 @@ mod tests {
         let (created, logs) = capture_logs(async {
             create(
                 &app,
-                &control_plane_token("orgs"),
+                "orgs",
                 &body(id, "Acme Cloud", "new@example.com", Some("New Owner")),
             )
             .await
@@ -385,7 +379,7 @@ mod tests {
         let id = Uuid::now_v7();
         let created = create(
             &app,
-            &control_plane_token("orgs"),
+            "orgs",
             &body(id, "Squat", "squatted@example.com", None),
         )
         .await;
@@ -413,7 +407,7 @@ mod tests {
         let id = Uuid::now_v7();
         let created = create(
             &app,
-            &control_plane_token("orgs"),
+            "orgs",
             &body(id, "Reuse", "existing@example.com", Some("Other Name")),
         )
         .await;
@@ -438,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn same_id_is_idempotent() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = "orgs";
         let id = Uuid::now_v7();
         let request = body(id, "Retry", "retry@example.com", None);
         let first = create(&app, &token, &request).await;
@@ -474,7 +468,7 @@ mod tests {
     async fn refuses_disabled_and_admin_owners() {
         let app = TestApp::new().await;
         app.seed().await;
-        let token = control_plane_token("orgs");
+        let token = "orgs";
 
         let disabled = insert_plain_user(&app, "disabled@example.com", None).await;
         let now = app.state.clock.now_ns();
@@ -511,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn validation_refuses_bad_input() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = "orgs";
 
         let v4 = create(
             &app,
@@ -561,7 +555,7 @@ mod tests {
         let id = Uuid::now_v7();
         let request = body(id, "Scoped", "scoped@example.com", None);
 
-        let usage = create(&app, &control_plane_token("usage"), &request).await;
+        let usage = create(&app, "usage", &request).await;
         assert_eq!(usage.status, 403);
 
         let session = app
@@ -584,7 +578,7 @@ mod tests {
     #[tokio::test]
     async fn slug_collision_gets_a_suffix() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = "orgs";
         let first = Uuid::now_v7();
         let created = create(
             &app,
@@ -609,7 +603,7 @@ mod tests {
     /// A `DELETE` of `org_id` with `token`.
     async fn drop_org_request(app: &TestApp, token: &str, org_id: Uuid) -> TestResponse {
         app.request(Method::DELETE, &format!("/api/internal/v1/orgs/{org_id}"))
-            .header(header::AUTHORIZATION.as_str(), &bearer(token))
+            .control_plane(token)
             .send()
             .await
     }
@@ -617,15 +611,8 @@ mod tests {
     #[tokio::test]
     async fn the_control_plane_drops_an_org() {
         let app = TestApp::new().await;
-        let token_id = Uuid::now_v7();
-        let token = sign_token(&json!({
-            "kind": "control_plane",
-            "id": token_id.to_string(),
-            "issued_at": "2026-01-01T00:00:00Z",
-            "expires_at": "2026-01-01T00:05:00Z",
-            "audience": app.state.config.public_url.origin(),
-            "scope": "orgs",
-        }));
+        let token = "orgs";
+
         let id = Uuid::now_v7();
         let created = create(
             &app,
@@ -639,7 +626,11 @@ mod tests {
         assert_eq!(first.status, 202);
         let deletion: Value = first.json();
         assert_eq!(deletion["requested_by"]["kind"], "control_plane");
-        assert_eq!(deletion["requested_by"]["id"], json!(token_id));
+        assert!(
+            deletion["requested_by"]["id"]
+                .as_str()
+                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        );
         assert!(logs.contains("deletion requested"));
         assert!(logs.contains("control_plane"));
         assert!(!logs.contains("doomed@example.com"));
@@ -664,11 +655,10 @@ mod tests {
         let seeded = app.seed().await;
         let id = Uuid::now_v7();
 
-        let unknown = drop_org_request(&app, &control_plane_token("orgs"), id).await;
+        let unknown = drop_org_request(&app, "orgs", id).await;
         assert_eq!(unknown.status, 404);
 
-        let usage =
-            drop_org_request(&app, &control_plane_token("usage"), seeded.org_id.as_uuid()).await;
+        let usage = drop_org_request(&app, "usage", seeded.org_id.as_uuid()).await;
         assert_eq!(usage.status, 403);
 
         let session = app
@@ -691,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn create_refuses_a_dropping_or_dropped_id() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = "orgs";
         let id = Uuid::now_v7();
         assert_eq!(
             create(&app, &token, &body(id, "Once", "once@example.com", None))

@@ -84,6 +84,9 @@ pub(crate) enum Principal {
         token_id: Uuid,
         /// The token's scope.
         scope: String,
+        /// The one method and path the token is for (D-P-71).
+        method: String,
+        path: String,
     },
 }
 
@@ -144,10 +147,17 @@ impl fmt::Debug for Principal {
                 .field("token_id", token_id)
                 .field("write", write)
                 .finish(),
-            Self::ControlPlane { token_id, scope } => formatter
+            Self::ControlPlane {
+                token_id,
+                scope,
+                method,
+                path,
+            } => formatter
                 .debug_struct("ControlPlane")
                 .field("token_id", token_id)
                 .field("scope", scope)
+                .field("method", method)
+                .field("path", path)
                 .finish(),
         }
     }
@@ -265,8 +275,8 @@ pub(crate) async fn bearer_principal(
 }
 
 /// The caller of a `control_plane` token. It must verify, name this cell as its audience,
-/// live at most 5 minutes and be valid within 60 s of skew. It is not single-use: a captured
-/// one works until it expires, which the idempotent internal endpoints accept (D-P-28).
+/// live at most 5 minutes and be valid within 60 s of skew. It is not single-use, but the
+/// access layer accepts it only for the method and path it names (D-P-28, D-P-71).
 fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
     if !state.config.entitlements.control_plane {
         return Err(ApiError::Unauthorized);
@@ -290,6 +300,8 @@ fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Pr
     Ok(Principal::ControlPlane {
         token_id: claims.id,
         scope: claims.scope,
+        method: claims.method,
+        path: claims.path,
     })
 }
 
@@ -469,13 +481,15 @@ mod tests {
             "expires_at": expires_at,
             "audience": audience,
             "scope": scope,
+            "method": "GET",
+            "path": "/api/internal/v1/orgs",
         }))
     }
 
     #[tokio::test]
     async fn control_plane_token_resolves() {
         let app = TestApp::new().await;
-        let token = control_plane_token("orgs");
+        let token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
         let Ok(principal) = bearer_principal(&app.state, &bearer_headers(&token)).await else {
             panic!("a valid control-plane token resolves");
         };
@@ -488,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn control_plane_tokens_are_refused_when_off() {
         let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
-        let token = control_plane_token("orgs");
+        let token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
         let refused = bearer_principal(&app.state, &bearer_headers(&token)).await;
         assert!(
             matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
@@ -509,7 +523,7 @@ mod tests {
             &json!({}),
         );
         let tampered = {
-            let mut token = control_plane_token("orgs");
+            let mut token = control_plane_token("orgs", "GET", "/api/internal/v1/orgs");
             let last = token.pop().expect("a token is not empty");
             token.push(if last == 'A' { 'B' } else { 'A' });
             token

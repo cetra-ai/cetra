@@ -260,7 +260,7 @@ mod tests {
         assert_eq!(forgot.status, 204);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(app.sent().is_empty());
-        let token = crate::auth::secret::new_opaque_token().unwrap();
+        let token = secret::new_opaque_token().unwrap();
         let hash = token.hash.clone();
         app.state
             .meta
