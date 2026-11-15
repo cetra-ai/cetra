@@ -87,7 +87,7 @@ pub(crate) async fn insert_project(
         "INSERT INTO projects (id, org_id, name, slug, retention_days, created_at, updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
          RETURNING id, org_id, name, slug, retention_days, \
-         CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+         CAST(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
          state, created_at, updated_at",
     )
     .bind(id.to_string())
@@ -137,7 +137,7 @@ pub(crate) async fn project_by_id(
     fetch_project(
         sqlx::query_as(
             "SELECT id, org_id, name, slug, retention_days, \
-             CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+             CAST(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
              state, created_at, updated_at \
              FROM projects WHERE id = ?",
         )
@@ -244,7 +244,7 @@ pub(crate) async fn project_by_slugs(
         sqlx::query_as(
             "SELECT projects.id, projects.org_id, projects.name, projects.slug, \
              projects.retention_days, \
-             CAST(CASE WHEN json_valid(projects.settings) THEN json_extract(projects.settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+             CAST(CASE WHEN json_valid(projects.settings) AND json_type(projects.settings) = 'object' THEN json_extract(projects.settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
              projects.state, projects.created_at, projects.updated_at \
              FROM projects JOIN orgs ON orgs.id = projects.org_id \
              WHERE orgs.slug = ? AND projects.slug = ?",
@@ -267,7 +267,7 @@ pub(crate) async fn projects_of_org(
 ) -> Result<Vec<ProjectRow>, MetaError> {
     let records: Vec<ProjectRecord> = sqlx::query_as(
         "SELECT id, org_id, name, slug, retention_days, \
-         CAST(CASE WHEN json_valid(settings) THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
+         CAST(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) AS trace_completion_timeout_s, \
          state, created_at, updated_at \
          FROM projects WHERE org_id = ? ORDER BY name, id",
     )
@@ -330,7 +330,7 @@ pub(crate) async fn update_project(
            name = COALESCE(?1, name),
            retention_days = CASE WHEN ?2 THEN ?3 ELSE retention_days END,
            settings = CASE WHEN ?4 IS NULL THEN settings
-                           ELSE json_set(CASE WHEN json_valid(settings) THEN settings ELSE '{}' END,
+                           ELSE json_set(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' THEN settings ELSE '{}' END,
                                          '$.trace_completion_timeout_s', ?4) END,
            updated_at = ?5
          WHERE id = ?6",
@@ -583,6 +583,66 @@ mod tests {
             assert_eq!(row.trace_completion_timeout_s, timeout);
             assert_eq!(row.updated_at, now);
         }
+    }
+
+    #[tokio::test]
+    async fn settings_that_are_not_an_object_read_as_default_and_take_the_timeout() {
+        let (_dir, db) = test_db().await;
+        let id = db
+            .write(|conn| {
+                Box::pin(async move {
+                    let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?;
+                    Ok(insert_project(conn, org.id, "API", "api", None, 1)
+                        .await?
+                        .id)
+                })
+            })
+            .await
+            .unwrap();
+        for raw in ["[]", "\"text\"", "not json"] {
+            db.write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE projects SET settings = ? WHERE id = ?")
+                        .bind(raw)
+                        .bind(id.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+            let row = project_by_id(db.reader(), id).await.unwrap().unwrap();
+            assert_eq!(row.trace_completion_timeout_s, None, "settings {raw}");
+            assert_eq!(
+                row.completion_timeout_s(),
+                COMPLETION_TIMEOUT_DEFAULT_S,
+                "settings {raw}"
+            );
+        }
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE projects SET settings = '[]' WHERE id = ?")
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                update_project(
+                    conn,
+                    id,
+                    ProjectPatch {
+                        name: None,
+                        retention_days: None,
+                        trace_completion_timeout_s: Some(120),
+                    },
+                    2,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap();
+        let row = project_by_id(db.reader(), id).await.unwrap().unwrap();
+        assert_eq!(row.trace_completion_timeout_s, Some(120));
     }
 
     #[tokio::test]

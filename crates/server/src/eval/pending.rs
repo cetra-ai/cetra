@@ -38,6 +38,9 @@ pub(crate) struct Entry {
     pub(crate) root_ended: bool,
     /// Sweeps whose reads failed (memory only).
     pub(crate) failed_reads: u8,
+    /// Spans observed, wrapping (memory only, starts at 0 after a load). `finish` compares it
+    /// with `last_seen`: a span at an unchanged clock still counts as growth.
+    pub(crate) spans: u32,
 }
 
 /// A completed trace, as the sweeper saw it.
@@ -48,6 +51,7 @@ pub(crate) struct Completed {
     pub(crate) trace_id: TraceId,
     pub(crate) last_seen: i64,
     pub(crate) min_start: i64,
+    pub(crate) spans: u32,
 }
 
 /// What the flusher writes: entries changed since the last flush, and keys removed since.
@@ -139,6 +143,8 @@ impl PendingTraces {
                         entry.last_seen = entry.last_seen.max(now);
                         entry.min_start = entry.min_start.min(span.start_time);
                         entry.root_ended |= root;
+                        entry.spans = entry.spans.wrapping_add(1);
+                        entry.failed_reads = 0;
                     }
                     None if inner.len < self.max => {
                         traces.insert(
@@ -149,6 +155,7 @@ impl PendingTraces {
                                 min_start: span.start_time,
                                 root_ended: root,
                                 failed_reads: 0,
+                                spans: 1,
                             },
                         );
                         inner.len += 1;
@@ -220,7 +227,7 @@ impl PendingTraces {
         timeout_ns: i64,
         limit: usize,
     ) -> Vec<Completed> {
-        let cap = limit.saturating_mul(4);
+        let cap = scan_cap(limit);
         let mut found = Vec::with_capacity(cap);
         {
             let inner = lock(&self.inner);
@@ -235,6 +242,7 @@ impl PendingTraces {
                             trace_id: *trace_id,
                             last_seen: entry.last_seen,
                             min_start: entry.min_start,
+                            spans: entry.spans,
                         });
                     }
                 }
@@ -248,20 +256,21 @@ impl PendingTraces {
         found
     }
 
-    /// Removes each trace whose `last_seen` still equals the completed one's: a trace that grew
-    /// during the sweep's reads stays (D-I-9).
+    /// Removes each trace whose `last_seen` and span count still equal the completed one's: a
+    /// trace that grew during the sweep's reads stays (D-I-9). A project left with no traces
+    /// loses its map.
     // I4.7 calls it.
     #[allow(dead_code)]
     pub(crate) fn finish(&self, project: ProjectId, done: &[Completed]) {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
+        let Some(traces) = inner.projects.get_mut(&project) else {
+            return;
+        };
         for completed in done {
-            let Some(traces) = inner.projects.get_mut(&project) else {
-                return;
-            };
-            let unchanged = traces
-                .get(&completed.trace_id)
-                .is_some_and(|entry| entry.last_seen == completed.last_seen);
+            let unchanged = traces.get(&completed.trace_id).is_some_and(|entry| {
+                entry.last_seen == completed.last_seen && entry.spans == completed.spans
+            });
             if unchanged {
                 traces.remove(&completed.trace_id);
                 inner.len -= 1;
@@ -269,6 +278,9 @@ impl PendingTraces {
                 inner.changed.remove(&key);
                 inner.removed.insert(key);
             }
+        }
+        if traces.is_empty() {
+            inner.projects.remove(&project);
         }
     }
 
@@ -280,10 +292,10 @@ impl PendingTraces {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
         let mut removed_count = 0;
+        let Some(traces) = inner.projects.get_mut(&project) else {
+            return removed_count;
+        };
         for completed in failed {
-            let Some(traces) = inner.projects.get_mut(&project) else {
-                return removed_count;
-            };
             let Some(entry) = traces.get_mut(&completed.trace_id) else {
                 continue;
             };
@@ -296,6 +308,9 @@ impl PendingTraces {
                 inner.removed.insert(key);
                 removed_count += 1;
             }
+        }
+        if traces.is_empty() {
+            inner.projects.remove(&project);
         }
         removed_count
     }
@@ -390,6 +405,11 @@ fn order(left: &Completed, right: &Completed) -> std::cmp::Ordering {
     (left.min_start, left.trace_id).cmp(&(right.min_start, right.trace_id))
 }
 
+/// How many entries one `completed` scan may collect: four times the limit (D-I-9).
+fn scan_cap(limit: usize) -> usize {
+    limit.saturating_mul(4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +489,7 @@ mod tests {
                 min_start: 300,
                 root_ended: true,
                 failed_reads: 0,
+                spans: 2,
             }
         );
     }
@@ -528,6 +549,7 @@ mod tests {
                 trace_id: trace_of(1),
                 last_seen: 0,
                 min_start: 500,
+                spans: 1,
             }]
         );
         let at_timeout = pending.completed(project, 60 * SECOND, timeout, 10);
@@ -538,7 +560,16 @@ mod tests {
     }
 
     #[test]
-    fn completed_collects_at_most_four_times_the_limit() {
+    fn scan_cap_is_four_times_the_limit() {
+        assert_eq!(scan_cap(5), 20);
+        assert_eq!(scan_cap(0), 0);
+        assert_eq!(scan_cap(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn completed_scans_at_most_scan_cap_and_returns_the_limit() {
+        // 50 completed traces and limit 5: the scan stops at `scan_cap(5)` = 20 entries, so the
+        // result is at most 5 of those 20, sorted by min_start.
         let pending = PendingTraces::new(100);
         let project = project_id();
         track(&pending, project);
@@ -548,10 +579,75 @@ mod tests {
         let done = pending.completed(project, 10 * SECOND, 60 * SECOND, 5);
         assert_eq!(done.len(), 5);
         assert!(
+            scan_cap(5) < 50,
+            "the cap must bind for this test to mean anything"
+        );
+        assert!(
             done.windows(2)
                 .all(|pair| pair[0].min_start <= pair[1].min_start)
         );
         assert!(done.iter().all(|done| done.last_seen == 0));
+    }
+
+    #[test]
+    fn finish_keeps_a_trace_observed_at_the_same_clock() {
+        let pending = PendingTraces::new(10);
+        let project = project_id();
+        track(&pending, project);
+        pending.observe(project, &[span(1, true, 1)], 0);
+        let done = pending.completed(project, 10 * SECOND, 60 * SECOND, 10);
+        assert_eq!(done.len(), 1);
+        // A concurrent commit with an older clock: last_seen stays 0, but the trace grew.
+        pending.observe(project, &[span(1, false, 2)], 0);
+        pending.finish(project, &done);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.take_changes().deletes, Vec::new());
+        // The next sweep sees the grown count and completes it.
+        let again = pending.completed(project, 10 * SECOND, 60 * SECOND, 10);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].spans, 2);
+        pending.finish(project, &again);
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn a_new_span_resets_failed_reads() {
+        let pending = PendingTraces::new(10);
+        let project = project_id();
+        track(&pending, project);
+        pending.observe(project, &[span(1, true, 1)], 0);
+        let failed = pending.completed(project, 10 * SECOND, 60 * SECOND, 10);
+        for _ in 0..4 {
+            assert_eq!(pending.read_failed(project, &failed), 0);
+        }
+        pending.observe(project, &[span(1, false, 2)], 0);
+        for _ in 0..4 {
+            assert_eq!(pending.read_failed(project, &failed), 0);
+        }
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.read_failed(project, &failed), 1);
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn a_project_without_traces_loses_its_map() {
+        let pending = PendingTraces::new(10);
+        let project = project_id();
+        track(&pending, project);
+        pending.observe(project, &[span(1, true, 1), span(2, true, 1)], 0);
+        assert_eq!(lock(&pending.inner).projects.len(), 1);
+        let done = pending.completed(project, 10 * SECOND, 60 * SECOND, 10);
+        pending.finish(project, &done);
+        assert_eq!(pending.len(), 0);
+        assert!(lock(&pending.inner).projects.is_empty());
+
+        pending.observe(project, &[span(3, true, 1)], 0);
+        let failed = pending.completed(project, 10 * SECOND, 60 * SECOND, 10);
+        for _ in 0..MAX_FAILED_READS {
+            pending.read_failed(project, &failed);
+        }
+        assert_eq!(pending.len(), 0);
+        assert!(lock(&pending.inner).projects.is_empty());
     }
 
     #[test]
@@ -628,8 +724,10 @@ mod tests {
 
         // A key observed between the take and the restore is marked once, and the restored
         // changes come back whole.
-        let again = first.clone();
+        let mut again = first.clone();
         pending.observe(project, &[span(1, true, 1)], 0);
+        // Trace 1 is the first upsert (sorted by key) and now holds one more span.
+        again.upserts[0].2.spans = 2;
         pending.restore(first);
         assert_eq!(pending.take_changes(), again);
     }
@@ -646,6 +744,7 @@ mod tests {
             min_start: 0,
             root_ended: false,
             failed_reads: 0,
+            spans: 0,
         };
         pending.load([
             (tracked, trace_of(1), entry),
@@ -672,6 +771,7 @@ mod tests {
             min_start: 0,
             root_ended: false,
             failed_reads: 0,
+            spans: 0,
         };
         pending.load((1..=3_u8).map(|index| (project, trace_of(index), entry)));
         assert_eq!(pending.len(), 2);
