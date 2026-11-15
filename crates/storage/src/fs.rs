@@ -214,23 +214,32 @@ pub(crate) fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     std::fs::remove_file(path)
 }
 
+/// Only the test-mode `remove_dir_all` recursion calls this: production calls
+/// std's `remove_dir_all` directly.
+#[cfg(test)]
 #[inline]
 pub(crate) fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    #[cfg(test)]
-    {
-        if let Some(root) = lossy::route(path.as_ref()) {
-            return root.remove_dir(path.as_ref());
-        }
+    if let Some(root) = lossy::route(path.as_ref()) {
+        return root.remove_dir(path.as_ref());
     }
     std::fs::remove_dir(path)
 }
 
-/// `std::fs::remove_dir_all` semantics: a missing path is `NotFound`, and a
-/// symlink is removed, not followed. Each entry is removed by its own call
-/// (`remove_file` for files, `remove_dir` bottom-up for directories), so the
-/// lossy shim records every step.
+/// `std::fs::remove_dir_all`. Under `cfg(test)`, a tree under a lossy root is
+/// removed entry by entry (`remove_file` for files, `remove_dir` bottom-up for
+/// directories), so the shim records every step. Elsewhere it is std's call.
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
+    std::fs::remove_dir_all(path)
+}
+
+#[cfg(test)]
 pub(crate) fn remove_dir_all<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref();
+    if lossy::route(path).is_none() {
+        return std::fs::remove_dir_all(path);
+    }
     let meta = std::fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
         return remove_file(path);

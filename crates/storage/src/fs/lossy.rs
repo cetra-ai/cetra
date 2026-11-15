@@ -264,15 +264,13 @@ pub(crate) fn crash_before_abort() -> Vec<MutexGuard<'static, State>> {
 /// The root that holds `path`, when `path` resolves under a registered root.
 /// Includes the root itself.
 pub(crate) fn route(path: &Path) -> Option<&'static Root> {
-    let roots = ROOTS.lock().unwrap_or_else(PoisonError::into_inner);
+    // The lock is released before canonicalizing: the registry is only read here.
+    let roots: Vec<&'static Root> = ROOTS.lock().unwrap_or_else(PoisonError::into_inner).clone();
     if roots.is_empty() {
         return None;
     }
     let canon = canonical(path)?;
-    roots
-        .iter()
-        .copied()
-        .find(|root| canon.starts_with(&root.path))
+    roots.into_iter().find(|root| canon.starts_with(&root.path))
 }
 
 /// `path` with its nearest existing ancestor canonicalized, so a path that
@@ -452,10 +450,10 @@ impl Root {
         if let Some(inode) = st.inodes.get_mut(&ino) {
             inode.path = Some(to_rel.clone());
         }
-        if let Some((old, _)) = &replaced {
-            if let Some(inode) = st.inodes.get_mut(old) {
-                inode.path = None;
-            }
+        if let Some((old, _)) = &replaced
+            && let Some(inode) = st.inodes.get_mut(old)
+        {
+            inode.path = None;
         }
         st.push(
             &parent,
@@ -496,10 +494,10 @@ impl Root {
             return Err(io::Error::from_raw_os_error(EIO));
         }
         std::fs::File::open(path)?.sync_all()?;
-        if let Some(inc) = st.incarnations.get_mut(&id) {
-            if !inc.ops.iter().any(|entry| entry.poisoned) {
-                inc.ops.clear();
-            }
+        if let Some(inc) = st.incarnations.get_mut(&id)
+            && !inc.ops.iter().any(|entry| entry.poisoned)
+        {
+            inc.ops.clear();
         }
         Ok(())
     }
@@ -648,7 +646,9 @@ impl Tracked {
     }
 
     /// `sync_all` or `sync_data`. A failed sync poisons the writes pending at
-    /// that moment, which no later sync makes durable.
+    /// that moment. A later successful sync covers every write made since,
+    /// as on Linux, but not the poisoned ones: they stay pending, and a crash
+    /// leaves them as zeros inside the synced length.
     pub(crate) fn sync(
         &self,
         inner: &std::fs::File,
@@ -665,10 +665,11 @@ impl Tracked {
         }
         real(inner)?;
         if let Some(inode) = st.inodes.get_mut(&self.ino) {
-            if !inode.writes.iter().any(|pending| pending.poisoned) {
-                inode.synced_len = inode.len;
-                inode.writes.clear();
-            }
+            // The synced length is the whole length, not the end of the last
+            // poisoned range: a write after that range was synced and must
+            // survive a crash.
+            inode.synced_len = inode.len;
+            inode.writes.retain(|pending| pending.poisoned);
         }
         Ok(())
     }
@@ -789,7 +790,7 @@ fn apply(root: &Root, st: &mut State, mode: CrashMode, seed: u64) -> CrashReport
             dropped.push((entry.seq, *id, j));
         }
     }
-    dropped.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    dropped.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
     report.dropped_entries = dropped.len();
     for (_, id, j) in dropped {
         let op = st.incarnations[&id].ops[j].op.clone();
@@ -1164,8 +1165,94 @@ mod tests {
 
             lossy.crash_with(mode, 0);
 
-            assert!(std::fs::read(&path).unwrap().is_empty(), "{mode:?}");
+            // The poisoned bytes are lost; the length the later sync covered stays.
+            assert_eq!(std::fs::read(&path).unwrap(), [0; 3], "{mode:?}");
         }
+    }
+
+    #[test]
+    fn a_later_sync_covers_the_writes_after_a_failure() {
+        let (_t, data, lossy) = setup();
+        let path = data.join("f");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        crate::fs::sync_dir(&data).unwrap();
+        file.write_all(b"abc").unwrap();
+        lossy.fail_next_sync(&path);
+        assert_eq!(file.sync_all().unwrap_err().raw_os_error(), Some(5));
+        file.write_all(b"def").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"\0\0\0def");
+    }
+
+    #[test]
+    fn a_failed_sync_dir_poisons_its_entries() {
+        for mode in [
+            CrashMode::DropAll,
+            CrashMode::KeepRandom,
+            CrashMode::TearLast,
+        ] {
+            let (_t, data, lossy) = setup();
+            let d = data.join("d");
+            crate::fs::create_dir(&d).unwrap();
+            lossy.fail_next_sync(&data);
+
+            let error = crate::fs::sync_dir(&data).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+            lossy.crash_with(mode, 0);
+
+            assert!(!d.exists(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn fs_write_over_a_synced_file_never_leaves_the_old_bytes() {
+        for seed in 0..6 {
+            let (_t, data, lossy) = setup();
+            let path = data.join("f");
+            write_synced(&path, b"old");
+            crate::fs::write(&path, b"new").unwrap();
+
+            lossy.crash(seed);
+
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(b"new".starts_with(&bytes), "seed {seed}: {bytes:?}");
+        }
+    }
+
+    #[test]
+    fn create_dir_all_and_remove_dir_all_go_through_the_shim() {
+        let (t, data, lossy) = setup();
+        let deep = data.join("a").join("b").join("c");
+        crate::fs::create_dir_all(&deep).unwrap();
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert!(!data.join("a").exists());
+
+        crate::fs::create_dir_all(&deep).unwrap();
+        crate::fs::sync_dir(&data).unwrap();
+        crate::fs::sync_dir(data.join("a")).unwrap();
+        crate::fs::sync_dir(data.join("a").join("b")).unwrap();
+        write_synced(&deep.join("x"), b"x");
+        let before = tree(&data, &data);
+
+        crate::fs::remove_dir_all(data.join("a")).unwrap();
+        assert!(!data.join("a").exists());
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert_eq!(tree(&data, &data), before);
+
+        // Outside every root, the call is std's.
+        let outside = t.path().join("outside");
+        crate::fs::create_dir_all(outside.join("x")).unwrap();
+        crate::fs::remove_dir_all(&outside).unwrap();
+        assert!(!outside.exists());
     }
 
     #[test]
@@ -1191,15 +1278,22 @@ mod tests {
             file.write_all(b"333").unwrap();
             drop(file);
         }
-        let (_a, data_a, lossy_a) = setup();
-        let (_b, data_b, lossy_b) = setup();
-        build(&data_a);
-        build(&data_b);
+        // 6, 7 and 8 pick each of the three modes once.
+        for seed in [6, 7, 8] {
+            let (_a, data_a, lossy_a) = setup();
+            let (_b, data_b, lossy_b) = setup();
+            build(&data_a);
+            build(&data_b);
 
-        lossy_a.crash(7);
-        lossy_b.crash(7);
+            lossy_a.crash(seed);
+            lossy_b.crash(seed);
 
-        assert_eq!(tree(&data_a, &data_a), tree(&data_b, &data_b));
+            assert_eq!(
+                tree(&data_a, &data_a),
+                tree(&data_b, &data_b),
+                "seed {seed}"
+            );
+        }
     }
 
     #[test]
@@ -1227,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "open")]
+    #[should_panic(expected = "still open")]
     fn crash_with_an_open_file_panics() {
         let (_t, data, lossy) = setup();
         let _file = OpenOptions::new()
@@ -1340,16 +1434,19 @@ mod tests {
             crate::fs::remove_file(d.join("x")).unwrap();
             crate::fs::remove_dir(&d).unwrap();
 
-            lossy.crash_with(CrashMode::KeepRandom, seed);
+            let report = lossy.crash_with(CrashMode::KeepRandom, seed);
 
             if !d.exists() {
                 assert!(!d.join("x").exists(), "seed {seed}");
+                assert_eq!(report.dropped_entries, 0, "seed {seed}");
             }
         }
     }
 
     #[test]
     fn a_recreated_directory_is_a_new_incarnation() {
+        // Every state a crash can leave: `d` absent; `d` empty; `d` with `a`;
+        // `d` with `b`. `a` and `b` never exist together.
         for seed in 0..64 {
             let (_t, data, lossy) = setup();
             let d = data.join("d");
@@ -1369,10 +1466,21 @@ mod tests {
 
             lossy.crash_with(CrashMode::KeepRandom, seed);
 
-            assert!(
-                !(d.join("a").exists() && d.join("b").exists()),
-                "seed {seed}: a and b exist together"
-            );
+            let state = tree(&data, &data);
+            let allowed: [Vec<(PathBuf, Option<Vec<u8>>)>; 4] = [
+                vec![],
+                vec![(PathBuf::from("d"), None)],
+                vec![
+                    (PathBuf::from("d"), None),
+                    (PathBuf::from("d/a"), Some(b"a".to_vec())),
+                ],
+                vec![
+                    (PathBuf::from("d"), None),
+                    (PathBuf::from("d/b"), Some(vec![])),
+                ],
+            ];
+            assert!(allowed.contains(&state), "seed {seed}: {state:?}");
+            assert!(!(d.join("b").exists() && !d.exists()), "seed {seed}");
         }
     }
 }

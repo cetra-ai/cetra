@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::fs;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::error::OpenError;
+use crate::fs;
 use crate::open_io;
 use crate::read_cache::{self, ReadCache};
 

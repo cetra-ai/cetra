@@ -202,7 +202,15 @@ mod fault {
                 // A lossy root of the child first loses what a power loss may drop
                 // (track R, D-R-4); the guards stay held until the abort.
                 #[cfg(test)]
-                let _lossy_guards = crate::fs::lossy::crash_before_abort();
+                let _lossy_guards = {
+                    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        crate::fs::lossy::crash_before_abort,
+                    ));
+                    crashed.unwrap_or_else(|_| {
+                        eprintln!("lossy crash before abort panicked; aborting without it");
+                        Vec::new()
+                    })
+                };
                 #[allow(clippy::exit)]
                 std::process::abort();
             }

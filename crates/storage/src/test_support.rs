@@ -55,7 +55,7 @@ fn read_text(name: &str) -> String {
 }
 
 /// The rows stored in one catalogued file's Parquet object, under `objects/`.
-pub(crate) fn object_rows(dir: &std::path::Path, file: &crate::catalog::FileMeta) -> RecordBatch {
+pub(crate) fn object_rows(dir: &Path, file: &crate::catalog::FileMeta) -> RecordBatch {
     let bytes = fs::read(dir.join("objects").join(&file.path)).unwrap();
     let builder =
         parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
