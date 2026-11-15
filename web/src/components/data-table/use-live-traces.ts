@@ -95,15 +95,20 @@ export function useLiveTraces({
   }
 
   /**
-   * Drops every page after the first and refetches page 1 from the server, with a correct
-   * cursor. At most one refetch runs at a time: a call during one only queues a single
-   * trailing refetch, so the traces that arrived meanwhile are still fetched.
+   * Refetches page 1 from the server, with a correct cursor. By default it first drops every
+   * page after the first. With `keepPages`, the loaded pages stay in the cache and it only
+   * invalidates: an infinite query then refetches every loaded page with fresh cursors, so a
+   * reader who scrolled down keeps their place. At most one refetch runs at a time: a call
+   * during one only queues a single trailing refetch, so the traces that arrived meanwhile
+   * are still fetched.
    */
-  function refetchFirstPage() {
+  function refetchFirstPage({ keepPages }: { keepPages: boolean } = { keepPages: false }) {
     const key = queryKeyRef.current;
-    queryClient.setQueryData<TracePages>(key, (current) =>
-      current ? firstPageOnly(current) : current,
-    );
+    if (!keepPages) {
+      queryClient.setQueryData<TracePages>(key, (current) =>
+        current ? firstPageOnly(current) : current,
+      );
+    }
     if (queryClient.isFetching({ queryKey: key, exact: true }) > 0) {
       refetchQueued.current = true;
       return;
@@ -130,7 +135,8 @@ export function useLiveTraces({
         queryClient.isFetching({ queryKey: queryKeyRef.current, exact: true }) === 0
       ) {
         refetchQueued.current = false;
-        refetchFirstPageRef.current();
+        // A list scrolled down keeps the pages it loaded, so the reader's place survives.
+        refetchFirstPageRef.current({ keepPages: (tracesScroller()?.scrollTop ?? 0) > 0 });
       }
     });
   }, [queryClient]);

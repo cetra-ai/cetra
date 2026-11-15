@@ -5,6 +5,7 @@ import type { Schema } from "@/api/types";
 import { columnChoiceKey } from "@/components/data-table/column-layout";
 import { ROW_HEIGHT } from "@/components/data-table/data-table";
 import { LIVE_BUFFER_MAX, LIVE_PAGE_MAX } from "@/components/data-table/live-list";
+import { traceProbeOptions } from "@/components/data-table/use-infinite-list";
 import { setLiveLimits } from "@/components/data-table/use-live-traces";
 import { ONBOARDING_POLL_MS, setOnboardingPollMs } from "@/components/onboarding/poll";
 import { otelSnippet } from "@/components/onboarding/snippets";
@@ -635,6 +636,41 @@ it("shows neither the empty range nor onboarding while the probe loads", async (
   }
 });
 
+it("hides onboarding while a cached empty probe refetches", async () => {
+  savedViewHandlers([]);
+  let probes = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      if (!new URL(request.url).searchParams.has("from")) {
+        probes += 1;
+        if (probes > 1) {
+          await gate;
+        }
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  try {
+    const { queryClient } = await renderApp("/acme/support-bot/traces");
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+    void queryClient.invalidateQueries({
+      queryKey: traceProbeOptions("acme", "support-bot").queryKey,
+    });
+    await waitFor(() => expect(probes).toBe(2));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+    release?.();
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  } finally {
+    release?.();
+  }
+});
+
 it("asks for one trace over all time before it shows onboarding", async () => {
   savedViewHandlers([]);
   const probes: URL[] = [];
@@ -737,6 +773,30 @@ it("opens no trace stream while the list answers an invalid filter", async () =>
     expect((await screen.findAllByText("unknown column")).length).toBeGreaterThan(0);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(streams).toEqual([]);
+  } finally {
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+it("keeps the live stream open while a background refetch fails", async () => {
+  const streams: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/traces/stream")) {
+      streams.push(url);
+    }
+  };
+  server.events.on("request:start", onStart);
+  try {
+    const { emit } = await openLive("/acme/support-bot/traces?live=1");
+    const opened = streams.length;
+    server.use(http.get("/api/v1/projects/:project/traces", () => HttpResponse.error()));
+    emit.resync();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    emit.trace(liveTrace("c1000000000000000000000000000051", "after the blip", LATER));
+    expect(await screen.findByText("after the blip")).toBeInTheDocument();
+    expect(streams.length).toBe(opened);
+    expect(screen.getByRole("switch", { name: "Live" })).toBeChecked();
   } finally {
     server.events.removeListener("request:start", onStart);
   }
@@ -1069,6 +1129,81 @@ it("queues a trace that arrives during a first-page refetch instead of inserting
     setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
   }
 });
+
+it("keeps the pages a reader scrolled to when a queued refetch runs", async () => {
+  server.use(...largeHandlers(traces5k));
+  let emit: StreamEmit | undefined;
+  server.use(
+    traceStreamHandler((next) => {
+      emit = next;
+      return undefined;
+    }),
+  );
+  let hold = false;
+  let release: (() => void) | undefined;
+  const cursors: string[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    const cursor = new URL(request.url).searchParams.get("cursor");
+    if (cursor) {
+      cursors.push(cursor);
+    }
+  };
+  server.events.on("request:start", onStart);
+  // Holds the next first-page request; the handler below falls through to the large list.
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      if (hold && new URL(request.url).searchParams.has("from")) {
+        hold = false;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      }
+      return undefined;
+    }),
+  );
+  try {
+    const { queryClient } = await renderApp("/acme/support-bot/traces?live=1");
+    await screen.findByRole("grid", { name: "Traces" });
+    await waitFor(() => expect(emit).toBeDefined());
+    const scroller = tracesScroller();
+    const firstPage = loadedCount();
+    scroller.scrollTop = scroller.scrollHeight;
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(loadedCount()).toBeGreaterThan(firstPage));
+    const scrolled = loadedCount();
+    // A list refetch is in flight at the top, and a trace queues one trailing refetch.
+    scroller.scrollTop = 0;
+    fireEvent.scroll(scroller);
+    const list = queryClient
+      .getQueryCache()
+      .getAll()
+      .find((query) => (query.state.data as { pages?: unknown } | undefined)?.pages !== undefined);
+    if (!list) {
+      throw new Error("missing list query");
+    }
+    hold = true;
+    void queryClient.invalidateQueries({ queryKey: list.queryKey, exact: true });
+    await waitFor(() => expect(release).toBeDefined());
+    emit?.trace(liveTrace("c1000000000000000000000000000061", "queued top", LATER));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    // The reader scrolls down before the refetch settles.
+    scroller.scrollTop = ROW_HEIGHT * 10;
+    fireEvent.scroll(scroller);
+    const cursorsBefore = cursors.length;
+    release?.();
+    await waitFor(() => expect(cursors.length).toBeGreaterThan(cursorsBefore));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(loadedCount()).toBeGreaterThanOrEqual(scrolled);
+  } finally {
+    release?.();
+    server.events.removeListener("request:start", onStart);
+  }
+});
+
+function loadedCount(): number {
+  const text = screen.getByText(/^\d+ loaded$/).textContent ?? "";
+  return Number.parseInt(text, 10);
+}
 
 const LATER = "2026-11-11T21:00:00.000000000Z";
 const LATER_STILL = "2026-11-11T21:00:01.000000000Z";

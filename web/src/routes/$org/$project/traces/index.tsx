@@ -204,14 +204,18 @@ function TracesPage() {
   const listEmpty = !hold && list.data !== undefined && rows.length === 0;
   const projectProbe = useQuery({ ...probe, enabled: listEmpty && needsOnboarding });
   const probeRows = projectProbe.data?.data.length;
+  // A cached empty answer is not trusted while it refetches: a trace may have arrived since.
+  const probing =
+    listEmpty &&
+    needsOnboarding &&
+    (projectProbe.isPending || (projectProbe.isFetching && probeRows === 0));
   const onboarding =
-    listEmpty && onboardingShown(needsOnboarding, probeRows, projectProbe.isError);
-  const probing = listEmpty && needsOnboarding && projectProbe.isPending;
+    listEmpty && !probing && onboardingShown(needsOnboarding, probeRows, projectProbe.isError);
   const reason = traceLiveReason(search);
   const liveOn = search.live === 1 && reason === undefined && !hold;
   const live = useLiveTraces({
     url:
-      liveOn && list.isSuccess
+      liveOn && (list.isSuccess || list.isRefetchError)
         ? traceStreamUrl(projectRef(org, project), {
             filter: search.filter,
             search: search.search,
