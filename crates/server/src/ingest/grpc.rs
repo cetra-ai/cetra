@@ -1,10 +1,18 @@
 //! OTLP/gRPC `TraceService/Export` (spec 02 § Endpoints, D-G-29).
 //!
 //! The credential is the `authorization` metadata. Only a project key with `ingest` is
-//! admitted, on its own project, as on the HTTP route (D-G-15). Refusals use the static
+//! admitted, on its own project, as on the HTTP route (D-G-15). The admission runs in a tower
+//! layer ([`Admit`]) before tonic reads the body: the credential, the key's scope, the project,
+//! the org's cap, and a reservation of `ingest.max_grpc_message_bytes` (G-1). `export` then
+//! shrinks that reservation to the decoded message and accepts it. Refusals use the static
 //! messages of design § gRPC status mapping; nothing from the request is logged.
 
+use std::convert::Infallible;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use llmobs_storage::error::{AppendError, MediaError};
@@ -17,18 +25,29 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 use prost::Message;
 use tonic::Code;
 use tonic::codec::CompressionEncoding;
+use tonic::server::NamedService;
+use tower::{Layer, Service};
 
 use super::otlp::partial_success;
-use super::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
+use super::{Accepted, CommitTarget, IngestError, Reservation, check_rate, commit_in_task};
 use crate::auth::principal::{Principal, bearer_principal};
 use crate::auth::roles::KeyScope;
 use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
+use crate::meta::projects::ProjectRow;
 
 /// The status message of a rate refusal. The wrapper logs it at `debug`.
 const RATE_LIMITED_MESSAGE: &str = "rate limited";
+
+/// What the admission layer leaves in the request's extensions (G-1): the project the key may
+/// write to, and the budget reserved for the largest message. `export` takes the reservation.
+#[derive(Clone)]
+pub(crate) struct GrpcAdmitted {
+    project: ProjectRow,
+    reservation: Arc<Mutex<Option<Reservation>>>,
+}
 
 /// The tonic service. Cloning shares the state.
 #[derive(Clone)]
@@ -52,54 +71,103 @@ impl TraceService for GrpcTraces {
         match export_request(&self.state, request, started).await {
             Ok(response) => Ok(tonic::Response::new(response)),
             Err(status) => {
-                // Rate and cap refusals are expected for a client over its limit: `debug`.
-                if status.code() == Code::ResourceExhausted
-                    || status.message() == RATE_LIMITED_MESSAGE
-                {
-                    tracing::debug!(
-                        target: "ingest",
-                        transport = "grpc",
-                        code = ?status.code(),
-                        duration_ms = elapsed_ms(started),
-                        reason = status.message(),
-                        "request refused"
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "ingest",
-                        transport = "grpc",
-                        code = ?status.code(),
-                        duration_ms = elapsed_ms(started),
-                        reason = status.message(),
-                        "request refused"
-                    );
-                }
+                log_refusal(&status, started);
                 Err(status)
             }
         }
     }
 }
 
-/// The service with its limits and compressions. The decoded message cap is
-/// `ingest.max_grpc_message_bytes` (validated by `config`).
-pub(crate) fn service(state: AppState) -> TraceServiceServer<GrpcTraces> {
-    let limit =
-        usize::try_from(state.config.ingest.max_grpc_message_bytes.as_u64()).unwrap_or(usize::MAX);
-    TraceServiceServer::new(GrpcTraces { state })
-        .max_decoding_message_size(limit)
-        .accept_compressed(CompressionEncoding::Gzip)
+/// The layer that runs [`admit`] on each request before the inner service reads its body.
+#[derive(Clone)]
+pub(crate) struct AdmitLayer {
+    state: AppState,
 }
 
-/// Steps of the `export` contract: authenticate, check the project, reserve, accept,
-/// commit, answer. The first failing step decides the status.
-async fn export_request(
+impl<S> Layer<S> for AdmitLayer {
+    type Service = Admit<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        Admit {
+            inner,
+            state: self.state.clone(),
+        }
+    }
+}
+
+/// An admitted request goes to `inner` with its [`GrpcAdmitted`] extension. A refusal is
+/// answered here with its static status, and the body is never read.
+#[derive(Clone)]
+pub(crate) struct Admit<S> {
+    inner: S,
+    state: AppState,
+}
+
+impl<S: NamedService> NamedService for Admit<S> {
+    const NAME: &'static str = S::NAME;
+}
+
+impl<S, B> Service<axum::http::Request<B>> for Admit<S>
+where
+    S: Service<
+            axum::http::Request<B>,
+            Response = axum::http::Response<tonic::body::Body>,
+            Error = Infallible,
+        > + Clone
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = axum::http::Response<tonic::body::Body>;
+    type Error = Infallible;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Infallible>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: axum::http::Request<B>) -> Self::Future {
+        // The clone takes the place of the service that is ready, which this call uses.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let state = self.state.clone();
+        Box::pin(async move {
+            let started = Instant::now();
+            match admit(&state, request.headers()).await {
+                Ok(admitted) => {
+                    request.extensions_mut().insert(admitted);
+                    inner.call(request).await
+                }
+                Err(status) => {
+                    log_refusal(&status, started);
+                    Ok(status.into_http())
+                }
+            }
+        })
+    }
+}
+
+/// The service with its limits and compressions, behind the admission layer (G-1). The decoded
+/// message cap is `ingest.max_grpc_message_bytes` (validated by `config`).
+pub(crate) fn service(state: AppState) -> Admit<TraceServiceServer<GrpcTraces>> {
+    let limit =
+        usize::try_from(state.config.ingest.max_grpc_message_bytes.as_u64()).unwrap_or(usize::MAX);
+    let inner = TraceServiceServer::new(GrpcTraces {
+        state: state.clone(),
+    })
+    .max_decoding_message_size(limit)
+    .accept_compressed(CompressionEncoding::Gzip);
+    AdmitLayer { state }.layer(inner)
+}
+
+/// The admission checks, in order: the credential, the key's scope, the project, the org's cap,
+/// then the budget for a message of the largest size. The body is not read.
+async fn admit(
     state: &AppState,
-    request: tonic::Request<ExportTraceServiceRequest>,
-    started: Instant,
-) -> Result<ExportTraceServiceResponse, tonic::Status> {
-    let now = state.clock.now_ns();
-    let headers = request.metadata().clone().into_headers();
-    let principal = bearer_principal(state, &headers)
+    headers: &axum::http::HeaderMap,
+) -> Result<GrpcAdmitted, tonic::Status> {
+    let principal = bearer_principal(state, headers)
         .await
         .map_err(|error| api_status(&error))?;
     let Principal::ApiKey {
@@ -117,9 +185,29 @@ async fn export_request(
     if let Err(cap) = check_cap(state, project.org_id).await {
         return Err(tonic::Status::resource_exhausted(cap.detail));
     }
+    let reservation = state
+        .ingest
+        .reserve_exact(state.config.ingest.max_grpc_message_bytes.as_u64())?;
+    Ok(GrpcAdmitted {
+        project,
+        reservation: Arc::new(Mutex::new(Some(reservation))),
+    })
+}
+
+/// Steps of the `export` contract after admission: take the reservation, fit it to the
+/// message, accept, check the rate, commit, answer. The first failing step decides the status.
+async fn export_request(
+    state: &AppState,
+    request: tonic::Request<ExportTraceServiceRequest>,
+    started: Instant,
+) -> Result<ExportTraceServiceResponse, tonic::Status> {
+    let now = state.clock.now_ns();
+    let (project, mut reservation) = take_admitted(&request)?;
     let message = request.into_inner();
-    let bytes = u64::try_from(message.encoded_len()).unwrap_or(u64::MAX);
-    let reservation = state.ingest.reserve_exact(bytes)?;
+    // The admission reserved the largest message; give back what the decoded one does not use.
+    let size = message.encoded_len();
+    state.ingest.fit(&mut reservation, size)?;
+    let bytes = u64::try_from(size).unwrap_or(u64::MAX);
     let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
         normalized,
@@ -170,8 +258,54 @@ async fn export_request(
     })
 }
 
+/// The project and the reservation the layer admitted. Without them `export` was not reached
+/// through the layer, which is a defect, not a client error.
+fn take_admitted(
+    request: &tonic::Request<ExportTraceServiceRequest>,
+) -> Result<(ProjectRow, Reservation), tonic::Status> {
+    let admitted = request
+        .extensions()
+        .get::<GrpcAdmitted>()
+        .ok_or_else(internal_error)?;
+    let reservation = admitted
+        .reservation
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .ok_or_else(internal_error)?;
+    Ok((admitted.project.clone(), reservation))
+}
+
+/// Logs a refused request: rate and cap refusals at `debug`, the rest at `warn`.
+fn log_refusal(status: &tonic::Status, started: Instant) {
+    // Rate and cap refusals are expected for a client over its limit: `debug`.
+    if status.code() == Code::ResourceExhausted || status.message() == RATE_LIMITED_MESSAGE {
+        tracing::debug!(
+            target: "ingest",
+            transport = "grpc",
+            code = ?status.code(),
+            duration_ms = elapsed_ms(started),
+            reason = status.message(),
+            "request refused"
+        );
+    } else {
+        tracing::warn!(
+            target: "ingest",
+            transport = "grpc",
+            code = ?status.code(),
+            duration_ms = elapsed_ms(started),
+            reason = status.message(),
+            "request refused"
+        );
+    }
+}
+
 fn denied() -> tonic::Status {
     tonic::Status::permission_denied("credentials do not allow ingest")
+}
+
+fn internal_error() -> tonic::Status {
+    tonic::Status::internal("internal error")
 }
 
 /// The status of an `ApiError` from the credential or the project check.
@@ -180,7 +314,7 @@ fn api_status(error: &ApiError) -> tonic::Status {
         ApiError::Unauthorized => tonic::Status::unauthenticated("missing or invalid credentials"),
         ApiError::Forbidden { .. } => denied(),
         ApiError::NotFound => tonic::Status::not_found("project not found"),
-        _ => tonic::Status::internal("internal error"),
+        _ => internal_error(),
     }
 }
 
@@ -223,7 +357,7 @@ impl From<IngestError> for tonic::Status {
             | IngestError::Append(AppendError::InvalidBatch { .. })
             | IngestError::Batch(_)
             | IngestError::MediaHash
-            | IngestError::Join(_) => tonic::Status::internal("internal error"),
+            | IngestError::Join(_) => internal_error(),
         }
     }
 }
@@ -235,16 +369,21 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use crate::test_support::raw_query;
+    use bytes::Bytes;
     use datafusion::prelude::SessionContext;
+    use http_body_util::{BodyExt, Full};
     use llmobs_otel::decode_json;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
+    use tower::ServiceExt;
 
     use super::*;
     use crate::test_support::{Seeded, TestApp, set_limits};
 
     const TRACES: &str =
         include_str!("../../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
+
+    const EXPORT_PATH: &str = "/opentelemetry.proto.collector.trace.v1.TraceService/Export";
 
     fn traces() -> ExportTraceServiceRequest {
         decode_json(TRACES.as_bytes()).expect("fixture decodes")
@@ -259,16 +398,47 @@ mod tests {
             .sum()
     }
 
-    fn with_key(
-        message: ExportTraceServiceRequest,
-        key: &str,
-    ) -> tonic::Request<ExportTraceServiceRequest> {
-        let mut request = tonic::Request::new(message);
-        request.metadata_mut().insert(
-            "authorization",
-            format!("Bearer {key}").parse().expect("ASCII token"),
-        );
-        request
+    fn bearer(key: &str) -> (&'static str, String) {
+        ("authorization", format!("Bearer {key}"))
+    }
+
+    /// Sends `message` through the layered service with `headers`, as tonic's client does: one
+    /// uncompressed gRPC frame in the body. Returns the reply, or the status the call ended with.
+    async fn send(
+        state: &AppState,
+        headers: &[(&str, String)],
+        message: &ExportTraceServiceRequest,
+    ) -> Result<ExportTraceServiceResponse, tonic::Status> {
+        let payload = message.encode_to_vec();
+        let length = u32::try_from(payload.len()).expect("the fixture is small");
+        let mut frame = vec![0_u8];
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let mut request = axum::http::Request::post(EXPORT_PATH)
+            .header(axum::http::header::CONTENT_TYPE, "application/grpc");
+        for (name, value) in headers {
+            request = request.header(*name, value.as_str());
+        }
+        let request = request
+            .body(tonic::body::Body::new(Full::new(Bytes::from(frame))))
+            .expect("the request builds");
+        let response = service(state.clone())
+            .oneshot(request)
+            .await
+            .expect("the service never fails");
+        let (parts, body) = response.into_parts();
+        let collected = body.collect().await?;
+        let trailers = collected.trailers().cloned();
+        let status = trailers
+            .as_ref()
+            .and_then(tonic::Status::from_header_map)
+            .or_else(|| tonic::Status::from_header_map(&parts.headers))
+            .expect("the answer carries a gRPC status");
+        if status.code() != Code::Ok {
+            return Err(status);
+        }
+        let reply = collected.to_bytes();
+        Ok(ExportTraceServiceResponse::decode(reply.slice(5..)).expect("the reply decodes"))
     }
 
     /// Spans in the project, read through the storage query provider.
@@ -297,14 +467,10 @@ mod tests {
         let message = traces();
         let spans = span_count(&message);
         let bytes = u64::try_from(message.encoded_len()).unwrap_or(u64::MAX);
-        let service = GrpcTraces {
-            state: app.state.clone(),
-        };
-        let response = service
-            .export(with_key(message, &seeded.ingest_key))
+        let reply = send(&app.state, &[bearer(&seeded.ingest_key)], &message)
             .await
             .expect("exported");
-        assert_eq!(response.into_inner().partial_success, None);
+        assert_eq!(reply.partial_success, None);
         assert_eq!(stored_spans(&app, seeded.project.id).await, spans);
 
         app.state
@@ -331,12 +497,8 @@ mod tests {
     async fn refused_credentials_get_their_static_status_and_store_nothing() {
         let app = TestApp::new().await;
         let seeded: Seeded = app.seed().await;
-        let service = GrpcTraces {
-            state: app.state.clone(),
-        };
 
-        let anonymous = service
-            .export(tonic::Request::new(traces()))
+        let anonymous = send(&app.state, &[], &traces())
             .await
             .expect_err("no credentials");
         assert_status(
@@ -345,8 +507,7 @@ mod tests {
             "missing or invalid credentials",
         );
 
-        let read = service
-            .export(with_key(traces(), &seeded.read_key))
+        let read = send(&app.state, &[bearer(&seeded.read_key)], &traces())
             .await
             .expect_err("a read key cannot ingest");
         assert_status(
@@ -355,14 +516,13 @@ mod tests {
             "credentials do not allow ingest",
         );
 
-        let mut cookied = tonic::Request::new(traces());
-        cookied
-            .metadata_mut()
-            .insert("cookie", seeded.cookie.parse().expect("ASCII cookie"));
-        let session = service
-            .export(cookied)
-            .await
-            .expect_err("a session cookie is not a credential here");
+        let session = send(
+            &app.state,
+            &[("cookie", seeded.cookie.to_string())],
+            &traces(),
+        )
+        .await
+        .expect_err("a session cookie is not a credential here");
         assert_status(
             &session,
             Code::Unauthenticated,
@@ -370,6 +530,19 @@ mod tests {
         );
 
         assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_without_admission_is_an_internal_error() {
+        let app = TestApp::new().await;
+        let service = GrpcTraces {
+            state: app.state.clone(),
+        };
+        let status = service
+            .export(tonic::Request::new(traces()))
+            .await
+            .expect_err("nothing admitted the request");
+        assert_status(&status, Code::Internal, "internal error");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -390,11 +563,7 @@ mod tests {
             0,
             0,
         );
-        let service = GrpcTraces {
-            state: app.state.clone(),
-        };
-        let status = service
-            .export(with_key(traces(), &seeded.ingest_key))
+        let status = send(&app.state, &[bearer(&seeded.ingest_key)], &traces())
             .await
             .expect_err("the org is at its cap");
         assert_eq!(status.code(), Code::ResourceExhausted);
@@ -412,16 +581,11 @@ mod tests {
             "2025-12-01T00:00:00Z",
             &serde_json::json!({"ingest_spans_per_sec": 1, "ingest_burst": 1}),
         );
-        let service = GrpcTraces {
-            state: app.state.clone(),
-        };
         // The first export spends the one token: the bucket holds one span's worth.
-        service
-            .export(with_key(traces(), &seeded.ingest_key))
+        send(&app.state, &[bearer(&seeded.ingest_key)], &traces())
             .await
             .expect("the first export is within the rate");
-        let status = service
-            .export(with_key(traces(), &seeded.ingest_key))
+        let status = send(&app.state, &[bearer(&seeded.ingest_key)], &traces())
             .await
             .expect_err("the bucket is empty");
         assert_eq!(status.code(), Code::Unavailable);

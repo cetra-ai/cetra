@@ -3,10 +3,13 @@
 //! Startup creates `data_dir`, then `Storage::open` (which takes `LOCK`), then
 //! `meta.db`. A second process fails on the lock before `meta.db`.
 //!
-//! Shutdown stops accepting, drains in-flight HTTP for at most [`DRAIN`],
-//! aborts background tasks, gives storage [`STORAGE_SHUTDOWN`] (spec 12's
-//! 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s), then
-//! closes `meta.db`.
+//! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
+//! most [`DRAIN`], waits at most [`USAGE_STOP_WAIT`] for the usage loop to finish
+//! any flush in progress, aborts background tasks, waits at most [`COMMIT_WAIT`]
+//! for detached commits (D-G-38), and gives storage [`STORAGE_SHUTDOWN`] (spec
+//! 12's 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s). These
+//! bounded steps add up to 57 s, inside the 60 s grace period the packaging sets. The `last_used` and usage flushes and the `meta.db` close are
+//! short meta writes outside that bound.
 
 use std::future::Future;
 use std::io;
@@ -36,8 +39,35 @@ use tonic::transport::server::TcpIncoming;
 /// How long in-flight HTTP may finish after stop-accepting (spec 12).
 const DRAIN: Duration = Duration::from_secs(20);
 
+/// How long shutdown waits for the usage loop to finish an in-flight flush.
+const USAGE_STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// How long shutdown waits for detached commits (D-G-38, spec 12).
+const COMMIT_WAIT: Duration = Duration::from_secs(5);
+
 /// Best-effort cap on `Storage::shutdown` (spec 12).
 const STORAGE_SHUTDOWN: Duration = Duration::from_secs(30);
+
+/// Concurrent HTTP/2 streams per gRPC connection (G-1). A stream holds a reservation before its
+/// body is read, so this bounds the requests one client can hold open.
+const GRPC_MAX_STREAMS: u32 = 100;
+
+/// Requests in flight per gRPC connection (G-1), across all its streams.
+const GRPC_CONCURRENCY_PER_CONNECTION: usize = 32;
+
+/// The time one gRPC request may take, from its headers to its response, body included (G-1,
+/// D-G-29). A stream that stalls is cut here, and its reservation goes with the dropped request.
+const GRPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The OTLP/gRPC router: the admission layer behind the stream and concurrency limits, with
+/// [`GRPC_REQUEST_TIMEOUT`] (or, in tests, a shorter one) on every request.
+fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::Router {
+    tonic::transport::Server::builder()
+        .timeout(timeout)
+        .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
+        .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
+        .add_service(grpc::service(state))
+}
 
 /// How often idle rate-limit keys are dropped (D143).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
@@ -142,6 +172,8 @@ pub struct Running {
     otlp_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
+    usage_stop_tx: Option<oneshot::Sender<()>>,
+    usage_task: Option<JoinHandle<()>>,
     state: Option<AppState>,
     /// The control socket's accept task, when it bound (D-N-17). Shutdown stops it
     /// first, before the HTTP drain.
@@ -171,6 +203,9 @@ impl Drop for Running {
         }
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
+        }
+        if let Some(task) = &self.usage_task {
+            task.abort();
         }
         if let Some(socket) = self.admin_socket.take() {
             socket.abort();
@@ -340,6 +375,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
         metrics_cache: crate::routes::metrics::MetricsCache::default(),
         usage: crate::usage::Usage::default(),
+        alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
         deletions: crate::deletion::Deletions::new(),
         secrets,
         eval_runner,
@@ -415,7 +451,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
-    tasks.push(spawn_usage(state.clone()));
+    let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
+    let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
     tasks.push(spawn_notices(state.clone()));
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
@@ -451,10 +488,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         Some((listener, addr)) => {
             tracing::info!(grpc_local_addr = %addr, "listening");
             let (tx, rx) = oneshot::channel();
-            let service = grpc::service(state.clone());
+            let router = grpc_router(state.clone(), GRPC_REQUEST_TIMEOUT);
             let serve = tokio::spawn(async move {
-                tonic::transport::Server::builder()
-                    .add_service(service)
+                router
                     .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
                         let _ = rx.await;
                     })
@@ -474,6 +510,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         otlp_shutdown_tx,
         grpc_serve,
         grpc_shutdown_tx,
+        usage_stop_tx: Some(usage_stop_tx),
+        usage_task: Some(usage_task),
         state: Some(state),
         admin_socket,
         tasks,
@@ -592,15 +630,22 @@ fn spawn_retention(state: AppState) -> JoinHandle<()> {
     })
 }
 
-fn spawn_usage(state: AppState) -> JoinHandle<()> {
+/// The usage flush loop. A send on `stop` (or dropping it) ends the loop. The flush runs in the
+/// branch body rather than inside the `select!`, so a stop that arrives during a flush waits for
+/// that flush to commit; it is never cancelled mid-write (D-G-11).
+fn spawn_usage(state: AppState, mut stop: oneshot::Receiver<()>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(USAGE_EVERY);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
-            interval.tick().await;
-            if let Err(error) = state.usage.flush(&state.meta).await {
-                tracing::error!(error = %error, "usage flush failed");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(error) = state.usage.flush(&state.meta).await {
+                        tracing::error!(error = %error, "usage flush failed");
+                    }
+                }
+                _ = &mut stop => break,
             }
         }
     })
@@ -699,6 +744,23 @@ impl Running {
             drain_optional(self.grpc_serve.take()),
         );
         let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        // The usage loop stops cooperatively, so an in-flight flush commits before the final one.
+        if let Some(sender) = self.usage_stop_tx.take() {
+            let _ = sender.send(());
+        }
+        // Bounded so a stuck `meta.db` cannot hold shutdown past the grace period. On expiry the
+        // task is aborted, and an aborted flush keeps its counts for the final flush.
+        if let Some(mut task) = self.usage_task.take() {
+            match tokio::time::timeout(USAGE_STOP_WAIT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(error = %error, "usage task failed"),
+                Err(_elapsed) => {
+                    tracing::error!("usage task did not stop before shutdown");
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
         if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) {
             eval.shutdown(state).await;
         }
@@ -709,7 +771,7 @@ impl Running {
         if let Some(state) = self.state.take() {
             // Commits whose request was dropped still run (D-G-38): they append and count
             // before the final flushes.
-            if tokio::time::timeout(STORAGE_SHUTDOWN, state.ingest.wait_for_commits())
+            if tokio::time::timeout(COMMIT_WAIT, state.ingest.wait_for_commits())
                 .await
                 .is_err()
             {
@@ -1061,6 +1123,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_usage_loop_stops_when_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = spawn_usage(state, stop_rx);
+        stop_tx.send(()).unwrap();
+        // Not aborted: the loop returns by itself, well before its 10 s interval.
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the loop stops on its signal")
+            .unwrap();
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn shutdown_flushes_the_map() {
         use crate::meta::MetaDb;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -1384,6 +1462,22 @@ mod tests {
         running.shutdown().await.unwrap();
     }
 
+    /// `TRACES` with a 4 KiB attribute, which is over a 1 KiB `max_grpc_message_bytes`.
+    fn oversized() -> ExportTraceServiceRequest {
+        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let padding = KeyValue {
+            key: "pad".to_owned(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue("x".repeat(4096))),
+            }),
+            ..Default::default()
+        };
+        message.resource_spans[0].scope_spans[0].spans[0]
+            .attributes
+            .push(padding);
+        message
+    }
+
     #[tokio::test]
     async fn grpc_refuses_a_message_over_the_configured_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -1396,26 +1490,163 @@ mod tests {
         .await
         .unwrap();
         let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
-        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
-        let padding = KeyValue {
-            key: "pad".to_owned(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue("x".repeat(4096))),
-            }),
-            ..Default::default()
-        };
-        message.resource_spans[0].scope_spans[0].spans[0]
-            .attributes
-            .push(padding);
 
         let mut client = TraceServiceClient::connect(format!("http://{addr}"))
             .await
             .unwrap();
         let status = client
-            .export(authorized(message))
+            .export(authorized(oversized()))
             .await
             .expect_err("the message is over the limit");
         assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    /// A gRPC export whose headers arrive and whose body never does (G-1, D-G-29): the admitted
+    /// reservation is held while it stalls, and the request timeout cuts it and gives it back.
+    #[tokio::test]
+    async fn a_stalled_grpc_export_is_cut_and_releases_its_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let state = running.state.clone().expect("the server is running");
+        // A second listener with a short timeout: the default one is 30 s.
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let serve =
+            tokio::spawn(
+                grpc_router(state.clone(), Duration::from_millis(300))
+                    .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
+                        let _ = stop_rx.await;
+                    }),
+            );
+
+        // The channel, with the body swapped for one that never yields: headers go out, then
+        // nothing, so the server waits in the body read while holding its reservation.
+        let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let stalled = tower::ServiceBuilder::new()
+            .map_request(|request: axum::http::Request<tonic::body::Body>| {
+                let (parts, _) = request.into_parts();
+                let never =
+                    futures::stream::pending::<Result<http_body::Frame<bytes::Bytes>, io::Error>>();
+                let body = http_body_util::StreamBody::new(never);
+                axum::http::Request::from_parts(parts, tonic::body::Body::new(body))
+            })
+            .service(channel);
+        let mut client = TraceServiceClient::new(stalled);
+        let export = tokio::spawn(async move {
+            client
+                .export(authorized(decode_json(TRACES.as_bytes()).unwrap()))
+                .await
+        });
+
+        // While it stalls, the budget is held.
+        let mut held = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_err() {
+                held = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(held, "the stalled export holds its reservation");
+
+        // The timeout cuts it, and the reservation comes back.
+        let outcome = tokio::time::timeout(Duration::from_secs(10), export)
+            .await
+            .expect("the stalled export is cut")
+            .unwrap();
+        assert!(outcome.is_err(), "a cut export is not accepted");
+        let mut freed = false;
+        for _ in 0..500 {
+            if state.ingest.reserve_exact(budget.as_u64()).is_ok() {
+                freed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(freed, "the reservation is released after the timeout");
+
+        let _ = stop_tx.send(());
+        serve.await.unwrap().unwrap();
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_oversized_message_is_refused_before_it_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = ByteSize::kib(1);
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let status = client
+            .export(tonic::Request::new(oversized()))
+            .await
+            .expect_err("no credentials");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+        assert_eq!(status.message(), "missing or invalid credentials");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_export_is_busy_while_the_budget_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        // The smallest budget config accepts: at least `max_request_bytes` (10 MiB by default).
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+        // One reservation of the whole budget: the next admission cannot reserve its message.
+        let state = running.state.as_ref().expect("the server is running");
+        let held = state
+            .ingest
+            .reserve_exact(budget.as_u64())
+            .expect("the budget is free");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let status = client
+            .export(authorized(message))
+            .await
+            .expect_err("the budget is held");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "server is busy, retry later");
+        drop(held);
         drop(client);
         running.shutdown().await.unwrap();
     }

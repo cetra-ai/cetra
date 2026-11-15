@@ -119,5 +119,5 @@ Counts: **0 blocker, 4 major, 12 minor**.
 | M-3, m-10 | F5 | `Run the embedded UI, live streams and every read route end to end` |
 
 - m-9 needs no change: `vite build` emits no `.map` file (`build.sourcemap` is off by default).
-- m-3, m-6, m-7 and m-11 are a backlog.
+- m-3, m-6, m-7 and m-11 were fixed by the full plan review's G-4 follow-up.
 - Found while fixing F4: the log-capture test helper lost events to a cached callsite interest, so `routes::otlp` log tests (and `an_empty_database_logs_the_setup_url_once`) failed now and then with empty logs, and the "no secrets in logs" asserts could pass on empty logs. Fixed by installing a global test subscriber (`Keep captured test logs from losing events to a cached callsite interest`).

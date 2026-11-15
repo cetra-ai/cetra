@@ -1079,6 +1079,59 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_query_past_its_timeout_is_422_query_timeout() {
+        let (app, seeded) = loaded().await;
+        // Eight copies of the example's 14 spans, cross joined: about 1.5 * 10^9 rows, which takes
+        // minutes against the smallest limit the API accepts (1 s, `timeout_ms` is 1000..=60000).
+        // The join streams into a sum, so it stays within memory (a `query_too_large` would be a
+        // different answer). Summing a length keeps the engine from counting the join from
+        // statistics.
+        let body = json!({
+            "query": "SELECT sum(length(a.span_kind)) FROM spans AS a CROSS JOIN spans AS b \
+                      CROSS JOIN spans AS c CROSS JOIN spans AS d CROSS JOIN spans AS e \
+                      CROSS JOIN spans AS f CROSS JOIN spans AS g CROSS JOIN spans AS h",
+            "timeout_ms": 1000,
+        });
+        let response = post_as(
+            &app,
+            seeded.project.id,
+            ("cookie", &seeded.cookie),
+            None,
+            &body,
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(response.problem().code, ProblemCode::QueryTimeout);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_query_over_the_memory_pool_is_422_query_too_large() {
+        let app = TestApp::with_config(|config| {
+            config.storage.query.max_memory_total = Some(ByteSize::mib(1));
+            config.storage.query.max_memory = ByteSize::mib(1);
+            config.storage.query.initial_memory = ByteSize::mib(1);
+        })
+        .await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let response = post_as(
+            &app,
+            seeded.project.id,
+            ("cookie", &seeded.cookie),
+            None,
+            &json!({"query": "SELECT * FROM traces"}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.problem().code, ProblemCode::QueryTooLarge);
+    }
+
     #[test]
     fn failure_kind_names_each_error() {
         assert_eq!(failure_kind(&ApiError::Sql(RunError::Timeout)), "timeout");

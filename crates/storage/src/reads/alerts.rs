@@ -29,6 +29,9 @@ const VALUE: &str = "alert_value";
 const DURATION_NS: &str = "duration_ns";
 const NS_PER_MS: f64 = 1_000_000.0;
 const DAY_NS: i64 = 86_400_000_000_000;
+/// How long before the window a trace may have started and still have its scores
+/// counted (D-K-17). Span measures look back one day (D-K-3).
+const SCORE_TRACE_LOOKBACK: i64 = 7 * DAY_NS;
 
 /// Which value an alert measures.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +42,7 @@ pub enum AlertMeasure {
     Cost,
     /// Trace `duration_ns` p95, in milliseconds.
     TraceLatencyP95,
-    /// `duration_ns` p95 of `llm` spans, in milliseconds.
+    /// `duration_ns` p95 of `llm` spans that ended in the window, in milliseconds.
     LlmLatencyP95,
     /// `avg(value_num)` of the live trace and span scores named `name` whose
     /// `value_num` is not null: numeric, boolean (1/0), and categorical with a value.
@@ -57,7 +60,8 @@ pub enum AlertMeasure {
 /// One alert evaluation.
 #[derive(Debug, Clone)]
 pub struct AlertValueRequest<'a> {
-    /// `start_time ∈ [from, to)` for traces and spans, `created_at` for scores.
+    /// `start_time ∈ [from, to)` for traces, `end_time ∈ [from, to)` for `llm` spans,
+    /// `created_at ∈ [from, to)` for scores.
     pub window: TimeWindow,
     /// Filter text over `traces`. `None`, empty or all-whitespace means no filter.
     pub filter: Option<&'a str>,
@@ -167,7 +171,8 @@ async fn compute(
             })
         }
         AlertMeasure::LlmLatencyP95 => {
-            let ids = trace_id_plan(ctx, window, filter, references_environment).await?;
+            let ids =
+                trace_id_plan(ctx, window, DAY_NS, true, filter, references_environment).await?;
             let batches = ctx
                 .session()
                 .table("spans")
@@ -175,7 +180,7 @@ async fn compute(
                 .map_err(classify)?
                 .filter(
                     window
-                        .predicate(spans::START_TIME)
+                        .predicate(spans::END_TIME)
                         .and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str())))
                         .and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))),
                 )
@@ -243,18 +248,20 @@ async fn trace_batches(
         .map_err(|error| ctx.fail(error))
 }
 
-/// The trace ids a span or score measure keeps: traces that end at or after the
-/// window start and start within the window's day of lookback, that pass the
-/// filter, with the default exclusions applied.
+/// The trace ids a span or score measure keeps: traces that start in
+/// `[from − lookback, to)` and pass the filter, with the default exclusions applied.
+/// With `ends_after_from`, also traces that end at or after the window start.
 async fn trace_id_plan(
     ctx: &QueryContext,
     window: TimeWindow,
+    lookback: i64,
+    ends_after_from: bool,
     filter: Option<Filter>,
     references_environment: bool,
 ) -> Result<LogicalPlan, RunError> {
     let start = window
         .from()
-        .checked_sub(DAY_NS)
+        .checked_sub(lookback)
         .ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;
     let wide = TimeWindow::new(start, window.to())?;
     let mut frame = scoped_traces(
@@ -267,12 +274,14 @@ async fn trace_id_plan(
         references_environment,
     )
     .await?;
-    frame = frame
-        .filter(col(traces::END_TIME).gt_eq(Expr::Literal(
-            ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())),
-            None,
-        )))
-        .map_err(classify)?;
+    if ends_after_from {
+        frame = frame
+            .filter(col(traces::END_TIME).gt_eq(Expr::Literal(
+                ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())),
+                None,
+            )))
+            .map_err(classify)?;
+    }
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
@@ -292,7 +301,17 @@ async fn score_value(
     name: &str,
     pass_rate: bool,
 ) -> Result<AlertValue, RunError> {
-    let ids = trace_id_plan(ctx, window, filter, references_environment).await?;
+    // Scores are counted whenever they were created, so their traces are not
+    // required to end in the window (D-K-17).
+    let ids = trace_id_plan(
+        ctx,
+        window,
+        SCORE_TRACE_LOOKBACK,
+        false,
+        filter,
+        references_environment,
+    )
+    .await?;
     let mut predicate = window
         .predicate(scores::CREATED_AT)
         .and(col(scores::NAME).eq(lit(name)))
@@ -706,6 +725,105 @@ mod tests {
             .await
             .expect("value");
         assert_eq!(value.count, 1);
+    }
+
+    /// Like [`measure`], over `window` instead of the default one.
+    async fn measure_over(
+        ctx: &QueryContext,
+        window: TimeWindow,
+        measure: AlertMeasure,
+    ) -> Result<AlertValue, RunError> {
+        alert_value(
+            ctx,
+            AlertValueRequest {
+                window,
+                filter: None,
+                measure,
+                timeout: Duration::from_secs(30),
+            },
+        )
+        .await
+    }
+
+    /// A `helpfulness` score on `trace`, created at `created_at`.
+    fn score_at(id: u128, trace: u16, created_at: i64) -> Score {
+        let mut score = score_row(
+            id,
+            trace,
+            created_at,
+            created_at,
+            created_at,
+            false,
+            "helpfulness",
+        );
+        score.value = ScoreValue::Numeric(1.0);
+        score
+    }
+
+    fn helpfulness() -> AlertMeasure {
+        AlertMeasure::ScoreAvg {
+            name: "helpfulness".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn score_created_after_its_trace_ended_counts() {
+        // Trace runs T0+1m..T0+2m; the score comes 10 minutes later, in a 5m window.
+        let mut trace = root(0, T0 + MIN);
+        trace.end_time = T0 + 2 * MIN;
+        let ctx = context(&[trace], &[score_at(1, 0, T0 + 12 * MIN)]);
+        let window = TimeWindow::new(T0 + 10 * MIN, T0 + 15 * MIN).expect("window");
+        let value = measure_over(&ctx, window, helpfulness())
+            .await
+            .expect("value");
+        assert_eq!(value.count, 1);
+    }
+
+    #[tokio::test]
+    async fn score_on_a_trace_started_two_days_earlier_counts() {
+        let mut trace = root(0, T0 - 2 * DAY_NS);
+        trace.end_time = T0 - 2 * DAY_NS + MIN;
+        let ctx = context(&[trace], &[score_at(1, 0, T0 + 10 * MIN)]);
+        let window = TimeWindow::new(T0, T0 + 60 * MIN).expect("window");
+        let value = measure_over(&ctx, window, helpfulness())
+            .await
+            .expect("value");
+        assert_eq!(value.count, 1);
+    }
+
+    #[tokio::test]
+    async fn score_on_a_trace_started_eight_days_earlier_does_not_count() {
+        let mut trace = root(0, T0 - 8 * DAY_NS);
+        trace.end_time = T0 - 8 * DAY_NS + MIN;
+        let ctx = context(&[trace], &[score_at(1, 0, T0 + 10 * MIN)]);
+        let window = TimeWindow::new(T0, T0 + 60 * MIN).expect("window");
+        let value = measure_over(&ctx, window, helpfulness())
+            .await
+            .expect("value");
+        assert_eq!(
+            value,
+            AlertValue {
+                count: 0,
+                value: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn llm_span_that_ended_in_the_window_counts_though_it_started_before() {
+        // A 90 s llm span ending at T0+5m30s: it started before the 1m window
+        // [T0+5m, T0+6m) but ended inside it.
+        let mut parent = root(0, T0 + 3 * MIN);
+        parent.end_time = T0 + 6 * MIN;
+        let mut child = llm_child(&parent, 0, T0 + 4 * MIN, 90_000_000_000);
+        child.end_time = T0 + 5 * MIN + 30_000_000_000;
+        let ctx = context(&[parent, child], &[]);
+        let window = TimeWindow::new(T0 + 5 * MIN, T0 + 6 * MIN).expect("window");
+        let value = measure_over(&ctx, window, AlertMeasure::LlmLatencyP95)
+            .await
+            .expect("value");
+        assert_eq!(value.count, 1);
+        assert_close(value.value, 90_000.0, 1.0);
     }
 
     #[tokio::test]

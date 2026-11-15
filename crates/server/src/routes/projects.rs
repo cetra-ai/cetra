@@ -112,7 +112,7 @@ async fn create_project(
 ) -> Result<Response, ApiError> {
     let name = trimmed_name(&body.name)?;
     if let Some(slug) = &body.slug {
-        orgs::validate_slug_shape(slug).map_err(slug_error)?;
+        orgs::validate_project_slug(slug).map_err(slug_error)?;
     }
     let retention = body.retention_days.map(checked_retention).transpose()?;
     if retention.is_some() && !may_manage_retention(&state, access.org.id) {
@@ -387,6 +387,53 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_reserves_settings_and_takes_null_retention() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        assert_eq!(org.status, 201);
+        let create = |body: serde_json::Value| {
+            app.request(Method::POST, "/api/v1/orgs/acme/projects")
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&body)
+                .send()
+        };
+
+        let reserved = create(serde_json::json!({ "name": "Settings", "slug": "settings" })).await;
+        assert_eq!(reserved.status, 400);
+        let problem = reserved.problem();
+        assert_eq!(problem.errors[0].field, "slug");
+
+        let derived = create(serde_json::json!({ "name": "Settings" })).await;
+        assert_eq!(derived.status, 201);
+        let derived: Project = derived.json();
+        assert_eq!(derived.slug, "settings-1");
+
+        let forever = create(serde_json::json!({
+            "name": "Keeper",
+            "slug": "keeper",
+            "retention_days": null
+        }))
+        .await;
+        assert_eq!(forever.status, 201);
+        let forever: Project = forever.json();
+        assert!(forever.retention_days.is_none());
+
+        let zero = create(serde_json::json!({
+            "name": "Zero",
+            "slug": "zero",
+            "retention_days": 0
+        }))
+        .await;
+        assert_eq!(zero.status, 400);
     }
 
     #[tokio::test]

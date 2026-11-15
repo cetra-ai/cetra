@@ -626,6 +626,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_latency_threshold_as_long_as_the_window_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        // A 5m window is 300 000 ms; a trace threshold of that much is refused.
+        let refused = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(json!({
+                "name": "Slow traces",
+                "condition": {"metric": "latency_p95", "window": "5m", "comparator": "gt", "threshold": 300000},
+            })),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        let fields: Vec<String> = problem_of(&refused)
+            .into_iter()
+            .map(|(field, _)| field)
+            .collect();
+        assert_eq!(fields, ["condition.threshold"]);
+
+        let llm = send(
+            &app,
+            Method::POST,
+            &rules(&seeded),
+            &seeded.cookie,
+            Some(json!({
+                "name": "Slow calls",
+                "condition": {"metric": "latency_p95", "target": "llm_span", "window": "5m", "comparator": "gt", "threshold": 300000},
+            })),
+        )
+        .await;
+        assert_eq!(llm.status, 201);
+    }
+
+    #[tokio::test]
     async fn invalid_condition_is_400_with_fields() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;

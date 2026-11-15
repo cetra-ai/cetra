@@ -1096,10 +1096,24 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         ("ReasoningPart", &[]),
         ("UnknownPart", &[]),
     ];
-    let d65_names: HashSet<&str> = D65.iter().map(|(name, _)| *name).collect();
+    // `null` is a value here, not an absent field: a PATCH clears retention with it
+    // (`api/openapi.rs` NULL_IS_A_VALUE).
+    const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("CreateProjectRequest", &["retention_days"]),
+        ("UpdateProjectRequest", &["retention_days"]),
+    ];
+    let allowed_names: HashSet<&str> = D65
+        .iter()
+        .chain(NULL_IS_A_VALUE)
+        .map(|(name, _)| *name)
+        .collect();
     let mut required_nullable = BTreeSet::new();
     for (name, schema) in schemas {
-        if let Some((_, fields)) = D65.iter().find(|(component, _)| *component == name) {
+        if let Some((_, fields)) = D65
+            .iter()
+            .chain(NULL_IS_A_VALUE)
+            .find(|(component, _)| *component == name)
+        {
             assert_eq!(
                 nullable_property_names(schema),
                 fields.iter().copied().collect(),
@@ -1109,7 +1123,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         collect_required_nullable(
             name,
             schema,
-            d65_names.contains(name.as_str()),
+            allowed_names.contains(name.as_str()),
             &mut required_nullable,
         );
     }

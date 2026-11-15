@@ -223,6 +223,28 @@ impl Ingest {
             .map_err(|_| IngestError::Busy)
     }
 
+    /// Sets `reservation` to exactly `bytes` of budget (D-G-5): a larger one gives back the
+    /// rest, a smaller one takes what is missing. Never waits; `Busy` when the budget is full.
+    pub(crate) fn fit(
+        &self,
+        reservation: &mut Reservation,
+        bytes: usize,
+    ) -> Result<(), IngestError> {
+        let held = reservation.0.num_permits();
+        if held > bytes {
+            drop(reservation.0.split(held - bytes));
+        } else if held < bytes {
+            let missing = u32::try_from(bytes - held).map_err(|_| IngestError::Busy)?;
+            let extra = self
+                .budget
+                .clone()
+                .try_acquire_many_owned(missing)
+                .map_err(|_| IngestError::Busy)?;
+            reservation.0.merge(extra);
+        }
+        Ok(())
+    }
+
     /// Decompresses, decodes, counts, normalizes and rewrites one OTLP request (D-G-2, D-G-7).
     ///
     /// `reservation` covers the raw body; decompressed chunks are reserved as they are
@@ -239,20 +261,7 @@ impl Ingest {
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let request_bytes = raw.len();
-        // Give back the part of a chunked reservation that the body does not use, and cover
-        // any part of the body the reservation does not.
-        let held = reservation.0.num_permits();
-        if held > request_bytes {
-            drop(reservation.0.split(held - request_bytes));
-        } else if held < request_bytes {
-            let missing = u32::try_from(request_bytes - held).map_err(|_| IngestError::Busy)?;
-            let extra = self
-                .budget
-                .clone()
-                .try_acquire_many_owned(missing)
-                .map_err(|_| IngestError::Busy)?;
-            reservation.0.merge(extra);
-        }
+        self.fit(&mut reservation, request_bytes)?;
         let max_bytes = self.max_request_bytes;
         let semaphore = Arc::clone(&self.budget);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {

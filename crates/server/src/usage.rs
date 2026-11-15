@@ -283,61 +283,87 @@ impl Usage {
 
     /// Upserts the counted sums into `usage_daily` and clears them, in one transaction.
     ///
-    /// A failed write adds the taken sums back, so the next flush writes them.
+    /// The sums leave memory only once the write has committed. A write that fails, or a flush
+    /// future that is dropped while it waits for the writer, puts them back for the next flush.
     ///
     /// # Errors
     ///
     /// Returns [`MetaError`] when the write fails.
     pub(crate) async fn flush(&self, meta: &MetaDb) -> Result<(), MetaError> {
         let _flush = self.flush_lock.lock().await;
-        let rows = {
+        let taken = {
             let mut counts = self.lock();
             if counts.is_empty() {
                 return Ok(());
             }
             std::mem::take(&mut *counts).into_iter().collect::<Vec<_>>()
         };
-        let saved = rows.clone();
-        let written = meta
-            .write(move |conn| {
-                Box::pin(async move {
-                    for (key, counts) in rows {
-                        sqlx::query(
-                            "INSERT INTO usage_daily (org_id, project_id, day, spans, bytes, scores, \
-                             judge_input_tokens, judge_output_tokens, judge_cost_usd) \
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                             ON CONFLICT (org_id, project_id, day) DO UPDATE SET \
-                             spans = spans + excluded.spans, \
-                             bytes = bytes + excluded.bytes, \
-                             scores = scores + excluded.scores, \
-                             judge_input_tokens = judge_input_tokens + excluded.judge_input_tokens, \
-                             judge_output_tokens = judge_output_tokens + excluded.judge_output_tokens, \
-                             judge_cost_usd = judge_cost_usd + excluded.judge_cost_usd",
-                        )
-                        .bind(key.org_id.to_string())
-                        .bind(key.project_id.to_string())
-                        .bind(key.day.format("%Y-%m-%d").to_string())
-                        .bind(i64::try_from(counts.spans).unwrap_or(i64::MAX))
-                        .bind(i64::try_from(counts.bytes).unwrap_or(i64::MAX))
-                        .bind(i64::try_from(counts.scores).unwrap_or(i64::MAX))
-                        .bind(i64::try_from(counts.judge_input_tokens).unwrap_or(i64::MAX))
-                        .bind(i64::try_from(counts.judge_output_tokens).unwrap_or(i64::MAX))
-                        .bind(counts.judge_cost_usd)
-                        .execute(&mut *conn)
-                        .await?;
-                    }
-                    Ok(())
-                })
+        let in_flight = InFlight {
+            usage: self,
+            rows: taken,
+        };
+        let rows = in_flight.rows.clone();
+        meta.write(move |conn| {
+            Box::pin(async move {
+                for (key, counts) in rows {
+                    sqlx::query(
+                        "INSERT INTO usage_daily (org_id, project_id, day, spans, bytes, scores, \
+                         judge_input_tokens, judge_output_tokens, judge_cost_usd) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                         ON CONFLICT (org_id, project_id, day) DO UPDATE SET \
+                         spans = spans + excluded.spans, \
+                         bytes = bytes + excluded.bytes, \
+                         scores = scores + excluded.scores, \
+                         judge_input_tokens = judge_input_tokens + excluded.judge_input_tokens, \
+                         judge_output_tokens = judge_output_tokens + excluded.judge_output_tokens, \
+                         judge_cost_usd = judge_cost_usd + excluded.judge_cost_usd",
+                    )
+                    .bind(key.org_id.to_string())
+                    .bind(key.project_id.to_string())
+                    .bind(key.day.format("%Y-%m-%d").to_string())
+                    .bind(i64::try_from(counts.spans).unwrap_or(i64::MAX))
+                    .bind(i64::try_from(counts.bytes).unwrap_or(i64::MAX))
+                    .bind(i64::try_from(counts.scores).unwrap_or(i64::MAX))
+                    .bind(i64::try_from(counts.judge_input_tokens).unwrap_or(i64::MAX))
+                    .bind(i64::try_from(counts.judge_output_tokens).unwrap_or(i64::MAX))
+                    .bind(counts.judge_cost_usd)
+                    .execute(&mut *conn)
+                    .await?;
+                }
+                Ok(())
             })
-            .await;
-        if let Err(error) = written {
-            let mut counts = self.lock();
-            for (key, taken) in saved {
-                counts.entry(key).or_default().merge(taken);
-            }
-            return Err(error);
-        }
+        })
+        .await?;
+        in_flight.committed();
         Ok(())
+    }
+}
+
+/// Counts taken by a flush and not yet committed. Dropped without [`InFlight::committed`]
+/// (the write failed, or the flush future was cancelled), it merges them back into the
+/// counters, so nothing is lost. Adds made meanwhile land in the fresh map and are merged
+/// with them.
+struct InFlight<'a> {
+    usage: &'a Usage,
+    rows: Vec<(UsageKey, UsageCounts)>,
+}
+
+impl InFlight<'_> {
+    /// The write committed: the taken counts are in `usage_daily` and are dropped here.
+    fn committed(mut self) {
+        self.rows.clear();
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let mut counts = self.usage.lock();
+        for (key, taken) in self.rows.drain(..) {
+            counts.entry(key).or_default().merge(taken);
+        }
     }
 }
 
@@ -351,7 +377,7 @@ mod tests {
         ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails, insert_deletion,
     };
     use crate::meta::orgs::insert_org;
-    use crate::meta::test_db;
+    use crate::meta::{MetaError, test_db};
     use crate::test_support::TestApp;
 
     const DAY: i64 = 86_400_000_000_000;
@@ -552,6 +578,57 @@ mod tests {
         assert_eq!(
             stored(&meta, project).await,
             vec![("2026-01-01".to_owned(), 2, 10, 1)]
+        );
+        let judge = stored_judge(&meta, project).await;
+        assert_eq!(judge.len(), 1);
+        assert_eq!((judge[0].0, judge[0].1), (5, 7));
+        assert!((judge[0].2 - 0.25).abs() < 1e-12, "{judge:?}");
+    }
+
+    #[tokio::test]
+    async fn an_aborted_flush_keeps_its_counts_for_the_next_one() {
+        let (_dir, meta) = test_db().await;
+        let meta = Arc::new(meta);
+        let (org, project) = (OrgId::new_v7(), ProjectId::new_v7());
+        let usage = Arc::new(Usage::default());
+        usage.add(org, project, DAY_ONE, 2, 10, 1);
+        usage.add_judge(org, project, DAY_ONE, 5, 7, 0.25);
+
+        // Holds the single meta writer until released, so the flush waits behind it.
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let blocker = {
+            let meta = Arc::clone(&meta);
+            tokio::spawn(async move {
+                meta.write(move |_conn| {
+                    Box::pin(async move {
+                        let _ = started_tx.send(());
+                        let _ = release_rx.await;
+                        Ok::<(), MetaError>(())
+                    })
+                })
+                .await
+            })
+        };
+        started_rx.await.unwrap();
+
+        let flush = {
+            let (usage, meta) = (Arc::clone(&usage), Arc::clone(&meta));
+            tokio::spawn(async move { usage.flush(&meta).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!flush.is_finished(), "the flush should wait for the writer");
+        // An add made while the flush is blocked must survive the abort too.
+        usage.add(org, project, DAY_ONE, 1, 0, 0);
+        flush.abort();
+        assert!(flush.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+
+        usage.flush(&meta).await.unwrap();
+        assert_eq!(
+            stored(&meta, project).await,
+            vec![("2026-01-01".to_owned(), 3, 10, 1)]
         );
         let judge = stored_judge(&meta, project).await;
         assert_eq!(judge.len(), 1);
