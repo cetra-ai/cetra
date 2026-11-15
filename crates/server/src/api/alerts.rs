@@ -241,7 +241,8 @@ pub struct AlertCondition {
     pub filter: Option<String>,
     /// How the value is compared with `threshold`.
     pub comparator: Comparator,
-    /// Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`.
+    /// Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
+    /// (below the window length for a `trace` target).
     pub threshold: f64,
     /// Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -164,23 +164,23 @@ const DAY_NS: i64 = 86_400_000_000_000;
    - `Cost`: `value = Some(f64_at(require(batch, VALUE)?, 0)?.unwrap_or(0.0))` — always `Some`, 0.0 when no trace or no cost.
    - `TraceLatencyP95`: `value = f64_at(require(batch, VALUE)?, 0)?.map(|ns| ns / NS_PER_MS)`; when `count == 0`, `None`.
 
-**Trace-id semi-join** (span and score measures), a private `async fn trace_id_plan(ctx, window, filter: Option<Filter>, references_environment) -> Result<LogicalPlan, RunError>`, the same as `metrics::trace_ids` but always built (the exclusions are always on here):
-1. `let start = window.from().checked_sub(DAY_NS).ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;`
+**Trace-id semi-join** (span and score measures), a private `async fn trace_id_plan(ctx, window, lookback: i64, ends_after_from: bool, filter: Option<Filter>, references_environment) -> Result<LogicalPlan, RunError>`, the same as `metrics::trace_ids` but always built (the exclusions are always on here). Span measures call it with `DAY_NS, true`; score measures with `SCORE_TRACE_LOOKBACK` (7 days, D-K-17) and `false`, so a late score counts whatever its trace's end time:
+1. `let start = window.from().checked_sub(lookback).ok_or_else(|| RunError::InvalidRequest("from is out of range".to_owned()))?;`
 2. `let wide = TimeWindow::new(start, window.to())?;`
 3. `let mut frame = scoped_traces(ctx, ListScope { window: Some(wide), include_eval: false, include_experiments: false }, references_environment).await?;`
-4. `frame = frame.filter(col(traces::END_TIME).gt_eq(Expr::Literal(ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())), None))).map_err(classify)?;`
+4. If `ends_after_from`: `frame = frame.filter(col(traces::END_TIME).gt_eq(Expr::Literal(ScalarValue::TimestampNanosecond(Some(window.from()), Some("UTC".into())), None))).map_err(classify)?;`
 5. Apply the filter as above, then `frame.select(vec![col(traces::TRACE_ID)]).map_err(classify)?` and return `frame.logical_plan().clone()`.
 
-**`LlmLatencyP95`**:
-1. `let ids = trace_id_plan(…).await?;`
+**`LlmLatencyP95`** (window on the span's `end_time`, D-K-18):
+1. `let ids = trace_id_plan(ctx, window, DAY_NS, true, …).await?;`
 2. `ctx.session().table("spans").await.map_err(classify)?`
-   `.filter(window.predicate(spans::START_TIME).and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str()))).and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))))`
+   `.filter(window.predicate(spans::END_TIME).and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str()))).and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))))`
    `.map_err(classify)?`
 3. Aggregate: `count(lit(1_i64)).alias(COUNT)` and `percentile(spans::DURATION_NS, 0.95).alias(VALUE)`. Collect with `ctx.fail`.
 4. `value = f64_at(…VALUE…)?.map(|ns| ns / NS_PER_MS)`, `None` when `count == 0`.
 
 **`ScoreAvg { name }` and `ScorePassRate { name }`**:
-1. `let ids = trace_id_plan(…).await?;`
+1. `let ids = trace_id_plan(ctx, window, SCORE_TRACE_LOOKBACK, false, …).await?;`
 2. Predicate: `window.predicate(scores::CREATED_AT)`
    `.and(col(scores::NAME).eq(lit(name.as_str())))`
    `.and(col(scores::TARGET).in_list(vec![lit(ScoreTargetKind::Trace.as_str()), lit(ScoreTargetKind::Span.as_str())], false))`

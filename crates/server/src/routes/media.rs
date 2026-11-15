@@ -322,4 +322,40 @@ mod tests {
         let unknown = fetch(&app, &seeded, &"0".repeat(64), None).await;
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     }
+
+    /// Deletes the stored object of `sha` in `project` under `dir`, as a lost file would.
+    /// Returns whether one was found.
+    fn remove_object(dir: &std::path::Path, project: &str, sha: &str) -> bool {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if remove_object(&path, project, sha) {
+                    return true;
+                }
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(sha)
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some(project)
+            {
+                std::fs::remove_file(&path).unwrap();
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_blob_whose_object_cannot_be_read_is_503() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let project = seeded.project.id.to_string();
+        assert!(remove_object(&app.state.config.data_dir, &project, SHA));
+
+        let response = fetch(&app, &seeded, SHA, None).await;
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.problem().code, ProblemCode::Busy);
+    }
 }

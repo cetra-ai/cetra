@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use llmobs_core::ids::OrgId;
 use llmobs_core::names::PRODUCT;
 use llmobs_eval::{Secret, sign_payload};
 use serde_json::Value;
@@ -9,9 +10,12 @@ use super::*;
 use crate::alerts::channel::seal_config;
 use crate::alerts::evaluate::Step;
 use crate::alerts::message::{MessageKind, sample_notice};
+use crate::alerts::quota::DAILY_EMAIL_LIMIT;
+use crate::api::account::SignupPolicy;
 use crate::api::alerts::{
     AlertCondition, AlertEventKind, AlertMetric, AlertState, AlertWindow, Comparator,
 };
+use crate::auth::roles::OrgRole;
 use crate::meta::alerts::{
     Evaluation, EventDetails, NewChannel, NewRule, Recorded, insert_channel, insert_rule,
     record_evaluation,
@@ -249,8 +253,10 @@ async fn exists(app: &TestApp, sql: &'static str, id: Uuid) -> bool {
 
 /// One send of the sample notice.
 async fn send(app: &TestApp, config: &ChannelConfig, now: i64) -> Result<(), SendError> {
+    // The org only matters under open signup, which these tests do not set.
     send_one(
         &app.state,
+        OrgId::new_v7(),
         config,
         &sample_notice(MessageKind::Fired, now),
         Uuid::now_v7(),
@@ -283,6 +289,7 @@ async fn webhook_is_signed_and_identified() {
     let notice = sample_notice(MessageKind::Fired, NOW);
     send_one(
         &app.state,
+        OrgId::new_v7(),
         &webhook(&receiver.url("/hook")),
         &notice,
         delivery,
@@ -459,6 +466,64 @@ async fn email_delivery_sends_to_each_recipient() {
     assert_eq!(sent[1].to, "b@x.io");
     let subject = format!("[{PRODUCT}] Firing: High errors");
     assert!(sent.iter().all(|mail| mail.subject == subject));
+}
+
+#[tokio::test]
+async fn daily_cap_refuses_the_send_before_it_starts() {
+    let app = TestApp::with_mailer().await;
+    let org = OrgId::new_v7();
+    assert!(
+        app.state
+            .alert_email_count
+            .reserve(org, DAILY_EMAIL_LIMIT, NOW)
+    );
+    let outcome = send_one(
+        &app.state,
+        org,
+        &email(&["a@x.io"]),
+        &sample_notice(MessageKind::Fired, NOW),
+        Uuid::now_v7(),
+        NOW,
+    )
+    .await;
+    assert_eq!(outcome, Err(permanent("daily alert email limit reached")));
+    assert!(app.sent().is_empty());
+}
+
+#[tokio::test]
+async fn open_signup_skips_recipients_that_are_not_verified_members() {
+    let app = TestApp::with_mailer_config(|config| config.auth.signup = SignupPolicy::Open).await;
+    let seeded = app.seed().await;
+    app.verify_email(seeded.user_id).await;
+    let ben = app
+        .add_member(&seeded, "ben@example.com", OrgRole::Member)
+        .await;
+    app.verify_email(ben.id).await;
+    app.add_member(&seeded, "cy@example.com", OrgRole::Member)
+        .await;
+    let config = email(&[
+        "ada@example.com",
+        "ben@example.com",
+        "cy@example.com",
+        "eve@example.com",
+    ]);
+    let outcome = send_one(
+        &app.state,
+        seeded.org_id,
+        &config,
+        &sample_notice(MessageKind::Fired, NOW),
+        Uuid::now_v7(),
+        NOW,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        Err(permanent(
+            "2 recipient(s) skipped: not verified members of the organization"
+        ))
+    );
+    let sent: Vec<String> = app.sent().into_iter().map(|mail| mail.to).collect();
+    assert_eq!(sent, ["ada@example.com", "ben@example.com"]);
 }
 
 #[tokio::test]

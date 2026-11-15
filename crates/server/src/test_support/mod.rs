@@ -54,6 +54,7 @@ use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
 
@@ -365,6 +366,7 @@ impl TestApp {
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             metrics_cache: crate::routes::metrics::MetricsCache::default(),
             usage: crate::usage::Usage::default(),
+            alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
             secrets,
             eval_runner,
@@ -533,6 +535,18 @@ pub(crate) struct Member {
 }
 
 impl TestApp {
+    /// Marks `user_id`'s email address verified.
+    pub(crate) async fn verify_email(&self, user_id: Uuid) {
+        let now = self.state.clock.now_ns();
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { set_email_verified(conn, user_id, now).await })
+            })
+            .await
+            .unwrap();
+    }
+
     /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
     /// session cookie for them.
     pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
