@@ -493,6 +493,72 @@ pub(crate) async fn rule_ids_of_connection(
     parse_ids(ids)
 }
 
+/// What the trigger needs of one enabled, unpaused rule of an active project (D-I-9).
+// I4.7 reads it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TriggerRule {
+    pub(crate) id: Uuid,
+    pub(crate) project_id: ProjectId,
+    pub(crate) evaluator_id: Uuid,
+    /// `"trace"` or `"span"`.
+    pub(crate) target: String,
+    pub(crate) filter: Option<String>,
+    pub(crate) sample_rate: f64,
+    /// The project's `settings.trace_completion_timeout_s`, as stored (not range-checked here).
+    pub(crate) completion_timeout_s: Option<i64>,
+}
+
+/// Every enabled, unpaused rule of an active project of an active org, ordered by `project_id, id`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails, or `MetaError::Corrupt` for a stored `target`
+/// outside the list or a stored id that does not parse.
+// I4.5 calls it.
+#[allow(dead_code)]
+pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>, MetaError> {
+    /// `id, project_id, evaluator_id, target, filter, sample_rate, completion_timeout_s`.
+    type TriggerRecord = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        f64,
+        Option<i64>,
+    );
+    let records: Vec<TriggerRecord> = sqlx::query_as(
+        "SELECT r.id, r.project_id, r.evaluator_id, r.target, r.filter, r.sample_rate, \
+         CAST(CASE WHEN json_valid(p.settings) \
+              THEN json_extract(p.settings, '$.trace_completion_timeout_s') END AS INTEGER) \
+           AS completion_timeout_s \
+         FROM online_rules r \
+         JOIN projects p ON p.id = r.project_id \
+         JOIN orgs o ON o.id = p.org_id \
+         WHERE r.enabled = 1 AND r.paused_reason IS NULL AND p.state = 'active' AND o.state = 'active' \
+         ORDER BY r.project_id, r.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    records
+        .into_iter()
+        .map(
+            |(id, project_id, evaluator_id, target, filter, sample_rate, completion_timeout_s)| {
+                Ok(TriggerRule {
+                    id: parse_uuid(&id, "id")?,
+                    project_id: ProjectId::from_uuid(parse_uuid(&project_id, "project_id")?),
+                    evaluator_id: parse_uuid(&evaluator_id, "evaluator_id")?,
+                    target: one_of(target, &TARGETS, "target")?,
+                    filter,
+                    sample_rate,
+                    completion_timeout_s,
+                })
+            },
+        )
+        .collect()
+}
+
 #[derive(sqlx::FromRow)]
 struct RuleRecord {
     id: String,
@@ -1364,5 +1430,116 @@ mod tests {
             .await
             .unwrap();
         assert!(missing.is_none());
+    }
+
+    async fn set_settings(db: &MetaDb, project: ProjectId, settings: &'static str) {
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE projects SET settings = ? WHERE id = ?")
+                    .bind(settings)
+                    .bind(project.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn timeout_of_first_rule(db: &MetaDb) -> Option<i64> {
+        let rules = crate::meta::online_rules::trigger_rules(db.reader())
+            .await
+            .unwrap();
+        rules.first().unwrap().completion_timeout_s
+    }
+
+    #[tokio::test]
+    async fn trigger_rules_returns_enabled_unpaused_rules_of_active_projects() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let enabled = create(&db, seeded.project, seeded.evaluator, "enabled").await;
+        let disabled = create(&db, seeded.project, seeded.evaluator, "disabled").await;
+        disable_rule(&db, disabled.id).await;
+        let paused = create(&db, seeded.project, seeded.evaluator, "paused").await;
+        pause_rule_on(&db, paused.id, PAUSE_BUDGET).await;
+        let deleting = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let project = insert_project(conn, seeded.org, "Other", "other", None, NOW)
+                        .await?
+                        .id;
+                    insert_rule(
+                        conn,
+                        NewRule {
+                            id: Uuid::now_v7(),
+                            project_id: project,
+                            evaluator_id: seeded.evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        fields("in-deleting-project"),
+                        NOW,
+                    )
+                    .await?;
+                    sqlx::query("UPDATE projects SET state = 'deleting' WHERE id = ?")
+                        .bind(project.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await;
+        assert!(deleting.is_ok());
+
+        let rules = crate::meta::online_rules::trigger_rules(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        assert_eq!(rules[0].id, enabled.id);
+        assert_eq!(rules[0].project_id, seeded.project);
+        assert_eq!(rules[0].evaluator_id, seeded.evaluator);
+        assert_eq!(rules[0].target, "trace");
+        assert!((rules[0].sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn trigger_rules_skips_rules_of_a_deleting_org() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        create(&db, seeded.project, seeded.evaluator, "rule").await;
+        let org = seeded.org;
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
+                    .bind(org.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let rules = crate::meta::online_rules::trigger_rules(db.reader())
+            .await
+            .unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trigger_rules_reads_the_project_timeout() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        create(&db, seeded.project, seeded.evaluator, "rule").await;
+        let project = seeded.project;
+
+        set_settings(&db, project, r#"{"trace_completion_timeout_s": 120}"#).await;
+        assert_eq!(timeout_of_first_rule(&db).await, Some(120));
+        set_settings(&db, project, "{}").await;
+        assert_eq!(timeout_of_first_rule(&db).await, None);
+        set_settings(&db, project, "not json").await;
+        assert_eq!(timeout_of_first_rule(&db).await, None);
+        set_settings(&db, project, r#"{"trace_completion_timeout_s": "abc"}"#).await;
+        assert_eq!(timeout_of_first_rule(&db).await, Some(0));
     }
 }
