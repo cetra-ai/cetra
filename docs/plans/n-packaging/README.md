@@ -527,7 +527,7 @@ Planned in [`m3/`](m3/00-design.md) (D180, D182):
 - restore mode for Q's restore drills (R18): no outbound call and no object deletion;
 - Prometheus `/metrics` on `metrics_addr` (R11);
 - `/readyz` checking the object store, free disk and the storage failure flags;
-- `/healthz` failing on sticky storage failures (D-N-25–D-N-35).
+- `/healthz` failing on sticky storage failures (D-N-25–D-N-36).
 
 ## Open items
 

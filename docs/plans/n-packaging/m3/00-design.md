@@ -11,7 +11,7 @@ This is track N's third milestone. D180 and D182 (`docs/mvp-decisions.md`) give 
   - free disk is above the threshold where ingestion is refused;
   - the storage failure flags of D-R-6 are clear.
 
-The decisions are D-N-25 to D-N-35 below. They are written so the user can override any of them; § Decisions marks which ones were the planner's choice.
+The decisions are D-N-25 to D-N-36 below. They are written so the user can override any of them; § Decisions marks which ones were the planner's choice.
 
 This file holds the design and the list of phases. One agent implements each phase file (`01-…` to `08-…`) in one go, using only this file and its own phase file. Each phase ends with `just check` green and one commit. § Phases says which phases can run in parallel.
 
@@ -21,7 +21,7 @@ This file holds the design and the list of phases. One agent implements each pha
 - This file, all of it. Then your own phase file.
 - `docs/spec/12-operations.md` § Process lifecycle, § Self-monitoring and § Backups.
 - `docs/spec/09-api.md`: the `/healthz` and `/readyz` rows and § CLI.
-- `docs/mvp-decisions.md`: D38, D166, D180 and D182; § Track N, D-N-17 to D-N-35; § Track R, D-R-6.
+- `docs/mvp-decisions.md`: D38, D166, D180 and D182; § Track N, D-N-17 to D-N-36; § Track R, D-R-6.
 
 ## What exists (checked 2026-11-15 on `main` at `09eb59e`)
 
@@ -111,10 +111,12 @@ There is no Prometheus code and no metrics dependency. `routes/metrics.rs` (`Met
    `spawn_org_sso` keeps running: it only reloads from `meta.db`.
 
    Queued eval jobs and pending deliveries stay as they are in `meta.db`. A drill copy is thrown away, and a real restore runs without restore mode, so they then proceed normally.
-6. **Objects: the storage deletes no object (D-N-34).** The server opens the storage with object deletion off: a new storage setting, phase 01's `StorageConfig::delete_objects`, not read from TOML.
-   - Then nothing is deleted: not obsolete data files, staged objects or stale media blobs (GC and its runs at open), and not a dropped project's media (`drop_project`).
-   - Flushes, compaction, deletions and retention still write new objects and mark old ones obsolete in the catalog. Nothing is removed from the store.
+6. **Objects: the storage deletes no object (D-N-34).** The server opens the storage with object deletion off: phase 01's `StorageConfig::delete_objects`, which is not a TOML key.
+   - `Objects::delete` and `delete_len` then fail with `ObjectError::DeletionOff`. Every caller already keeps its catalog row and retries later, so GC, media collection and project drops remove nothing, and a later server without restore mode collects normally.
+   - A project drop stays `dropping`.
+   - Flushes, compaction, deletions and retention still write new objects and mark old ones obsolete in the catalog.
    - So a drill copy whose config still points at the live bucket by mistake can only **add** objects to it. The live server's catalog does not know them, and its staged-object GC removes them after an hour. It can never delete a live object.
+   - `gc-orphans` (`Maintenance`) always deletes, even with `restore_mode` in the config.
    - The drill should still use a copy of the bucket, as Q's drill does (`<BUCKET>-drill`). The restore procedure says so.
 
 **What keeps running:** every read, ingestion, score writes, deletions and retention (in the catalog), compaction, usage counters, the admin socket (backups), live updates and the UI. Restore mode is not read-only: a restored copy must be able to re-apply deletions (D-M-9) and accept the drill's probe traffic.
@@ -151,11 +153,12 @@ The checks run in this order. Each failure adds a name to the 503 problem's deta
 | free disk | `StorageHealth::disk_low` (new, phase 01) | `free disk` |
 | object store reachable | `Storage::probe_objects()` (new, phase 01), cached 10 s by the server | `object store` |
 
-**The probe** is a `HEAD` of the fixed key `_probe/readyz` under the storage prefix, through `Objects::raw_store()`. That is the prefixed store, without the read cache.
-- `NotFound` counts as reachable: the store answered and the credentials were accepted.
-- Any other error means unreachable. `object_store`'s own `RetryConfig` retries inside the call, so the server's **2 s timeout** is what bounds the probe, and a timeout also means unreachable.
-- Nothing is written. In local mode the probe goes through the same `ObjectStore`.
-- With credentials lacking `s3:ListBucket`, S3 answers 403 instead of 404 for a missing key, so the probe would fail. GC lists the bucket anyway, so such credentials do not work today either. `docs/self-hosting/s3.md` gets one sentence.
+**The probe (D-N-36)** goes through `Objects::raw_store()`, the prefixed store without the read cache.
+- It HEADs the marker `_probe/readyz`. If that fails for any reason, it PUTs the marker (0 bytes). The store is reachable when either call succeeds.
+- Why a marker: S3 answers a HEAD of a missing key with 403, not 404, when the credentials lack `s3:ListBucket`. A HEAD alone of a missing key would then fail forever with least-privilege credentials. With the marker, once it exists, every probe is one HEAD that needs only `s3:GetObject`; the first one needs `s3:PutObject`, which the server has anyway.
+- `_probe/` is outside `tables/` and `media/`, so GC, `gc-orphans` and backups never see it.
+- `object_store`'s own `RetryConfig` retries inside each call, so the server's **2 s timeout** bounds the whole probe, and a timeout means unreachable.
+- In local mode the probe goes through the same `ObjectStore`.
 
 **The cache.** `ReadyCache` in `http/health.rs` keeps the last outcome and its `Instant`.
 - A result younger than 10 s is reused, success or failure.
@@ -229,7 +232,7 @@ Per-tenant numbers stay in the usage API (P) and the control plane. This keeps c
 | `llmobs_storage_flush_seconds_total` | counter | `table` | `StorageStats` (sum; rate ÷ flushes gives the mean) |
 | `llmobs_storage_compactions_total` | counter | `outcome` (`ok`, `failed`, `deferred`, `conflict`) | `StorageStats` |
 | `llmobs_storage_compaction_bytes_written_total` | counter | — | `StorageStats` |
-| `llmobs_storage_gc_objects_deleted_total` | counter | — | `StorageStats` |
+| `llmobs_storage_gc_objects_deleted_total` | counter | — | `StorageStats` (data files and staged objects; media blobs not counted) |
 | `llmobs_storage_read_cache_hits_total` / `_misses_total` | counter | — | `read_cache_stats()` (absent in local mode) |
 | `llmobs_storage_read_cache_bytes` | gauge | — | `read_cache_stats()` |
 | `llmobs_eval_jobs` | gauge | `status` (`queued`, `running`) | `meta.db` count, cached 10 s |
@@ -251,12 +254,12 @@ The **histogram buckets** are prometheus-client's `exponential_buckets(0.005, 2.
 
 ### Storage API needed from track R (phase 01; D-N-31)
 
-`crates/storage` is R's area (`docs/roadmap.md`, track R). Phase 01 is the only phase that edits it, and it is a request to R through the coordinator. Either R implements phase 01 or approves N doing it. Items 1–3 only add read access. Item 4 adds a switch that the server sets only in restore mode.
+`crates/storage` is R's area (`docs/roadmap.md`, track R). Phase 01 is the only phase that edits it. R reviewed it on 2026-11-15 and asked for six changes, which phase 01 includes; N implements it after R's stacked PRs are merged. Items 1–3 only add read access. Item 4 adds a switch that the server sets only in restore mode.
 
 1. `StorageHealth` gets two fields:
    - `disk_low: bool`, from `Disk::low()`;
    - `disk_free_bytes: u64` and `disk_min_free_bytes: u64`, from `Disk::free()` and `min_free`.
-2. `pub async fn probe_objects(&self) -> Result<(), ProbeError>`. It HEADs `_probe/readyz` through `Objects::raw_store()`. `NotFound` is `Ok`. `ProbeError` is a `thiserror` enum with one variant, `Unreachable`, whose text names no key. The caller bounds it with a timeout.
+2. `pub async fn probe_objects(&self) -> Result<(), ProbeError>`. It HEADs the marker `_probe/readyz` through `Objects::raw_store()` and, if that fails, PUTs it (D-N-36). `ProbeError` is a `thiserror` enum with one variant, `Unreachable`, whose text names no key. The caller bounds it with a timeout.
 3. `pub async fn stats(&self) -> StorageStats`, plain counters read with `Relaxed` loads:
    - `wal_bytes: [u64; 2]` (spans, scores; the bytes of the live segments);
    - `flushes_ok`, `flushes_failed` and `flush_nanos`, per table;
@@ -265,9 +268,9 @@ The **histogram buckets** are prometheus-client's `exponential_buckets(0.005, 2.
    - `gc_objects_deleted`.
 
    The counters are `AtomicU64` fields of one `Counters` struct. An `Arc<Counters>` hangs on the `Committer`, which flush, compaction and GC already share, so no task signature changes. Phase 01 lists the exact sites.
-4. **`StorageConfig::delete_objects: bool`**, `#[serde(skip)]`, default `true` (D-N-34). When `false`:
-   - the GC task does not run: obsolete data files, staged objects, media;
-   - `Storage::collect_obsolete` and the media GC delete nothing.
+4. **`StorageConfig::delete_objects: bool`**, `#[serde(skip)]` (not a TOML key; `StorageConfig` is `deny_unknown_fields`), default `true` (D-N-34). When `false`, `Objects` refuses every deletion with `ObjectError::DeletionOff`, and callers keep their rows. `Maintenance` (`gc-orphans`) always deletes.
+
+Track R reviewed these on 2026-11-15. N implements phase 01, after R's stacked PRs are merged, and keeps the probe and the counters out of R's model, stress and soak harnesses.
 
    The server sets it to `!config.restore_mode` before `Storage::open` (phase 02). Spec 03 § 5 gets one sentence.
 
@@ -290,18 +293,19 @@ They are in `docs/mvp-decisions.md` § Track N from this plan's PR. "(planner)" 
 | D-N-27 | **No external sign-in in restore mode**: operator providers are not built, and org-SSO login is refused, because the token exchange would reach a live IdP with the cell's client secret. Password login and API keys still work. Members of SSO-enforced orgs, and everyone under `auth.disable_password`, use API keys. (planner) |
 | D-N-28 | **`/metrics` on `metrics_addr`** (off by default), no authentication, `prometheus-client` 0.26.0, OpenMetrics text. (planner, within D38's "separate admin port") |
 | D-N-29 | **The metric set of § `/metrics`, and the label rule**: labels from fixed code-defined sets only; never an org, project, user, key, email, model, URL, host or evaluator name. Query latency is the HTTP route histogram. (planner) |
-| D-N-30 | **`/readyz`** checks `meta.db`, both WALs, object fsync, the catalog, free disk, and an object-store `HEAD` of `_probe/readyz`. `NotFound` counts as reachable; the probe has a 2 s timeout and is cached 10 s with single flight. (planner, implements D182) |
-| D-N-31 | **Storage additions requested from R**: `StorageHealth::{disk_low, disk_free_bytes, disk_min_free_bytes}`, `Storage::probe_objects`, `Storage::stats() -> StorageStats` (counters on the `Committer`), and `StorageConfig::delete_objects` (D-N-34). |
+| D-N-30 | **`/readyz`** checks `meta.db`, both WALs, object fsync, the catalog, free disk, and the object-store probe of D-N-36. The probe has a 2 s timeout and is cached 10 s with single flight. (planner, implements D182) |
+| D-N-31 | **Storage additions, reviewed by R**: `StorageHealth::{disk_low, disk_free_bytes, disk_min_free_bytes}`, `Storage::probe_objects`, `Storage::stats() -> StorageStats` (counters on the `Committer`), and `StorageConfig::delete_objects` (D-N-34). Reviewed by R on 2026-11-15; N implements them after R's stacked PRs. |
 | D-N-32 | **Packaging**: the image `EXPOSE`s 9464, the conventional port of OpenTelemetry's Prometheus exporter. The chart gets `metrics.enabled` (default `false`), which sets `LLMOBS_METRICS_ADDR=0.0.0.0:9464`, adds a `metrics` container port and adds `metrics.podAnnotations` (`prometheus.io/scrape`, `port`, `path`) for pod scraping. It gets no Service port, because a `LoadBalancer` Service would publish the unauthenticated port, and no `ServiceMonitor`. Compose documents the key in a comment. (planner) |
 | D-N-33 | **D38 settled for `/metrics`**: spec 12 § Self-monitoring describes `/metrics` and `/readyz` as built; OTel self-traces stay deferred. |
-| D-N-34 | **Restore mode deletes no object.** The storage opens with `delete_objects = false`, so GC removes nothing. A drill copy pointed at the live bucket by mistake can only add objects, which the live server's staged-object GC removes, and never deletes a live one. Drills still use a bucket copy. (planner) |
+| D-N-34 | **Restore mode deletes no object.** The storage opens with `delete_objects = false`, so `Objects` refuses every deletion and callers keep their catalog rows: GC, media collection and project drops remove nothing until a later server. A drill copy pointed at the live bucket by mistake can only add objects, which the live server's staged-object GC removes, and never deletes a live one. `gc-orphans` still deletes. Drills still use a bucket copy. (planner; R's design, 2026-11-15) |
 | D-N-35 | **`/healthz` fails on the sticky storage failures** (`*_wal_failed`, `objects_sync_failed`, `catalog_failed`, D-R-6), so Kubernetes' liveness probe restarts the pod. `meta.db`, free disk and the object store stay readiness-only, because a restart would not fix them. (planner) |
+| D-N-36 | **The object-store probe uses a marker.** `/readyz` HEADs `_probe/readyz` and, when that fails, PUTs it (0 bytes); reachable when either succeeds. A HEAD of a missing key alone would fail forever on S3 with credentials lacking `s3:ListBucket` (403 instead of 404). No write at open, so storage tests that list every key are unchanged. **For the user's confirmation** (track R's recommendation; the alternative is to require `s3:ListBucket` in the docs). |
 
 ## Phases
 
 | Phase | File | Commit | Needs | Area |
 |---|---|---|---|---|
-| 01 | [01-storage-api.md](01-storage-api.md) | `Expose disk, object-store probe and counters from storage` | — | `crates/storage` (**R's OK first**) |
+| 01 | [01-storage-api.md](01-storage-api.md) | `Expose disk, object-store probe and counters from storage` | R's stacked PRs merged | `crates/storage` (R reviewed it) |
 | 02 | [02-readyz.md](02-readyz.md) | `Check the object store, free disk and storage flags in /readyz` | 01, 03 | server `http/health.rs` (`/readyz`, `/healthz`), specs 09 and 12 |
 | 03 | [03-restore-mode.md](03-restore-mode.md) | `Add restore mode` | — | `crates/eval/src/egress.rs`, server config, serve, email, ee/org_sso |
 | 04 | [04-restore-handlers.md](04-restore-handlers.md) | `Refuse user-triggered outbound calls in restore mode` | 03 | server routes, `http/restore.rs`, `ProblemCode` |
@@ -312,7 +316,7 @@ They are in `docs/mvp-decisions.md` § Track N from this plan's PR. "(planner)" 
 
 **Parallel work.** Two chains can run at the same time, each in its own worktree:
 
-- 01 (waits for R's OK);
+- 01 (after R's stacked PRs are merged);
 - 03 → then 04 and 05 in parallel → 06 after 05.
 
 02 needs 01 and 03; it also wires the object-deletion switch of D-N-34. Until 02 lands, restore mode is complete except that the storage still deletes objects. 07 needs 01 and 05.

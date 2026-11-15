@@ -97,7 +97,7 @@ Test, in `serve.rs`: `restore_mode_opens_storage_without_object_deletion`. Start
 
 `docs/spec/12-operations.md` § Process lifecycle: replace the bullet with:
 
-> `/healthz`: the process is alive, and no storage failure that only a restart clears is set (a WAL, a local object fsync or a catalog commit failed, D-R-6); otherwise 503 `busy` naming them, so a liveness probe restarts the server (D-N-35). `/readyz`: `meta.db` answers, neither WAL has failed, no local object fsync or catalog commit has failed (D-R-6), free disk is above `storage.min_free_bytes`, and the object store answers a `HEAD` of `_probe/readyz` (a 404 counts as reachable; 2 s timeout; the result is reused for 10 s). A failure answers 503 `busy` naming the failed checks (D182, D-N-30). Liveness probes use `/healthz`: a full disk or an unreachable bucket takes the server out of rotation but must not restart it.
+> `/healthz`: the process is alive, and no storage failure that only a restart clears is set (a WAL, a local object fsync or a catalog commit failed, D-R-6); otherwise 503 `busy` naming them, so a liveness probe restarts the server (D-N-35). `/readyz`: `meta.db` answers, neither WAL has failed, no local object fsync or catalog commit has failed (D-R-6), free disk is above `storage.min_free_bytes`, and the object store answers (a HEAD of the marker `_probe/readyz`, or a PUT of it when the HEAD fails; 2 s timeout; the result is reused for 10 s; D-N-36). A failure answers 503 `busy` naming the failed checks (D182, D-N-30). Liveness probes use `/healthz`: a full disk or an unreachable bucket takes the server out of rotation but must not restart it.
 
 `docs/spec/09-api.md` row 13: change `probes` to `probes; \`/readyz\` checks are listed in spec 12 § Process lifecycle`.
 

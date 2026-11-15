@@ -7,7 +7,7 @@ Read [00-design.md](00-design.md) first, especially § `/metrics` and § Storage
 - `llmobs_storage_wal_bytes{table}`;
 - `llmobs_storage_flushes_total{table,outcome}`, `llmobs_storage_flush_seconds_total{table}`;
 - `llmobs_storage_compactions_total{outcome}` (`ok`, `failed`, `deferred`, `conflict`), `llmobs_storage_compaction_bytes_written_total`;
-- `llmobs_storage_gc_objects_deleted_total`.
+- `llmobs_storage_gc_objects_deleted_total`. Its HELP says "obsolete data files and staged objects deleted by GC; media blobs are not counted".
 
 **Edit only:** `crates/server/src/telemetry.rs`.
 

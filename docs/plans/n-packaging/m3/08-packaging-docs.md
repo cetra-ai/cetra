@@ -1,6 +1,6 @@
 # 08: packaging and docs for restore mode, `/metrics` and `/readyz`
 
-Read [00-design.md](00-design.md) first, especially § Decisions (D-N-25 to D-N-35) and D-N-32.
+Read [00-design.md](00-design.md) first, especially § Decisions (D-N-25 to D-N-36) and D-N-32.
 
 **Goal:** the image, the chart and compose know about the metrics port. The self-hosting docs explain restore mode, `/metrics` and readiness. Spec 12 § Self-monitoring describes what is built. The decisions, the CHANGELOG and the roadmap row are written.
 
@@ -100,7 +100,7 @@ No Service port and no `ServiceMonitor`: Prometheus scrapes the pod. Keep the pr
 - **What it does not do:**
   - it does not make the copy read-only;
   - it does not stop a copy from reaching the live bucket if it is configured to; point it at a copy of the bucket, as the restore procedure says.
-- It deletes no object: GC is off (D-N-34), so a copy pointed at the live bucket by mistake can add objects but never delete one. Still point it at a bucket copy.
+- It deletes no object (D-N-34): GC, media collection and project drops remove nothing until the server runs without restore mode, so a copy pointed at the live bucket by mistake can add objects but never delete one. Still point it at a bucket copy. `gc-orphans` still deletes.
 - Use an API key when `auth.disable_password = true`, and for members of orgs that enforce SSO: external sign-in is off.
 - Link it from the restore procedure's "verify the restore" step: verifying a restore in place uses the same mode.
 
@@ -108,7 +108,7 @@ No Service port and no `ServiceMonitor`: Prometheus scrapes the pod. Keep the pr
 
 **`kubernetes.md` / `docker-compose.md`:** one line each pointing to `monitoring.md` for metrics and probes.
 
-**`s3.md`:** one sentence: "The credentials need `s3:ListBucket`: GC lists the bucket, and `/readyz`'s probe expects a 404 for a missing key, which S3 answers with 403 without that permission." 
+**`s3.md`:** one sentence: "`/readyz` checks the bucket by reading the marker object `_probe/readyz` (written on the first check), so it needs no permission beyond the server's own (D-N-36)." 
 
 **`README.md`:** link `monitoring.md`.
 
@@ -125,12 +125,12 @@ Replace the "Deferred to just before release (D38). Placeholder decisions: …" 
 
 ### Decisions
 
-- `docs/mvp-decisions.md` § Track N: D-N-25 to D-N-35 are already there (from the plan's PR). Make them match what was built, and change "(planner)" to "(user)" for each one the coordinator says the user confirmed.
+- `docs/mvp-decisions.md` § Track N: D-N-25 to D-N-36 are already there (from the plan's PR). Make them match what was built, and change "(planner)" to "(user)" for each one the coordinator says the user confirmed.
 - D38's row: append ` /metrics and /readyz: N M3 (D-N-28–D-N-30).`
 
 ### Roadmap
 
-Replace the N row's M3 sentence with: `M3 (restore mode for Q's drills, Prometheus /metrics on metrics_addr, /readyz with object store, free disk and storage flags) implemented.` Update its decision cell to `D-N-1–D-N-35, D180, D182`.
+Replace the N row's M3 sentence with: `M3 (restore mode for Q's drills, Prometheus /metrics on metrics_addr, /readyz with object store, free disk and storage flags) implemented.` Update its decision cell to `D-N-1–D-N-36, D180, D182`.
 
 ### Requests for Q
 
