@@ -289,7 +289,7 @@ pub struct UpdateOrgRequest {
 pub struct CreateProjectRequest {
     /// Display name. Trimmed to 1–100 characters.
     pub name: String,
-    /// URL slug. Absent derives one from the name. Project slugs are not reserved words.
+    /// URL slug. Absent derives one from the name. `settings` is reserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
     /// Days to keep data, from 1 to 36500. Null or absent keeps data forever.

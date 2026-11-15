@@ -2331,7 +2331,7 @@ export interface components {
              * @description Days to keep data, from 1 to 36500. Null or absent keeps data forever.
              */
             retention_days?: number | null;
-            /** @description URL slug. Absent derives one from the name. Project slugs are not reserved words. */
+            /** @description URL slug. Absent derives one from the name. `settings` is reserved. */
             slug?: string;
         };
         /**

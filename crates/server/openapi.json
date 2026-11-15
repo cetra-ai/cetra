@@ -12395,7 +12395,7 @@
           },
           "slug": {
             "type": "string",
-            "description": "URL slug. Absent derives one from the name. Project slugs are not reserved words."
+            "description": "URL slug. Absent derives one from the name. `settings` is reserved."
           }
         },
         "additionalProperties": false
