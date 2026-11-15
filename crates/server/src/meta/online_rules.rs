@@ -515,8 +515,6 @@ pub(crate) struct TriggerRule {
 ///
 /// Returns [`MetaError`] when the query fails, or `MetaError::Corrupt` for a stored `target`
 /// outside the list or a stored id that does not parse.
-// I4.5 calls it.
-#[allow(dead_code)]
 pub(crate) async fn trigger_rules(pool: &SqlitePool) -> Result<Vec<TriggerRule>, MetaError> {
     /// `id, project_id, evaluator_id, target, filter, sample_rate, completion_timeout_s`.
     type TriggerRecord = (

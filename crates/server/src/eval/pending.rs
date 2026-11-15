@@ -9,12 +9,8 @@ use llmobs_core::names::{environment, metadata_key};
 use llmobs_core::span::Span;
 
 /// Most traces held at once (D-I-8).
-// I4.5 wires it.
-#[allow(dead_code)]
 pub(crate) const MAX_PENDING: usize = 200_000;
 /// A trace whose root ended is complete after this long without a new span (D-I-7).
-// I4.5 wires it.
-#[allow(dead_code)]
 pub(crate) const ROOT_IDLE_NS: i64 = 5_000_000_000;
 /// Failed sweeps after which a trace is dropped (D-I-9).
 // I4.7 calls it.
@@ -24,8 +20,6 @@ pub(crate) const MAX_FAILED_READS: u8 = 5;
 const WARN_EVERY_NS: i64 = 60_000_000_000;
 
 /// One pending trace.
-// I4.5 wires it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entry {
     /// Ingest time of the first span seen.
@@ -55,8 +49,6 @@ pub(crate) struct Completed {
 }
 
 /// What the flusher writes: entries changed since the last flush, and keys removed since.
-// I4.5 wires it.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Changes {
     pub(crate) upserts: Vec<(ProjectId, TraceId, Entry)>,
@@ -64,8 +56,6 @@ pub(crate) struct Changes {
 }
 
 /// The in-memory map of pending traces (D-I-8). Every method takes the lock once, briefly.
-// I4.5 wires it.
-#[allow(dead_code)]
 pub(crate) struct PendingTraces {
     max: usize,
     inner: Mutex<Inner>,
@@ -107,8 +97,6 @@ fn lock(mutex: &Mutex<Inner>) -> MutexGuard<'_, Inner> {
 
 impl PendingTraces {
     /// An empty map holding at most `max` traces (tests pass small values).
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn new(max: usize) -> Self {
         Self {
             max,
@@ -118,8 +106,6 @@ impl PendingTraces {
 
     /// Records the spans of one committed batch of `project`, when the project is tracked (D-I-8).
     /// Evaluation and experiment spans are skipped (D-I-17). `now` is the ingest time.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn observe(&self, project: ProjectId, spans: &[Span], now: i64) {
         let mut warning = None;
         {
@@ -190,8 +176,6 @@ impl PendingTraces {
     }
 
     /// Replaces the tracked set. Every entry of a project that is no longer tracked is removed.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn set_tracked(&self, projects: HashSet<ProjectId>) {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
@@ -316,8 +300,6 @@ impl PendingTraces {
     }
 
     /// Takes the changes since the last take, sorted by key so the flush order is deterministic.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn take_changes(&self) -> Changes {
         let mut changes = {
             let mut guard = lock(&self.inner);
@@ -345,8 +327,6 @@ impl PendingTraces {
 
     /// Puts back the changes of a failed flush. Upserts whose entry is gone and deletes whose
     /// entry came back are dropped: the map already says what the database must hold.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn restore(&self, changes: Changes) {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
@@ -372,8 +352,6 @@ impl PendingTraces {
 
     /// Loads the table at startup. Entries of tracked projects are held while there is room and
     /// are not marked changed. The rest are marked for deletion, so the next flush removes their rows.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn load(&self, rows: impl IntoIterator<Item = (ProjectId, TraceId, Entry)>) {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
@@ -393,8 +371,6 @@ impl PendingTraces {
     }
 
     /// Traces held.
-    // I4.5 wires it.
-    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         lock(&self.inner).len
     }

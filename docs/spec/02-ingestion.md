@@ -268,7 +268,7 @@ After `append_spans` returns (the batch is in the WAL and the memtable), `commit
 
 ## Online-eval triggers
 
-For each committed span, matching online rules (06) with `target = span` are evaluated against the span's light columns; sampled hits are inserted into the `eval_jobs` queue. Trace-level rules are triggered by the trace-completion detector (06), which is fed from the same batch (trace_id, ingest_time, has_root, root end).
+After each append, `commit` records the trace in the online-rule trigger's in-memory map when its project has an enabled, unpaused rule: first and last ingest time, earliest span start, and whether a root span was seen (D-I-8). Evaluation and experiment spans are never recorded (D-I-17). Nothing on the ingest path touches `meta.db`: a flusher writes the changed entries every 5 s. Rules are matched later, when the trace completes (06 § Online rules › Triggering, D-I-7).
 
 ## Testing
 

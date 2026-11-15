@@ -22,8 +22,6 @@ pub(crate) struct PendingRow {
 /// # Errors
 ///
 /// [`MetaError`] when the query fails, or `MetaError::Corrupt` for a `trace_id` blob that is not 16 bytes.
-// I4.5 calls it.
-#[allow(dead_code)]
 pub(crate) async fn load_pending(pool: &SqlitePool) -> Result<Vec<PendingRow>, MetaError> {
     let records: Vec<(String, Vec<u8>, i64, i64, i64, i64)> = sqlx::query_as(
         "SELECT t.project_id, t.trace_id, t.first_seen, t.last_seen, t.min_start, t.root_ended \
@@ -58,8 +56,6 @@ pub(crate) async fn load_pending(pool: &SqlitePool) -> Result<Vec<PendingRow>, M
 /// # Errors
 ///
 /// [`MetaError`] when a statement fails.
-// I4.5 calls it.
-#[allow(dead_code)]
 pub(crate) async fn write_pending(
     conn: &mut SqliteConnection,
     deletes: &[(ProjectId, TraceId)],
