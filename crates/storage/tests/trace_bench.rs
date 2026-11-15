@@ -17,6 +17,10 @@
 //! directory. `LLMOBS_TRACE_BENCH_CACHE` is `cold` (default), `warm` or `off`:
 //! `cold` empties `<dir>/cache` before the open, `warm` runs the whole query
 //! set once untimed first, `off` sets `query.read_cache_bytes = 0`.
+//! Spans carry the realistic payloads of `common::payload` (track R M7). The
+//! corpus comes from `just fetch-corpus`. `LLMOBS_TRACE_BENCH_MAX_BYTES` (for
+//! example `384MiB`) replaces the first attempt's 128 MiB flush size, which a
+//! trace of tens of KiB of Arrow needs larger.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,32 +33,36 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use bytesize::ByteSize;
 use chrono::{TimeZone, Utc};
+use common::corpus::{CORPUS_SHA256, Corpus};
+use common::machine::{dir_bytes, machine};
+use common::payload::{Payloads, span_payload_bytes};
+use common::rng::{Rng, mix};
+use common::s3::S3Env;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use futures::TryStreamExt;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::enums::{SpanKind, SpanStatus};
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
-    AnchorConfig, FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config,
-    StorageConfig, WalConfig, WalSync,
+    AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
+    WalSync,
 };
 use llmobs_storage::{
     Bucket, BucketWidth, ListScope, MetricsRequest, Page, ProjectQuery, QueryContext, QueryOptions,
     SortOrder, TimeWindow, TraceListRequest, TraceSort, metrics, trace_detail, trace_list,
     trace_list_plan,
 };
-use object_store::aws::AmazonS3Builder;
-use object_store::{ObjectStore, ObjectStoreExt};
 
 // ---------------------------------------------------------------- constants
+
+#[allow(dead_code)] // each test target uses part of the shared helpers
+mod common;
 
 const SEED: u64 = 1;
 const DEFAULT_TRACES: usize = 5_000_000;
@@ -116,48 +124,6 @@ const MODELS: [&str; 6] = [
 ];
 const ENVIRONMENTS: [&str; 3] = ["production", "staging", "llmobs-eval"];
 
-// ---------------------------------------------------------------- RNG
-
-/// Seeded xorshift64* — no `rand` dependency, identical for a given seed.
-struct Rng(u64);
-
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// Uniform `f64` in `[0, 1)`.
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1_u64 << 53) as f64
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        (self.next() % bound as u64) as usize
-    }
-
-    /// Standard normal via Box–Muller.
-    fn normal(&mut self) -> f64 {
-        let u1 = self.unit().max(f64::MIN_POSITIVE);
-        let u2 = self.unit();
-        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
-    }
-
-    /// Log-normal with a given median and p99.
-    fn lognormal(&mut self, median: f64, p99: f64) -> f64 {
-        let sigma = (p99 / median).ln() / 2.326_347_874_040_840_8;
-        (median.ln() + sigma * self.normal()).exp()
-    }
-}
-
 fn trace_id(index: usize) -> TraceId {
     let mut bytes = [0_u8; 16];
     bytes[8..].copy_from_slice(&((index as u64) + 1).to_be_bytes());
@@ -194,7 +160,6 @@ struct SpanPlan {
     is_llm: bool,
     is_root: bool,
     tag_mask: u16,
-    preview: Option<(usize, u8)>,
     tokens: Option<i64>,
     model: Option<usize>,
     error: bool,
@@ -208,6 +173,8 @@ struct GroupPlan {
 
 struct TracePlan {
     id: TraceId,
+    /// The trace's position in the generated dataset: its seed comes from it.
+    index: usize,
     start: i64,
     env: usize,
     session: Option<u32>,
@@ -238,6 +205,14 @@ fn start_time(rng: &mut Rng, start: i64) -> i64 {
 }
 
 /// A bitmask with 0–3 of the 10 tag bits set (spec 06 § Data: 0–3 tags/span).
+/// The plan's preview draws (length and fill byte). They are still drawn, in
+/// the same order, so the data plan's stream is unchanged (R7.4). The previews
+/// themselves now come from the payload content.
+fn draw_preview(rng: &mut Rng) {
+    rng.below(301);
+    rng.below(26);
+}
+
 fn tag_mask(rng: &mut Rng) -> u16 {
     let count = rng.below(4);
     let mut mask = 0_u16;
@@ -296,14 +271,15 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
     // Root group: the root span plus the children not handed to late groups.
     {
         let mut spans = Vec::new();
+        let root_tags = tag_mask(rng);
+        draw_preview(rng);
         spans.push(SpanPlan {
             start: root_start,
             end: root_end,
             span_index: 0,
             is_llm: false,
             is_root: true,
-            tag_mask: tag_mask(rng),
-            preview: Some((100 + rng.below(301), b'a' + rng.below(26) as u8)),
+            tag_mask: root_tags,
             tokens: None,
             model: None,
             error: has_error && error_span == 0,
@@ -318,16 +294,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
             let cs = root_start + (rng.unit() * duration as f64) as i64;
             let ce = (cs + duration / 10).min(root_end);
             let tokens = is_llm.then(|| rng.lognormal(800.0, 20_000.0) as i64);
+            let tags = tag_mask(rng);
+            if is_llm {
+                draw_preview(rng);
+            }
+            let model = is_llm.then(|| rng.below(MODELS.len()));
             spans.push(SpanPlan {
                 start: cs,
                 end: ce,
                 span_index: *child,
                 is_llm,
                 is_root: false,
-                tag_mask: tag_mask(rng),
-                preview: is_llm.then(|| (100 + rng.below(301), b'a' + rng.below(26) as u8)),
+                tag_mask: tags,
                 tokens,
-                model: is_llm.then(|| rng.below(MODELS.len())),
+                model,
                 error: has_error && error_span == *child,
                 cost_share: is_llm.then_some(cost_share),
             });
@@ -361,16 +341,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
             let cs = base + (j as i64 + 1) * (duration / SPANS_PER_TRACE as i64);
             let ce = cs + duration / SPANS_PER_TRACE as i64;
             let tokens = is_llm.then(|| rng.lognormal(800.0, 20_000.0) as i64);
+            let tags = tag_mask(rng);
+            if is_llm {
+                draw_preview(rng);
+            }
+            let model = is_llm.then(|| rng.below(MODELS.len()));
             spans.push(SpanPlan {
                 start: cs,
                 end: ce,
                 span_index: *child,
                 is_llm,
                 is_root: false,
-                tag_mask: tag_mask(rng),
-                preview: is_llm.then(|| (100 + rng.below(301), b'a' + rng.below(26) as u8)),
+                tag_mask: tags,
                 tokens,
-                model: is_llm.then(|| rng.below(MODELS.len())),
+                model,
                 error: has_error && error_span == *child,
                 cost_share: is_llm.then_some(cost_share),
             });
@@ -384,6 +368,7 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
 
     TracePlan {
         id: trace_id(index),
+        index,
         start: root_start,
         env,
         session,
@@ -395,7 +380,20 @@ fn trace_plan(rng: &mut Rng, index: usize, start: i64, end: i64) -> TracePlan {
     }
 }
 
-fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
+/// The spans of one group. Content comes from `payloads`, seeded by the trace's
+/// index; the plan keeps the tokens, cost, models, status and times.
+fn build_spans(plan: &TracePlan, group: &GroupPlan, payloads: &Payloads) -> Vec<Span> {
+    let seed = mix(SEED ^ mix(plan.index as u64));
+    // An LLM span's call number is its rank among the trace's LLM spans.
+    let mut llm_indices: Vec<usize> = plan
+        .groups
+        .iter()
+        .flat_map(|g| g.spans.iter())
+        .filter(|s| s.is_llm)
+        .map(|s| s.span_index)
+        .collect();
+    llm_indices.sort_unstable();
+    let calls = payloads.llm_calls(seed, llm_indices.len());
     let session = plan.session.map(|s| format!("session-{s}"));
     let user = plan.user.map(|u| format!("user-{u}"));
     let mut out = Vec::with_capacity(group.spans.len());
@@ -406,10 +404,17 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
                 tags.push((*tag).to_owned());
             }
         }
-        let preview = s
-            .preview
-            .map(|(len, fill)| std::iter::repeat_n(fill as char, len).collect::<String>());
-        out.push(Span {
+        let content = if s.is_root {
+            payloads.root(seed)
+        } else if s.is_llm {
+            let rank = llm_indices
+                .binary_search(&s.span_index)
+                .expect("an LLM span is among the trace's LLM spans");
+            calls[rank].clone()
+        } else {
+            payloads.step(seed, s.span_index)
+        };
+        let mut span = Span {
             project_id: project(),
             trace_id: plan.id,
             span_id: span_id(s.span_index),
@@ -459,8 +464,8 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
             input_format: None,
             output: None,
             output_format: None,
-            input_preview: preview.clone(),
-            output_preview: preview,
+            input_preview: None,
+            output_preview: None,
             system_instructions: None,
             tool_definitions: None,
             attributes: Default::default(),
@@ -474,7 +479,9 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
             conventions: Vec::new(),
             ingest_time: group.ingest,
             schema_version: 1,
-        });
+        };
+        content.apply(&mut span);
+        out.push(span);
     }
     out
 }
@@ -483,18 +490,10 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan) -> Vec<Span> {
 
 fn config(backend: &Backend, max_bytes: ByteSize, read_cache: Option<ByteSize>) -> StorageConfig {
     let (object_store, s3) = match &backend.s3 {
-        Some(t) => (
-            Some(ObjectStoreUrl::S3 {
-                bucket: t.bucket.clone(),
-                prefix: S3_PREFIX.to_owned(),
-            }),
-            S3Config {
-                region: Some("us-east-1".to_owned()),
-                endpoint: Some(t.endpoint.clone()),
-                force_path_style: true,
-                allow_http: t.endpoint.starts_with("http://"),
-            },
-        ),
+        Some(t) => {
+            let (url, s3) = t.config(S3_PREFIX);
+            (Some(url), s3)
+        }
         None => (None, S3Config::default()),
     };
     StorageConfig {
@@ -545,25 +544,6 @@ fn count_spans_files(dir: &Path) -> usize {
     count
 }
 
-fn dir_bytes(dir: &Path) -> u64 {
-    fn walk(path: &Path, total: &mut u64) {
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                walk(&p, total);
-            } else if let Ok(meta) = p.metadata() {
-                *total += meta.len();
-            }
-        }
-    }
-    let mut total = 0;
-    walk(dir, &mut total);
-    total
-}
-
 // ---------------------------------------------------------------- manifest
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -579,18 +559,27 @@ struct Manifest {
     endpoint: Option<String>,
     #[serde(default)]
     bucket: Option<String>,
+    /// The payload generator the data was written with (`payload_tag`); absent
+    /// in datasets written before track R M7.
+    #[serde(default)]
+    payload: Option<String>,
+    /// Arrow bytes appended and payload bytes generated (`span_payload_bytes`).
+    #[serde(default)]
+    arrow_bytes: u64,
+    #[serde(default)]
+    payload_bytes: u64,
+}
+
+/// Identifies the payload generator: a dataset is reused only with the same one.
+fn payload_tag() -> String {
+    format!("m7:{}", &CORPUS_SHA256[..12])
 }
 
 /// Where the dataset lives: the local directory, and an S3 prefix when
 /// `LLMOBS_TEST_S3_ENDPOINT` is set (D119).
 struct Backend {
     dir: PathBuf,
-    s3: Option<S3Target>,
-}
-
-struct S3Target {
-    endpoint: String,
-    bucket: String,
+    s3: Option<S3Env>,
 }
 
 /// The fixed S3 prefix, so the dataset is reused across runs.
@@ -598,12 +587,7 @@ const S3_PREFIX: &str = "trace-bench";
 
 impl Backend {
     fn from_env(dir: PathBuf) -> Self {
-        let s3 = std::env::var("LLMOBS_TEST_S3_ENDPOINT")
-            .ok()
-            .map(|endpoint| S3Target {
-                endpoint,
-                bucket: std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET"),
-            });
+        let s3 = S3Env::from_env();
         Self { dir, s3 }
     }
 }
@@ -634,59 +618,13 @@ impl CacheMode {
     }
 }
 
-/// Copied from `tests/s3.rs`.
-async fn delete_prefix(endpoint: &str, bucket: &str, prefix: &str) -> Result<(), String> {
-    let http = endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(bucket)
-        .with_endpoint(endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(prefix);
-    let locations: Vec<object_store::path::Path> = store
-        .list(Some(&root))
-        .map_ok(|meta| meta.location)
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())?;
-    for location in locations {
-        store
-            .delete(&location)
-            .await
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-/// Every object under the bench prefix.
-async fn s3_listing(s3: &S3Target) -> Result<Vec<object_store::ObjectMeta>, String> {
-    let http = s3.endpoint.starts_with("http://");
-    let store = AmazonS3Builder::from_env()
-        .with_bucket_name(&s3.bucket)
-        .with_endpoint(&s3.endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
-        .with_allow_http(http)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let root = object_store::path::Path::from(S3_PREFIX);
-    store
-        .list(Some(&root))
-        .try_collect()
-        .await
-        .map_err(|error| error.to_string())
-}
-
 /// Spans Parquet files and bytes of the dataset: the directory's for local
 /// mode, the listed objects' for S3.
 async fn dataset_files(backend: &Backend) -> (usize, u64) {
     match &backend.s3 {
         None => (count_spans_files(&backend.dir), dir_bytes(&backend.dir)),
         Some(s3) => {
-            let metas = s3_listing(s3).await.unwrap();
+            let metas = s3.list(S3_PREFIX).await.unwrap();
             let count = metas
                 .iter()
                 .filter(|meta| {
@@ -701,38 +639,38 @@ async fn dataset_files(backend: &Backend) -> (usize, u64) {
 
 /// The dataset to query: the stored one when its manifest matches the target,
 /// otherwise a generated one. With S3 a missing or foreign manifest regenerates.
+/// The dataset to query: the stored one when its manifest matches the target,
+/// the payload generator and (with S3) the endpoint and bucket; otherwise a
+/// generated one. A catalog without a matching manifest is regenerated, since
+/// its payloads are unknown.
 async fn dataset(backend: &Backend, traces: usize) -> Manifest {
     let has_catalog = backend.dir.join("catalog.db").is_file();
     let stored = std::fs::read_to_string(manifest_path(&backend.dir))
         .ok()
         .and_then(|text| serde_json::from_str::<Manifest>(&text).ok());
+    let payload = Some(payload_tag());
     match (has_catalog, &backend.s3, stored) {
         (true, Some(s3), Some(manifest))
             if manifest.endpoint.as_deref() == Some(s3.endpoint.as_str())
-                && manifest.bucket.as_deref() == Some(s3.bucket.as_str()) =>
+                && manifest.bucket.as_deref() == Some(s3.bucket.as_str())
+                && manifest.payload == payload =>
         {
             manifest
         }
-        (true, Some(_), _) => generate_dataset(backend, traces).await,
-        (true, None, Some(manifest)) => manifest,
-        (true, None, None) => Manifest {
-            traces,
-            files: vec![count_spans_files(&backend.dir)],
-            gen_secs: 0.0,
-            max_bytes: ByteSize::mib(128).0,
-            sample: Vec::new(),
-            late_1_3h: 0,
-            endpoint: None,
-            bucket: None,
-        },
-        (false, _, _) => generate_dataset(backend, traces).await,
+        (true, None, Some(manifest)) if manifest.payload == payload => manifest,
+        _ => generate_dataset(backend, traces).await,
     }
 }
 
 // The bench reports on stdout like the rest of the file.
 #[allow(clippy::print_stdout)]
 async fn generate_dataset(backend: &Backend, traces: usize) -> Manifest {
-    let max_bytes = ByteSize::mib(128);
+    let max_bytes = match std::env::var("LLMOBS_TRACE_BENCH_MAX_BYTES") {
+        Ok(value) => value
+            .parse::<ByteSize>()
+            .expect("LLMOBS_TRACE_BENCH_MAX_BYTES is a size such as 384MiB"),
+        Err(_) => ByteSize::mib(128),
+    };
     let (count, _, generated) = generate(backend, traces, max_bytes).await;
     if (900..=1100).contains(&count) {
         return generated;
@@ -794,6 +732,46 @@ async fn append_retry(storage: &llmobs_storage::Storage, batch: RecordBatch) {
     }
 }
 
+/// Arrow and payload bytes written by one generation.
+#[derive(Default)]
+struct Written {
+    arrow_bytes: u64,
+    payload_bytes: u64,
+}
+
+async fn append_batch(storage: &llmobs_storage::Storage, batch: &[Span], written: &mut Written) {
+    let rb = spans_to_record_batch(batch).unwrap();
+    written.arrow_bytes += rb.get_array_memory_size() as u64;
+    append_retry(storage, rb).await;
+}
+
+/// Builds the spans of `groups` in order and appends them in batches of about
+/// `BATCH_SPANS` spans.
+async fn append_groups(
+    storage: &llmobs_storage::Storage,
+    plans: &[TracePlan],
+    payloads: &Payloads,
+    groups: &[Pending],
+    written: &mut Written,
+) {
+    let mut batch: Vec<Span> = Vec::with_capacity(BATCH_SPANS + SPANS_PER_TRACE);
+    for p in groups {
+        let spans = build_spans(&plans[p.trace], &plans[p.trace].groups[p.group], payloads);
+        written.payload_bytes += spans
+            .iter()
+            .map(|s| span_payload_bytes(s) as u64)
+            .sum::<u64>();
+        batch.extend(spans);
+        if batch.len() >= BATCH_SPANS {
+            append_batch(storage, &batch, written).await;
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        append_batch(storage, &batch, written).await;
+    }
+}
+
 /// Generate into `dir` (wiping it first) and return the file count and elapsed
 /// time. Appends in ingest-time order, batches of ~10,000 spans. The last two
 /// minutes of ingest time stay in the WAL: append everything else, shutdown,
@@ -806,15 +784,14 @@ async fn generate(
     let begun = Instant::now();
     let dir = backend.dir.as_path();
     if let Some(s3) = &backend.s3 {
-        delete_prefix(&s3.endpoint, &s3.bucket, S3_PREFIX)
-            .await
-            .unwrap();
+        s3.delete_prefix(S3_PREFIX).await.unwrap();
     }
     if dir.exists() {
         std::fs::remove_dir_all(dir).unwrap();
     }
     std::fs::create_dir_all(dir).unwrap();
 
+    let payloads = Payloads::new(Corpus::from_env());
     let start = range_start();
     let end = range_end();
     let mut rng = Rng::new(SEED);
@@ -841,7 +818,7 @@ async fn generate(
     let max_ingest = pending.last().map_or(end, |p| p.ingest);
     let tail_start = max_ingest.saturating_sub(TAIL);
 
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         traces,
         files: Vec::new(),
         gen_secs: 0.0,
@@ -850,29 +827,22 @@ async fn generate(
         late_1_3h,
         endpoint: backend.s3.as_ref().map(|s3| s3.endpoint.clone()),
         bucket: backend.s3.as_ref().map(|s3| s3.bucket.clone()),
+        payload: Some(payload_tag()),
+        arrow_bytes: 0,
+        payload_bytes: 0,
     };
 
+    let mut written = Written::default();
     let files = {
         let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
-        let mut batch: Vec<Span> = Vec::with_capacity(BATCH_SPANS + SPANS_PER_TRACE);
-        for p in pending.iter().filter(|p| p.ingest < tail_start) {
-            batch.extend(build_spans(
-                &plans[p.trace],
-                &plans[p.trace].groups[p.group],
-            ));
-            if batch.len() >= BATCH_SPANS {
-                let rb = spans_to_record_batch(&batch).unwrap();
-                append_retry(&storage, rb).await;
-                batch.clear();
-            }
-        }
-        if !batch.is_empty() {
-            let rb = spans_to_record_batch(&batch).unwrap();
-            append_retry(&storage, rb).await;
-            batch.clear();
-        }
+        let early: Vec<Pending> = pending
+            .iter()
+            .copied()
+            .filter(|p| p.ingest < tail_start)
+            .collect();
+        append_groups(&storage, &plans, &payloads, &early, &mut written).await;
         storage.shutdown().await.unwrap();
         drop(storage);
         let files = dataset_files(backend).await.0;
@@ -880,79 +850,27 @@ async fn generate(
         let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
-        for p in pending.iter().filter(|p| p.ingest >= tail_start) {
-            batch.extend(build_spans(
-                &plans[p.trace],
-                &plans[p.trace].groups[p.group],
-            ));
-            if batch.len() >= BATCH_SPANS {
-                let rb = spans_to_record_batch(&batch).unwrap();
-                append_retry(&storage, rb).await;
-                batch.clear();
-            }
-        }
-        if !batch.is_empty() {
-            let rb = spans_to_record_batch(&batch).unwrap();
-            append_retry(&storage, rb).await;
-        }
+        let late: Vec<Pending> = pending
+            .iter()
+            .copied()
+            .filter(|p| p.ingest >= tail_start)
+            .collect();
+        append_groups(&storage, &plans, &payloads, &late, &mut written).await;
         // Drop without shutdown: the tail stays in the WAL / memtable.
         drop(storage);
         files
     };
 
-    let mut manifest = manifest;
     manifest.files.push(files);
     manifest.gen_secs = begun.elapsed().as_secs_f64();
+    manifest.arrow_bytes = written.arrow_bytes;
+    manifest.payload_bytes = written.payload_bytes;
     std::fs::write(
         manifest_path(dir),
         serde_json::to_string(&manifest).unwrap(),
     )
     .unwrap();
     (files, begun.elapsed(), manifest)
-}
-
-// ---------------------------------------------------------------- machine
-
-fn read_line(path: &str, prefix: &str) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .map(|line| {
-            line[prefix.len()..]
-                .trim()
-                .trim_start_matches(':')
-                .trim()
-                .to_owned()
-        })
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn command(args: &[&str]) -> String {
-    Command::new(args[0])
-        .args(&args[1..])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned())
-}
-
-fn machine() -> String {
-    let cpu = read_line("/proc/cpuinfo", "model name");
-    let cores = std::thread::available_parallelism().map_or(0, |n| n.get());
-    let mem = read_line("/proc/meminfo", "MemTotal:");
-    let disk = command(&["lsblk", "-d", "-o", "NAME,ROTA,MODEL"])
-        .lines()
-        .nth(1)
-        .unwrap_or("unknown")
-        .trim()
-        .to_owned();
-    let kernel = command(&["uname", "-r"]);
-    let commit = command(&["git", "rev-parse", "HEAD"]);
-    format!(
-        "CPU {cpu}, {cores} threads, RAM {mem}, disk [{disk}], kernel {kernel}, commit {}",
-        &commit[..commit.len().min(12)]
-    )
 }
 
 // ---------------------------------------------------------------- timing
@@ -1412,17 +1330,14 @@ async fn trace_benchmark() {
     // Markdown table.
     let (_, dataset_bytes) = dataset_files(&backend).await;
     let store = match (&backend.s3, cache) {
-        (Some(s3), Some(mode)) => format!(
-            "S3 s3://{}/{S3_PREFIX} at {}, read cache {}",
-            s3.bucket,
-            s3.endpoint,
-            mode.name()
-        ),
+        (Some(s3), Some(mode)) => {
+            format!("S3 {}, read cache {}", s3.describe(S3_PREFIX), mode.name())
+        }
         _ => "local disk".to_owned(),
     };
     println!("\n## M3 implementation\n");
     println!("Store: {store}");
-    println!("Machine: {}", machine());
+    println!("Machine: {}", machine(&backend.dir));
     println!(
         "Dataset: {} traces, {} spans files ({}), {} bytes, generated in {:.1} s, target_partitions {PARTITIONS}, {} traces with a 1–3 h late group",
         manifest.traces,
@@ -1436,6 +1351,12 @@ async fn trace_benchmark() {
         dataset_bytes,
         manifest.gen_secs,
         manifest.late_1_3h,
+    );
+    println!(
+        "Payloads: {} arrow bytes, {} payload bytes, {} arrow bytes per trace",
+        manifest.arrow_bytes,
+        manifest.payload_bytes,
+        manifest.arrow_bytes / manifest.traces.max(1) as u64,
     );
     println!();
     println!("| query | mode | cold | p50 | p95 | max | target | pass | rows | differing ids |");

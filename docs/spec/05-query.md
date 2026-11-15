@@ -10,8 +10,8 @@ Everything compiles to DataFusion plans over the project-scoped providers of 03 
 | `traces` | one per trace (merged; the merge bookkeeping columns `last_ingest_time` and `partial_count` are not exposed) | `TracesProvider` |
 | `sessions` | one per session_id | `SELECT session_id, min(start_time) AS start_time, max(end_time) AS end_time, count(*) AS trace_count, sum(error_count) AS error_count, sum(total_tokens) AS total_tokens, sum(cost_total) AS cost_total, first non-null user_id by (start_time, trace_id) AS user_id, sorted distinct union of tags AS tags, duration_ns, duration_ms … FROM traces WHERE session_id IS NOT NULL GROUP BY session_id` |
 | `scores` | one per live score | `ScoresProvider` |
-| `experiment_items` | experiment results | SQLite rows for the project, exposed via a `MemTable` built per query (bounded to 1M rows). The server owns the schema, the rows and the column catalog, and registers the table through `QueryContext::register_sqlite_view` (D93) |
-| `dataset_items` | current version items | same approach |
+| `experiment_items` | one per experiment result (item × repetition) of the project's visible experiments, with the input snapshot | SQLite rows exposed via a `MemTable` built per query, only when the statement names the view, at most 1M rows and 256 MiB of text (else `query_failed`). The server owns the schema, the rows and the column catalog, and registers the table through `QueryContext::register_sqlite_view` (D93). D101's window applies to `created_at`; experiments older than the data window are left out (D-J-14, D-J-15) |
+| `dataset_items` | the live items of every dataset of the project at its latest version | same approach; no time window (D-J-15) |
 
 Cost totals of `sessions`, of the user list, and of the dashboard and alert queries (§ Dashboard metrics; spec 07) are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
 

@@ -15,6 +15,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { atLeast, type OrgRole } from "@/lib/roles";
 
@@ -105,7 +106,12 @@ export function SettingsSidebar({
           </SidebarGroup>
         </SidebarContent>
       </Sidebar>
-      <SidebarInset className="min-h-0 overflow-hidden">{children}</SidebarInset>
+      <SidebarInset className="min-h-0 overflow-hidden">
+        <div className="flex shrink-0 items-center border-b px-2 py-1 md:hidden">
+          <SidebarTrigger aria-label="Open navigation" />
+        </div>
+        {children}
+      </SidebarInset>
     </SidebarProvider>
   );
 }

@@ -1,0 +1,81 @@
+[package]
+name = "llmobs-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: outside the main one, nightly only (D-R-7).
+[workspace]
+
+[dependencies]
+# Exact pin: `just fuzz-lock` resolves it on top of the root lock, and Dependabot bumps it here.
+libfuzzer-sys = "=0.4.13"
+llmobs-otel = { path = "../crates/otel" }
+llmobs-storage = { path = "../crates/storage" }
+
+[[bin]]
+name = "wal_record"
+path = "fuzz_targets/wal_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_replay"
+path = "fuzz_targets/wal_replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parquet_file"
+path = "fuzz_targets/parquet_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "read_cache_block"
+path = "fuzz_targets/read_cache_block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "catalog_rows"
+path = "fuzz_targets/catalog_rows.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filter_dsl"
+path = "fuzz_targets/filter_dsl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otlp_http_protobuf"
+path = "fuzz_targets/otlp_http_protobuf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otlp_http_json"
+path = "fuzz_targets/otlp_http_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otlp_grpc"
+path = "fuzz_targets/otlp_grpc.rs"
+test = false
+doc = false
+bench = false

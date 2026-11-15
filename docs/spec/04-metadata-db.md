@@ -265,24 +265,28 @@ Names are not unique: several visible views may share a name. Visibility, sharin
 
 ## Datasets & experiments
 
-Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Editing an item closes the old revision and inserts a new one in a new version.
+Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).
 
 ```sql
 CREATE TABLE datasets (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  name TEXT NOT NULL, description TEXT,
-  input_schema TEXT, expected_schema TEXT,    -- optional JSON Schema
+  name TEXT NOT NULL,
+  description TEXT,
+  input_schema TEXT,                  -- JSON Schema text, or NULL
+  expected_schema TEXT,
   current_version INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
   UNIQUE(project_id, name)
 );
 
 CREATE TABLE dataset_versions (
   dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   version INTEGER NOT NULL,
-  description TEXT,                   -- e.g. "import data.csv (120 items)"
-  created_by TEXT, created_at INTEGER NOT NULL,
+  description TEXT NOT NULL,
+  created_by TEXT,                    -- user id, or 'key:<key id>'
+  created_at INTEGER NOT NULL,
   PRIMARY KEY (dataset_id, version)
 );
 
@@ -291,42 +295,58 @@ CREATE TABLE dataset_items (
   item_id TEXT NOT NULL,              -- stable across revisions
   dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
   input TEXT NOT NULL,                -- JSON
-  expected_output TEXT,               -- JSON
+  expected_output TEXT,               -- JSON, NULL when absent
   metadata TEXT NOT NULL DEFAULT '{}',
-  source_trace_id BLOB, source_span_id BLOB,
+  source_trace_id BLOB,               -- 16 bytes
+  source_span_id BLOB,                -- 8 bytes
   valid_from_version INTEGER NOT NULL,
   valid_to_version INTEGER,
   created_at INTEGER NOT NULL
 );
-CREATE INDEX dataset_items_live ON dataset_items(dataset_id, valid_to_version);
+CREATE INDEX dataset_items_live ON dataset_items(dataset_id, valid_to_version, item_id);
+CREATE INDEX dataset_items_item ON dataset_items(dataset_id, item_id, valid_from_version);
 CREATE INDEX dataset_items_source ON dataset_items(source_trace_id) WHERE source_trace_id IS NOT NULL;
+CREATE UNIQUE INDEX dataset_items_one_live ON dataset_items(dataset_id, item_id) WHERE valid_to_version IS NULL;
 
 CREATE TABLE experiments (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
-  dataset_version INTEGER,
-  name TEXT NOT NULL, description TEXT,
-  metadata TEXT NOT NULL DEFAULT '{}',   -- model, prompt, git sha, params…
-  server_evaluators TEXT NOT NULL DEFAULT '[]',  -- evaluator ids to run server-side
-  status TEXT NOT NULL,               -- 'running' | 'completed' | 'failed'
-  created_at INTEGER NOT NULL, finished_at INTEGER
+  dataset_name TEXT NOT NULL,         -- copied at create, shown after the dataset is deleted
+  dataset_version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  repetitions INTEGER NOT NULL DEFAULT 1,
+  item_count INTEGER NOT NULL,        -- live items of the pinned version
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  error TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
+CREATE INDEX experiments_project ON experiments(project_id, created_at);
+CREATE INDEX experiments_dataset ON experiments(dataset_id, created_at);
 
 CREATE TABLE experiment_items (
   experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
   dataset_item_id TEXT NOT NULL,      -- item_id (stable)
-  repetition INTEGER NOT NULL DEFAULT 0,
-  trace_id BLOB,                      -- trace of the task execution
-  output TEXT,                        -- JSON copy of the task output (small; full data in trace)
+  repetition INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,          -- the pinned revision; no FK (D-J-9 deletes by it)
+  input TEXT NOT NULL,                -- snapshot of the revision
+  expected_output TEXT,
+  trace_id BLOB,
+  output TEXT,                        -- JSON
   error TEXT,
-  latency_ns INTEGER, cost_total REAL,
+  latency_ns INTEGER,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (experiment_id, dataset_item_id, repetition)
 );
+CREATE INDEX experiment_items_trace ON experiment_items(trace_id) WHERE trace_id IS NOT NULL;
+CREATE INDEX experiment_items_revision ON experiment_items(revision_id);
 ```
 
-Experiment scores are rows in the columnar `scores` table with `experiment_id` + `dataset_item_id` set.
+Experiment scores are rows in the columnar `scores` table with `experiment_id` + `dataset_item_id` set (D-J-12). Per-item cost comes from the item's trace at read time (D-J-13). A trace deletion hard-deletes the dataset item revisions copied from the trace and the experiment results that point at it or snapshot such a revision (D-J-9).
 
 ## Evaluation
 

@@ -8,6 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use bytesize::ByteSize;
 use datafusion::execution::context::{SessionConfig, SessionContext};
+use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 
@@ -56,6 +57,11 @@ pub(super) const MODEL_PUT_SIZES: PutSizes = PutSizes {
     single_max: 16 * 1024,
     part: 8 * 1024,
 };
+
+/// An in-memory object store with the model's sizes: a harness's `store` for a remote case.
+pub(super) fn memory_store() -> (Arc<dyn ObjectStore>, PutSizes) {
+    (Arc::new(InMemory::new()), MODEL_PUT_SIZES)
+}
 
 /// The sizes of a run against a real bucket (R4.8). Every part but the last must be at least 5 MiB
 /// (`EntityTooSmall` otherwise), so the parts are 5 MiB; a file above 16 KiB is still multipart, as
@@ -106,6 +112,9 @@ pub(super) struct HarnessOptions {
     /// it would fill the disk with WAL segments that are already truncated (R5.4, D7). A lossy
     /// crash is not possible in an unrecorded harness.
     pub(super) unrecorded: bool,
+    /// Projects besides the lanes whose files may be catalogued: `check_settled_files` accepts
+    /// them and checks nothing about them (the resource tests' filler project C).
+    pub(super) foreign_projects: Vec<ProjectId>,
 }
 
 /// The remote store of a harness with an object store.
@@ -140,6 +149,8 @@ pub(super) struct Harness {
     remote: Option<Remote>,
     /// Tokio worker threads per life.
     workers: usize,
+    /// See [`HarnessOptions::foreign_projects`].
+    foreign_projects: Vec<ProjectId>,
     /// The `list` calls the orphan audits made (S3 mode). `check_full` expects exactly these
     /// and no others: storage never lists the bucket (spec 03 §5).
     pub(super) audit_lists: u64,
@@ -220,6 +231,7 @@ impl Harness {
             adjust,
         );
         harness._dir = Some(dir);
+        harness.foreign_projects = options.foreign_projects;
         harness
     }
 
@@ -275,6 +287,7 @@ impl Harness {
             crashes: Vec::new(),
             remote,
             workers,
+            foreign_projects: Vec::new(),
             audit_lists: 0,
             faulty_read_errors: AtomicU64::new(0),
         }
@@ -282,6 +295,10 @@ impl Harness {
 
     pub(super) fn dir(&self) -> &std::path::Path {
         &self.data
+    }
+
+    pub(super) fn foreign_projects(&self) -> &[ProjectId] {
+        &self.foreign_projects
     }
 
     pub(super) fn config(&self) -> &StorageConfig {

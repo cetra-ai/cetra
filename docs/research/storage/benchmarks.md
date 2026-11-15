@@ -21,6 +21,16 @@ are checked against spec 03 § Capacity sanity check in the last section.
 - The benchmark binaries were built with `RUST_MIN_STACK=33554432` (one release
   build crashed with SIGSEGV in rustc without it).
 
+**Erratum (track R M7).** The machine line of runs 1–7 names `sda` as the disk
+(rotational). `sda` is a card reader that holds no data. The local data directory of runs 1–7 was on btrfs
+(`compress=zstd:1`) over LUKS, on the NVMe drive `nvme1n1` (model
+`CT4000P3PSSD8`, not rotational). The benches' `machine()` printed the first row of
+`lsblk -d`, which was `sda`. It now walks from the data directory's mounted device
+down to the physical disk and prints the mount's filesystem and options (track R
+M7, R7.1). Runs 1–7 are not rewritten. btrfs also compressed the files on disk, so
+the physical write volume of those runs is not the logical byte count they report
+(`dir_bytes` sums file lengths, which btrfs does not change). The S3 runs (2, 4–6) kept their objects on a tmpfs Versity, not on that disk.
+
 Common environment for every S3 run:
 
 ```bash

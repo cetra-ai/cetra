@@ -5,12 +5,14 @@ default:
 # Format Rust, the web and TypeScript SDK (Biome), and the Python SDK (ruff)
 fmt:
     cargo fmt --all
+    cargo fmt --manifest-path fuzz/Cargo.toml
     pnpm exec biome format --write .
     cd sdks/python && uv run ruff format
 
 # Check formatting
 fmt-check:
     cargo fmt --all -- --check
+    cargo fmt --manifest-path fuzz/Cargo.toml -- --check
 
 # Lint (warnings are errors)
 lint:
@@ -38,6 +40,11 @@ test:
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":
     LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
+
+# The concurrent model stress test (track R M6), release mode. `secs` is the
+# run time; LLMOBS_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
+stress secs="300":
+    LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
 # Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
@@ -69,13 +76,125 @@ s3-chaos:
 lazyfs:
     tools/lazyfs/lazyfs.sh build && tools/lazyfs/lazyfs.sh run
 
+# Download the pinned text corpus of the storage benchmarks and soak (OpenAssistant oasst2, Apache-2.0; track R M7)
+fetch-corpus:
+    mkdir -p target/bench-corpus
+    curl -fL --retry 3 -o target/bench-corpus/oasst2-ready-messages.jsonl.gz.part https://huggingface.co/datasets/OpenAssistant/oasst2/resolve/179dd21fc55192153d94adb0e0ce8f69e222bf75/2023-11-05_oasst2_ready.messages.jsonl.gz
+    echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
+    mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
+
+# Storage soak (D-R-11). Needs LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT; see crates/storage/tests/soak.rs
+soak:
+    RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+
+# Plots of a soak run's samples into <out>/plots
+soak-plot out:
+    cd tools/soak && uv run --locked python plot.py {{absolute_path(out)}}
+
+# Lint and type-check the soak plot script (not part of `just check`)
+check-soak-plot:
+    cd tools/soak && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy plot.py
+
+# Write the fuzz seed corpus from the test fixtures (track R M3)
+fuzz-seed:
+    cargo test --workspace --all-features -- --ignored --exact fuzz_entry::tests::write_seed_corpus
+
+# The fuzzing toolchain, updated by hand like rust-toolchain.toml (track R M3)
+fuzz_toolchain := "nightly-2026-11-03"
+fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc"
+
+# Install the fuzzing toolchain and cargo-fuzz (track R M3)
+# Install the fuzzing toolchain (track R M3); CI installs cargo-fuzz with taiki-e instead
+fuzz-toolchain:
+    rustup toolchain install {{fuzz_toolchain}} --profile minimal
+
+# Install the fuzzing toolchain and cargo-fuzz (track R M3)
+fuzz-tools: fuzz-toolchain
+    cargo install cargo-fuzz --version 0.13.2 --locked
+
+# Write fuzz/Cargo.lock: the root lock's versions, plus the exact libfuzzer-sys pin
+fuzz-lock:
+    cp Cargo.lock fuzz/Cargo.lock
+    cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+
+# Fuzz one target for `secs` seconds; new inputs go into its committed corpus
+fuzz target secs="60": fuzz-lock
+    cargo +{{fuzz_toolchain}} fuzz run {{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+
+# Fuzz one target for CI: new inputs go to target/fuzz-new/<target>, so the checkout stays clean
+fuzz-ci target secs: fuzz-lock
+    mkdir -p target/fuzz-new/{{target}}
+    cargo +{{fuzz_toolchain}} fuzz run {{target}} target/fuzz-new/{{target}} fuzz/corpus/{{target}} -- -max_total_time={{secs}} -rss_limit_mb=4096 -timeout=30 -max_len=$(just _fuzz-max-len {{target}})
+
+# Fuzz every target in turn; fails if any target crashed
+fuzz-all secs="60":
+    #!/usr/bin/env bash
+    set -uo pipefail
+    rc=0
+    for target in {{fuzz_targets}}; do just fuzz "$target" {{secs}} || rc=1; done
+    exit "$rc"
+
+# Minimize every corpus, then fit the 2 MiB and file-count budgets by dropping the largest files
+fuzz-cmin: fuzz-lock
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in {{fuzz_targets}}; do
+        dir="fuzz/corpus/$target"
+        cargo +{{fuzz_toolchain}} fuzz cmin "$target" "$dir" -- -max_len="$(just _fuzz-max-len "$target")"
+        dropped=0
+        while [ "$(du -sb "$dir" | cut -f1)" -gt 2097152 ]; do
+            rm -- "$dir/$(ls -S "$dir" | head -n 1)"
+            dropped=$((dropped + 1))
+        done
+        max_files="$(just _fuzz-max-files "$target")"
+        while [ "$(find "$dir" -type f | wc -l)" -gt "$max_files" ]; do
+            rm -- "$dir/$(ls -S "$dir" | head -n 1)"
+            dropped=$((dropped + 1))
+        done
+        if [ "$dropped" -gt 0 ]; then
+            echo "$target: dropped $dropped largest files to fit the budgets" >&2
+        fi
+    done
+
+# The largest input a target takes, in bytes (libFuzzer's default is too small for Parquet)
+[private]
+_fuzz-max-len target:
+    #!/usr/bin/env bash
+    case "{{target}}" in
+        parquet_file) echo 1048576 ;;
+        wal_replay|otlp_http_protobuf|otlp_http_json|otlp_grpc) echo 262144 ;;
+        *) echo 65536 ;;
+    esac
+
+# The file-count budget of a target's corpus, so its stable replay stays under 10 s in debug
+[private]
+_fuzz-max-files target:
+    #!/usr/bin/env bash
+    case "{{target}}" in
+        parquet_file|filter_dsl|catalog_rows) echo 300 ;;
+        *) echo 2000 ;;
+    esac
+
+# Open or update the one open `nightly` issue for a failed nightly run (RUN_URL from the environment)
+nightly-issue:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gh label create nightly --force --description "A nightly run failed"
+    number="$(gh issue list --label nightly --state open --json number --jq '.[0].number // empty')"
+    if [ -n "$number" ]; then
+        gh issue comment "$number" --body "Nightly failed again: $RUN_URL"
+    else
+        gh issue create --title "Nightly run failed" --label nightly --body "Nightly run failed: $RUN_URL"
+    fi
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3)
-deny:
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3)
+deny: fuzz-lock
     cargo deny check advisories bans licenses sources
+    cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
 
 # Debug build
 build:
@@ -153,8 +272,9 @@ check-workflows:
     zizmor --offline .github
 
 # RustSec advisories only; run weekly by CI
-deny-advisories:
+deny-advisories: fuzz-lock
     cargo deny check advisories
+    cargo deny --manifest-path fuzz/Cargo.toml check advisories
 
 # Check the ee licence files and SPDX headers (D-P-2)
 check-ee:

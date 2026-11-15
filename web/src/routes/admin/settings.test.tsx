@@ -64,6 +64,15 @@ it("shows the effective settings", async () => {
   expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("aria-current", "page");
 });
 
+it("labels password sign-in that is off", async () => {
+  server.use(withSettings({ password_enabled: false }));
+
+  await renderApp("/admin/settings");
+  await screen.findByRole("heading", { name: "Settings", level: 2 });
+
+  expect(settingValue("Password sign-in")).toHaveTextContent("Instance admins only");
+});
+
 it("labels a disabled sign-up", async () => {
   server.use(withSettings({ signup: "disabled" }));
 

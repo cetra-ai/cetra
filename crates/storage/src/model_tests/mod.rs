@@ -10,6 +10,7 @@ mod observe;
 mod ops;
 mod resources;
 mod shape;
+mod stress;
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::Ordering;
@@ -19,7 +20,9 @@ use std::time::Duration;
 use proptest::prelude::*;
 
 use check::{check_deletions, check_dropped, check_full, check_no_leaked_uploads, check_quick};
-use harness::{Harness, HarnessOptions, MODEL_PUT_SIZES, REMOTE_PUT_SIZES, s3_tweaks};
+use harness::{
+    Harness, HarnessOptions, MODEL_PUT_SIZES, REMOTE_PUT_SIZES, memory_store, s3_tweaks,
+};
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
@@ -1017,7 +1020,7 @@ fn a_high_rate_run_injects_faults() {
 fn allow_failure_needs_an_injected_fault() {
     let harness = Harness::with_options(
         HarnessOptions {
-            store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+            store: Some(memory_store()),
             ..HarnessOptions::default()
         },
         s3_tweaks,
@@ -1051,7 +1054,7 @@ fn allow_failure_needs_an_injected_fault() {
 fn check_no_leaked_uploads_fires_on_a_leak() {
     let harness = Harness::with_options(
         HarnessOptions {
-            store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+            store: Some(memory_store()),
             ..HarnessOptions::default()
         },
         s3_tweaks,

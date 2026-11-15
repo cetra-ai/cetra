@@ -28,7 +28,9 @@ use crate::catalog::{Catalog, FileMeta, FileTable, now_ns};
 use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
 use crate::objects::Objects;
+use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 use crate::verify::{VerifyQueue, is_store_error};
+use object_store::ObjectStore;
 
 /// Nanoseconds in a UTC day.
 pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
@@ -240,7 +242,7 @@ impl Anchors {
             .collect();
         let mut rows_read = 0_usize;
         for file in &files {
-            match self.rebuild_file(file, objects, since).await {
+            match self.rebuild_file(file, objects.store(), since).await {
                 Ok(rows) => rows_read = rows_read.saturating_add(rows),
                 Err(AnchorError::Parquet(error)) if is_store_error(&error) => {
                     return Err(AnchorError::Parquet(error));
@@ -268,17 +270,16 @@ impl Anchors {
 
 impl Anchors {
     /// Reads the recent row groups of one `traces` file; returns the rows read.
-    async fn rebuild_file(
+    pub(crate) async fn rebuild_file(
         &mut self,
         file: &FileMeta,
-        objects: &Objects,
+        store: Arc<dyn ObjectStore>,
         since: i64,
     ) -> Result<usize, AnchorError> {
         #[allow(deprecated)]
-        let reader =
-            ParquetObjectReader::new(objects.store(), ObjectPath::from(file.path.as_str()))
-                .with_file_size(file.size);
-        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+        let reader = ParquetObjectReader::new(store, ObjectPath::from(file.path.as_str()))
+            .with_file_size(file.size);
+        let builder = guard(ParquetRecordBatchStreamBuilder::new(reader))
             .await
             .map_err(AnchorError::parquet)?;
         let groups = row_groups_to_read(builder.metadata(), since);
@@ -291,11 +292,14 @@ impl Anchors {
                 traces::LAST_INGEST_TIME,
             ],
         );
-        let mut stream = builder
-            .with_row_groups(groups)
-            .with_projection(mask)
-            .build()
-            .map_err(AnchorError::parquet)?;
+        let stream = guard_sync(move || {
+            builder
+                .with_row_groups(groups)
+                .with_projection(mask)
+                .build()
+        })
+        .map_err(AnchorError::parquet)?;
+        let mut stream = GuardedStream::new(stream, || Err(decoder_panicked()));
         let mut rows = 0_usize;
         while let Some(batch) = stream.next().await {
             let batch = batch.map_err(AnchorError::parquet)?;

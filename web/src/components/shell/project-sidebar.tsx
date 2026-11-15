@@ -98,7 +98,12 @@ export function ProjectSidebar({ children }: { children: ReactNode }) {
             </SidebarMenu>
           </SidebarFooter>
         </Sidebar>
-        <SidebarInset className="min-h-0 overflow-hidden">{children}</SidebarInset>
+        <SidebarInset className="min-h-0 overflow-hidden">
+          <div className="flex shrink-0 items-center border-b px-2 py-1 md:hidden">
+            <SidebarTrigger />
+          </div>
+          {children}
+        </SidebarInset>
       </SidebarProvider>
     </TooltipProvider>
   );
