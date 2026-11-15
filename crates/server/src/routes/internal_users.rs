@@ -199,7 +199,7 @@ struct Deleted {
     hashes: Vec<String>,
 }
 
-/// `POST /api/internal/v1/users/delete`. An unknown subject answers 200 with no orgs, so a
+/// `POST /api/internal/v1/users/delete`. An unknown user answers 200 with no orgs, so a
 /// retry after a lost response succeeds.
 async fn delete(
     State(state): State<AppState>,

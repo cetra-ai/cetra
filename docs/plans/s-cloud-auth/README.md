@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15
+Status: S1–S5 done on 2026-11-15
 
 # S · Cloud auth
 
