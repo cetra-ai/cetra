@@ -125,6 +125,8 @@ pub(crate) struct EvalTiming {
     pub(crate) budget_every: Duration,
     /// Pending-traces flusher (D-I-8).
     pub(crate) flush_every: Duration,
+    /// Online-rule sweeper (D-I-9).
+    pub(crate) sweep_every: Duration,
     /// How long the dispatcher gives its workers at shutdown before it aborts them.
     pub(crate) drain: Duration,
 }
@@ -137,6 +139,7 @@ impl EvalTiming {
         prune_every: Duration::from_secs(3_600),
         budget_every: Duration::from_secs(30),
         flush_every: Duration::from_secs(5),
+        sweep_every: Duration::from_secs(2),
         drain: Duration::from_secs(3),
     };
 
@@ -148,6 +151,7 @@ impl EvalTiming {
         prune_every: Duration::from_secs(3_600),
         budget_every: Duration::from_millis(100),
         flush_every: Duration::from_millis(100),
+        sweep_every: Duration::from_millis(50),
         drain: Duration::from_secs(3),
     };
 }
@@ -176,7 +180,8 @@ pub(crate) struct EvalTasks {
     timing: EvalTiming,
 }
 
-/// Starts the dispatcher, janitor, pruner, budget ticker and pending-traces flusher. Each runs one
+/// Starts the dispatcher, janitor, pruner, budget ticker, pending-traces flusher and online-rule
+/// sweeper. Each runs one
 /// pass as soon as it starts (the first tick of its interval is not skipped), so a restart prunes
 /// and clears at once.
 pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
@@ -190,6 +195,7 @@ pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
         )),
         tokio::spawn(run_prune(state.clone(), stop.clone(), timing.prune_every)),
         tokio::spawn(run_flusher(state.clone(), stop.clone(), timing.flush_every)),
+        tokio::spawn(run_sweeper(state.clone(), stop.clone(), timing.sweep_every)),
         tokio::spawn(run_budget(state.clone(), stop, timing.budget_every)),
     ];
     EvalTasks { handles, timing }
@@ -316,6 +322,35 @@ async fn run_flusher(state: AppState, mut stop: watch::Receiver<bool>, every: Du
             Err(error) => {
                 tracing::warn!(error = %error, "pending traces could not be flushed");
             }
+        }
+    }
+}
+
+/// The online-rule sweeper (D-I-9). A tick awaits its pass to the end, so passes never overlap.
+async fn run_sweeper(state: AppState, mut stop: watch::Receiver<bool>, every: Duration) {
+    let mut interval = ticker(every);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => return,
+            _ = interval.tick() => {}
+        }
+        let now = state.clock.now_ns();
+        match trigger::sweep_once(&state, now).await {
+            Ok(report) if report != trigger::SweepReport::default() => {
+                tracing::debug!(
+                    completed = report.completed,
+                    matched = report.matched,
+                    sampled = report.sampled,
+                    capped = report.capped,
+                    enqueued = report.enqueued,
+                    failed_batches = report.failed_batches,
+                    dropped = report.dropped,
+                    "online-rule sweep"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => tracing::error!(error = %error, "online-rule sweep failed"),
         }
     }
 }

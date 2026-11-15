@@ -494,8 +494,6 @@ pub(crate) async fn rule_ids_of_connection(
 }
 
 /// What the trigger needs of one enabled, unpaused rule of an active project (D-I-9).
-// I4.7 reads it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TriggerRule {
     pub(crate) id: Uuid,

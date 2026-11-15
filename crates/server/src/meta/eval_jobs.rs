@@ -320,8 +320,6 @@ pub(crate) async fn insert_job(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the insert fails. A missing or disabled rule is `Ok(false)`, not an error.
-// I4.7 calls it.
-#[allow(dead_code)]
 pub(crate) async fn insert_rule_job(
     conn: &mut SqliteConnection,
     job: NewJob,
