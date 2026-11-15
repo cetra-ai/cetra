@@ -6,6 +6,7 @@
 mod counting;
 mod datagen;
 mod payload;
+mod profile;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,6 +57,15 @@ async fn main() -> R<()> {
             let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(5);
             let only = args.get(4).cloned();
             query(&dir, runs, only).await
+        }
+        Some("profile") => {
+            let dir = std::fs::canonicalize(&args[2])?;
+            let runs: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(30);
+            let d2 = dir.clone();
+            profile::profile(&dir, runs, async move |ctx: &SessionContext, variant: &str| {
+                table(ctx, "t", &format!("file://{}/{variant}/", d2.display()), variant.starts_with("vx")).await
+            })
+            .await
         }
         Some("swe") => {
             let budget: usize = args[2].parse()?;

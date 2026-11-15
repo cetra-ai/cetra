@@ -18,6 +18,9 @@ LLM-trace data is the example dataset because it stresses all five.
 | [parquet.md](parquet.md) | Deep review of the Parquet format (HEAD `ec90dd4`) and arrow-rs `parquet` 59.3.2, with file:line citations |
 | [vortex.md](vortex.md) | Deep review of Vortex (HEAD `d7aa24e8f`, ≈ 0.93.0), with file:line citations |
 | [bench/](bench/) | The benchmark crate (data generator, both formats through DataFusion 55, payload-layer prototype) |
+| [other-formats-a.md](other-formats-a.md) | Ideas from media containers, compression containers, dedup and VCS tools, and HTTP-range-native formats |
+| [other-formats-b.md](other-formats-b.md) | Ideas from LSM and embedded databases, columnar engines, search and log engines, and time-series formats |
+| [prototype-plan.md](prototype-plan.md) | Plan for the Strata v0 prototype: design decisions, phases, benchmark protocol, go/no-go criteria |
 | this file | Method, measurements, conclusions, and the proposed design |
 
 ## TL;DR
