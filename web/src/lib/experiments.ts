@@ -25,8 +25,8 @@ export function parseExperimentsSearch(search: Record<string, unknown>): { datas
 }
 
 /** `?errors=1` of the experiment page. */
-export function parseExperimentSearch(search: Record<string, unknown>): { errors?: true } {
-  return isFlag(search.errors) ? { errors: true } : {};
+export function parseExperimentSearch(search: Record<string, unknown>): { errors?: 1 } {
+  return isFlag(search.errors) ? { errors: 1 } : {};
 }
 
 /**
@@ -37,7 +37,7 @@ export function parseExperimentSearch(search: Record<string, unknown>): { errors
 export function parseCompareSearch(search: Record<string, unknown>): {
   ids: string[];
   threshold?: number;
-  regressions?: true;
+  regressions?: 1;
 } {
   const ids: string[] = [];
   for (const part of (stringParam(search, "ids") ?? "").split(",")) {
@@ -53,7 +53,7 @@ export function parseCompareSearch(search: Record<string, unknown>): {
   return {
     ids,
     ...(threshold !== undefined ? { threshold } : {}),
-    ...(isFlag(search.regressions) ? { regressions: true as const } : {}),
+    ...(isFlag(search.regressions) ? { regressions: 1 as const } : {}),
   };
 }
 

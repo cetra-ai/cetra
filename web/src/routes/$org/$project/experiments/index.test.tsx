@@ -42,7 +42,10 @@ it("lists the experiments", async () => {
   const table = await screen.findByRole("table", { name: "Experiments" });
   for (const fixture of experimentsFixture.data) {
     const row = rowOf(fixture.name);
-    expect(within(row).getByText(fixture.name)).toBeInTheDocument();
+    expect(within(row).getByRole("link", { name: fixture.name })).toHaveAttribute(
+      "href",
+      `/acme/support-bot/experiments/${fixture.id}`,
+    );
     expect(
       within(row).getByText(`${fixture.dataset_name} v${fixture.dataset_version}`),
     ).toBeInTheDocument();

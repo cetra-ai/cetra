@@ -110,7 +110,15 @@ export function ExperimentsTable(props: {
                     }}
                   />
                 </TableCell>
-                <TableCell>{row.name}</TableCell>
+                <TableCell>
+                  <Link
+                    to="/$org/$project/experiments/$experimentId"
+                    params={{ org, project, experimentId: row.id }}
+                    className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+                  >
+                    {row.name}
+                  </Link>
+                </TableCell>
                 {hideDataset ? null : (
                   <TableCell>
                     {row.dataset_id !== undefined ? (
@@ -220,7 +228,7 @@ export function CompareSelection({ experiments }: { experiments: Schema<"Experim
   );
 }
 
-function StatusBadge({ experiment }: { experiment: Schema<"Experiment"> }) {
+export function StatusBadge({ experiment }: { experiment: Schema<"Experiment"> }) {
   switch (experiment.status) {
     case "completed":
       return <Badge variant="secondary">Completed</Badge>;

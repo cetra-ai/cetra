@@ -36,7 +36,7 @@ describe("parseCompareSearch", () => {
   });
 
   it("reads the regressions flag", () => {
-    expect(parseCompareSearch({ ids: A, regressions: "1" }).regressions).toBe(true);
+    expect(parseCompareSearch({ ids: A, regressions: "1" }).regressions).toBe(1);
     expect(parseCompareSearch({ ids: A }).regressions).toBeUndefined();
   });
 });
@@ -48,7 +48,7 @@ describe("parseExperimentsSearch and parseExperimentSearch", () => {
   });
 
   it("reads the errors flag of the experiment page", () => {
-    expect(parseExperimentSearch({ errors: "1" })).toEqual({ errors: true });
+    expect(parseExperimentSearch({ errors: "1" })).toEqual({ errors: 1 });
     expect(parseExperimentSearch({})).toEqual({});
   });
 });
