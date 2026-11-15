@@ -2,7 +2,12 @@
 //! the `ExecutionPlan` that reads them (design S8).
 //!
 //! `translate` decides, for each filter, whether Strata evaluates it exactly, as a superset, or
-//! not at all. `scan` and `supports_filters_pushdown` both call it, so they always agree.
+//! not at all. `scan` and `supports_filters_pushdown` both call it, so they agree on the filters
+//! DataFusion passes to `scan`. DataFusion may rewrite a filter after accepting it (`i IN (1,
+//! NULL)` becomes `i = 1 OR NULL`), so `scan` translates the rewritten form as well. A filter
+//! that `scan` cannot translate, or a set of pushed filters that exceeds the predicate size
+//! limit together, is a `Plan` error and never a dropped filter: a dropped filter returns wrong
+//! rows.
 
 use std::sync::Arc;
 
@@ -224,6 +229,7 @@ fn translate_inner(expr: &Expr, table: &StrataTable) -> Pushed {
             _ => Pushed::No,
         },
         Expr::Like(like) => like_expr(like, table),
+        Expr::Literal(ScalarValue::Boolean(v), _) => Pushed::Exact(Predicate::Const(*v)),
         _ => Pushed::No,
     }
 }
@@ -270,7 +276,9 @@ fn exact(table: &StrataTable, p: Predicate) -> Pushed {
 }
 
 /// The `Lit` of a literal of type `value`, for a column of file type `dt`. `None` when the types
-/// do not match, which keeps the filter unpushed.
+/// do not match, which keeps the filter unpushed. Float columns are never pushed: DataFusion
+/// compares floats with `-0.0 == 0.0`, while Arrow's kernels, which Strata uses, order them by
+/// the IEEE total order, so the two would disagree.
 fn lit_of(value: &ScalarValue, dt: &DataType) -> Option<Lit> {
     fn opt<T>(v: Option<T>, f: impl FnOnce(T) -> Lit) -> Lit {
         v.map_or(Lit::Null, f)
@@ -285,8 +293,6 @@ fn lit_of(value: &ScalarValue, dt: &DataType) -> Option<Lit> {
         (DataType::UInt16, ScalarValue::UInt16(v)) => opt(*v, |v| Lit::UInt(u64::from(v))),
         (DataType::UInt32, ScalarValue::UInt32(v)) => opt(*v, |v| Lit::UInt(u64::from(v))),
         (DataType::UInt64, ScalarValue::UInt64(v)) => opt(*v, Lit::UInt),
-        (DataType::Float32, ScalarValue::Float32(v)) => opt(*v, |v| Lit::Float(f64::from(v))),
-        (DataType::Float64, ScalarValue::Float64(v)) => opt(*v, Lit::Float),
         (DataType::Timestamp(TimeUnit::Nanosecond, _), ScalarValue::TimestampNanosecond(v, _)) => {
             opt(*v, Lit::Int)
         }
@@ -362,6 +368,15 @@ fn combine(and: bool, a: Pushed, b: Pushed) -> Pushed {
     } else {
         Pushed::Inexact(p)
     }
+}
+
+/// Whether `kept` followed by `p` still satisfies the predicate size limit, as one `And`. Pushdown
+/// and `scan` both use it, so they accept the same filters.
+fn fits_with(kept: &[Predicate], p: &Predicate) -> bool {
+    let mut all = Vec::with_capacity(kept.len() + 1);
+    all.extend(kept.iter().cloned());
+    all.push(p.clone());
+    predicate::check_size(&Predicate::And(all)).is_ok()
 }
 
 /// `column op literal` or `literal op column`.
@@ -526,12 +541,21 @@ impl TableProvider for StrataTable {
         &self,
         filters: &[&Expr],
     ) -> DfResult<Vec<TableProviderFilterPushDown>> {
+        // A filter is accepted only while the predicates accepted before it still fit together.
+        let mut kept: Vec<Predicate> = Vec::new();
         Ok(filters
             .iter()
-            .map(|filter| match translate(filter, self) {
-                Pushed::Exact(_) => TableProviderFilterPushDown::Exact,
-                Pushed::Inexact(_) => TableProviderFilterPushDown::Inexact,
-                Pushed::No => TableProviderFilterPushDown::Unsupported,
+            .map(|filter| {
+                let (p, answer) = match translate(filter, self) {
+                    Pushed::Exact(p) => (p, TableProviderFilterPushDown::Exact),
+                    Pushed::Inexact(p) => (p, TableProviderFilterPushDown::Inexact),
+                    Pushed::No => return TableProviderFilterPushDown::Unsupported,
+                };
+                if !fits_with(&kept, &p) {
+                    return TableProviderFilterPushDown::Unsupported;
+                }
+                kept.push(p);
+                answer
             })
             .collect())
     }
@@ -543,20 +567,29 @@ impl TableProvider for StrataTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        // Translate the filters. `No` stays above the scan, which DataFusion evaluates itself.
-        let mut kept = Vec::new();
+        // Translate the filters. DataFusion passes only the filters that `supports_filters_pushdown`
+        // accepted, so a filter that does not translate here is an error, not a filter to skip.
+        let mut kept: Vec<Predicate> = Vec::new();
         let mut key = None;
         for filter in filters {
-            match translate(filter, self) {
-                Pushed::Exact(p) => {
-                    if key.is_none() {
-                        key = self.sort_key_equality(filter);
-                    }
-                    kept.push(p);
+            let (p, exact) = match translate(filter, self) {
+                Pushed::Exact(p) => (p, true),
+                Pushed::Inexact(p) => (p, false),
+                Pushed::No => {
+                    return Err(DataFusionError::Plan(format!(
+                        "StrataTable cannot evaluate a pushed filter: {filter}"
+                    )));
                 }
-                Pushed::Inexact(p) => kept.push(p),
-                Pushed::No => {}
+            };
+            if !fits_with(&kept, &p) {
+                return Err(DataFusionError::Plan(format!(
+                    "StrataTable cannot evaluate the pushed filters together: {filter}"
+                )));
             }
+            if exact && key.is_none() {
+                key = self.sort_key_equality(filter);
+            }
+            kept.push(p);
         }
 
         // Prune the files whose sort-key filter proves the key absent.

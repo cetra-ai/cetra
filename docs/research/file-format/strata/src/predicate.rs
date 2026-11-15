@@ -63,6 +63,7 @@ pub enum CmpOp {
 /// only narrow columns. `MapKeyEq` may name only a shredded map column, and is NULL unless the
 /// key has exactly one non-null value in the row's map. `Contains` may name only a payload
 /// column; it is never NULL, so a null row is not a match and `Not(Contains(..))` selects it.
+/// `Const` is TRUE, FALSE or NULL for every row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
     /// All of the terms; TRUE when empty.
@@ -86,6 +87,8 @@ pub enum Predicate {
     /// The payload column's value contains the bytes. Never NULL: a null row is FALSE. The
     /// needle is at most 64 bytes long.
     Contains(usize, Vec<u8>),
+    /// A constant: TRUE (`Some(true)`), FALSE (`Some(false)`) or NULL (`None`) for every row.
+    Const(Option<bool>),
 }
 
 /// A predicate checked against a file, with its literals converted to the column types.
@@ -99,6 +102,8 @@ pub(crate) enum Bound {
     Cmp(usize, CmpOp, ArrayRef),
     IsNull(usize),
     IsNotNull(usize),
+    /// A constant, as [`Predicate::Const`].
+    Const(Option<bool>),
     /// The precomputed mask at this index of the masks of [`bind`].
     Mask(usize),
 }
@@ -281,7 +286,8 @@ pub(crate) fn check_size(p: &Predicate) -> Result<()> {
             | Predicate::IsNull(_)
             | Predicate::IsNotNull(_)
             | Predicate::MapKeyEq(..)
-            | Predicate::Contains(..) => {}
+            | Predicate::Contains(..)
+            | Predicate::Const(_) => {}
         }
         if nodes > MAX_PREDICATE_NODES {
             return Err(too_large());
@@ -381,6 +387,7 @@ fn bind_into(p: &Predicate, file: &StrataFile, masks: &mut Vec<MaskSource>) -> R
             masks.push(MaskSource::MapKey(residual, key.clone(), value));
             Ok(Bound::Mask(masks.len() - 1))
         }
+        Predicate::Const(value) => Ok(Bound::Const(*value)),
         Predicate::Contains(column, needle) => {
             if schema_layer(file, *column)? != Layer::Payload {
                 return Err(StrataError::Unsupported {
@@ -465,6 +472,7 @@ pub(crate) fn evaluate(
             let array: &dyn Array = column_of(columns, *column)?.as_ref();
             Ok(is_not_null(array)?)
         }
+        Bound::Const(value) => Ok(BooleanArray::from(vec![*value; rows])),
     }
 }
 
@@ -580,6 +588,14 @@ fn pruning_terms(b: &Bound, column: usize) -> Vec<&Bound> {
         .collect()
 }
 
+/// Whether a top-level conjunct of `b` is FALSE or NULL. Such a conjunct selects no row, so a
+/// scan can skip every chunk.
+pub(crate) fn never_true(b: &Bound) -> bool {
+    conjuncts(b)
+        .into_iter()
+        .any(|conjunct| matches!(conjunct, Bound::Const(Some(false) | None)))
+}
+
 /// The distinct columns that some conjunct of `b` prunes, in ascending order.
 pub(crate) fn pruned_columns(b: &Bound) -> Vec<usize> {
     let columns: BTreeSet<usize> = conjuncts(b).into_iter().filter_map(pruned_by).collect();
@@ -599,7 +615,7 @@ pub(crate) fn bound_columns(b: &Bound) -> Vec<usize> {
             Bound::Cmp(column, _, _) | Bound::IsNull(column) | Bound::IsNotNull(column) => {
                 out.insert(*column);
             }
-            Bound::Mask(_) => {}
+            Bound::Mask(_) | Bound::Const(_) => {}
         }
     }
     let mut columns = BTreeSet::new();
@@ -891,6 +907,29 @@ mod tests {
         let field = Field::new("x", DataType::Int64, true);
         let null: ArrayRef = new_null_array(field.data_type(), 1);
         assert!(!term_may_match(&entry, &field, CmpOp::Eq, &null).unwrap());
+    }
+
+    #[test]
+    fn a_constant_is_the_same_value_on_every_row() {
+        for value in [Some(true), Some(false), None] {
+            let mask = evaluate(&Bound::Const(value), &[], &[], 3).unwrap();
+            assert_eq!(mask, BooleanArray::from(vec![value; 3]));
+        }
+    }
+
+    #[test]
+    fn a_false_or_null_top_level_conjunct_is_never_true() {
+        let and = |terms| Bound::And(terms);
+        assert!(never_true(&Bound::Const(Some(false))));
+        assert!(never_true(&Bound::Const(None)));
+        assert!(never_true(&and(vec![
+            Bound::Const(Some(true)),
+            Bound::Const(Some(false)),
+        ])));
+        assert!(!never_true(&Bound::Const(Some(true))));
+        // Under an `Or` a constant is not a conjunct, so nothing is proven.
+        assert!(!never_true(&Bound::Or(vec![Bound::Const(Some(false))])));
+        assert!(!never_true(&Bound::Not(Box::new(Bound::Const(None)))));
     }
 
     #[test]

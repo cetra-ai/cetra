@@ -1,8 +1,10 @@
 //! `trace_detail` and `trace_list` against DataFusion over the same Strata files: the same rows
 //! in the same order, and an early stop that reads fewer requests for `k = 1`.
 //!
-//! Always ignored. Run with:
+//! The DataFusion comparisons are always ignored. Run with:
 //! `cargo test --release -- --ignored fast_paths --nocapture`
+//!
+//! `trace_list_with_no_column_counts_the_rows` runs in a plain `cargo test`.
 
 #[path = "common/dataset.rs"]
 mod dataset;
@@ -291,5 +293,77 @@ async fn fast_paths_match_datafusion() {
         rows(&[outputs[0].clone()]),
         rows(&[outputs[1].slice(0, 1)]),
         "k=1 row is the first row of k=1,000,000"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn trace_list_with_no_column_counts_the_rows() {
+    let data = dataset::spans_dataset(200, 1);
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let files = write_files(
+        &store,
+        &data.files,
+        &["trace_id", "start_time"],
+        Config::default(),
+        "no-column",
+    )
+    .await;
+    let hour = 3_600 * NS;
+    let window = DAY_START..DAY_START + 24 * hour;
+    let with_key = trace_list(&files, window.clone(), Some(llm(&files)), 5, &["trace_id"])
+        .await
+        .unwrap();
+    assert!(with_key.num_rows() > 0, "the window has llm spans");
+    let none = trace_list(&files, window, Some(llm(&files)), 5, &[])
+        .await
+        .unwrap();
+    assert_eq!(none.num_columns(), 0, "no column is requested");
+    assert_eq!(none.num_rows(), with_key.num_rows(), "row count");
+}
+
+/// `trace_list` over many chunks, with a `k` far below the window: the kept batches are
+/// compacted along the way, and the rows still equal DataFusion's top rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn fast_paths_trace_list_compacts_a_long_window() {
+    // Sorted by trace, so every chunk spans the whole day and the early stop never fires.
+    let data = dataset::spans_dataset(8_000, 1);
+    let total: usize = data.files.iter().flatten().map(|b| b.num_rows()).sum();
+    assert!(
+        total > 20_000,
+        "the window needs more than 20,000 rows, got {total}"
+    );
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let files = write_files(
+        &store,
+        &data.files,
+        &["trace_id", "start_time"],
+        Config {
+            chunk_max_rows: 256,
+            ..Config::default()
+        },
+        "long-window",
+    )
+    .await;
+    let hour = 3_600 * NS;
+    let window = DAY_START..DAY_START + 24 * hour;
+
+    let got = trace_list(&files, window.clone(), Some(llm(&files)), 3, &LIST_COLUMNS)
+        .await
+        .unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(StrataTable::new(files.clone()).unwrap()))
+        .unwrap();
+    let batches = ctx
+        .sql(&list_sql("t", &window, 3))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        rows(&[got]),
+        rows(&batches),
+        "trace_list k = 3 over {total} spans"
     );
 }
