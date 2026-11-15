@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(problem.code, ProblemCode::QueryTooLarge);
         assert_eq!(
             problem.detail.as_deref(),
-            Some("the query needed more memory than allowed")
+            Some("the query needed more memory or temporary disk space than allowed")
         );
     }
 

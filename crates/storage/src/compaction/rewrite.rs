@@ -71,6 +71,11 @@ impl Compactor {
         self: &Arc<Self>,
         now: i64,
     ) -> Result<DeletionReport, CompactionError> {
+        // A stopped store (D-R-6) would only stage rows that cannot commit.
+        if self.objects.sync_failed() || self.committer.stopped() {
+            tracing::debug!("deletion pass skipped: the store stopped after an I/O error");
+            return Ok(DeletionReport::default());
+        }
         // 1. The tombstones as last published.
         let tombstones = Arc::clone(&self.published.load().tombstones);
         let pending = tombstones.all();

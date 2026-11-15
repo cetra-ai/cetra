@@ -3,10 +3,13 @@
 //! Without score functions, the default list is `Limit(n+1) ← Sort(start_time DESC NULLS LAST, trace_id DESC) ← Filter ← traces view`.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::compute::concat_batches;
+use arrow::array::BooleanArray;
+use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
@@ -25,6 +28,11 @@ const DURATION_NS: &str = "duration_ns";
 const DURATION_MS: &str = "duration_ms";
 const TRACE_TIES: &[&str] = &[traces::TRACE_ID];
 const SPAN_TIES: &[&str] = &[spans::SPAN_ID, spans::TRACE_ID];
+/// The columns that name one span in a list: copies agree on all three.
+const SPAN_KEY: &[&str] = &[spans::START_TIME, spans::SPAN_ID, spans::TRACE_ID];
+/// Most rows one list attempt reads, 64 × [`super::MAX_PAGE`]. A span stored many times, or a
+/// filter matching many copies, can't make the refetch read more than this.
+const MAX_FETCH: usize = 64 * super::MAX_PAGE;
 const SPAN_RANK: &str = "rn";
 
 /// Most spans `trace_detail` returns for one trace.
@@ -254,20 +262,35 @@ pub async fn trace_list(
     ctx: &QueryContext,
     request: TraceListRequest<'_>,
 ) -> Result<Page, RunError> {
-    run_timed(request.limit, request.timeout, async {
-        let frame = trace_frame(ctx, &request).await?;
-        finish(ctx, frame, &ListPlan::traces(&request)).await
-    })
-    .await
+    run_list(ctx, ListPlan::traces(&request), request.timeout, MAX_FETCH).await
 }
 
 /// One page of spans. Exclusions use the span's own environment and metadata.
 ///
+/// A span stored more than once (a re-send not yet compacted) is listed once, as its copy with
+/// the greatest `ingest_time`.
+///
 /// # Errors
 ///
 /// Same as [`trace_list`].
+///
+/// A page reads at most [`MAX_FETCH`] rows to find `limit` distinct spans. When that cap comes
+/// first, the page holds the distinct spans read so far: fewer than `limit` is possible, and the
+/// cursor is still set, so paging goes on from the last span returned.
+///
+/// The filter, the search and the default exclusions apply before de-duplication. If the newest
+/// copy of a span fails them and an older copy passes, the older copy is listed.
 pub async fn span_list(ctx: &QueryContext, request: SpanListRequest<'_>) -> Result<Page, RunError> {
-    run_list(ctx, ListPlan::spans(&request), request.timeout).await
+    span_list_capped(ctx, request, MAX_FETCH).await
+}
+
+/// [`span_list`] with a caller-chosen read cap. Tests pass a small one.
+async fn span_list_capped(
+    ctx: &QueryContext,
+    request: SpanListRequest<'_>,
+    cap: usize,
+) -> Result<Page, RunError> {
+    run_list(ctx, ListPlan::spans(&request), request.timeout, cap).await
 }
 
 /// The trace and its spans. Default exclusions do not apply.
@@ -680,12 +703,20 @@ async fn count_matches(
         .map_err(|error| ctx.fail(error))
 }
 
+/// Copies of one row. Rows that agree on `key` and sort next to each other are copies; the
+/// sort puts the copy with the greatest `newest` first, and that copy is the one kept.
+struct Dedup {
+    key: &'static [&'static str],
+    newest: &'static str,
+}
+
 struct ListPlan<'a> {
     table: &'static str,
     view: FilterView,
     list: &'static str,
     sort: &'static str,
     ties: &'static [&'static str],
+    dedup: Option<Dedup>,
     filter: Option<&'a str>,
     search: Option<&'a str>,
     scope: ListScope,
@@ -704,6 +735,7 @@ impl<'a> ListPlan<'a> {
             list: LIST,
             sort: request.sort.column(),
             ties: TRACE_TIES,
+            dedup: None,
             filter: request.filter,
             search: request.search,
             scope: request.scope,
@@ -722,6 +754,10 @@ impl<'a> ListPlan<'a> {
             list: SPANS,
             sort: request.sort.column(),
             ties: SPAN_TIES,
+            dedup: Some(Dedup {
+                key: SPAN_KEY,
+                newest: spans::INGEST_TIME,
+            }),
             filter: request.filter,
             search: request.search,
             scope: request.scope,
@@ -738,12 +774,104 @@ async fn run_list(
     ctx: &QueryContext,
     plan: ListPlan<'_>,
     timeout: Duration,
+    cap: usize,
 ) -> Result<Page, RunError> {
     run_timed(plan.limit, timeout, async {
-        let frame = list_frame(ctx, &plan).await?;
-        finish(ctx, frame, &plan).await
+        // A de-duplicating list reads a margin for the copies it drops. When the rows left after
+        // de-duplication don't fill the page and the read stopped at its own limit, read again
+        // with a doubled limit, up to `cap`. Without de-duplication the first read always settles it.
+        let mut fetch = plan.limit + 1;
+        if plan.dedup.is_some() {
+            fetch *= 2;
+        }
+        fetch = fetch.min(cap);
+        loop {
+            let frame = list_frame(ctx, &plan, fetch).await?;
+            let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+            let read: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            let batches = match &plan.dedup {
+                Some(dedup) => drop_adjacent_copies(&batches, dedup.key)?,
+                None => batches,
+            };
+            let distinct: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            // `limit + 1` distinct rows, or a read that ended before its limit, settle the page.
+            if distinct > plan.limit || read < fetch {
+                return assemble(
+                    batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
+                );
+            }
+            if fetch >= cap {
+                return capped_page(batches, &plan);
+            }
+            fetch = fetch.saturating_mul(2).min(cap);
+        }
     })
     .await
+}
+
+/// The page when the read cap comes first: the distinct rows read, at most `limit`. When fewer
+/// than `limit` rows came back, the page has a cursor anyway, taken from its last row. The
+/// cursor's strict `after` skips the rest of that row's copies, and copies that were read but
+/// dropped share its key.
+fn capped_page(batches: Vec<RecordBatch>, plan: &ListPlan<'_>) -> Result<Page, RunError> {
+    let distinct: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    if distinct > plan.limit {
+        return assemble(
+            batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
+        );
+    }
+    // One more row than the page: `assemble` then cuts the page at `distinct` rows and cursors
+    // from its last row, which is the last distinct row.
+    let mut batches = batches;
+    if let Some(last) = batches.iter().rev().find(|batch| batch.num_rows() > 0) {
+        let tail = last.slice(last.num_rows() - 1, 1);
+        batches.push(tail);
+    }
+    assemble(
+        batches, distinct, plan.list, plan.sort, plan.order, plan.ties,
+    )
+}
+
+/// Drops each row whose `key` columns equal the previous row's. The rows arrive in sort order,
+/// so the copies of one row are adjacent and the first of each run is kept. One pass with no
+/// window or aggregate: the batches keep their order and only lose rows.
+fn drop_adjacent_copies(
+    batches: &[RecordBatch],
+    key: &[&str],
+) -> Result<Vec<RecordBatch>, RunError> {
+    let mut previous: Option<Vec<ScalarValue>> = None;
+    let mut kept = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let columns = key
+            .iter()
+            .map(|name| {
+                batch.column_by_name(name).map(Arc::clone).ok_or_else(|| {
+                    RunError::Internal(DataFusionError::Internal(format!(
+                        "missing key column {name}"
+                    )))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let values = columns
+                .iter()
+                .map(|column| ScalarValue::try_from_array(column.as_ref(), row))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RunError::Internal)?;
+            keep.push(previous.as_ref() != Some(&values));
+            previous = Some(values);
+        }
+        let filtered = filter_record_batch(batch, &BooleanArray::from(keep)).map_err(|error| {
+            RunError::Internal(DataFusionError::Internal(format!(
+                "dropping copies: {error}"
+            )))
+        })?;
+        if filtered.num_rows() > 0 {
+            kept.push(filtered);
+        }
+    }
+    Ok(kept)
 }
 
 async fn run_timed<F>(limit: usize, timeout: Duration, future: F) -> Result<Page, RunError>
@@ -761,23 +889,12 @@ where
     }
 }
 
-async fn finish(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    plan: &ListPlan<'_>,
-) -> Result<Page, RunError> {
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    assemble(
-        batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
-    )
-}
-
 /// The planned frame, before it is collected. Tests read the plan from this.
 async fn trace_frame(
     ctx: &QueryContext,
     request: &TraceListRequest<'_>,
 ) -> Result<DataFrame, RunError> {
-    list_frame(ctx, &ListPlan::traces(request)).await
+    list_frame(ctx, &ListPlan::traces(request), request.limit + 1).await
 }
 
 /// The physical plan A2 builds for `trace_list`, as a display string.
@@ -799,7 +916,13 @@ pub async fn trace_list_plan(
     ))
 }
 
-async fn list_frame(ctx: &QueryContext, plan: &ListPlan<'_>) -> Result<DataFrame, RunError> {
+/// The list's frame, sorted and cut to `fetch` rows. A de-duplicating plan also sorts by the
+/// newest copy's `ingest_time` last, and the frame keeps only the listed columns.
+async fn list_frame(
+    ctx: &QueryContext,
+    plan: &ListPlan<'_>,
+    fetch: usize,
+) -> Result<DataFrame, RunError> {
     let filter = match present(plan.filter) {
         Some(text) => Some(ctx.parse_filter(plan.view, text)?),
         None => None,
@@ -848,10 +971,14 @@ async fn list_frame(ctx: &QueryContext, plan: &ListPlan<'_>) -> Result<DataFrame
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
+    let mut sorts = order_by(plan.sort, plan.ties, plan.order);
+    if let Some(dedup) = &plan.dedup {
+        sorts.push(col(dedup.newest).sort(false, false));
+    }
     frame = frame
-        .sort(order_by(plan.sort, plan.ties, plan.order))
+        .sort(sorts)
         .map_err(classify)?
-        .limit(0, Some(plan.limit + 1))
+        .limit(0, Some(fetch))
         .map_err(classify)?;
     if let Some(columns) = plan.columns {
         frame = frame
@@ -997,11 +1124,12 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MatchCountRequest,
-        SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
-        TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest, TraceRefreshRequest, TraceSort,
-        TraceSpansRequest, match_count, span_detail, span_list, span_refresh, trace_detail,
-        trace_detail_limited, trace_frame, trace_list, trace_refresh, trace_spans,
+        MAX_FETCH, MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE,
+        MatchCountRequest, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest,
+        SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest,
+        TraceRefreshRequest, TraceSort, TraceSpansRequest, match_count, span_detail, span_list,
+        span_list_capped, span_refresh, trace_detail, trace_detail_limited, trace_frame,
+        trace_list, trace_refresh, trace_spans,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};
@@ -1743,6 +1871,164 @@ mod tests {
                 .any(|row| row["total_tokens"].is_null()),
             "total_tokens has a null"
         );
+    }
+
+    /// `copies` copies of one span starting at `start`. Copy `i` (from 1) has `ingest_time = i`
+    /// and `name = "copy i"`, so the newest copy is the last one.
+    fn copies_of(trace: u16, span: u8, start: i64, copies: i64) -> Vec<Span> {
+        (1..=copies)
+            .map(|ingest| {
+                let mut copy = span_row(trace, span, start, ingest);
+                copy.name = format!("copy {ingest}");
+                copy
+            })
+            .collect()
+    }
+
+    /// (trace_id, span_id, name) of a span row of the test project.
+    fn expected_row(trace: u16, span: u8, name: &str) -> (String, String, String) {
+        let row = span_row(trace, span, 0, 0);
+        (row.trace_id.to_hex(), row.span_id.to_hex(), name.to_owned())
+    }
+
+    fn listed_triples(rows: &[Value]) -> Vec<(String, String, String)> {
+        rows.iter()
+            .map(|row| {
+                (
+                    row["trace_id"].as_str().expect("trace_id").to_owned(),
+                    row["span_id"].as_str().expect("span_id").to_owned(),
+                    row["name"].as_str().expect("name").to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Every row of the span list read in pages of `limit`, with a read cap of `cap`, in order.
+    async fn walk_spans(ctx: &QueryContext, limit: usize, cap: usize) -> Vec<Value> {
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut request = span_request(
+                scope(None, true),
+                SpanSort::StartTime,
+                SortOrder::Desc,
+                limit,
+            );
+            request.cursor = cursor.as_deref();
+            let page = span_list_capped(ctx, request, cap).await.expect("page");
+            assert!(row_count(&page.batches) <= limit);
+            walked.extend(rows(&page));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return walked,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_shows_a_resent_span_once() {
+        let ctx = context_for(&copies_of(0, 0, 1_000, 2));
+        let page = span_list(
+            &ctx,
+            span_request(scope(None, true), SpanSort::StartTime, SortOrder::Desc, 50),
+        )
+        .await
+        .expect("list");
+        assert_eq!(
+            listed_triples(&rows(&page)),
+            vec![expected_row(0, 0, "copy 2")]
+        );
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn span_list_pages_are_independent_of_page_size() {
+        // Traces 0 and 1 start together, so ties cut across pages. Trace 0 and 2 re-send
+        // span 1; trace 3 span 0 is sent five times, so one page needs more rows than it asks.
+        let mut spans = Vec::new();
+        let mut expected = Vec::new();
+        for trace in 0..4u16 {
+            let start = 1_000 * (1 + i64::from(trace / 2));
+            for span in 0..3u8 {
+                let copies = match (trace, span) {
+                    (3, 0) => 5,
+                    (0 | 2, 1) => 2,
+                    _ => 1,
+                };
+                spans.extend(copies_of(trace, span, start, copies));
+                expected.push(expected_row(trace, span, &format!("copy {copies}")));
+            }
+        }
+        let ctx = context_for(&spans);
+        let single = listed_triples(&walk_spans(&ctx, 1000, MAX_FETCH).await);
+        let mut sorted = single.clone();
+        sorted.sort();
+        expected.sort();
+        assert_eq!(sorted, expected, "one row per span, the newest copy");
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                single,
+                "pages of {limit}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_boundary_between_copies() {
+        // Start order: B, then the two copies of X, then A. A page of two rows ends between the
+        // copies of X unless the list shows X once.
+        let mut spans = copies_of(2, 0, 3_000, 1);
+        spans.extend(copies_of(1, 0, 2_000, 2));
+        spans.extend(copies_of(0, 0, 1_000, 1));
+        let ctx = context_for(&spans);
+        let expected = vec![
+            expected_row(2, 0, "copy 1"),
+            expected_row(1, 0, "copy 2"),
+            expected_row(0, 0, "copy 1"),
+        ];
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                expected,
+                "pages of {limit}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_bounds_the_refetch_and_keeps_paging() {
+        // Newest first: Z (one copy), X (five copies), Y (one copy). With a read cap of 4, a page
+        // reads Z and the first three copies of X, so it stops with two distinct spans.
+        let mut spans = copies_of(2, 0, 3_000, 1);
+        spans.extend(copies_of(1, 0, 2_000, 5));
+        spans.extend(copies_of(0, 0, 1_000, 1));
+        let ctx = context_for(&spans);
+        let expected = vec![
+            expected_row(2, 0, "copy 1"),
+            expected_row(1, 0, "copy 5"),
+            expected_row(0, 0, "copy 1"),
+        ];
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                expected,
+                "pages of {limit}, no cap"
+            );
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, 4).await),
+                expected,
+                "pages of {limit}, a read cap of 4"
+            );
+        }
+        let request = span_request(scope(None, true), SpanSort::StartTime, SortOrder::Desc, 3);
+        let page = span_list_capped(&ctx, request, 4).await.expect("page");
+        assert_eq!(
+            listed_triples(&rows(&page)),
+            vec![expected[0].clone(), expected[1].clone()],
+            "the short page at the cap"
+        );
+        assert!(page.next_cursor.is_some(), "the capped page still pages on");
     }
 
     #[tokio::test]

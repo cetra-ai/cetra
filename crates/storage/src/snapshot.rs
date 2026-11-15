@@ -6,7 +6,6 @@
 //! the `object_gc_gate`.
 
 use std::fmt;
-use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, MutexGuard, PoisonError};
@@ -18,6 +17,7 @@ use tokio::sync::OwnedRwLockWriteGuard;
 use crate::CopyCancel;
 use crate::catalog::{Catalog, table_index};
 use crate::error::{CopyObjectsError, SnapshotError};
+use crate::fs;
 use crate::objects::Objects;
 use crate::wal::Table;
 
@@ -191,7 +191,7 @@ pub(crate) fn copy_all(
     }
     {
         let _held = not_cancelled(cancel)?;
-        std::fs::create_dir_all(dest).map_err(|source| CopyObjectsError::Dir { source })?;
+        fs::create_dir_all(dest).map_err(|source| CopyObjectsError::Dir { source })?;
     }
     let mut report = CopyReport::default();
     for (key_index, object) in objects.iter().enumerate() {
@@ -200,7 +200,7 @@ pub(crate) fn copy_all(
         let target = dest.join(&object.key);
         let _held = not_cancelled(cancel)?;
         if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(io_error)?;
+            fs::create_dir_all(parent).map_err(io_error)?;
         }
         match link_or_copy(&source, &target, false).map_err(io_error)? {
             Linked::Hard => report.linked += 1,
@@ -241,7 +241,7 @@ fn is_plain_relative(key: &str) -> bool {
 /// target), which the copy would hit as well. Errors of the copy are returned.
 fn link_or_copy(source: &Path, target: &Path, force_copy: bool) -> io::Result<Linked> {
     if !force_copy {
-        match std::fs::hard_link(source, target) {
+        match fs::hard_link(source, target) {
             Ok(()) => return Ok(Linked::Hard),
             Err(error)
                 if matches!(
@@ -254,15 +254,15 @@ fn link_or_copy(source: &Path, target: &Path, force_copy: bool) -> io::Result<Li
             Err(_) => {}
         }
     }
-    std::fs::copy(source, target)?;
-    File::open(target)?.sync_all()?;
+    fs::copy(source, target)?;
+    fs::OpenOptions::new().read(true).open(target)?.sync_all()?;
     Ok(Linked::Copied)
 }
 
 /// Makes every directory under `dir` durable, `dir` included.
 fn sync_dirs(dir: &Path) -> io::Result<()> {
-    crate::wal::sync_dir(dir)?;
-    for entry in std::fs::read_dir(dir)? {
+    fs::sync_dir(dir)?;
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             sync_dirs(&entry.path())?;
@@ -678,6 +678,7 @@ mod tests {
         let storage = Storage::open_with_store(
             config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600)),
             Arc::new(InMemory::new()),
+            crate::objects::PutSizes::S3,
         )
         .await
         .unwrap();

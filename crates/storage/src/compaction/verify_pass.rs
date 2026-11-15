@@ -4,10 +4,13 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
+use object_store::path::Path as ObjectPath;
+
 use crate::catalog::{CatalogEdit, FileId, FileMeta, FileTable};
 use crate::compaction::job::{ClaimGuard, Compactor};
 use crate::compaction::plan::{Job, JobKind, Policy};
 use crate::hooks::HookPoint;
+use crate::read_cache::cached_name;
 use crate::read_state::publish_catalog;
 use crate::verify::{Verdict, verify_file};
 
@@ -109,6 +112,7 @@ impl Compactor {
         let store = self.objects.raw_store();
         match verify_file(&store, &file).await {
             Verdict::Healthy => {
+                self.drop_cached_blocks(&file).await;
                 self.verify.healthy(id, now);
                 report.healthy += 1;
             }
@@ -139,6 +143,23 @@ impl Compactor {
             }
         }
         drop(guard);
+    }
+
+    /// Drops the read-cache blocks of a file that verification found healthy,
+    /// so a bad cached block cannot outlive the check (spec 03 §6).
+    ///
+    /// Known narrow race, not fixed here: a reader that fetched the file's bytes before this
+    /// evict can write them back into the cache after it, so a bad block could survive the
+    /// check. The next suspect of M4 (`docs/research/storage/hardening.md` § M4) fixes it.
+    async fn drop_cached_blocks(&self, file: &FileMeta) {
+        let Some(cache) = self.objects.read_cache() else {
+            return;
+        };
+        let Some(name) = cached_name(&ObjectPath::from(file.path.as_str())) else {
+            return;
+        };
+        let cache = Arc::clone(cache);
+        let _ = tokio::task::spawn_blocking(move || cache.evict_file(&name)).await;
     }
 
     /// Quarantines a corrupt `spans` or `scores` file with the claimed

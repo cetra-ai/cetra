@@ -114,23 +114,23 @@ async fn pre_migration_copy(
                 )),
             })?;
         if staging.exists() {
-            std::fs::remove_file(&staging).map_err(io)?;
+            crate::fs::remove_file(&staging).map_err(io)?;
         }
         sqlx::query("VACUUM INTO ?")
             .bind(staging_text)
             .execute(&mut *connection)
             .await
             .map_err(|source| CatalogError::PreMigrationCopy { source })?;
-        std::fs::File::open(&staging)
+        crate::fs::OpenOptions::new()
+            .read(true)
+            .open(&staging)
             .and_then(|file| file.sync_all())
             .map_err(io)?;
-        std::fs::rename(&staging, &target).map_err(io)?;
-        std::fs::File::open(dir)
-            .and_then(|file| file.sync_all())
-            .map_err(io)?;
+        crate::fs::rename(&staging, &target).map_err(io)?;
+        crate::fs::sync_dir(dir).map_err(io)?;
     }
     let prefix = format!("{name}.pre-");
-    for entry in std::fs::read_dir(dir).map_err(io)? {
+    for entry in crate::fs::read_dir(dir).map_err(io)? {
         let path = entry.map_err(io)?.path();
         let stale = path != target
             && path
@@ -138,7 +138,7 @@ async fn pre_migration_copy(
                 .and_then(|file| file.to_str())
                 .is_some_and(|file| file.starts_with(&prefix));
         if stale {
-            std::fs::remove_file(&path).map_err(io)?;
+            crate::fs::remove_file(&path).map_err(io)?;
         }
     }
     if copied {
@@ -581,7 +581,7 @@ mod tests {
 
     /// Lists the `catalog.db.pre-*` files in `dir`.
     fn pre_copies(dir: &Path) -> Vec<String> {
-        std::fs::read_dir(dir)
+        crate::fs::read_dir(dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| name.starts_with("catalog.db.pre-"))

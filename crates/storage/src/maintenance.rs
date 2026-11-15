@@ -6,7 +6,7 @@
 //! startup collection, no temporary-file or spill cleanup, no background task. A
 //! `--dry-run` therefore changes neither the objects nor the catalog.
 
-use std::fs::File;
+use crate::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use crate::config::StorageConfig;
 use crate::error::{OpenError, OrphanError, StorageError};
 use crate::gc::{self, OrphanReport};
 use crate::hooks::Hooks;
-use crate::objects::Objects;
+use crate::objects::{Objects, PutSizes};
 
 /// A data directory open for maintenance. Holds `LOCK` until [`Self::close`].
 #[derive(Debug)]
@@ -45,12 +45,12 @@ impl Maintenance {
         config: StorageConfig,
         store: Arc<dyn ObjectStore>,
     ) -> Result<Self, OpenError> {
-        Self::open_inner(config, Some(store)).await
+        Self::open_inner(config, Some((store, PutSizes::S3))).await
     }
 
     async fn open_inner(
         config: StorageConfig,
-        remote: Option<Arc<dyn ObjectStore>>,
+        remote: Option<(Arc<dyn ObjectStore>, PutSizes)>,
     ) -> Result<Self, OpenError> {
         #[allow(clippy::default_constructed_unit_structs)]
         let hooks = Hooks::default();
@@ -185,9 +185,13 @@ mod tests {
     async fn a_dry_run_maintenance_open_changes_no_object_and_no_catalog_byte() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = Storage::open_with_store(config_in(dir.path()), Arc::clone(&store))
-            .await
-            .unwrap();
+        let storage = Storage::open_with_store(
+            config_in(dir.path()),
+            Arc::clone(&store),
+            crate::objects::PutSizes::S3,
+        )
+        .await
+        .unwrap();
         storage
             .append_spans(project(), spans_at(&[1]))
             .await
@@ -241,9 +245,13 @@ mod tests {
         store: &Arc<dyn ObjectStore>,
     ) -> (std::path::PathBuf, Vec<String>, Vec<String>) {
         let live = root.join("live");
-        let storage = Storage::open_with_store(config_in(&live), Arc::clone(store))
-            .await
-            .unwrap();
+        let storage = Storage::open_with_store(
+            config_in(&live),
+            Arc::clone(store),
+            crate::objects::PutSizes::S3,
+        )
+        .await
+        .unwrap();
         storage
             .append_spans(project(), spans_at(&[1]))
             .await

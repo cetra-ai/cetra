@@ -8,8 +8,9 @@
 
 use crate::QueryOptions;
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use arrow::array::{Array, FixedSizeBinaryArray};
@@ -56,7 +57,7 @@ const COMPACTION_POINTS: &[(&str, HookPoint)] = &[
     ("GcObsoleteAfterDelete", HookPoint::GcObsoleteAfterDelete),
 ];
 
-const DELETION_POINTS: &[(&str, HookPoint)] = &[
+pub(crate) const DELETION_POINTS: &[(&str, HookPoint)] = &[
     ("CatalogCommit", HookPoint::CatalogCommit),
     ("CompactionAfterStage", HookPoint::CompactionAfterStage),
     ("ObjectSync", HookPoint::ObjectSync),
@@ -285,8 +286,10 @@ async fn child() {
     let Ok(dir) = std::env::var("LLMOBS_FLUSH_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_FLUSH_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
+    let _lossy = lossy_from_env(Path::new(&dir));
     let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
         .await
         .unwrap();
@@ -298,10 +301,77 @@ async fn child() {
     panic!("shutdown finished without reaching {name}");
 }
 
-/// Spawns the `test` crash child with `dir` and `name`, and returns only once
-/// it has aborted by signal. A point the child's operations never reach exits
-/// with a code (its `panic!`) and fails the assertion.
-fn run_child(test: &str, dir_var: &str, point_var: &str, name: &str, dir: &Path) {
+/// Lossy seeds per crash point: `LLMOBS_LOSSY_SEEDS`, default 1 (R2.10).
+fn seeds() -> u64 {
+    std::env::var("LLMOBS_LOSSY_SEEDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(1)
+}
+
+/// With `LLMOBS_LOSSY_SHADOW` and `LLMOBS_LOSSY_SEED` set: registers `dir` in
+/// lossy mode and arms the crash before the hook abort (R2.2, R2.10). The
+/// registration lives until the abort. Once `LLMOBS_LOSSY_SHADOW` is set, the
+/// seed must be too: a child that lost it would abort without its crash.
+fn lossy_from_env(dir: &Path) -> Option<crate::fs::lossy::Lossy> {
+    let shadow = std::env::var_os("LLMOBS_LOSSY_SHADOW")?;
+    let seed = std::env::var("LLMOBS_LOSSY_SEED")
+        .expect("LLMOBS_LOSSY_SEED is set whenever LLMOBS_LOSSY_SHADOW is");
+    let seed: u64 = seed
+        .parse()
+        .expect("LLMOBS_LOSSY_SEED is a u64, set by run_lossy_child");
+    let lossy = crate::fs::lossy::Lossy::enable(dir, Path::new(&shadow));
+    lossy.crash_on_abort(seed);
+    Some(lossy)
+}
+
+/// [`run_child`] with the lossy variables of [`lossy_from_env`].
+fn run_lossy_child(
+    test: &str,
+    dir_var: &str,
+    point_var: &str,
+    name: &str,
+    dir: &Path,
+    shadow: &Path,
+    seed: u64,
+) {
+    let seed = seed.to_string();
+    run_child(
+        test,
+        dir_var,
+        point_var,
+        name,
+        dir,
+        &[
+            ("LLMOBS_LOSSY_SHADOW", shadow.as_os_str()),
+            ("LLMOBS_LOSSY_SEED", OsStr::new(&seed)),
+        ],
+    );
+}
+
+/// No object on disk that the catalog does not name, after the reopen and any
+/// GC step (the helper counts staged files as named).
+async fn assert_no_orphans(dir: &Path, name: &str) {
+    let orphans = crate::test_support::orphan_objects(dir).await;
+    assert!(
+        orphans.is_empty(),
+        "{name}: orphan objects remain: {orphans:?}"
+    );
+}
+
+/// Spawns the `test` crash child with `dir`, `name` and `extra` env vars, its stderr going to
+/// `stderr`, and returns its exit status once it has ended, or fails after 60 s. The caller
+/// says what an end means: [`run_child`] wants an abort by signal.
+pub(crate) fn spawn_child(
+    test: &str,
+    dir_var: &str,
+    point_var: &str,
+    name: &str,
+    dir: &Path,
+    extra: &[(&str, &OsStr)],
+    stderr: Stdio,
+) -> ExitStatus {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg(test)
@@ -310,22 +380,37 @@ fn run_child(test: &str, dir_var: &str, point_var: &str, name: &str, dir: &Path)
         .arg("--test-threads=1")
         .env(dir_var, dir)
         .env(point_var, name)
+        .envs(extra.iter().copied())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();
-    let status = loop {
+    loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > Duration::from_secs(60) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("{name} did not abort within 60s");
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => panic!("waiting for {name}: {error}"),
         }
-    };
+    }
+}
+
+/// [`spawn_child`] that must abort by signal. A point the child's operations
+/// never reach exits with a code (its `panic!`) and fails the assertion.
+fn run_child(
+    test: &str,
+    dir_var: &str,
+    point_var: &str,
+    name: &str,
+    dir: &Path,
+    extra: &[(&str, &OsStr)],
+) {
+    let status = spawn_child(test, dir_var, point_var, name, dir, extra, Stdio::inherit());
     assert!(
         status.code().is_none(),
         "{name} exited {status} instead of aborting (point not reached?)"
@@ -346,16 +431,23 @@ async fn every_flush_hook_aborts_safely() {
             "LLMOBS_FLUSH_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
-
-        let storage = crate::Storage::open(quiet_config(dir.path()))
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
-        let ids = stored_ids(&storage).await;
-        assert_eq!(ids, expected_ids(), "{name}: acknowledged rows");
-        objects_match_catalog(&storage, dir.path());
-        drop(storage);
+        check_flush(dir.path(), name).await;
     }
+}
+
+/// The checks after the reopen, shared by the abort parent and the lossy parent
+/// (R2.10).
+async fn check_flush(dir: &Path, name: &str) {
+    let storage = crate::Storage::open(quiet_config(dir))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+    let ids = stored_ids(&storage).await;
+    assert_eq!(ids, expected_ids(), "{name}: acknowledged rows");
+    objects_match_catalog(&storage, dir);
+    drop(storage);
+    assert_no_orphans(dir, name).await;
 }
 
 /// `quiet_config` with hand-run compaction passes: interval 1 h, two L0 files.
@@ -380,8 +472,10 @@ async fn compaction_child() {
     let Ok(dir) = std::env::var("LLMOBS_COMPACTION_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_COMPACTION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
+    let _lossy = lossy_from_env(Path::new(&dir));
 
     // Three L0 spans files and three traces files of one trace.
     for index in 0..3_u8 {
@@ -427,52 +521,59 @@ async fn every_compaction_hook_aborts_safely() {
             "LLMOBS_COMPACTION_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
-
-        // The reopen runs the open-time `file_sources` check and the startup
-        // temp-file cleanup.
-        let storage = crate::Storage::open(compaction_config(dir.path()))
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
-        let ids = stored_ids(&storage).await;
-        assert_eq!(ids, compaction_span_ids(), "{name}: acknowledged rows");
-        objects_match_catalog(&storage, dir.path());
-
-        // Redo the interrupted work, then collect everything it left.
-        for pass in 0..5 {
-            let report = storage.compact(crash_at(12, 0)).await.unwrap();
-            assert_eq!(report.failed, 0, "{name}: pass {pass} failed a job");
-            if report.jobs == 0 {
-                break;
-            }
-        }
-        storage.collect_obsolete(Duration::ZERO).await.unwrap();
-        storage.collect_staged(Duration::ZERO).await.unwrap();
-
-        let ids = stored_ids(&storage).await;
-        assert_eq!(ids, compaction_span_ids(), "{name}: rows after the redo");
-        let spans_files = storage.catalog_files(Table::Spans);
-        assert_eq!(spans_files.len(), 1, "{name}: one spans file");
-        assert_eq!(spans_files[0].level, 1, "{name}: the spans file is level 1");
-        let traces_files = storage.catalog_files(FileTable::Traces);
-        assert_eq!(traces_files.len(), 1, "{name}: one traces file");
-        assert_eq!(
-            traces_files[0].level, 1,
-            "{name}: the traces file is level 1"
-        );
-        storage.shutdown().await.unwrap();
-        drop(storage);
-
-        let (obsolete, staged) = catalog_counts(dir.path()).await;
-        assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
-        assert_eq!(staged, 0, "{name}: staged rows remain");
-        let temps = temp_files(&dir.path().join("objects"));
-        assert!(
-            temps.is_empty(),
-            "{name}: {} temp files remain",
-            temps.len()
-        );
+        check_compaction(dir.path(), name).await;
     }
+}
+
+/// The checks after the reopen, shared by the abort parent and the lossy parent
+/// (R2.10).
+async fn check_compaction(dir: &Path, name: &str) {
+    // The reopen runs the open-time `file_sources` check and the startup
+    // temp-file cleanup.
+    let storage = crate::Storage::open(compaction_config(dir))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+    let ids = stored_ids(&storage).await;
+    assert_eq!(ids, compaction_span_ids(), "{name}: acknowledged rows");
+    objects_match_catalog(&storage, dir);
+
+    // Redo the interrupted work, then collect everything it left.
+    for pass in 0..5 {
+        let report = storage.compact(crash_at(12, 0)).await.unwrap();
+        assert_eq!(report.failed, 0, "{name}: pass {pass} failed a job");
+        if report.jobs == 0 {
+            break;
+        }
+    }
+    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+    storage.collect_staged(Duration::ZERO).await.unwrap();
+
+    let ids = stored_ids(&storage).await;
+    assert_eq!(ids, compaction_span_ids(), "{name}: rows after the redo");
+    let spans_files = storage.catalog_files(Table::Spans);
+    assert_eq!(spans_files.len(), 1, "{name}: one spans file");
+    assert_eq!(spans_files[0].level, 1, "{name}: the spans file is level 1");
+    let traces_files = storage.catalog_files(FileTable::Traces);
+    assert_eq!(traces_files.len(), 1, "{name}: one traces file");
+    assert_eq!(
+        traces_files[0].level, 1,
+        "{name}: the traces file is level 1"
+    );
+    storage.shutdown().await.unwrap();
+    drop(storage);
+
+    let (obsolete, staged) = catalog_counts(dir).await;
+    assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
+    assert_eq!(staged, 0, "{name}: staged rows remain");
+    let temps = temp_files(&dir.join("objects"));
+    assert!(
+        temps.is_empty(),
+        "{name}: {} temp files remain",
+        temps.len()
+    );
+    assert_no_orphans(dir, name).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -481,8 +582,10 @@ async fn deletion_child() {
     let Ok(dir) = std::env::var("LLMOBS_DELETION_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_DELETION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
+    let _lossy = lossy_from_env(Path::new(&dir));
 
     // Three L0 spans files and three traces files, one span of trace 0 and
     // one of trace 1 each.
@@ -525,71 +628,78 @@ async fn every_deletion_hook_aborts_safely() {
             "LLMOBS_DELETION_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
-
-        let storage = crate::Storage::open(compaction_config(dir.path()))
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
-        // New when the crash came before the registration commit, a no-op
-        // after it. Either way trace 1 is hidden from both tables at once.
-        storage.register_deletion(trace_deletion()).await.unwrap();
-        let trace0 = trace_bytes(0);
-        let trace1 = trace_bytes(1);
-        let spans = stored_trace_ids(&storage, false).await;
-        assert!(
-            !spans.contains(&trace1),
-            "{name}: a trace 1 span is visible"
-        );
-        assert_eq!(
-            spans.iter().filter(|trace| **trace == trace0).count(),
-            3,
-            "{name}: trace 0 spans"
-        );
-        let traces = stored_trace_ids(&storage, true).await;
-        assert!(
-            !traces.contains(&trace1),
-            "{name}: a trace 1 partial is visible"
-        );
-        objects_match_catalog(&storage, dir.path());
-
-        // Finish the interrupted work, then collect everything it left.
-        for pass in 0..5 {
-            let report = storage.apply_deletions(crash_at(12, 0)).await.unwrap();
-            assert_eq!(report.failed, 0, "{name}: pass {pass} failed a job");
-            if report.applied == 1 || deletion_applied(&storage, name).await {
-                break;
-            }
-        }
-        storage.collect_obsolete(Duration::ZERO).await.unwrap();
-        storage.collect_staged(Duration::ZERO).await.unwrap();
-
-        // Trace 0 is intact, in the queries and in the files on disk.
-        let ids = stored_ids(&storage).await;
-        assert_eq!(ids, deletion_span_ids(), "{name}: acknowledged rows");
-        for file in storage.catalog_files(Table::Spans) {
-            let rows = crate::test_support::object_rows(dir.path(), &file);
-            let covered = crate::test_support::trace_ids_of(&rows)
-                .into_iter()
-                .any(|trace| trace.as_slice() == trace1.as_slice());
-            assert!(!covered, "{name}: {} holds a trace 1 row", file.path);
-        }
-        assert!(
-            deletion_applied(&storage, name).await,
-            "{name}: the deletion is not applied"
-        );
-
-        let (obsolete, staged) = catalog_counts(dir.path()).await;
-        assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
-        assert_eq!(staged, 0, "{name}: staged rows remain");
-        let temps = temp_files(&dir.path().join("objects"));
-        assert!(
-            temps.is_empty(),
-            "{name}: {} temp files remain",
-            temps.len()
-        );
-        storage.shutdown().await.unwrap();
-        drop(storage);
+        check_deletion(dir.path(), name).await;
     }
+}
+
+/// The checks after the reopen, shared by the abort parent and the lossy parent
+/// (R2.10).
+async fn check_deletion(dir: &Path, name: &str) {
+    let storage = crate::Storage::open(compaction_config(dir))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+    // New when the crash came before the registration commit, a no-op
+    // after it. Either way trace 1 is hidden from both tables at once.
+    storage.register_deletion(trace_deletion()).await.unwrap();
+    let trace0 = trace_bytes(0);
+    let trace1 = trace_bytes(1);
+    let spans = stored_trace_ids(&storage, false).await;
+    assert!(
+        !spans.contains(&trace1),
+        "{name}: a trace 1 span is visible"
+    );
+    assert_eq!(
+        spans.iter().filter(|trace| **trace == trace0).count(),
+        3,
+        "{name}: trace 0 spans"
+    );
+    let traces = stored_trace_ids(&storage, true).await;
+    assert!(
+        !traces.contains(&trace1),
+        "{name}: a trace 1 partial is visible"
+    );
+    objects_match_catalog(&storage, dir);
+
+    // Finish the interrupted work, then collect everything it left.
+    for pass in 0..5 {
+        let report = storage.apply_deletions(crash_at(12, 0)).await.unwrap();
+        assert_eq!(report.failed, 0, "{name}: pass {pass} failed a job");
+        if report.applied == 1 || deletion_applied(&storage, name).await {
+            break;
+        }
+    }
+    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+    storage.collect_staged(Duration::ZERO).await.unwrap();
+
+    // Trace 0 is intact, in the queries and in the files on disk.
+    let ids = stored_ids(&storage).await;
+    assert_eq!(ids, deletion_span_ids(), "{name}: acknowledged rows");
+    for file in storage.catalog_files(Table::Spans) {
+        let rows = crate::test_support::object_rows(dir, &file);
+        let covered = crate::test_support::trace_ids_of(&rows)
+            .into_iter()
+            .any(|trace| trace.as_slice() == trace1.as_slice());
+        assert!(!covered, "{name}: {} holds a trace 1 row", file.path);
+    }
+    assert!(
+        deletion_applied(&storage, name).await,
+        "{name}: the deletion is not applied"
+    );
+
+    let (obsolete, staged) = catalog_counts(dir).await;
+    assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
+    assert_eq!(staged, 0, "{name}: staged rows remain");
+    let temps = temp_files(&dir.join("objects"));
+    assert!(
+        temps.is_empty(),
+        "{name}: {} temp files remain",
+        temps.len()
+    );
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    assert_no_orphans(dir, name).await;
 }
 
 /// Whether the child's deletion is `Applied`.
@@ -612,8 +722,10 @@ async fn media_child() {
     let Ok(dir) = std::env::var("LLMOBS_MEDIA_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_MEDIA_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
+    let _lossy = lossy_from_env(Path::new(&dir));
     let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
         .await
         .unwrap();
@@ -635,48 +747,55 @@ async fn every_media_hook_aborts_safely() {
             "LLMOBS_MEDIA_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
-
-        // The reopen runs the startup temp-file cleanup, under `media/` too.
-        let storage = crate::Storage::open(quiet_config(dir.path()))
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
-        let temps = temp_files(&dir.path().join("objects"));
-        assert!(
-            temps.is_empty(),
-            "{name}: {} temp files remain",
-            temps.len()
-        );
-        storage.collect_staged(Duration::ZERO).await.unwrap();
-        let (rows, objects) = media_state(dir.path()).await;
-        assert_eq!(rows, objects, "{name}: media rows and objects disagree");
-
-        storage.put_media(project(), media_blob()).await.unwrap();
-        let (rows, objects) = media_state(dir.path()).await;
-        assert_eq!(
-            rows, objects,
-            "{name}: media rows and objects disagree after the put"
-        );
-        let read = storage
-            .get_media(project(), &media_blob().sha256, None, None)
-            .await
-            .unwrap();
-        assert_eq!(read.bytes, media_blob().bytes, "{name}: the blob's bytes");
-        assert_eq!(
-            read.mime_type,
-            media_blob().mime_type,
-            "{name}: the blob's mime type"
-        );
-        assert_eq!(
-            read.size,
-            media_blob().bytes.len() as u64,
-            "{name}: the blob's size"
-        );
-        let (_, staged) = catalog_counts(dir.path()).await;
-        assert_eq!(staged, 0, "{name}: staged rows remain");
-        storage.shutdown().await.unwrap();
-        drop(storage);
+        check_media(dir.path(), name).await;
     }
+}
+
+/// The checks after the reopen, shared by the abort parent and the lossy parent
+/// (R2.10).
+async fn check_media(dir: &Path, name: &str) {
+    // The reopen runs the startup temp-file cleanup, under `media/` too.
+    let storage = crate::Storage::open(quiet_config(dir))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+    let temps = temp_files(&dir.join("objects"));
+    assert!(
+        temps.is_empty(),
+        "{name}: {} temp files remain",
+        temps.len()
+    );
+    storage.collect_staged(Duration::ZERO).await.unwrap();
+    let (rows, objects) = media_state(dir).await;
+    assert_eq!(rows, objects, "{name}: media rows and objects disagree");
+
+    storage.put_media(project(), media_blob()).await.unwrap();
+    let (rows, objects) = media_state(dir).await;
+    assert_eq!(
+        rows, objects,
+        "{name}: media rows and objects disagree after the put"
+    );
+    let read = storage
+        .get_media(project(), &media_blob().sha256, None, None)
+        .await
+        .unwrap();
+    assert_eq!(read.bytes, media_blob().bytes, "{name}: the blob's bytes");
+    assert_eq!(
+        read.mime_type,
+        media_blob().mime_type,
+        "{name}: the blob's mime type"
+    );
+    assert_eq!(
+        read.size,
+        media_blob().bytes.len() as u64,
+        "{name}: the blob's size"
+    );
+    let (_, staged) = catalog_counts(dir).await;
+    assert_eq!(staged, 0, "{name}: staged rows remain");
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    assert_no_orphans(dir, name).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -685,8 +804,10 @@ async fn drop_child() {
     let Ok(dir) = std::env::var("LLMOBS_DROP_CRASH_DIR") else {
         return;
     };
+    crate::test_support::no_core_dumps();
     let name = std::env::var("LLMOBS_DROP_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
+    let _lossy = lossy_from_env(Path::new(&dir));
 
     // One flush cycle with spans of P, and one blob of P.
     let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
@@ -727,57 +848,313 @@ async fn every_drop_hook_aborts_safely() {
             "LLMOBS_DROP_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
-
-        // The reopen finishes a crash after the drop commit; the second
-        // `drop_project` is idempotent either way.
-        let storage = crate::Storage::open(quiet_config(dir.path()))
-            .await
-            .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
-        storage.drop_project(project()).await.unwrap();
-        assert!(
-            stored_ids(&storage).await.is_empty(),
-            "{name}: P's spans are visible"
-        );
-        assert!(
-            stored_trace_ids(&storage, true).await.is_empty(),
-            "{name}: P's partials are visible"
-        );
-        let error = storage
-            .append_spans(
-                project(),
-                crate::test_support::span_rows(&[crate::test_support::span_row(0, 40, 0, 0)]),
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(error, AppendError::ProjectDropped),
-            "{name}: P's appends are not refused"
-        );
-        storage.collect_obsolete(Duration::ZERO).await.unwrap();
-        let leftovers = project_objects(dir.path(), project());
-        assert!(
-            leftovers.is_empty(),
-            "{name}: {} objects of P remain",
-            leftovers.len()
-        );
-        let temps = temp_files(&dir.path().join("objects"));
-        assert!(
-            temps.is_empty(),
-            "{name}: {} temp files remain",
-            temps.len()
-        );
-        assert_eq!(
-            project_state(dir.path(), project()).await,
-            "dropped",
-            "{name}: P is not dropped"
-        );
-        let (obsolete, staged) = catalog_counts(dir.path()).await;
-        assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
-        assert_eq!(staged, 0, "{name}: staged rows remain");
-        storage.shutdown().await.unwrap();
-        drop(storage);
+        check_drop(dir.path(), name).await;
     }
+}
+
+/// The checks after the reopen, shared by the abort parent and the lossy parent
+/// (R2.10).
+async fn check_drop(dir: &Path, name: &str) {
+    // The reopen finishes a crash after the drop commit; the second
+    // `drop_project` is idempotent either way.
+    let storage = crate::Storage::open(quiet_config(dir))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: reopen failed: {error}"));
+    storage.drop_project(project()).await.unwrap();
+    assert!(
+        stored_ids(&storage).await.is_empty(),
+        "{name}: P's spans are visible"
+    );
+    assert!(
+        stored_trace_ids(&storage, true).await.is_empty(),
+        "{name}: P's partials are visible"
+    );
+    let error = storage
+        .append_spans(
+            project(),
+            crate::test_support::span_rows(&[crate::test_support::span_row(0, 40, 0, 0)]),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AppendError::ProjectDropped),
+        "{name}: P's appends are not refused"
+    );
+    storage.collect_obsolete(Duration::ZERO).await.unwrap();
+    let leftovers = project_objects(dir, project());
+    assert!(
+        leftovers.is_empty(),
+        "{name}: {} objects of P remain",
+        leftovers.len()
+    );
+    let temps = temp_files(&dir.join("objects"));
+    assert!(
+        temps.is_empty(),
+        "{name}: {} temp files remain",
+        temps.len()
+    );
+    assert_eq!(
+        project_state(dir, project()).await,
+        "dropped",
+        "{name}: P is not dropped"
+    );
+    let (obsolete, staged) = catalog_counts(dir).await;
+    assert_eq!(obsolete, 0, "{name}: obsolete rows remain");
+    assert_eq!(staged, 0, "{name}: staged rows remain");
+    storage.shutdown().await.unwrap();
+    drop(storage);
+    assert_no_orphans(dir, name).await;
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
+/// crashes its directory with a seeded lossy crash before it aborts (R2.10):
+/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_flush_hook_survives_a_lossy_crash() {
+    for (index, (name, _)) in POINTS.iter().enumerate() {
+        for count in 0..seeds() {
+            // Consecutive points get different seeds, so they cycle through the modes.
+            let seed = index as u64 * 1_000 + count;
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("data");
+            let shadow = t.path().join("shadow");
+            run_lossy_child(
+                "crash_tests::child",
+                "LLMOBS_FLUSH_CRASH_DIR",
+                "LLMOBS_FLUSH_CRASH_POINT",
+                name,
+                &dir,
+                &shadow,
+                seed,
+            );
+            check_flush(&dir, &format!("{name} with lossy seed {seed}")).await;
+        }
+    }
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
+/// crashes its directory with a seeded lossy crash before it aborts (R2.10):
+/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_compaction_hook_survives_a_lossy_crash() {
+    for (index, (name, _)) in COMPACTION_POINTS.iter().enumerate() {
+        for count in 0..seeds() {
+            // Consecutive points get different seeds, so they cycle through the modes.
+            let seed = index as u64 * 1_000 + count;
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("data");
+            let shadow = t.path().join("shadow");
+            run_lossy_child(
+                "crash_tests::compaction_child",
+                "LLMOBS_COMPACTION_CRASH_DIR",
+                "LLMOBS_COMPACTION_CRASH_POINT",
+                name,
+                &dir,
+                &shadow,
+                seed,
+            );
+            check_compaction(&dir, &format!("{name} with lossy seed {seed}")).await;
+        }
+    }
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
+/// crashes its directory with a seeded lossy crash before it aborts (R2.10):
+/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_deletion_hook_survives_a_lossy_crash() {
+    for (index, (name, _)) in DELETION_POINTS.iter().enumerate() {
+        for count in 0..seeds() {
+            // Consecutive points get different seeds, so they cycle through the modes.
+            let seed = index as u64 * 1_000 + count;
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("data");
+            let shadow = t.path().join("shadow");
+            run_lossy_child(
+                "crash_tests::deletion_child",
+                "LLMOBS_DELETION_CRASH_DIR",
+                "LLMOBS_DELETION_CRASH_POINT",
+                name,
+                &dir,
+                &shadow,
+                seed,
+            );
+            check_deletion(&dir, &format!("{name} with lossy seed {seed}")).await;
+        }
+    }
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
+/// crashes its directory with a seeded lossy crash before it aborts (R2.10):
+/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_media_hook_survives_a_lossy_crash() {
+    for (index, (name, _)) in MEDIA_POINTS.iter().enumerate() {
+        for count in 0..seeds() {
+            // Consecutive points get different seeds, so they cycle through the modes.
+            let seed = index as u64 * 1_000 + count;
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("data");
+            let shadow = t.path().join("shadow");
+            run_lossy_child(
+                "crash_tests::media_child",
+                "LLMOBS_MEDIA_CRASH_DIR",
+                "LLMOBS_MEDIA_CRASH_POINT",
+                name,
+                &dir,
+                &shadow,
+                seed,
+            );
+            check_media(&dir, &format!("{name} with lossy seed {seed}")).await;
+        }
+    }
+}
+
+/// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
+/// crashes its directory with a seeded lossy crash before it aborts (R2.10):
+/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "spawns processes; `just test` runs it in its own test process"]
+async fn every_drop_hook_survives_a_lossy_crash() {
+    for (index, (name, _)) in DROP_POINTS.iter().enumerate() {
+        for count in 0..seeds() {
+            // Consecutive points get different seeds, so they cycle through the modes.
+            // `1_000 % 3 == 1`, so the extra `index` moves the second point of the
+            // two-point table to `TearLast` (`seed % 3 == 2`) for the default one seed.
+            let seed = index as u64 * 1_000 + count + index as u64;
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("data");
+            let shadow = t.path().join("shadow");
+            run_lossy_child(
+                "crash_tests::drop_child",
+                "LLMOBS_DROP_CRASH_DIR",
+                "LLMOBS_DROP_CRASH_POINT",
+                name,
+                &dir,
+                &shadow,
+                seed,
+            );
+            check_drop(&dir, &format!("{name} with lossy seed {seed}")).await;
+        }
+    }
+}
+
+/// Run alone by `just lazyfs` (R2.12), never by `just test`. Every child of the five groups
+/// runs on a LazyFS mount, and after each child exits LazyFS drops its unsynced writes, so the
+/// checks see what a power loss on the real binary leaves. Needs `LLMOBS_LAZYFS_DIR` (a
+/// directory on the mount), `LLMOBS_LAZYFS_FIFO` and `LLMOBS_LAZYFS_DONE`; without them it
+/// returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a LazyFS mount: `just lazyfs`"]
+async fn every_hook_survives_lazyfs() {
+    let (Some(root), Some(fifo), Some(done)) = (
+        std::env::var_os("LLMOBS_LAZYFS_DIR"),
+        std::env::var_os("LLMOBS_LAZYFS_FIFO"),
+        std::env::var_os("LLMOBS_LAZYFS_DONE"),
+    ) else {
+        return;
+    };
+    let (fifo, done) = (Path::new(&fifo), Path::new(&done));
+    for (name, _) in POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::child",
+            "LLMOBS_FLUSH_CRASH_DIR",
+            "LLMOBS_FLUSH_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_flush(dir.path(), name).await;
+    }
+    for (name, _) in COMPACTION_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::compaction_child",
+            "LLMOBS_COMPACTION_CRASH_DIR",
+            "LLMOBS_COMPACTION_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_compaction(dir.path(), name).await;
+    }
+    for (name, _) in DELETION_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::deletion_child",
+            "LLMOBS_DELETION_CRASH_DIR",
+            "LLMOBS_DELETION_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_deletion(dir.path(), name).await;
+    }
+    for (name, _) in MEDIA_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::media_child",
+            "LLMOBS_MEDIA_CRASH_DIR",
+            "LLMOBS_MEDIA_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_media(dir.path(), name).await;
+    }
+    for (name, _) in DROP_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::drop_child",
+            "LLMOBS_DROP_CRASH_DIR",
+            "LLMOBS_DROP_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_drop(dir.path(), name).await;
+    }
+}
+
+/// LazyFS's power loss (R2.12): writes `lazyfs::clear-cache` to `fifo` and waits, at most 30 s,
+/// for one line on `done`. The copy in `tests/crash.rs` does the same; integration tests cannot
+/// reach this module.
+fn lazyfs_clear_cache(fifo: &Path, done: &Path) {
+    let (fifo, done) = (fifo.to_owned(), done.to_owned());
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(send_clear_cache(&fifo, &done));
+    });
+    match received.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("lazyfs clear-cache failed: {error}"),
+        Err(_) => panic!("lazyfs did not acknowledge clear-cache within 30s"),
+    }
+}
+
+fn send_clear_cache(fifo: &Path, done: &Path) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(fifo)?
+        .write_all(b"lazyfs::clear-cache\n")?;
+    let mut line = String::new();
+    if BufReader::new(std::fs::File::open(done)?).read_line(&mut line)? == 0 {
+        return Err(std::io::Error::other("the done FIFO closed without a line"));
+    }
+    Ok(())
 }
 
 /// `obsolete` and `staged_objects` row counts of `catalog.db`.
@@ -1147,6 +1524,7 @@ async fn every_retention_hook_aborts_safely() {
             "LLMOBS_RETENTION_CRASH_POINT",
             name,
             dir.path(),
+            &[],
         );
 
         let storage = crate::Storage::open(quiet_config(dir.path()))
@@ -1304,6 +1682,7 @@ async fn a_rotation_crash_reopens_with_the_acknowledged_rows() {
         "LLMOBS_ROTATE_CRASH_POINT",
         "FlushAfterRotate",
         dir.path(),
+        &[],
     );
     let wal = dir.path().join("wal").join("spans");
     let mut names: Vec<String> = std::fs::read_dir(&wal)

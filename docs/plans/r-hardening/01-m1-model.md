@@ -12,7 +12,7 @@ Sub-phases R1.1–R1.8, one commit each. R1.8 can produce several commits, one p
 - **Scope.** Edit only:
   - `crates/storage/src/model_tests/` (new) and `crates/storage/src/lib.rs` (the `mod` line);
   - `crates/storage/proptest-regressions/`;
-  - `justfile` (R1.7);
+  - `justfile` and `AGENTS.md` (R1.7);
   - `docs/`.
 
   R1.7 also deletes `crates/storage/src/compaction/model.rs`, its `mod` line in `compaction/mod.rs`, and `crates/storage/proptest-regressions/compaction/model.txt`.
@@ -583,11 +583,11 @@ Commit: `storage: add deletions, retention and drop to the model test (R1.5)`
 ### Ops
 
 ```rust
-/// `register_deletion` of 1–3 traces (`picks`, each `% 12`), cut off at the
-/// op's ingest time.
+/// `register_deletion` of 1–3 traces (`picks`, each `% 12`) plus their
+/// evaluation traces, cut off at the op's ingest time.
 DeleteTraces { project: P, picks: Vec<u8> },
-/// A user deletion as the server resolves it (D-M-3): every trace of `user`
-/// with a stored copy, and those traces' sessions.
+/// A user deletion as the server resolves it (D-M-3), through
+/// `user_deletion_scope` and `eval_trace_ids`.
 DeleteUser { project: P, user: u8 },     // user 0..2 → "u0" | "u1"
 /// Advances the clock by `hours` (0..24), then one deletion pass.
 ApplyDeletions { hours: u8 },
@@ -597,11 +597,21 @@ Retention { project: P, keep: u8 },
 DropB,
 ```
 
-Weights: `DeleteTraces 3`, `DeleteUser 2`, `ApplyDeletions 2`, `Retention 1`, `DropB 1`. `Op::project()` returns `Some(project)` for `DeleteTraces`, `DeleteUser` and `Retention`, `Some(P::B)` for `DropB`, and `None` for `ApplyDeletions` (both projects are checked).
+Weights: `DeleteTraces 3`, `DeleteUser 2`, `ApplyDeletions 2`, `Retention 1`, `DropB 1`. `Op::project()` returns `Some(project)` for `DeleteTraces`, `DeleteUser` and `Retention`, and `None` for `ApplyDeletions` and `DropB`: both projects are checked after them, so a drop that disturbs project A is caught at once (R1.3's rule).
 
 - **`keep` never equals `D + 2`.** Class-2 traces have rows on days `D + 1` and `D + 2` whose partition depends on the anchor (spec 03 § Trace anchor). Every allowed `keep` treats both days alike, so the model needs no anchor logic (D-R-3).
 - **Deletion ids** are `Uuid::now_v7()`; the cutoff is `clock` after the op's tick.
-- **`DeleteUser` resolution.** The traces are those whose shape has `user == Some(u)` and that have at least one copy in the model (any copy: all are ≤ the cutoff). The sessions are their shapes' `Some` sessions. If no trace matches, register the deletion anyway, with empty `trace_ids` and `session_ids`: it still covers rows by `user_id`.
+- **Evaluation traces (shape change in this sub-phase).** In `shape.rs::span`, every span of a trace whose environment is `environment::EVAL` gets `metadata = {metadata_key::EVAL_TARGET_TRACE_ID: hex(trace_id((t + 1) % 12))}` (`llmobs_core::names::metadata_key`). The value is the same on every span of the trace, so no known limit is hit. The model doesn't compare `metadata`.
+- **Resolution goes through the real reads (D-M-3, D-M-6).** The server resolves a deletion's scope with `crate::reads::{user_deletion_scope, eval_trace_ids}` before it calls `register_deletion`. The op does the same, on a `QueryContext` of the project, and first checks each read against the oracle:
+  - `DeleteUser`: `user_deletion_scope(ctx, "u<n>", cutoff, timeout)` must return:
+    - as `trace_ids`, the traces whose shape has `user == Some(u)` and that have at least one **visible** copy (all copies are ≤ the cutoff, since the cutoff is the op's ingest time), sorted by bytes;
+    - as `session_ids`, those traces' `Some` sessions, sorted and distinct.
+
+    Copies already covered by an earlier deletion are not visible, so a trace with no visible copy is not in the scope. The coverage is the same either way.
+  - Both ops then call `eval_trace_ids(ctx, &targets, timeout)` with the resolved trace ids as `targets`. It must return the traces whose environment is `EVAL`, that have a visible copy, whose target (`(t + 1) % 12`) is in `targets`, and that are not in `targets` themselves (one level, not transitive), sorted by bytes.
+  - On a mismatch, the case fails with both sets printed. That is a finding about M's resolution reads.
+  - The deletion is registered with the real reads' results: `trace_ids` = targets ∪ eval traces, and for `DeleteUser`, `user_id` and the returned `session_ids`. The model's `ModelDeletion` stores the same sets.
+  - If no trace matches a user, register the deletion anyway, with empty `trace_ids` and `session_ids`: it still covers rows by `user_id`.
 - **A dropped project** skips `register_deletion` and `apply_retention`. The model ignores the op, and nothing is called.
 - **`DropB`** expects `Ok` the first time; later times are a no-op without a call. The model applies the drop rule of R1.2.
 
@@ -621,7 +631,7 @@ Commit: `storage: check sessions, users, metrics and windows in the model test (
 
 All of these are in `check_full`, per project. Each one is compared **only when no visible trace of the project is unsettled**: unmerged re-sends count twice in the traces view, so the aggregates would only have bounds. The read still runs in that case, and it must return `Ok`.
 
-- **Windowed trace list.** `observe_traces` with `window = TimeWindow::new(midnight(D+1), midnight(D+2)).unwrap()` (`new` returns a `Result`). Expected: the traces whose merged `start_time` lies in `[from, to)`. That is class 1 and class 2, since class 2 starts at 23:50 on `D + 1`. Their partials sit within minutes of each other, so `trace_lookback` doesn't matter.
+- **Windowed trace list.** `observe_traces` with `window = TimeWindow::new(midnight(D+1), midnight(D+2)).unwrap()` (`new` returns a `Result`). Expected: the traces whose merged `start_time` lies in `[from, to)`, computed from the expected traces, never from the class. It is usually class 1 and class 2, but a class-2 trace whose spans 0–9 were deleted and 10–11 appended later starts at `midnight(D+2)` and falls outside. All partials of a trace sit within minutes of each other, so `trace_lookback` doesn't matter.
 - **Eval exclusion.** `observe_traces` with `include_eval: false`. Expected: the traces whose environment is not `environment::EVAL`.
 - **Sessions.** `session_list` (`ListScope` with no window, `include_eval: true`, `include_experiments: true`, `sort: SessionSort::StartTime`, `order: SortOrder::Desc`). Compare per `session_id`: `trace_count`, `error_count` (sum of the traces' `error_count`), `total_tokens` and `cost_total` (sums, `None` when no trace has one). The expected rows come from `expected_traces` grouped by `session_id`, with `None` sessions excluded (`views/sessions.rs` filters them).
 - **Users.** `user_list` with the same scope, `sort: UserSort::TraceCount`, `order: SortOrder::Desc`. Compare per `user_id`: the trace count (column `trace_count`). The expected rows are the `expected_traces` grouped by `user_id`, with `None` excluded: `user_list` drops null users (`reads/users.rs`).
@@ -637,7 +647,20 @@ All of these are in `check_full`, per project. Each one is compared **only when 
   - the cost sum;
   - the token sum.
 
-  All four are `None` when there is no such trace. `previous` covers `[midnight(D−4), midnight(D))` and is always `None`. `LatencyP95` is not compared (approximate percentile); it only has to be present. Floats compare with `1e-9`.
+  `Traces` and `ErrorRate` are `None` when there is no such trace. `CostTotal` and `TotalTokens` are SQL sums (`reads/metrics.rs`, `kpi_values`): `None` when no such trace has a value, even when traces exist (a trace whose only visible span is span 0 has neither), and `Some(sum)` otherwise. Alert `Cost` below follows a different rule (always `Some`). `previous` covers `[midnight(D−4), midnight(D))` and is always `None`. `LatencyP95` is not compared (approximate percentile); it only has to be present. Floats compare with `1e-9`.
+- **Filter-deletion scope** (track M's resolve read, D-M-2). `filter_trace_ids` with:
+  - `filter: None`, `search: None`;
+  - `window = [midnight(D), midnight(D+4))`;
+  - `include_eval: false`, `include_experiments: true`;
+  - `limit: MAX_FILTER_DELETION_TRACES + 1`.
+
+  Expected: the trace ids, sorted by bytes, of the expected traces in that window whose environment is not `EVAL`, which are exactly the traces the trace list shows with the same scope.
+- **Alert values** (track K's read, `reads/alerts.rs`). `alert_value` with `window = [midnight(D), midnight(D+4))`, `filter: None`:
+  - `AlertMeasure::ErrorRate`: `count` is the number of expected traces in the window with a non-`EVAL` environment, and `value` is the share of them with `error_count > 0` (`None` when `count` is 0). Experiment traces are always excluded; the shapes have none.
+  - `AlertMeasure::Cost`: the same count; `value` is their cost sum, always `Some` (`0.0` with no trace or no cost).
+  - `AlertMeasure::ScoreAvg { name: "n<k>" }` for `k` in `0..3`. The rows are the live **trace** scores (session scores never count) with that name and `created_at` in the window, whose trace passes the semi-join of `alerts.rs::trace_id_plan`. That means the trace is an expected, non-`EVAL` trace with `end_time ≥ from` and `start_time ∈ [from − 1 day, to)`. `count` is those rows, and `value` is the mean of their `value_num` (`None` when `count` is 0).
+
+  `TraceLatencyP95`, `LlmLatencyP95` and `ScorePassRate` are not compared: the percentiles are approximate, and the shapes write no boolean scores.
 
 ---
 
@@ -692,6 +715,9 @@ model cases="500":
 
 ### Docs
 
+- **`AGENTS.md`.**
+  - § Commands: add a row for `just model [cases]`: "the storage model test with more cases, in release mode (D-R-14)".
+  - § Tests: add a bullet: "`LLMOBS_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default set in R1.3); `just model N` runs it in release mode. It is separate from `LLMOBS_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable."
 - **`docs/research/storage/hardening.md`** (new). Title `# Storage hardening — findings`, then a one-paragraph intro: track R, `docs/plans/r-hardening/`. Then `## M1 — Model-based correctness` with:
   - what the test covers, in one list;
   - `### Runs`: a table of date, commit, cases, mode, duration and result, with R1.7's own `just model 500` run as the first row;
@@ -738,5 +764,6 @@ If a storage cause is not found within the code paths the failing read touches, 
 - **Lossy crashes, the `fs` seam, fsync fixes:** M2.
 - **Background tasks during ops, concurrent readers:** M6.
 - **S3 mode:** M4 adds it with `ChaosStore`.
-- **Media, `trace_spans`, `trace_refresh`, `session_detail`, `user_detail`, the SQL console, filters and search text:** the read functions M1 checks are the list, lookup and aggregate paths that every page uses. Adding filters means modelling the filter language; that is a later extension once M1's findings are in.
+- **Media, `trace_spans`, `trace_refresh`, `session_detail`, `user_detail`, the SQL console, filters and search text:** the read functions M1 checks are the list, lookup and aggregate paths that every page uses, plus the scope reads of deletion (R1.5, R1.6) and the alert measures (R1.6).
+- **P's `QueryOptions::visible_from`** (D-P-21, P's M4): not merged yet. When it lands, an R follow-up sub-phase adds it to the model's read set (`00-design.md` § Other tracks in `crates/storage`). Adding filters means modelling the filter language; that is a later extension once M1's findings are in.
 - **A nightly workflow:** M3, together with fuzzing.

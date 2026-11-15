@@ -7,19 +7,19 @@
 //! Called from tests until the writer task lands.
 #![allow(dead_code)]
 
-use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::WalError;
+use crate::fs::{self, File, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
-use crate::wal::{segment_name, sync_dir};
+use crate::wal::segment_name;
 
 /// An append-only segment file.
 #[derive(Debug)]
 pub(crate) struct SegmentWriter {
     dir: PathBuf,
-    file: std::fs::File,
+    file: File,
     name: String,
     len: u64,
     segment_bytes: u64,
@@ -46,7 +46,7 @@ impl SegmentWriter {
         if let Some(source) = hooks.fail(HookPoint::WalSegmentDirSync) {
             return Err(WalError::io("syncing WAL directory", dir, source));
         }
-        sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))?;
+        fs::sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))?;
         let len = file
             .metadata()
             .map_err(|source| WalError::io("reading WAL segment", &path, source))?
@@ -132,13 +132,13 @@ impl SegmentWriter {
     }
 }
 
-fn open_segment(path: &Path) -> Result<std::fs::File, WalError> {
+fn open_segment(path: &Path) -> Result<File, WalError> {
     let mut options = OpenOptions::new();
     options.append(true);
     match options.create_new(true).open(path) {
         Ok(file) => Ok(file),
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-            let meta = std::fs::metadata(path)
+            let meta = fs::metadata(path)
                 .map_err(|source| WalError::io("creating WAL segment", path, source))?;
             if meta.len() != 0 {
                 return Err(WalError::io("creating WAL segment", path, source));

@@ -201,6 +201,14 @@ async fn run(mut params: FlushParams) {
                 }
             }
             Err(_) => {
+                // After a failed local fsync or a fatal catalog I/O error, no retry can
+                // succeed until a restart (D-R-6). At shutdown, stop instead of retrying
+                // for the grace period.
+                if stopping(&params.stop)
+                    && (params.objects.sync_failed() || params.committer.stopped())
+                {
+                    break;
+                }
                 sleep_backoff(&mut params.stop, &params.notify, backoff).await;
                 backoff = next_backoff(backoff);
             }

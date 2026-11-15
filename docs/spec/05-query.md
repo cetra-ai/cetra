@@ -174,5 +174,5 @@ Filter, SQL and execution errors (D94) go back to the caller, capped at 2 KiB, a
 | `invalid_filter` | 400 | Filter and SQL text, with `position` when one is known |
 | `query_failed` | 400 | Execution errors (bad cast, regex too big, division by zero), with DataFusion's message capped at 2 KiB |
 | `query_timeout` | 422 | The query exceeded its time limit |
-| `query_too_large` | 422 | The query needed more memory than the cap |
+| `query_too_large` | 422 | The query needed more memory or temporary disk space than the cap |
 | `busy` | 503 | Admission control refused the query |

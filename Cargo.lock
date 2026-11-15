@@ -3598,6 +3598,7 @@ dependencies = [
  "object_store",
  "parquet",
  "proptest",
+ "reqwest",
  "rustix",
  "serde",
  "serde_json",

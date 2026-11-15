@@ -3328,7 +3328,7 @@ fn problem(code: u16) -> Response {
         416 => "The Range header does not overlap the blob.",
         415 => "The request body is not JSON.",
         422 => {
-            "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
+            "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
         }
         429 => "Too many requests.",
         503 => "The server is busy or a dependency is unavailable. Retry later.",

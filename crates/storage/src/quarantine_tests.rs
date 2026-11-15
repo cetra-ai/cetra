@@ -18,7 +18,8 @@ use crate::catalog::{FileId, FileMeta, FileTable, now_ns};
 use crate::compaction::job::tests::{at, config_in, flush_cycle, project, quiet_compaction};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::hooks::HookPoint;
-use crate::test_support::{FaultStore, rows, span_row, span_rows};
+use crate::objects::PutSizes;
+use crate::test_support::{Call, ChaosStore, rows, span_row, span_rows};
 use crate::verify::{Verdict, verify_file};
 use crate::views::QueryContext;
 use crate::{QueryOptions, Storage};
@@ -184,11 +185,11 @@ async fn verify_file_sorts_files() {
     std::fs::write(object_path(dir.path(), &file), &original).unwrap();
 
     // A failing store is not corruption.
-    let fault = Arc::new(FaultStore::new(Arc::clone(&store)));
+    let fault = Arc::new(ChaosStore::new(Arc::clone(&store)));
     let failing: Arc<dyn ObjectStore> = fault.clone();
-    fault.fail_reads(true);
+    fault.hold(&[Call::Get, Call::Head]);
     assert_eq!(verify_file(&failing, &file).await, Verdict::Unavailable);
-    fault.fail_reads(false);
+    fault.release();
     assert_eq!(verify_file(&failing, &file).await, Verdict::Healthy);
     storage.shutdown().await.unwrap();
 }
@@ -322,8 +323,8 @@ async fn a_healthy_file_is_not_verified_twice_within_an_hour() {
 async fn a_store_outage_requeues() {
     let dir = tempfile::tempdir().unwrap();
     let config = config_in(dir.path(), quiet_compaction(10), Duration::from_secs(3_600));
-    let fault = Arc::new(FaultStore::new(Arc::new(InMemory::new())));
-    let storage = Storage::open_with_store(config.clone(), fault.clone())
+    let fault = Arc::new(ChaosStore::new(Arc::new(InMemory::new())));
+    let storage = Storage::open_with_store(config.clone(), fault.clone(), PutSizes::S3)
         .await
         .unwrap();
     storage
@@ -334,19 +335,19 @@ async fn a_store_outage_requeues() {
         .await
         .unwrap();
     storage.shutdown().await.unwrap();
-    let storage = Storage::open_with_store(config, fault.clone())
+    let storage = Storage::open_with_store(config, fault.clone(), PutSizes::S3)
         .await
         .unwrap();
     let file = storage.catalog_files(FileTable::Spans)[0].id;
 
     storage.verify_queue().suspect([file], now_ns());
-    fault.fail_reads(true);
+    fault.hold(&[Call::Get, Call::Head]);
     let report = storage.verify_pass().await;
     assert_eq!(report.unavailable, 1);
     assert_eq!(report.quarantined, 0);
     assert_eq!(storage.verify_queue().take(10), vec![file]);
 
-    fault.fail_reads(false);
+    fault.release();
     storage.verify_queue().requeue(file);
     let report = storage.verify_pass().await;
     assert_eq!(report.healthy, 1);

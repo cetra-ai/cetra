@@ -296,6 +296,10 @@ pub enum CatalogError {
         /// The offending `data_files.id`.
         file: Uuid,
     },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 /// One staged-object collection failed.
@@ -357,6 +361,10 @@ pub enum CommitError {
         #[source]
         source: sqlx::Error,
     },
+    /// A commit failed with a fatal SQLite I/O error earlier in this process.
+    /// Every catalog call is refused until a restart (D-R-6).
+    #[error("catalog stopped after an I/O error; restart required")]
+    Stopped,
 }
 
 impl CommitError {
@@ -473,6 +481,10 @@ pub enum ObjectError {
         /// Relative object key.
         path: String,
     },
+    /// A local fsync failed earlier in this process. Local object writes and
+    /// deletes are refused until a restart (D-R-6).
+    #[error("local object store stopped after a failed fsync; restart required")]
+    SyncFailed,
     /// A remote `put` or multipart upload failed.
     ///
     /// The object may already exist: a failed completion is ambiguous. The
@@ -519,6 +531,7 @@ impl ObjectError {
             Self::Store { .. } => "store",
             Self::InvalidPath => "invalid_path",
             Self::Client { .. } => "client",
+            Self::SyncFailed => "sync_failed",
         }
     }
 

@@ -906,6 +906,46 @@ mod tests {
         assert!(matches!(classify(shared), RunError::TooLarge));
     }
 
+    #[test]
+    fn a_spill_limit_error_is_too_large() {
+        let limit = std::io::Error::other(
+            "The used disk space during the spilling process has exceeded the allowable limit of 1.0 B.",
+        );
+        let error = DataFusionError::ArrowError(
+            Box::new(arrow::error::ArrowError::IoError("x".into(), limit)),
+            None,
+        );
+        assert!(matches!(classify(error), RunError::TooLarge));
+    }
+
+    #[test]
+    fn enospc_under_a_spill_is_too_large() {
+        // `FileSpillWriter` wraps the OS error as a DataFusion error, and the
+        // IPC writer wraps that again.
+        let disk_full =
+            DataFusionError::IoError(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let error = DataFusionError::ArrowError(
+            Box::new(arrow::error::ArrowError::IoError(
+                "x".into(),
+                std::io::Error::other(disk_full),
+            )),
+            None,
+        );
+        assert!(matches!(classify(error), RunError::TooLarge));
+    }
+
+    #[test]
+    fn another_arrow_io_error_still_fails() {
+        let error = DataFusionError::ArrowError(
+            Box::new(arrow::error::ArrowError::IoError(
+                "x".into(),
+                std::io::Error::other("broken pipe"),
+            )),
+            None,
+        );
+        assert!(matches!(classify(error), RunError::Failed(_)));
+    }
+
     #[tokio::test]
     async fn a_statement_that_is_not_a_query_stays_invalid() {
         let error = context()

@@ -2,10 +2,10 @@
 //!
 //! Spec 03 §1. Appends are queued, grouped, written, and acknowledged in
 //! sequence order. The task owns the open segment and is the only inserter
-//! into the memtable. A write or sync that fails ends the task: the group is
-//! truncated, its acks are `WalFailed`, and nothing is retried.
+//! into the memtable. A write that fails ends the task and truncates the
+//! group. A sync that fails ends the task without touching the file again, so
+//! the group may be replayed after a restart. Nothing is retried.
 
-use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -20,12 +20,13 @@ use tokio::task::JoinHandle;
 use crate::AppendReceipt;
 use crate::config::WalSync;
 use crate::error::{AppendError, WalError};
+use crate::fs::{self, OpenOptions};
 use crate::hooks::{HookPoint, Hooks};
 use crate::memtable::Memtable;
 use crate::read_state::{Published, ReadState};
 use crate::wal::record::encode;
 use crate::wal::segment::SegmentWriter;
-use crate::wal::{Table, segment_name, sync_dir};
+use crate::wal::{Table, segment_name};
 
 /// Queue depth for appends waiting on the writer.
 ///
@@ -354,8 +355,9 @@ struct KeptSegment {
 }
 
 impl IoJob {
-    /// Writes the group. On failure the segment is back at `mark` unless the
-    /// failure was a sync of already-acknowledged bytes, which adds nothing.
+    /// Writes the group. A failed write leaves the segment back at `mark`. A
+    /// failed sync leaves the file as written, with no second sync: the writer
+    /// stops, and the group may be replayed after a restart.
     fn commit(mut self) -> Result<Written, Box<KeptSegment>> {
         let mark = self.segment.len();
         if self.sync_first
@@ -376,13 +378,22 @@ impl IoJob {
         if self.sync_after
             && let Err(error) = self.segment.sync()
         {
-            rewind_to(&mut self.segment, mark);
             return Err(Box::new(KeptSegment {
                 segment: self.segment,
                 error,
             }));
         }
         if self.segment.needs_rotation() {
+            // Only the last segment may have an unsynced tail (spec 03 § 1), so
+            // interval mode syncs the group before a newer segment exists. The
+            // sync makes the group durable, so `Written` reports it synced.
+            let rotation_synced = !self.sync_after;
+            if rotation_synced && let Err(error) = self.segment.sync() {
+                return Err(Box::new(KeptSegment {
+                    segment: self.segment,
+                    error,
+                }));
+            }
             let old_path = self.segment.path();
             match SegmentWriter::create(
                 &self.dir,
@@ -395,8 +406,8 @@ impl IoJob {
                         segment: next,
                         previous: Some(old_path),
                         mark,
-                        did_sync: self.sync_first || self.sync_after,
-                        group_synced: self.sync_after,
+                        did_sync: self.sync_first || self.sync_after || rotation_synced,
+                        group_synced: self.sync_after || rotation_synced,
                     });
                 }
                 Err(error) => {
@@ -434,15 +445,21 @@ fn rewind_to(segment: &mut SegmentWriter, mark: u64) {
 }
 
 /// Drops a group that was written and then not acknowledged.
-fn discard_unacked(written: Written) {
+///
+/// `dir` is the table's segment directory. The removed segment's unlink is
+/// synced, so a power loss cannot bring the empty file back to sort after the
+/// real active segment (spec 03 § 1).
+fn discard_unacked(written: Written, dir: &Path) {
     if let Some(old) = written.previous {
         let new_path = written.segment.path();
         drop(written.segment);
         if let Err(err) = truncate_path(&old, written.mark) {
             tracing::error!(%err, "truncating unacknowledged WAL group");
         }
-        if let Err(err) = std::fs::remove_file(&new_path) {
+        if let Err(err) = fs::remove_file(&new_path) {
             tracing::error!(%err, "removing empty WAL segment");
+        } else if let Err(err) = fs::sync_dir(dir) {
+            tracing::error!(%err, "syncing WAL directory after removing a segment");
         }
         return;
     }
@@ -485,7 +502,7 @@ async fn sync_segment(mut segment: SegmentWriter) -> Result<SegmentWriter, Box<K
 /// stops the writer.
 fn remove_stray_segment(dir: &Path, name: &str, hooks: &Hooks) -> Result<(), WalError> {
     let path = dir.join(name);
-    let len = match std::fs::metadata(&path) {
+    let len = match fs::metadata(&path) {
         Ok(meta) => meta.len(),
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(WalError::io("removing WAL segment", &path, source)),
@@ -500,9 +517,8 @@ fn remove_stray_segment(dir: &Path, name: &str, hooks: &Hooks) -> Result<(), Wal
     if let Some(source) = hooks.fail(HookPoint::WalSegmentCleanup) {
         return Err(WalError::io("removing WAL segment", &path, source));
     }
-    std::fs::remove_file(&path)
-        .map_err(|source| WalError::io("removing WAL segment", &path, source))?;
-    sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))
+    fs::remove_file(&path).map_err(|source| WalError::io("removing WAL segment", &path, source))?;
+    fs::sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))
 }
 
 async fn run(
@@ -790,7 +806,11 @@ async fn run(
         hooks.note_group(prepared.len(), noted_bytes);
         hooks.pause(HookPoint::AfterWalSync);
 
-        if let Err(err) = insert_all(&shared, &prepared, flush_max_bytes) {
+        let inserted = match hooks.fail(HookPoint::AfterWalSync) {
+            Some(err) => Err(err),
+            None => insert_all(&shared, &prepared, flush_max_bytes).map_err(io::Error::other),
+        };
+        if let Err(err) = inserted {
             tracing::error!(
                 table = table.name(),
                 segment = written.segment.name(),
@@ -799,7 +819,7 @@ async fn run(
                 %err,
                 "WAL group failed"
             );
-            discard_unacked(written);
+            discard_unacked(written, &dir);
             fail_group(&shared, prepared);
             fail_queued(&shared, &mut rx, table, &segment_label, first_seq, last_seq);
             break;
@@ -1247,7 +1267,8 @@ mod tests {
             assert_eq!(task.await.unwrap(), Err(AppendError::WalFailed));
         }
         assert!(handle.shared().failed());
-        assert_eq!(replay_seqs(running.dir.path()), vec![1]);
+        // The group whose fsync failed is left as written and replays (spec 03 §1).
+        assert_eq!(replay_seqs(running.dir.path()), vec![1, 2]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -265,7 +265,7 @@ async fn measure_rule(
         .await
         .map_err(|error| match error {
             RunError::Timeout => "query timed out",
-            RunError::TooLarge => "query needed more memory than allowed",
+            RunError::TooLarge => "query needed more memory or temporary disk space than allowed",
             RunError::Invalid(_) => "the filter is no longer valid",
             _ => "query failed",
         })

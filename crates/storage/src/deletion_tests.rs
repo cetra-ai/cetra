@@ -12,9 +12,11 @@ use llmobs_core::score::ScoreTarget;
 use uuid::Uuid;
 
 use crate::QueryOptions;
+use crate::compaction::job::CompactionReport;
+use crate::compaction::rewrite::DeletionReport;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
-use crate::error::DeletionError;
+use crate::error::{CatalogError, DeletionError};
 use crate::hooks::HookPoint;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
@@ -543,6 +545,42 @@ async fn register_deletion_is_idempotent_and_status_reports_the_state() {
     storage.shutdown().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_store_runs_no_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+
+    // The next catalog commit fails with a fsync error, which stops the
+    // committer (D-R-6). The deletion above stays pending.
+    storage.hooks().arm_fail(HookPoint::CatalogFsync);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST))
+        .await
+        .unwrap_err();
+    assert!(storage.health().catalog_failed);
+
+    // Neither pass attempts its work: each returns an empty report.
+    let deletions = storage.apply_deletions(INGEST + 1).await.unwrap();
+    assert_eq!(deletions, DeletionReport::default());
+    let compacted = storage.compact(INGEST + 1).await.unwrap();
+    assert_eq!(compacted, CompactionReport::default());
+    // A status read goes through the stopped committer too, so it is refused.
+    let error = storage.deletion_status(Uuid::now_v7()).await.unwrap_err();
+    assert!(
+        matches!(error, DeletionError::Catalog(CatalogError::Stopped)),
+        "{error}"
+    );
+    storage.shutdown().await.unwrap();
+}
+
 /// Marks a span's name so the test can find its bytes in a WAL file.
 const MARKER: &str = "erased-span-marker-4c1e9a7b";
 
@@ -668,5 +706,36 @@ async fn a_dropped_project_leaves_no_wal_bytes() {
     // The flush skips the dropped project's partitions, so nothing is written.
     wait_for_flush_commit(&storage, 0).await;
     wait_until_wal_lacks_marker(dir.path()).await;
+    storage.shutdown().await.unwrap();
+}
+
+/// A deletion the traces file has already applied must not hide a trace ingested after it,
+/// even while another deletion of the project is pending (spec 03 §7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reingested_trace_survives_another_pending_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 1, INGEST, INGEST + 10)]))
+        .await
+        .unwrap();
+    storage.shutdown().await.unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST + 100))
+        .await
+        .unwrap();
+    assert_eq!(span_count(&storage, 1).await, 1);
+    assert_eq!(trace_count(&storage, 1).await, 1, "so does the trace");
     storage.shutdown().await.unwrap();
 }
