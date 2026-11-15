@@ -74,6 +74,7 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules") ||
         path.startsWith("/api/v1/projects/{project}/online-rules") ||
+        path.startsWith("/api/v1/projects/{project}/datasets") ||
         path.startsWith("/api/v1/projects/{project}/scores");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
@@ -239,6 +240,12 @@ it("answers the score writes", async () => {
 
   const deleted = await send("DELETE", `${PROJECT}/scores/01900000-0000-7000-8000-000000000310`);
   expect(deleted.status).toBe(204);
+});
+
+it("creates a dataset with the given name", async () => {
+  const response = await send("POST", `${PROJECT}/datasets`, JSON.stringify({ name: "golden" }));
+  expect(response.status).toBe(201);
+  expect(response.json?.name).toBe("golden");
 });
 
 it("answers 204 for deletes", async () => {

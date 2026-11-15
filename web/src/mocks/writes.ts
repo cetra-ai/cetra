@@ -1,4 +1,7 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import datasetItemDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json";
+import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
+import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
@@ -6,6 +9,9 @@ import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.
 import backfillDocument from "../../../fixtures/api/static/backfill.json";
 import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
+import datasetImportPreviewDocument from "../../../fixtures/api/static/dataset-import-preview.json";
+import datasetImportResultDocument from "../../../fixtures/api/static/dataset-import-result.json";
+import datasetItemFromTraceDocument from "../../../fixtures/api/static/dataset-item-from-trace.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
@@ -260,6 +266,47 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_score",
     method: "delete",
     path: "/api/v1/projects/{project}/scores/{score_id}",
+  },
+  { operationId: "post_dataset", method: "post", path: "/api/v1/projects/{project}/datasets" },
+  {
+    operationId: "patch_dataset",
+    method: "patch",
+    path: "/api/v1/projects/{project}/datasets/{dataset}",
+  },
+  {
+    operationId: "delete_dataset",
+    method: "delete",
+    path: "/api/v1/projects/{project}/datasets/{dataset}",
+  },
+  {
+    operationId: "post_dataset_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+  },
+  {
+    operationId: "patch_dataset_item",
+    method: "patch",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+  },
+  {
+    operationId: "delete_dataset_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+  },
+  {
+    operationId: "post_dataset_import_preview",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+  },
+  {
+    operationId: "post_dataset_import",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/import",
+  },
+  {
+    operationId: "post_dataset_item_from_trace",
+    method: "post",
+    path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
   },
 ];
 
@@ -553,6 +600,23 @@ const RESPONSES: Record<string, Respond> = {
     });
   },
   delete_score: () => noContent(),
+
+  post_dataset: ({ body }) =>
+    HttpResponse.json({ ...datasetDocument, ...named(body) }, { status: 201 }),
+  patch_dataset: ({ body }) => HttpResponse.json({ ...datasetDocument, ...named(body) }),
+  delete_dataset: () => noContent(),
+  post_dataset_items: () =>
+    HttpResponse.json(
+      { version: datasetDocument.current_version + 1, item_ids: [datasetItemDocument.id] },
+      { status: 201 },
+    ),
+  patch_dataset_item: ({ params }) =>
+    HttpResponse.json({ ...datasetItemDocument, id: params.item_id }),
+  delete_dataset_item: () => HttpResponse.json(datasetVersionsDocument.data[0]),
+  post_dataset_import_preview: () => HttpResponse.json(datasetImportPreviewDocument),
+  post_dataset_import: () => HttpResponse.json(datasetImportResultDocument, { status: 201 }),
+  post_dataset_item_from_trace: () =>
+    HttpResponse.json(datasetItemFromTraceDocument, { status: 201 }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
