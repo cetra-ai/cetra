@@ -8,7 +8,7 @@ Data model in 01; written through:
 |---|---|
 | `POST /api/v1/scores` (batch ≤ 1000) with `sk` key (`ingest` scope) | `sdk` (D-F-1) |
 | `POST /api/v1/projects/{p}/scores` (batch ≤ 1000) with `sk` key or PAT | `api` (or `sdk` when the SDK sets it) |
-| UI annotation panel (human, with score definitions as controls) | `human`, `author_user_id` set |
+| UI annotation form on traces, spans and sessions (one control per live score definition; only the caller's own scores, D-I-37) | `human`, `author_user_id` set |
 | `POST /api/public/feedback` with `pk` key | `end_user` |
 | Online rules / experiment server evaluators | `llm_judge` \| `check` \| `webhook` |
 

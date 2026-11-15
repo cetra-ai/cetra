@@ -1,6 +1,10 @@
 import { screen, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import { serveAnnotationDefinitions } from "@/test/score-definitions";
+import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const TRACE = "a1000000000000000000000000000001";
 const SECOND = "a1000000000000000000000000000002";
@@ -35,4 +39,49 @@ it("follows the session link from a trace header", async () => {
   await user.click(within(header).getByRole("link", { name: "sess-001" }));
   expect(router.state.location.pathname).toBe("/acme/support-bot/sessions/sess-001");
   expect(await screen.findByRole("region", { name: "Conversation" })).toBeInTheDocument();
+});
+
+it("annotates the session from the side sheet", async () => {
+  serveAnnotationDefinitions();
+  const bodies: unknown[] = [];
+  server.use(
+    http.post("/api/v1/projects/:project/scores", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ score_ids: ["01900000-0000-7000-8000-000000000320"] });
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  await user.click(screen.getByRole("button", { name: "Annotate" }));
+
+  const sheet = await screen.findByRole("dialog", { name: "Annotate session" });
+  const resolved = await within(sheet).findByRole("radiogroup", { name: "resolved" });
+  expect(within(resolved).getByRole("radio", { name: "Yes" })).toBeChecked();
+  await user.click(within(resolved).getByRole("radio", { name: "No" }));
+  await user.click(within(sheet).getByRole("button", { name: "Save" }));
+
+  await within(sheet).findByText("Saved.");
+  expect(bodies).toEqual([
+    {
+      scores: [
+        {
+          target: { type: "session", session_id: "sess-001" },
+          user_id: "user-42",
+          name: "resolved",
+          value: { data_type: "boolean", value: false },
+        },
+      ],
+    },
+  ]);
+});
+
+it("does not let a viewer annotate the session", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project", () =>
+      HttpResponse.json({ ...projectFixture, role: "viewer" }),
+    ),
+  );
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  expect(screen.getByRole("button", { name: "Annotate" })).toBeDisabled();
 });
