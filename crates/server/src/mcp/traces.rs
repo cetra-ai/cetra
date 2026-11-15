@@ -20,7 +20,7 @@ use crate::http::AppState;
 use crate::http::access::user_project;
 use crate::http::error::ApiError;
 use crate::meta::saved_views::{self, Viewer};
-use crate::routes::read::{READ_TIMEOUT, attach_trace_scores, open_query};
+use crate::routes::read::{Deadline, READ_TIMEOUT, attach_trace_scores, open_query};
 
 pub(crate) const SEARCH_TRACES: &str = "search_traces";
 pub(crate) const GET_TRACE: &str = "get_trace";
@@ -165,6 +165,7 @@ pub(crate) async fn search_traces(
 
     // The window goes into `ListScope`, which filters the list; the context itself is opened
     // without a window, as for every read endpoint (D101).
+    let deadline = Deadline::start();
     let ctx = open_query(state, access.project.id, None).await?;
     let page = storage::trace_list(
         &ctx,
@@ -180,12 +181,12 @@ pub(crate) async fn search_traces(
             order: storage::SortOrder::Desc,
             limit,
             cursor: None,
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
     let mut traces = convert::trace_summaries(&page.batches)?;
-    attach_trace_scores(&ctx, &mut traces).await?;
+    attach_trace_scores(&ctx, &mut traces, deadline).await?;
 
     let more = page.next_cursor.is_some();
     let mut cut = false;
@@ -318,14 +319,15 @@ pub(crate) async fn get_trace(
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
 
+    let deadline = Deadline::start();
     let ctx = open_query(state, access.project.id, args.around.map(TimeParam::ns)).await?;
-    let data = storage::trace_detail(&ctx, &args.trace_id, READ_TIMEOUT)
+    let data = storage::trace_detail(&ctx, &args.trace_id, deadline.remaining()?)
         .await?
         .ok_or(ApiError::NotFound)?;
     let mut trace = convert::trace_summaries(std::slice::from_ref(&data.trace))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace)).await?;
+    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace), deadline).await?;
     let spans = build_tree(convert::span_summaries(&data.spans)?);
 
     let (trace, mut cut) = compact_summary(to_json(&trace)?, args.include_payloads);

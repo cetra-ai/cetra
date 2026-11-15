@@ -17,7 +17,8 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{
-    READ_TIMEOUT, attach_trace_scores, check_search, list_scope, open_query, page_limit, sort_order,
+    Deadline, READ_TIMEOUT, attach_trace_scores, check_search, list_scope, open_query, page_limit,
+    sort_order,
 };
 
 /// Trace and span read routes. All are documented and need project view.
@@ -89,6 +90,7 @@ async fn list_traces(
         params.include_eval,
         params.include_experiments,
     )?;
+    let deadline = Deadline::start();
     let ctx = open_query(&state, access.project.id, None).await?;
     let page = storage::trace_list(
         &ctx,
@@ -100,12 +102,12 @@ async fn list_traces(
             order: sort_order(params.order),
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
     let mut data = convert::trace_summaries(&page.batches)?;
-    attach_trace_scores(&ctx, &mut data).await?;
+    attach_trace_scores(&ctx, &mut data, deadline).await?;
     Ok(error::Json(Page {
         data,
         next_cursor: page.next_cursor,
@@ -152,14 +154,15 @@ async fn get_trace(
     error::Query(params): error::Query<TraceDetailParams>,
 ) -> Result<error::Json<TraceDetail>, ApiError> {
     let around = params.around.map(TimeParam::ns);
+    let deadline = Deadline::start();
     let ctx = open_query(&state, access.project.id, around).await?;
-    let data = storage::trace_detail(&ctx, &path.trace_id, READ_TIMEOUT)
+    let data = storage::trace_detail(&ctx, &path.trace_id, deadline.remaining()?)
         .await?
         .ok_or(ApiError::NotFound)?;
     let mut trace = convert::trace_summaries(std::slice::from_ref(&data.trace))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace)).await?;
+    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace), deadline).await?;
     let spans = build_tree(convert::span_summaries(&data.spans)?);
     Ok(error::Json(TraceDetail {
         trace,

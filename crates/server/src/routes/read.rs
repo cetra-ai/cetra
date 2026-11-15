@@ -1,9 +1,11 @@
 //! Shared plumbing of the read handlers (D-G-14).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use llmobs_core::ids::ProjectId;
-use llmobs_storage::{ListScope, QueryContext, QueryOptions, ScoreTargets, Storage, TimeWindow};
+use llmobs_storage::{
+    ListScope, QueryContext, QueryOptions, RunError, ScoreTargets, Storage, TimeWindow,
+};
 
 use crate::api::common::{Limit, SortOrder, TimeParam};
 use crate::api::convert;
@@ -12,8 +14,37 @@ use crate::api::traces::TraceSummary;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 
-/// Time allowed for one read: planning, running and score lookups each get this budget.
+/// Time allowed for one read request, counted from the start of its handler (G review m-3).
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The point in time by which one read request must have finished. Every storage step of the
+/// request takes [`Deadline::remaining`], so a later step gets what is left of the budget, not a
+/// fresh [`READ_TIMEOUT`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline(Instant);
+
+impl Deadline {
+    /// A deadline [`READ_TIMEOUT`] from now.
+    pub(crate) fn start() -> Self {
+        Self::after(READ_TIMEOUT)
+    }
+
+    fn after(budget: Duration) -> Self {
+        Self(Instant::now() + budget)
+    }
+
+    /// The time left for the next step.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::Timeout`] (422 `query_timeout`) once no time is left.
+    pub(crate) fn remaining(self) -> Result<Duration, ApiError> {
+        self.0
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or(ApiError::Query(RunError::Timeout))
+    }
+}
 
 /// Most bytes of `search` text a list or stream accepts (D-G-39).
 pub(crate) const MAX_SEARCH_BYTES: usize = 1024;
@@ -107,6 +138,7 @@ pub(crate) fn sort_order(order: SortOrder) -> llmobs_storage::SortOrder {
 pub(crate) async fn attach_trace_scores(
     ctx: &QueryContext,
     traces: &mut [TraceSummary],
+    deadline: Deadline,
 ) -> Result<(), ApiError> {
     if traces.is_empty() {
         return Ok(());
@@ -117,7 +149,8 @@ pub(crate) async fn attach_trace_scores(
         .collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let batches =
-        llmobs_storage::latest_scores(ctx, ScoreTargets::Traces(&refs), READ_TIMEOUT).await?;
+        llmobs_storage::latest_scores(ctx, ScoreTargets::Traces(&refs), deadline.remaining()?)
+            .await?;
     let mut briefs = convert::score_briefs(&batches)?;
     for (trace, id) in traces.iter_mut().zip(&ids) {
         trace.scores = briefs.remove(id).unwrap_or_default();
@@ -131,6 +164,7 @@ pub(crate) async fn attach_trace_scores(
 pub(crate) async fn attach_session_scores(
     ctx: &QueryContext,
     sessions: &mut [SessionSummary],
+    deadline: Deadline,
 ) -> Result<(), ApiError> {
     if sessions.is_empty() {
         return Ok(());
@@ -141,7 +175,8 @@ pub(crate) async fn attach_session_scores(
         .collect();
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let batches =
-        llmobs_storage::latest_scores(ctx, ScoreTargets::Sessions(&refs), READ_TIMEOUT).await?;
+        llmobs_storage::latest_scores(ctx, ScoreTargets::Sessions(&refs), deadline.remaining()?)
+            .await?;
     let mut briefs = convert::score_briefs(&batches)?;
     for (session, id) in sessions.iter_mut().zip(&ids) {
         session.scores = briefs.remove(id).unwrap_or_default();
@@ -168,6 +203,32 @@ mod tests {
         assert_eq!(page_limit(limit), 1000);
         let limit: Limit = serde_json::from_value(serde_json::json!(50)).unwrap();
         assert_eq!(page_limit(limit), 50);
+    }
+
+    #[test]
+    fn a_later_step_gets_what_is_left_of_the_budget() {
+        let budget = Duration::from_secs(1);
+        let deadline = Deadline::after(budget);
+        std::thread::sleep(Duration::from_millis(50));
+        let left = deadline.remaining().unwrap();
+        assert!(left > Duration::ZERO, "{left:?}");
+        assert!(left < budget, "a fresh budget was handed out: {left:?}");
+    }
+
+    #[test]
+    fn a_passed_deadline_is_a_query_timeout() {
+        let deadline = Deadline(Instant::now());
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(matches!(
+            deadline.remaining(),
+            Err(ApiError::Query(RunError::Timeout))
+        ));
+    }
+
+    #[test]
+    fn a_new_deadline_is_the_read_timeout() {
+        let left = Deadline::start().remaining().unwrap();
+        assert!(left <= READ_TIMEOUT && left > READ_TIMEOUT - Duration::from_secs(1));
     }
 
     #[test]

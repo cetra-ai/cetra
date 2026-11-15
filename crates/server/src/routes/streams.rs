@@ -32,7 +32,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::live::{LiveEvent, StreamOwner, StreamSlot, StreamTiming, shut};
-use crate::routes::read::{attach_trace_scores, check_search, open_query, open_query_on};
+use crate::routes::read::{Deadline, attach_trace_scores, check_search, open_query, open_query_on};
 
 /// Events the task may have queued for one client before it waits.
 const CLIENT_BUFFER: usize = 16;
@@ -422,10 +422,13 @@ async fn refresh(
             rows
         }
     };
-    attach_trace_scores(&ctx, &mut rows).await.map_err(|_| {
-        tracing::warn!("a trace stream could not read scores");
-        RefreshError::Resync
-    })?;
+    // The stream's refresh budget is its own (REFRESH_TIMEOUT); the score lookup gets a fresh one.
+    attach_trace_scores(&ctx, &mut rows, Deadline::start())
+        .await
+        .map_err(|_| {
+            tracing::warn!("a trace stream could not read scores");
+            RefreshError::Resync
+        })?;
     Ok(Refreshed { rows, overflowed })
 }
 
