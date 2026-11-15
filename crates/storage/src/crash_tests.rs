@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use arrow::array::{Array, FixedSizeBinaryArray};
@@ -55,7 +55,7 @@ const COMPACTION_POINTS: &[(&str, HookPoint)] = &[
     ("GcObsoleteAfterDelete", HookPoint::GcObsoleteAfterDelete),
 ];
 
-const DELETION_POINTS: &[(&str, HookPoint)] = &[
+pub(crate) const DELETION_POINTS: &[(&str, HookPoint)] = &[
     ("CatalogCommit", HookPoint::CatalogCommit),
     ("CompactionAfterStage", HookPoint::CompactionAfterStage),
     ("ObjectSync", HookPoint::ObjectSync),
@@ -341,16 +341,16 @@ async fn assert_no_orphans(dir: &Path, name: &str) {
 }
 
 /// Spawns the `test` crash child with `dir`, `name` and `extra` env vars, and
-/// returns only once it has aborted by signal. A point the child's operations
-/// never reach exits with a code (its `panic!`) and fails the assertion.
-fn run_child(
+/// returns its exit status once it has ended, or fails after 60 s. The caller
+/// says what an end means: [`run_child`] wants an abort by signal.
+pub(crate) fn spawn_child(
     test: &str,
     dir_var: &str,
     point_var: &str,
     name: &str,
     dir: &Path,
     extra: &[(&str, &OsStr)],
-) {
+) -> ExitStatus {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg(test)
@@ -365,7 +365,7 @@ fn run_child(
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();
-    let status = loop {
+    loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > Duration::from_secs(60) => {
@@ -375,7 +375,20 @@ fn run_child(
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(error) => panic!("waiting for {name}: {error}"),
         }
-    };
+    }
+}
+
+/// [`spawn_child`] that must abort by signal. A point the child's operations
+/// never reach exits with a code (its `panic!`) and fails the assertion.
+fn run_child(
+    test: &str,
+    dir_var: &str,
+    point_var: &str,
+    name: &str,
+    dir: &Path,
+    extra: &[(&str, &OsStr)],
+) {
+    let status = spawn_child(test, dir_var, point_var, name, dir, extra);
     assert!(
         status.code().is_none(),
         "{name} exited {status} instead of aborting (point not reached?)"

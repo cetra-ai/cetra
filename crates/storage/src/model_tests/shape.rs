@@ -107,6 +107,17 @@ pub(super) fn trace_shape(project: P, trace: u8) -> TraceShape {
     }
 }
 
+/// The id of the deletion an op registers at `clock` (R2.11). A UUIDv7-shaped value with a fixed
+/// timestamp and the clock in its random bits, so a parent that replays the same ops registers the
+/// same ids. `ops::apply` raises the clock by at least a microsecond per op, so the ids of one data
+/// directory differ. The top two bits of the clock are zero, so the variant bits do not collide.
+pub(super) fn deletion_id(clock: i64) -> Uuid {
+    const FIXED_MILLIS: u64 = 1_700_000_000_000;
+    let mut random = [0_u8; 10];
+    random[2..].copy_from_slice(&clock.to_be_bytes());
+    uuid::Builder::from_unix_timestamp_millis(FIXED_MILLIS, &random).into_uuid()
+}
+
 /// The trace id `span_row` builds for `trace`: the 2 big-endian bytes of `trace + 1`, repeated.
 pub(super) fn trace_id(trace: u8) -> TraceId {
     let pair = (u16::from(trace) + 1).to_be_bytes();

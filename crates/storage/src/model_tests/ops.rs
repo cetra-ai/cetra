@@ -9,14 +9,14 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 use proptest::strategy::Union;
-use uuid::Uuid;
 
 use super::check::check_settled_files;
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
 use super::observe::{observe_eval_trace_ids, observe_user_scope};
 use super::shape::{
-    HOUR_NS, P, ScoreKey, Target, day, hex, midnight, score, score_created_at, span, trace_id,
+    HOUR_NS, P, ScoreKey, Target, day, deletion_id, hex, midnight, score, score_created_at, span,
+    trace_id,
 };
 use crate::config::WalSync;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
@@ -28,7 +28,7 @@ use llmobs_core::ids::TraceId;
 use llmobs_core::span::Span;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
-const MICRO_NS: i64 = 1_000;
+pub(super) const MICRO_NS: i64 = 1_000;
 const MILLI_NS: i64 = 1_000_000;
 /// Trace numbers are `0..TRACES`, span numbers `0..SPANS`.
 pub(super) const TRACES: u8 = 12;
@@ -692,7 +692,7 @@ fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8],
     let targets = picked_traces(picks);
     let evals = resolve_evals(harness, model.project(project), &targets);
     let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
-    let id = Uuid::now_v7();
+    let id = deletion_id(clock);
     register(
         harness,
         Deletion {
@@ -736,7 +736,7 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
     );
     let evals = resolve_evals(harness, model.project(project), &expected_traces);
     let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
-    let id = Uuid::now_v7();
+    let id = deletion_id(clock);
     register(
         harness,
         Deletion {

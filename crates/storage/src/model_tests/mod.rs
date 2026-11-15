@@ -3,6 +3,7 @@
 
 mod check;
 mod harness;
+mod hook_crash;
 mod model;
 mod observe;
 mod ops;

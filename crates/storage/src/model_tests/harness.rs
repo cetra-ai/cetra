@@ -49,9 +49,10 @@ pub(super) struct Life {
 }
 
 pub(super) struct Harness {
-    /// Kept so the directory lives as long as the harness. The data directory
-    /// is `data` below it, and the lossy shadow is `shadow`.
-    _dir: tempfile::TempDir,
+    /// Kept so a harness made by `with_config` owns its directory. The data
+    /// directory is `data` below it, and the lossy shadow is `shadow`. An
+    /// `attach`ed harness borrows its directory from the caller.
+    _dir: Option<tempfile::TempDir>,
     data: std::path::PathBuf,
     config: StorageConfig,
     /// The data directory's lossy root (R2.2), registered before the first open.
@@ -76,23 +77,50 @@ impl Harness {
     /// applied, opened.
     pub(super) fn with_config(change: impl FnOnce(&mut StorageConfig)) -> Self {
         let dir = tempfile::TempDir::new().expect("temp dir for a model case");
-        let data = dir.path().join("data");
-        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
-        let mut config = model_config(&data);
-        change(&mut config);
-        let life = Some(open_life(&config));
-        Self {
-            _dir: dir,
-            data,
-            config,
-            lossy,
-            life,
-        }
+        let mut harness =
+            Self::open_in(&dir.path().join("data"), &dir.path().join("shadow"), change);
+        harness._dir = Some(dir);
+        harness
     }
 
     /// `with_config` with no change: `wal.sync = "always"`.
     pub(super) fn new() -> Self {
         Self::with_config(|_| {})
+    }
+
+    /// Opens the existing directory `data` (created when missing) in lossy mode, with the shadow
+    /// at `shadow`, as the default config (`wal.sync = "always"`). The caller keeps both paths
+    /// alive. With `seed`, a hook abort of this process first applies `crash(seed)` (R2.11).
+    pub(super) fn attach(
+        data: &std::path::Path,
+        shadow: &std::path::Path,
+        seed: Option<u64>,
+    ) -> Self {
+        let harness = Self::open_in(data, shadow, |_| {});
+        if let Some(seed) = seed {
+            harness.lossy.crash_on_abort(seed);
+        }
+        harness
+    }
+
+    /// Registers `data` as a lossy root with the shadow at `shadow`, and opens it under
+    /// `model_config(data)` with `change` applied. The caller sets `_dir` when it owns the paths.
+    fn open_in(
+        data: &std::path::Path,
+        shadow: &std::path::Path,
+        change: impl FnOnce(&mut StorageConfig),
+    ) -> Self {
+        let lossy = Lossy::enable(data, shadow);
+        let mut config = model_config(data);
+        change(&mut config);
+        let life = Some(open_life(&config));
+        Self {
+            _dir: None,
+            data: data.to_path_buf(),
+            config,
+            lossy,
+            life,
+        }
     }
 
     pub(super) fn dir(&self) -> &std::path::Path {
