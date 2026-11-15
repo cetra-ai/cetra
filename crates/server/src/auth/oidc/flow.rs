@@ -65,6 +65,8 @@ pub(crate) enum LoginError {
     SeatLimit,
     /// No usable provider for this login: unknown domain, disabled provider, or no owner test (D-P-57, D-P-60).
     SsoUnavailable,
+    /// The email's domain is enforced by its org, and this person is not an instance admin (D-P-58).
+    SsoRequired,
     /// The database or the random source failed.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -84,6 +86,7 @@ impl LoginError {
             Self::SetupRequired => "setup_required",
             Self::SeatLimit => "seat_limit",
             Self::SsoUnavailable => "sso_unavailable",
+            Self::SsoRequired => "sso_required",
             Self::Internal(_) => return None,
         })
     }
@@ -253,12 +256,26 @@ async fn resolve(
         .map_err(internal)?
     {
         let user_id = active(state, user_id).await?;
+        if enforced_for_user(state, user_id).await? {
+            return Err(LoginError::SsoRequired);
+        }
         provision_org(state, &rules, user_id).await?;
         return Ok(user_id);
     }
     let Some(email) = verified_email(claims) else {
         return Err(LoginError::EmailNotVerified);
     };
+    // D-P-58: an enforcing org's domain signs in only through the org's provider. An instance
+    // admin is the operator's break-glass and is still admitted.
+    if crate::ee::org_sso::enforces(state, &email) {
+        let admin = users::user_by_email(state.meta.reader(), &email)
+            .await
+            .map_err(internal)?
+            .is_some_and(|user| user.is_instance_admin);
+        if !admin {
+            return Err(LoginError::SsoRequired);
+        }
+    }
     let user_id = admit(
         state,
         &Admission {
@@ -578,6 +595,17 @@ async fn provision_org(
         })
         .await
         .map_err(internal)
+}
+
+/// Whether an org's enforcement refuses this user at an instance provider (D-P-58).
+async fn enforced_for_user(state: &AppState, user_id: Uuid) -> Result<bool, LoginError> {
+    let Some(user) = users::user_by_id(state.meta.reader(), user_id)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(false);
+    };
+    Ok(crate::ee::org_sso::enforces(state, &user.email) && !user.is_instance_admin)
 }
 
 async fn active(state: &AppState, user_id: Uuid) -> Result<Uuid, LoginError> {

@@ -1432,4 +1432,104 @@ mod tests {
         .await;
         assert_eq!(location(&opened), "/");
     }
+
+    #[tokio::test]
+    async fn instance_providers_are_refused_under_org_enforcement() {
+        let idp = MockIdp::start().await;
+        let issuer = idp.issuer().to_owned();
+        let app = TestApp::with_config(move |config| {
+            config.security.allow_private_network_egress = true;
+            config.auth.signup = SignupPolicy::Open;
+            config.auth.oidc = vec![oidc(&issuer)];
+        })
+        .await;
+        let seeded = app.seed().await;
+        crate::test_support::configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true)
+            .await;
+
+        // A new person of the enforced domain is refused and nothing is written.
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("ada-sub", &pending, "ada@acme.test", Some(true)));
+        let refused = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&refused), "/login?error=sso_required");
+        let written: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = 'ada@acme.test'")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(written, 0);
+
+        // An existing non-admin of the domain is refused too.
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    users::insert_user(
+                        conn,
+                        users::NewUser {
+                            email: "grace@acme.test".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: Some(now),
+                            is_instance_admin: false,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("grace-sub", &pending, "grace@acme.test", Some(true)));
+        let refused = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&refused), "/login?error=sso_required");
+
+        // An instance admin of the domain passes the check; linking refuses admins anyway.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    users::insert_user(
+                        conn,
+                        users::NewUser {
+                            email: "root@acme.test".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: Some(now),
+                            is_instance_admin: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant("root-sub", &pending, "root@acme.test", Some(true)));
+        let admitted = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&admitted), "/login?error=link_refused");
+    }
 }

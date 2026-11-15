@@ -163,7 +163,7 @@ it("explains a domain that must use single sign-on", async () => {
   const { user } = await renderApp("/login");
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Your email domain must sign in with single sign-on. Use a button above.",
+    "Your organization requires single sign-on. Enter your email again to continue.",
   );
 });
 

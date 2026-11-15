@@ -155,6 +155,10 @@ function ForgotPassword({ smtpEnabled }: { smtpEnabled: boolean }) {
   );
 }
 
+/** Under an org's enforcement the account has no password to reset (D-P-58). */
+const SSO_RESET_MESSAGE =
+  "Your organization requires single sign-on, so this account has no password to reset. Sign in through your identity provider.";
+
 /** The message above the submit button for a failed `POST /api/auth/password/reset`. */
 function resetFormError(error: unknown): string | undefined {
   if (error === null || error === undefined) {
@@ -171,6 +175,9 @@ function resetFormError(error: unknown): string | undefined {
     if (problem.detail === "invalid or expired link") {
       return "This reset link is invalid or has expired.";
     }
+  }
+  if (problem.status === 403 && problem.code === "sso_required") {
+    return SSO_RESET_MESSAGE;
   }
   if (problem.status === 403) {
     return "Password sign-in is disabled on this server.";
@@ -258,6 +265,13 @@ function NewPassword({ token }: { token: string }) {
           disabled={reset.isPending}
         />
         <FormError message={formError} />
+        {formError === SSO_RESET_MESSAGE ? (
+          <p>
+            <Link to="/login" className={AUTH_LINK_CLASS}>
+              Go to sign in
+            </Link>
+          </p>
+        ) : null}
         {invalidLink ? (
           <Link to="/reset" search={{}} className={AUTH_LINK_CLASS}>
             Request a new link

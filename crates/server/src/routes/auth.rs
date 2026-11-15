@@ -278,6 +278,12 @@ async fn login(
         audit_login_failed(Some(user.id));
         return Err(ApiError::Unauthorized);
     };
+    // Checked after the password verifies, so a wrong password reveals nothing (D-P-58).
+    if crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::SsoRequired,
+        });
+    }
     if state.config.auth.require_email_verification && user.email_verified_at.is_none() {
         return Err(ApiError::Forbidden {
             code: ProblemCode::EmailNotVerified,
@@ -348,6 +354,11 @@ async fn reset_password(
     let Some(user) = users::user_by_id(state.meta.reader(), user_id).await? else {
         return Err(invalid_link());
     };
+    if crate::ee::org_sso::enforces(&state, &user.email) && !user.is_instance_admin {
+        return Err(ApiError::Forbidden {
+            code: ProblemCode::SsoRequired,
+        });
+    }
     check_policy(&body.password, &user.email)
         .map_err(|error| field_error("password", &error.to_string()))?;
     let password_hash = {
@@ -439,6 +450,7 @@ async fn forgot_password(
     let now = state.clock.now_ns();
     if let Some(user) = users::user_by_email(state.meta.reader(), &email).await?
         && user.disabled_at.is_none()
+        && !(crate::ee::org_sso::enforces(&state, &email) && !user.is_instance_admin)
         && mail_allowed(&state, &email, now)
     {
         let url = reset_link(&state.meta, &state.config.public_url, user.id, now)
@@ -534,7 +546,9 @@ async fn pending_signup_invite(
     if invite.email != email {
         return Err(field_error("email", "does not match the invitation"));
     }
-    if crate::ee::sso_enforcement::requires_sso(state, email) {
+    if crate::ee::sso_enforcement::requires_sso(state, email)
+        || crate::ee::org_sso::enforces(state, email)
+    {
         return Err(ApiError::Forbidden {
             code: ProblemCode::SsoRequired,
         });
@@ -577,7 +591,9 @@ async fn signup(
                 code: ProblemCode::Forbidden,
             });
         }
-        if crate::ee::sso_enforcement::requires_sso(&state, &email) {
+        if crate::ee::sso_enforcement::requires_sso(&state, &email)
+            || crate::ee::org_sso::enforces(&state, &email)
+        {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::SsoRequired,
             });
@@ -835,8 +851,10 @@ mod tests {
     use crate::meta::members::org_role;
     use crate::meta::projects::project_by_slugs;
     use crate::meta::users::{count_users, user_by_email};
+    use crate::test_support::mock_idp::MockIdp;
     use crate::test_support::{
-        TestApp, TestResponse, assert_logs_clean, capture_logs, license_key, set_limits,
+        TestApp, TestResponse, assert_logs_clean, capture_logs, configure_org_sso, license_key,
+        make_instance_admin, org_sso_app, org_sso_app_with, second_org, set_limits,
     };
 
     const PASSWORD: &str = "llmobs-ok1";
@@ -2383,5 +2401,243 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A user with a password, created the way signup creates one.
+    async fn password_user(app: &TestApp, email: &str, admin: bool) -> Uuid {
+        let hash = {
+            let hasher = app.state.passwords().await.expect("hasher");
+            hasher.hash(PASSWORD).await.expect("hash")
+        };
+        let now = app.state.clock.now_ns();
+        let email = email.to_owned();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let user = insert_user(
+                        conn,
+                        NewUser {
+                            email,
+                            name: None,
+                            password_hash: Some(hash),
+                            email_verified_at: Some(now),
+                            is_instance_admin: admin,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(user.id)
+                })
+            })
+            .await
+            .expect("user")
+    }
+
+    async fn login_as(app: &TestApp, email: &str, password: &str) -> TestResponse {
+        app.request(Method::POST, "/api/auth/login")
+            .json(&serde_json::json!({ "email": email, "password": password }))
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn org_enforcement_refuses_password_login() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        password_user(&app, "ada@acme.test", false).await;
+
+        let right = login_as(&app, "ada@acme.test", PASSWORD).await;
+        assert_eq!(right.status, StatusCode::FORBIDDEN);
+        assert_eq!(right.problem().code, ProblemCode::SsoRequired);
+        // A wrong password answers 401 whatever the domain: nothing is revealed.
+        let wrong = login_as(&app, "ada@acme.test", "wrong-password").await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+
+        password_user(&app, "bob@other.test", false).await;
+        assert_eq!(
+            login_as(&app, "bob@other.test", PASSWORD).await.status,
+            StatusCode::OK
+        );
+        let root = password_user(&app, "root@acme.test", true).await;
+        make_instance_admin(&app, root).await;
+        assert_eq!(
+            login_as(&app, "root@acme.test", PASSWORD).await.status,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn org_enforcement_refuses_password_and_invitation_signup() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, _owner) = org_sso_app_with(|config| {
+            config.auth.signup = SignupPolicy::Open;
+        })
+        .await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        let signup = |email: &'static str, invite: Option<String>| {
+            app.request(Method::POST, "/api/auth/signup")
+                .json(&serde_json::json!({
+                    "email": email,
+                    "password": PASSWORD,
+                    "name": "Ada",
+                    "invite_token": invite,
+                }))
+        };
+        let refused = signup("new@acme.test", None).send().await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.problem().code, ProblemCode::SsoRequired);
+
+        let token = crate::auth::secret::new_opaque_token().expect("token");
+        let now = app.state.clock.now_ns();
+        let inviter = seeded.user_id;
+        let hash = token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    invites::replace_invite(
+                        conn,
+                        seeded.org_id,
+                        "invited@acme.test",
+                        OrgRole::Member,
+                        &hash,
+                        inviter,
+                        now,
+                        now + invites::INVITE_TTL_NS,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let invited = signup("invited@acme.test", Some(token.plaintext.clone()))
+            .send()
+            .await;
+        assert_eq!(invited.status, StatusCode::FORBIDDEN);
+        assert_eq!(invited.problem().code, ProblemCode::SsoRequired);
+    }
+
+    #[tokio::test]
+    async fn org_enforcement_silences_forgot_and_refuses_reset() {
+        let idp = MockIdp::start().await;
+        let app = TestApp::with_mailer_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.license_key = Some(Secret::new(license_key(&["org_sso"])));
+        })
+        .await;
+        let seeded = app.seed().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        let ada = password_user(&app, "ada@acme.test", false).await;
+
+        let forgot = app
+            .request(Method::POST, "/api/auth/password/forgot")
+            .json(&serde_json::json!({ "email": "ada@acme.test" }))
+            .send()
+            .await;
+        assert_eq!(forgot.status, StatusCode::NO_CONTENT);
+        // Give a background send time to happen before asserting that none did.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(app.sent().is_empty(), "no mail for an enforced account");
+
+        let token = crate::auth::secret::new_opaque_token().expect("token");
+        let now = app.state.clock.now_ns();
+        let hash = token.hash.clone();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::password_resets::insert_reset(
+                        conn,
+                        &hash,
+                        ada,
+                        now,
+                        now + 3_600_000_000_000,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let reset = app
+            .request(Method::POST, "/api/auth/password/reset")
+            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-llmobs-1" }))
+            .send()
+            .await;
+        assert_eq!(reset.status, StatusCode::FORBIDDEN);
+        assert_eq!(reset.problem().code, ProblemCode::SsoRequired);
+
+        password_user(&app, "root@acme.test", true).await;
+        let root = app
+            .request(Method::POST, "/api/auth/password/forgot")
+            .json(&serde_json::json!({ "email": "root@acme.test" }))
+            .send()
+            .await;
+        assert_eq!(root.status, StatusCode::NO_CONTENT);
+        // Mail is sent in the background: poll for it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while app.sent().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(app.sent().len(), 1, "the instance admin's reset is sent");
+    }
+
+    /// D-P-54 and D-P-58: after another org takes the domain, the refusal follows the domain's
+    /// route, so the old org's enforcement no longer refuses its users.
+    #[tokio::test]
+    async fn a_taken_over_domain_stops_refusing_password_login() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        password_user(&app, "x@acme.test", false).await;
+        assert_eq!(
+            login_as(&app, "x@acme.test", PASSWORD).await.status,
+            StatusCode::FORBIDDEN
+        );
+
+        let (beta, beta_owner) = second_org(&app, "beta", "b@beta.test").await;
+        configure_org_sso(&app, beta, &idp, "beta.test", true, false).await;
+        let added = app
+            .request(Method::POST, "/api/v1/orgs/beta/sso/domains")
+            .header("cookie", &beta_owner.cookie)
+            .json(&serde_json::json!({ "domain": "acme.test" }))
+            .send()
+            .await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let row = added.json::<crate::api::org_sso::OrgSso>().domains[0].clone();
+        // The record of acme is gone from the answer, so the domain moves to beta.
+        app.dns_txt(&row.txt_name, &[format!("\"{}\"", row.txt_value).as_str()]);
+        let verified = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/orgs/beta/sso/domains/{}/verify", row.id),
+            )
+            .header("cookie", &beta_owner.cookie)
+            .send()
+            .await;
+        assert_eq!(verified.status, StatusCode::OK);
+
+        assert_eq!(
+            login_as(&app, "x@acme.test", PASSWORD).await.status,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn lapse_keeps_enforcement() {
+        let idp = MockIdp::start().await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
+        password_user(&app, "ada@acme.test", false).await;
+        let refused = login_as(&app, "ada@acme.test", PASSWORD).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.problem().code, ProblemCode::SsoRequired);
     }
 }

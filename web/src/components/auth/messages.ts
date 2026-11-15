@@ -21,6 +21,8 @@ const OAUTH_MESSAGES: Record<OAuthErrorCode, string> = {
   seat_limit:
     "Your organization has no free seat for you. Ask an owner to free one or upgrade the plan.",
   sso_unavailable: "Single sign-on is not set up for this email domain.",
+  sso_required:
+    "Your organization requires signing in through its identity provider. Enter your email to continue.",
 };
 
 export function oauthErrorMessage(code: OAuthErrorCode): string {
@@ -34,7 +36,7 @@ export function loginErrorMessage(error: unknown): string {
     return "Incorrect email or password.";
   }
   if (problem?.status === 403 && problem.code === "sso_required") {
-    return "Your email domain must sign in with single sign-on. Use a button above.";
+    return "Your organization requires single sign-on. Enter your email again to continue.";
   }
   if (problem?.status === 403 && problem.code === "email_not_verified") {
     return "Verify your email address before signing in.";
