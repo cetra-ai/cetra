@@ -1,6 +1,6 @@
 # Strata v0 · M5: DataFusion provider and fast paths
 
-Implementation plan for phases 6 and 7 of [the prototype design](../prototype-plan.md), § S8 and § S9. Revision 2, after the first cold review, which built the plan's dependencies and checked the code it names. There are two sub-phases. Each is done by one Haiku agent in one go, in order, and ends with the checks green and one commit.
+Implementation plan for phases 6 and 7 of [the prototype design](../prototype-plan.md), § S8 and § S9. Revision 3, after two cold reviews. They built the plan's dependencies, and checked its DataFusion behaviour with a mock provider: ordering, `get_field` and the module names. There are two sub-phases. Each is done by one Haiku agent in one go, in order, and ends with the checks green and one commit.
 
 **Prerequisites:** M4.3 is committed (`scan`, `ScanRequest`, `Predicate`, `Lit`, `lookup_scan`, `IoStats`).
 
@@ -30,7 +30,7 @@ Implementation plan for phases 6 and 7 of [the prototype design](../prototype-pl
 
 **Edit:**
 - `strata/Cargo.toml` and `strata/Cargo.lock`. The lock file is tracked and gains about 70 packages; commit it.
-- `strata/src/{datafusion.rs (new),file.rs,lib.rs}`;
+- `strata/src/{datafusion.rs (new),file.rs,predicate.rs,lib.rs}`. In `predicate.rs`, only make `check_size` `pub(crate)`;
 - `strata/tests/{datafusion.rs (new),common/dataset.rs (new)}`;
 - `docs/research/file-format/prototype-plan.md` § S8.
 
@@ -46,7 +46,7 @@ Implementation plan for phases 6 and 7 of [the prototype design](../prototype-pl
   - add `datafusion = { version = "55.2", default-features = false, features = ["sql", "nested_expressions"] }`;
   - move `async-trait = "0.1.92"` from `[dev-dependencies]` to here.
 - `[dev-dependencies]`: add `datafusion = { version = "55.2", default-features = false, features = ["sql", "nested_expressions", "parquet", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }`. These are the bench crate's features.
-- Run `cargo +1.99.1 tree -e normal,dev --prefix none | grep -E '^(arrow|parquet|object_store) ' | sort -u`. It must print exactly one line per crate. A reviewer checked that this resolves to arrow 59.3.2, parquet 59.3.2 and object_store 0.13.2. If it prints more, stop and report.
+- Run `cargo +1.99.1 tree -e normal,dev --prefix none | grep -E '^(arrow|parquet|object_store) ' | sed 's/ (\*)$//' | sort -u`. It must print exactly one line per crate: `arrow v59.3.2`, `object_store v0.13.2` and `parquet v59.3.2`. A reviewer checked that this resolves to arrow 59.3.2, parquet 59.3.2 and object_store 0.13.2. If it prints more, stop and report.
 
 ### Types (`datafusion.rs`)
 
@@ -130,9 +130,11 @@ fn translate(expr: &Expr, table: &StrataTable) -> Pushed;
   | Column file type | `ScalarValue` | `Lit` |
   |---|---|---|
   | Boolean | `Boolean(v)` | `Bool` |
-  | Int8–Int64 | the same `IntN(v)` | `Int(v as i64)` |
-  | UInt8–UInt64 | the same `UIntN(v)` | `UInt(v as u64)` |
-  | Float32, Float64 | `Float32(v)`, `Float64(v)` | `Float(v as f64)` |
+  | Int8–Int64 | the same `IntN(v)` | `Int(i64::from(v))`; plain `v` for Int64 |
+  | UInt8–UInt64 | the same `UIntN(v)` | `UInt(u64::from(v))`; plain `v` for UInt64 |
+  | Float32, Float64 | `Float32(v)`, `Float64(v)` | `Float(f64::from(v))`; plain `v` for Float64 |
+
+  Writing `v as i64` in the Int64 arm trips `clippy::unnecessary_cast`.
   | Timestamp(Nanosecond, _) | `TimestampNanosecond(v, _)` (any timezone; the value is UTC nanoseconds) | `Int(v)` |
   | Utf8 | `Utf8View(v)` or `Utf8(v)` | `Utf8` |
   | Binary | `BinaryView(v)` or `Binary(v)` | `Bytes` |
@@ -142,6 +144,7 @@ fn translate(expr: &Expr, table: &StrataTable) -> Pushed;
 - **Combinators.**
   - `BinaryExpr { a, And, b }` and `BinaryExpr { a, Or, b }` translate `a` and `b`. With either side `No`, the whole is `No`. Both sides `Exact` give `Exact(And/Or)`. Otherwise the result is `Inexact`.
   - `Not(e)`: `Exact(p)` gives `Exact(Not(p))`; anything else gives `No`.
+- **Size.** If the predicate of the whole result fails `crate::predicate::check_size`, which enforces the depth and node limits added by M4F, the result is `No`. Otherwise a wide `OR` or a large `IN` would be accepted at plan time and fail in `scan`.
 
 **Map keys.**
 - `get_field(m, k) = v` is `Exact(MapKeyEq(m, k, Utf8(v)))` only if, in **every** file:
@@ -173,7 +176,7 @@ fn translate(expr: &Expr, table: &StrataTable) -> Pushed;
 
      The column name is not hard-coded. A `None` literal, or any other width, means no lookup.
      - For each file, `file.may_contain(name, &key).await`; drop the files whose answer is `Some(false)`.
-     - If that filter is the **only** kept filter and `limit` is `None`, the exec is in **lookup mode**: it calls `lookup_scan(&key, &projection)` per file.
+     - If that filter is the **only** kept filter and `limit` is `None`, the exec is in **lookup mode**: it calls `lookup_scan(&key, &projection)` per file, and its `predicate` is `None`, so the key is not evaluated twice.
   4. **Exec.** Build `StrataExec` with the remaining files, the projection, the predicate, the lookup key (lookup mode only), `limit`, and the output schema.
 
 ### `StrataExec`
@@ -228,7 +231,13 @@ pub struct StrataExec {
 
 ### Design doc (§ S8)
 
-Update the pushdown table and the metrics list to match this plan:
+Update the pushdown table, the API and the metrics list to match this plan:
+- `StrataTable::open(store, paths, &Config)` and `StrataTable::new(files)`.
+- Any `Cast` makes a filter `No`; there is no unwrapping.
+- Only `trace_id = …` takes lookup mode, not `IN`.
+- Mixed `AND` and `OR` of `Exact` and `Inexact` is `Inexact`.
+- `output_ordering` is the first sort-key column only, and only when each partition reads at most one file.
+- `limit` reaches the scan only when DataFusion passes it.
 - `MapKeyEq` is `Exact` only when the key is promoted with `residual_hits == 0` in every file, and `Unsupported` otherwise. Explain why: `get_field` returns the first match.
 - `strata_chunks_pruned` and `strata_frames_read` are dropped. The prototype's `scan` does not report them; `IoStats` covers I/O.
 - Lookup mode is used only when the `trace_id` filter is the only filter.
@@ -299,10 +308,10 @@ The test:
 
    Queries without `ORDER BY` compare the sorted row lists; the others compare them in order.
 5. **Pushdown checks.** For these queries, check whether `FilterExec` appears in the Strata physical plan: `ctx.sql(q).await?.create_physical_plan().await?`, displayed with `datafusion::physical_plan::displayable(plan.as_ref()).indent(true).to_string()`.
-   - `count_errors_6h`, `user_filter` and `metadata_filter`: no `FilterExec`, because every filter is `Exact`. For `metadata_filter`, first assert that `customer_id` is a promoted key with `residual_hits == 0` in every file. Read it through a `pub(crate)` helper; since the test is in `tests/`, expose `StrataTable::exact_map_key(&self, column: &str, key: &str) -> bool`, a public method documented as a diagnostic. If the assertion fails, stop and report: the bench query would not be exact.
+   - `count_errors_6h`, `user_filter` and `metadata_filter`: no `FilterExec`, because every filter is `Exact`. For `metadata_filter`, first assert `table.exact_map_key("metadata", "customer_id")`. This is a documented `pub fn exact_map_key(&self, column: &str, key: &str) -> bool` on `StrataTable`. It returns true only if, in every file, `column` is a shredded map (`layout_of` is `Ok`) and `key` is promoted with `residual_hits == 0`. `translate` uses the same function for `MapKeyEq`; do not write the check twice. If the assertion fails, stop and report: the bench query would not be exact.
    - `substring_input`: a `FilterExec` remains, because the filter is `Inexact`, and the `StrataExec` line contains `Contains`.
    - `SELECT trace_id FROM t ORDER BY trace_id`: the plan has no `SortExec`, because each partition is one sorted file. A `SortPreservingMergeExec` is expected. Its rows equal Parquet's in order.
-6. **Lookup mode.** For the first trace id, the plan string contains `lookup=true` and `files=1` (the other files are dropped by the key filter or zones). If a file is not dropped because of a filter false positive, accept `files<=3` and say so in the report.
+6. **Lookup mode.** For the first trace id, the plan string contains `lookup=true` and `files=N` with `N < 3`. `may_contain` uses only the sort-key filter, and a trace that straddles two time slices lives in two files. Also look up `[0xFFu8; 16]`, a key absent from every file: 0 rows.
 
 ### Done when
 
@@ -322,7 +331,7 @@ cargo +1.99.1 test --release -- --ignored roundtrip_payload roundtrip_light scan
 **Goal:** `trace_detail` and `trace_list` answer the two most common UI queries without DataFusion, and return the same rows as the DataFusion queries.
 
 **Edit:**
-- `strata/src/{fast.rs (new),lib.rs}`;
+- `strata/src/{fast.rs (new),predicate.rs,lib.rs}`. In `predicate.rs`, only make `zone_i64` `pub(crate)`, after checking its current name with grep;
 - `strata/tests/{fast_paths.rs (new)}`;
 - `docs/research/file-format/prototype-plan.md` § S9.
 
@@ -356,7 +365,7 @@ pub async fn trace_list(files: &[Arc<StrataFile>], time: Range<i64>, predicate: 
 
 **Columns.** `st`, `tid` and `sid` are the indexes of `start_time`, `trace_id` and `span_id`; a missing one is `Schema`. The scan projection is `[st, tid, sid]` followed by the requested columns, so the request may repeat a column.
 
-**Zones.** `fn time_zone(entry: &BlockEntry) -> (i64, i64)` reads `min` and `max` only when `entry.flags & crate::narrow::flags::HAS_ZONE != 0`: `entry.min.split_first_chunk::<8>()` mapped through `i64::from_le_bytes`, and the same for `max`. Otherwise, or if a split fails, it returns `(i64::MIN, i64::MAX)`. `BlockEntry` and `flags` live in `crate::narrow`; `predicate.rs` has an equivalent private helper, `zone_i64`. Make that one `pub(crate)` and reuse it instead of writing a second.
+**Zones.** `fn time_zone(e: &BlockEntry) -> (i64, i64)`: if `e.flags & crate::narrow::flags::HAS_ZONE != 0`, it returns `(zone_i64(&e.min), zone_i64(&e.max))`, each `None` replaced by `i64::MIN` or `i64::MAX` respectively. Otherwise it returns `(i64::MIN, i64::MAX)`. `zone_i64` is the existing helper in `predicate.rs`.
 
 **Algorithm:**
 1. **Candidate chunks.** For every file `f`, `block_entries(st)`. A chunk is a candidate when `max ≥ time.start && min < time.end`. Collect `(max, f, first_row, n_rows)` over all files, and sort by `max` descending, then file index and `first_row` ascending.
@@ -369,7 +378,7 @@ pub async fn trace_list(files: &[Arc<StrataFile>], time: Range<i64>, predicate: 
    - Push each output row into the heap. Pop the minimum while `len > k`.
 5. **Output.**
    - Pop all rows and sort them by the key descending.
-   - Build each output column with `arrow::compute::interleave` over the kept batches' columns. The requested column `j` is at position `3 + j` in every kept batch.
+   - Build each output column with `arrow::compute::interleave(&[&dyn Array], &[(usize, usize)])`. The arrays are the kept batches' columns, and the indexes are `(batch index, row index)`. The kept batches stay alive until then. The requested column `j` is at position `3 + j` in every kept batch.
    - Make the batch over the file-schema projection, then convert with `to_table_batch`.
 6. **Empty results.** The names and files are validated first. Then `k == 0` returns an empty batch with no I/O. An empty heap after the loop also returns `RecordBatch::new_empty`, before any `interleave`, which errors on an empty list.
 
@@ -395,7 +404,11 @@ It reuses `tests/common/dataset.rs`: `spans_dataset(2_000, 3)`, written as Strat
 
   Then:
   - compare `trace_list` with DataFusion over `t2` for the same 10 windows;
-  - assert the early stop: for the window `t0 + 12h`, the summed `io_stats().requests` over the files after `trace_list` with `k = 50` is below the sum after `k = 1_000_000`. Call `reset_io_stats` before each run.
+  - **Early stop.** For the window `t0 + 12h`:
+    - first warm the metadata with one `trace_list` call with `k = 1_000_000`;
+    - then, for `k = 1` and for `k = 1_000_000`, call `reset_io_stats` on every file, call `trace_list`, and sum `io_stats().requests`;
+    - assert that `requests(k = 1) < requests(k = 1_000_000)`;
+    - assert that the `k = 1` row equals the first row of the `k = 1_000_000` result.
 
   `trace_detail` is not run on these files, because `lookup_scan` needs a FixedSizeBinary sort key.
 - **Errors.** An unknown column name gives `Schema`.
