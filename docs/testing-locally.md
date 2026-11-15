@@ -183,11 +183,83 @@ Point any OpenTelemetry exporter at the server:
 or use the Python and TypeScript SDKs in `sdks/` (spec 10). `just e2e` runs both SDK suites
 against a real server.
 
+## Enterprise features
+
+Project roles, SSO enforcement and per-org single sign-on need a licence. Release builds trust
+only the production signing key, so build a release binary that also trusts the development key
+in `fixtures/license/dev-1.key`, like a debug build does:
+
+```bash
+just build-release-dev-license
+```
+
+`just demo-license` prints a licence with `project_roles`, `sso_enforcement` and `org_sso`
+(`tools/demo/enterprise/license.json`). With only the licence, `just demo-serve` covers project
+roles: `LLMOBS_LICENSE_KEY=$(just demo-license) just demo-serve`.
+
+The SSO features need an OpenID Connect provider, and an org's domain is proven by a DNS TXT
+record. `tools/demo/enterprise/compose.yaml` runs them with Docker on the host network:
+
+- **keycloak** on <http://localhost:8180> (console `admin` / `admin`): realm `corp` with
+  `alice@corp.test` and `dave@corp.test`, realm `acme` with `bob@acme.test` and `carol@acme.test`.
+  Usernames are the part before the `@` and passwords `<name>-password` (`alice-password`).
+  Client `llmobs`, secret `corp-demo-secret` or `acme-demo-secret`.
+- **dns**: dnsmasq on 127.0.0.1:53, serving the TXT records in `dns/records.conf` and forwarding
+  everything else to the host's resolver (`127.0.0.53`, systemd-resolved).
+- **llmobs**: the host's `target/release/llmobs` in an `ubuntu:26.04` container whose
+  `/etc/resolv.conf` points at the dns service, so the host's DNS is untouched. It listens on
+  <http://localhost:8081> (beside `just demo-serve`), with data in `target/demo-ee`, the same
+  admin, org, project and key as the demo, and `llmobs.toml`: an `[[auth.oidc]]` provider
+  `corp` (auto-provisioned as `member` of `demo`) and `enforce_sso_domains = ["corp.test"]`.
+  The binary links against the host's glibc, so the image's must be the same or newer
+  (`LLMOBS_IMAGE=…` to change it).
+
+```bash
+cd tools/demo/enterprise
+echo "LLMOBS_LICENSE_KEY=$(just demo-license)" > .env
+docker compose up -d
+just demo-seed 100 http://localhost:8081
+```
+
+Keycloak takes about 30 seconds to start. Without Docker on your machine, copy
+`tools/demo/enterprise`, `.env` and the binary (`strip` it first: 630 MB with debug info, 125 MB
+without) to the same paths on a Linux host that has Docker, run `docker compose up -d` there, and
+forward the two ports: `ssh -N -L 8081:127.0.0.1:8081 -L 8180:127.0.0.1:8180 <host>`. Keycloak
+and llmobs must be at the same `localhost` URLs for the browser and for llmobs, since the issuer
+is `http://localhost:8180/realms/…` (http issuers must be on a loopback host).
+
+Checked with Keycloak 26.8.1 on Ubuntu 26.04 (`main` at 30bed18):
+
+- [ ] **Licence**: the llmobs log shows `licence active` with `kid` `dev-1`; `/demo/settings/plan`
+  lists Project roles, SSO enforcement and Single sign-on as Included.
+- [ ] **Instance SSO**: on <http://localhost:8081/login>, `Continue with Corp Keycloak`, sign in as
+  `alice`: alice lands in org `demo` as a Member.
+- [ ] **SSO enforcement**: invite `dave@corp.test` (Members → Invite member), open the invite link
+  and sign up with a password: refused with `sso_required`. An admin reset link for alice
+  (`/admin/users`) is refused the same way when used.
+- [ ] **Project roles** (`/demo/demo/settings/members`, as admin): set alice's project access to
+  `Viewer`. Signed in as alice, `New evaluator` is disabled and writes answer 403.
+- [ ] **Per-org SSO** (`/demo/settings/sso`, as admin): provider `Acme Keycloak`, issuer
+  `http://localhost:8180/realms/acme`, client `llmobs`, secret `acme-demo-secret`, `Save`. Add
+  domain `acme.test`; copy its token into `dns/records.conf`
+  (`txt-record=_llmobs-verify.acme.test,"llmobs-verify=<token>"`), `docker compose restart dns`,
+  then `Verify`: Verified. Turn on `Enabled`.
+- [ ] **Email-first sign-in**: sign out. The login page now asks for the email only; `bob@acme.test`
+  → `Continue` goes to the acme realm, and bob joins `demo` with the role for new members
+  (Viewer).
+- [ ] **Org enforcement**: as bob, create a personal access token; as admin, turn on `Enforced`.
+  Bob's token now answers 401 while his SSO session keeps working, and a password signup of
+  `carol@acme.test` from an invite is refused with `sso_required`. The admin's email is not in a covered
+  domain, so the admin is unaffected; an instance admin of a covered domain would sign in at
+  `/login?password=1` (break-glass).
+
+Stop with `docker compose down`. The data in `target/demo-ee` belongs to root (the container's
+user); remove it with `sudo rm -rf target/demo-ee` to start over.
+
 ## Known gaps
 
-- **Single sign-on, SSO enforcement and project roles** need an enterprise licence (or the Teams
-  add-on). The development signing key in `tools/license` is trusted only by debug builds, and an
-  org's SSO also needs a local OpenID Connect provider; not covered here.
+- **Teams add-on and org tokens**: the plans of the cloud control plane (`PUT
+  /api/internal/v1/orgs/{org_id}/entitlements`) are not covered here.
 - **Email** (invites, password resets, email alert channels, email verification) needs
   `LLMOBS_SMTP_URL`; without it, links show in the UI and `llmobs admin reset-password` prints a
   reset URL.

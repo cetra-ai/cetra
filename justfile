@@ -262,13 +262,22 @@ demo-serve:
     LLMOBS_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true \
     ./target/release/llmobs serve
 
-# Send demo traces and scores to the server started by `just demo-serve`
-demo-seed traces="300":
-    python3 tools/demo/seed.py --key {{demo_key}} --traces {{traces}} --email admin@demo.test --password demo-password
+# Send demo traces and scores to the server started by `just demo-serve` (or the enterprise demo on 8081)
+demo-seed traces="300" url="http://localhost:8080":
+    python3 tools/demo/seed.py --url {{url}} --key {{demo_key}} --traces {{traces}} --email admin@demo.test --password demo-password
 
 # OpenAI-compatible mock judge and webhook receiver on 127.0.0.1:8090
 demo-llm:
     python3 tools/demo/mock_llm.py --port 8090
+
+# The release binary, trusting the development licence key like a debug build (enterprise demo)
+build-release-dev-license: js-install
+    pnpm --dir web run build
+    cargo build --release -p llmobs-cli --config 'profile.release.package.llmobs-token.debug-assertions=true'
+
+# Print an enterprise licence for the demo, signed with the development key
+demo-license:
+    @cargo run -q -p llmobs-license-tool -- sign --key fixtures/license/dev-1.key --kid dev-1 --payload tools/demo/enterprise/license.json
 
 # Run the binary with arguments, e.g. `just run --version`
 run *args:
