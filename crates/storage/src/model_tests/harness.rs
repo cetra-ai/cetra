@@ -106,6 +106,9 @@ pub(super) struct HarnessOptions {
     /// it would fill the disk with WAL segments that are already truncated (R5.4, D7). A lossy
     /// crash is not possible in an unrecorded harness.
     pub(super) unrecorded: bool,
+    /// Projects besides the lanes whose files may be catalogued: `check_settled_files` accepts
+    /// them and checks nothing about them (the resource tests' filler project C).
+    pub(super) foreign_projects: Vec<ProjectId>,
 }
 
 /// The remote store of a harness with an object store.
@@ -140,6 +143,8 @@ pub(super) struct Harness {
     remote: Option<Remote>,
     /// Tokio worker threads per life.
     workers: usize,
+    /// See [`HarnessOptions::foreign_projects`].
+    foreign_projects: Vec<ProjectId>,
     /// The `list` calls the orphan audits made (S3 mode). `check_full` expects exactly these
     /// and no others: storage never lists the bucket (spec 03 §5).
     pub(super) audit_lists: u64,
@@ -220,6 +225,7 @@ impl Harness {
             adjust,
         );
         harness._dir = Some(dir);
+        harness.foreign_projects = options.foreign_projects;
         harness
     }
 
@@ -275,6 +281,7 @@ impl Harness {
             crashes: Vec::new(),
             remote,
             workers,
+            foreign_projects: Vec::new(),
             audit_lists: 0,
             faulty_read_errors: AtomicU64::new(0),
         }
@@ -282,6 +289,10 @@ impl Harness {
 
     pub(super) fn dir(&self) -> &std::path::Path {
         &self.data
+    }
+
+    pub(super) fn foreign_projects(&self) -> &[ProjectId] {
+        &self.foreign_projects
     }
 
     pub(super) fn config(&self) -> &StorageConfig {
