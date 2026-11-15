@@ -521,6 +521,14 @@ Planned in [`m2/`](m2/00-design.md): online `llmobs admin backup` through a cont
 `gc.grace` up to 30 days for S3-mode metadata backups, `llmobs admin gc-orphans`, and pre-migration
 copies of `meta.db` and `catalog.db` (D-N-17–D-N-24).
 
+## N M3
+
+Planned in [`m3/`](m3/00-design.md) (D180, D182):
+- restore mode for Q's restore drills (R18): no outbound call and no object deletion;
+- Prometheus `/metrics` on `metrics_addr` (R11);
+- `/readyz` checking the object store, free disk and the storage failure flags;
+- `/healthz` failing on sticky storage failures (D-N-25–D-N-35).
+
 ## Open items
 
 - **SDK publishing** (PyPI, npm): not in N's scope as briefed. The SDK versions and release flow
