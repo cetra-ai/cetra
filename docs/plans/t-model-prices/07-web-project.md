@@ -56,7 +56,7 @@ export function PriceResolver({ org, project }: { org: string; project: string }
 ```
 
 A small form: "Model" (`TextField`, id `resolve-model`), "Provider" (`TextField`, id `resolve-provider`, description "Optional, e.g. openai"), and a "Check" submit button. On submit with a non-blank model, set the submitted values in state and run `$api.useQuery("get", "/api/v1/projects/{project}/models/resolve", { params: { path: { project: projectRef(org, project) }, query: { model, ...(provider ? { provider } : {}) } } }, { enabled: submitted })`. Show:
-- `price` absent → "No price matches this model. Its spans get no cost, and a budgeted online rule cannot use it as a judge."
+- `price` absent (test `data.price === undefined`; the generated type is `price?: ModelPrice`, never `null`) → "No price matches this model. Its spans get no cost, and a budgeted online rule cannot use it as a judge."
 - a row → "Priced by the {scope label} price “{model_name}”: input {formatUnitPrice}, output {formatUnitPrice} per 1M tokens." where the scope label is "project", "organization" or "built-in".
 
 ## 4. Online-rule hint (`rule-form.tsx`)
