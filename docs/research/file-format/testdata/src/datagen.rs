@@ -18,6 +18,7 @@ impl Rng {
     pub fn new(seed: u64) -> Self {
         Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1)
     }
+    #[allow(clippy::should_implement_trait)] // Rng is not an iterator; the name is kept for the generator call sites
     pub fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
@@ -153,7 +154,7 @@ impl World {
         let vocab = Vocab::new(&mut rng, 6000);
         let mut apps = Vec::new();
         for a in 0..40 {
-            let system = ({ let n = rng.range(300, 2200); vocab.text(&mut rng, n) });
+            let system = { let n = rng.range(300, 2200); vocab.text(&mut rng, n) };
             let ntools = rng.below(7);
             let mut tool_names = Vec::new();
             let tools = (ntools > 0).then(|| {
@@ -161,7 +162,7 @@ impl World {
                     .map(|t| {
                         let name = format!("{}_{}", vocab.word(&mut rng), t);
                         tool_names.push(name.clone());
-                        let desc = ({ let n = rng.range(20, 80); vocab.text(&mut rng, n) });
+                        let desc = { let n = rng.range(20, 80); vocab.text(&mut rng, n) };
                         json!({"type":"function","name":name,"description":desc,
                           "parameters":{"type":"object","properties":{
                             "query":{"type":"string","description":vocab.text(&mut rng, 8)},
@@ -180,7 +181,7 @@ impl World {
                 model: rng.below(MODELS.len()),
             });
         }
-        let corpus = (0..3000).map(|_| ({ let n = rng.range(80, 400); vocab.text(&mut rng, n) })).collect();
+        let corpus = (0..3000).map(|_| { let n = rng.range(80, 400); vocab.text(&mut rng, n) }).collect();
         Self {
             vocab,
             apps,
@@ -299,7 +300,7 @@ impl World {
             schema_version: 1,
         };
 
-        let question = ({ let n = rng.range(8, 150); self.vocab.text(rng, n) });
+        let question = { let n = rng.range(8, 150); self.vocab.text(rng, n) };
         let mut messages: Vec<serde_json::Value> =
             vec![json!({"role":"user","parts":[{"type":"text","content":question}]})];
         let first = out.len();
@@ -315,7 +316,7 @@ impl World {
             let input = serde_json::to_string(&messages).unwrap_or_default();
             let in_tokens = (input.len() + app.system.len()) as i64 / 4;
             let call_tool = i + 1 < n_llm && !app.tool_names.is_empty() && rng.unit() < 0.7;
-            let answer = ({ let n = rng.range(20, 450); self.vocab.text(rng, n) });
+            let answer = { let n = rng.range(20, 450); self.vocab.text(rng, n) };
             let out_msg = if call_tool {
                 let tool = &app.tool_names[rng.below(app.tool_names.len())];
                 json!([{"role":"assistant","parts":[
@@ -334,7 +335,7 @@ impl World {
             s.operation = Some("chat".to_owned());
             s.input_tokens = Some(in_tokens);
             s.output_tokens = Some(out_tokens);
-            s.cache_read_tokens = (rng.unit() < 0.4).then(|| app.system.len() as i64 / 4);
+            s.cache_read_tokens = (rng.unit() < 0.4).then_some(app.system.len() as i64 / 4);
             s.total_tokens = Some(in_tokens + out_tokens);
             s.cost_input = Some(in_tokens as f64 * 2.5e-6);
             s.cost_output = Some(out_tokens as f64 * 1e-5);

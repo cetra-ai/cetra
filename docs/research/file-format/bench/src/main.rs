@@ -4,7 +4,6 @@
 //! fmtbench query <dir> [runs]
 
 mod counting;
-mod datagen;
 mod payload;
 mod profile;
 
@@ -18,6 +17,7 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::prelude::{SessionConfig, SessionContext};
+use fmt_testdata::datagen;
 use llmobs_core::batch::spans_to_record_batch;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
@@ -483,89 +483,15 @@ fn payload_cmd(dir: &Path) -> R<()> {
 /// in a trace-sorted file). Column chunks ("files") hold ~`budget` MiB of raw
 /// input each; the first 4 chunks are measured.
 fn swe_cmd(budget_mib: usize, files: &[String]) -> R<()> {
-    use arrow::array::{AsArray, StructArray};
-    use parquet::arrow::ProjectionMask;
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    let budget = budget_mib << 20;
-    let mut chunks: Vec<[payload::Column; 3]> = Vec::new();
-    let new_chunk = || {
-        [
-            payload::Column { name: "input".into(), values: Vec::new() },
-            payload::Column { name: "output".into(), values: Vec::new() },
-            payload::Column { name: "system_instructions".into(), values: Vec::new() },
-        ]
-    };
-    let mut cur = new_chunk();
-    let mut cur_bytes = 0usize;
-    let mut trajectories = 0usize;
-    let mut spans = 0usize;
-    let mut needle: Option<Vec<u8>> = None;
-    'outer: for f in files {
-        let b = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(f)?)?;
-        let schema = b.parquet_schema();
-        let idx: Vec<usize> = (0..schema.num_columns()).filter(|&i| schema.column(i).path().parts()[0] == "trajectory").collect();
-        let mask = ProjectionMask::leaves(schema, idx);
-        for batch in b.with_projection(mask).with_batch_size(256).build()? {
-            let batch = batch?;
-            let list = batch.column_by_name("trajectory").unwrap().as_list::<i32>();
-            for t in 0..list.len() {
-                let msgs = list.value(t);
-                let st: &StructArray = msgs.as_struct();
-                let role = st.column_by_name("role").unwrap().as_string::<i32>();
-                let text = st.column_by_name("text").unwrap().as_string::<i32>();
-                let sys = st.column_by_name("system_prompt").unwrap().as_string::<i32>();
-                let mut system = String::new();
-                let mut history: Vec<serde_json::Value> = Vec::new();
-                trajectories += 1;
-                for m in 0..st.len() {
-                    let r = role.value(m);
-                    let txt = if text.is_null(m) { "" } else { text.value(m) };
-                    if !sys.is_null(m) && !sys.value(m).is_empty() {
-                        system = sys.value(m).to_owned();
-                    }
-                    if r == "system" {
-                        system = txt.to_owned();
-                        continue;
-                    }
-                    if r == "ai" || r == "assistant" {
-                        let input = serde_json::to_string(&history)?;
-                        let out = serde_json::to_string(&serde_json::json!([{"role":"assistant","parts":[{"type":"text","content":txt}],"finish_reason":"stop"}]))?;
-                        let sysj = serde_json::to_string(&serde_json::json!([{"type":"text","content":system}]))?;
-                        if needle.is_none() && trajectories == 37 && txt.len() > 400 {
-                            let mid = &txt.as_bytes()[txt.len() / 2..];
-                            if let Some(p) = mid.iter().position(|c| *c == b' ') {
-                                let n = &mid[p + 1..(p + 1 + 20).min(mid.len())];
-                                needle = Some(n.to_vec());
-                            }
-                        }
-                        cur_bytes += input.len();
-                        cur[0].values.push(input.into_bytes());
-                        cur[1].values.push(out.into_bytes());
-                        cur[2].values.push(sysj.into_bytes());
-                        spans += 1;
-                    }
-                    let role_out = if r == "ai" { "assistant" } else { r };
-                    history.push(serde_json::json!({"role":role_out,"parts":[{"type":"text","content":txt}]}));
-                }
-                if cur_bytes >= budget {
-                    chunks.push(std::mem::replace(&mut cur, new_chunk()));
-                    cur_bytes = 0;
-                    if chunks.len() == 4 {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-    }
-    if chunks.len() < 4 && !cur[0].values.is_empty() {
-        chunks.push(cur);
-    }
-    let needle = needle.unwrap_or_else(|| b"zqxjneedle".to_vec());
-    println!("swe: {trajectories} trajectories, {spans} LLM spans, {} column chunks; needle {:?}", chunks.len(), String::from_utf8_lossy(&needle));
+    let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    let swe = fmt_testdata::swe::payloads(&paths, budget_mib << 20, 4)?;
+    let needle = swe.needle;
+    println!("swe: {} trajectories, {} LLM spans, {} column chunks; needle {:?}", swe.trajectories, swe.spans, swe.chunks.len(), String::from_utf8_lossy(&needle));
+    let names = ["input", "output", "system_instructions"];
     let mut per_col: Vec<Vec<payload::Column>> = vec![Vec::new(), Vec::new(), Vec::new()];
-    for c in chunks {
-        for (i, col) in c.into_iter().enumerate() {
-            per_col[i].push(col);
+    for c in swe.chunks {
+        for (i, values) in c.into_iter().enumerate() {
+            per_col[i].push(payload::Column { name: names[i].into(), values });
         }
     }
     for cols in &per_col {

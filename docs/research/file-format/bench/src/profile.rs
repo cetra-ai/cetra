@@ -203,8 +203,8 @@ fn unhex(s: &str) -> Vec<u8> {
 pub async fn profile(dir: &Path, runs: usize, register: impl AsyncFn(&SessionContext, &str) -> R<()>) -> R<()> {
     let ids: Vec<String> = std::fs::read_to_string(dir.join("trace_ids.txt"))?.lines().take(20).map(str::to_owned).collect();
     let light = "span_id, parent_span_id, name, start_time, end_time, status, model, total_tokens, cost_total";
-    let t0 = crate::datagen::DAY_START;
-    let h = 3_600 * crate::datagen::NS;
+    let t0 = fmt_testdata::datagen::DAY_START;
+    let h = 3_600 * fmt_testdata::datagen::NS;
     let list = format!(
         "SELECT trace_id, span_id, name, start_time, duration_ns, status, model, total_tokens, cost_total, input_preview FROM t WHERE span_kind = 'llm' AND start_time >= to_timestamp_nanos({}) AND start_time < to_timestamp_nanos({}) ORDER BY start_time DESC LIMIT 50",
         t0 + 14 * h,
