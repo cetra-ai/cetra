@@ -161,7 +161,9 @@ async fn update_org_member(
                 if matches!(role, OrgRole::Owner | OrgRole::Admin) {
                     members::clear_project_overrides(conn, org_id, target).await?;
                 }
-                if members::count_owners(conn, org_id).await? == 0 {
+                if target_role == OrgRole::Owner
+                    && members::count_active_owners(conn, org_id).await? == 0
+                {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
                 Ok(RoleChange::Done)
@@ -207,11 +209,13 @@ async fn remove_org_member(
                 if actor != target && !may_remove_other(actor_role, target_role) {
                     return Ok(MemberChange::Forbidden);
                 }
-                if target_role == OrgRole::Owner && members::count_owners(conn, org_id).await? == 1
+                members::remove_org_member(conn, org_id, target).await?;
+                // A disabled owner does not count: the org must keep one who can act.
+                if target_role == OrgRole::Owner
+                    && members::count_active_owners(conn, org_id).await? == 0
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
-                members::remove_org_member(conn, org_id, target).await?;
                 Ok(MemberChange::Done)
             })
         })
@@ -672,6 +676,57 @@ mod tests {
             stuck.problem().detail.as_deref(),
             Some("an org needs an owner")
         );
+    }
+
+    /// Review 2026-11-15 #5: a disabled owner counted toward the last-owner rule, so the only
+    /// active owner could leave or step down and no one could act for the org.
+    #[tokio::test]
+    async fn a_disabled_owner_does_not_keep_the_org_owned() {
+        let app = TestApp::new().await;
+        let (ada_id, ada) = signed_in(&app, "ada@example.com").await;
+        let (other_id, _) = signed_in(&app, "other@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, other_id, OrgRole::Owner).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::users::set_disabled(conn, other_id, Some(now), now).await
+                })
+            })
+            .await
+            .unwrap();
+
+        let demoted = app
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "admin" }))
+            .send()
+            .await;
+        assert_eq!(demoted.status, 409);
+        let left = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(left.status, 409);
+        // The disabled owner can still be removed while an active one stays.
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{other_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
     }
 
     #[tokio::test]

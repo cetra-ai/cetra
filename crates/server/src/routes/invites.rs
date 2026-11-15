@@ -301,6 +301,10 @@ async fn accept_invite(
                 else {
                     return Ok(Accepted::Missing);
                 };
+                // A suspended or deleting org takes no new members.
+                if org.state != "active" {
+                    return Ok(Accepted::Missing);
+                }
                 if invite.email != caller_email {
                     return Ok(Accepted::WrongEmail);
                 }
@@ -864,6 +868,44 @@ mod tests {
             .json();
         assert!(listed.data.is_empty());
         assert!(listed.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_inactive_org_takes_no_member() {
+        // Review 2026-11-15 #8: accept ignored the org's state.
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest_cookie = cookie_pair(
+            &start_session(&app.state, guest_id, None, None, None)
+                .await
+                .unwrap(),
+        );
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+        let org_id = org.id.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE orgs SET state = 'deleting' WHERE id = ?")
+                        .bind(org_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)
+                })
+            })
+            .await
+            .unwrap();
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest_cookie)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 404, "{}", body(&accepted));
     }
 
     #[tokio::test]

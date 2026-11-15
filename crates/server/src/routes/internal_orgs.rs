@@ -17,7 +17,11 @@ use crate::http::error::{self, ApiError};
 use crate::meta::deletions::{ActorKind, org_drop_exists_tx, org_drop_of};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{self, OrgRow, org_by_id, org_by_id_tx};
-use crate::meta::users::{NewUser, insert_user, normalize_email, user_by_email_tx};
+use crate::meta::personal_tokens::revoke_user_tokens;
+use crate::meta::users::{
+    NewUser, insert_user, normalize_email, set_email_verified, set_password_hash, user_by_email_tx,
+};
+use crate::meta::web_sessions::delete_user_sessions;
 use crate::routes::deletions::deletion_json;
 use crate::routes::entitlements::OrgIdPath;
 use crate::routes::orgs::{field_error, trimmed_name};
@@ -44,8 +48,9 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 
 /// What the write transaction did.
 enum Outcome {
-    /// The org and its owner membership were created.
-    Created(OrgRow),
+    /// The org and its owner membership were created, with the hashes of the PATs revoked
+    /// from an unverified owner account.
+    Created(OrgRow, Vec<String>),
     /// An org with this id already exists. Nothing changed (an idempotent retry).
     Existing(OrgRow),
     /// The email belongs to a disabled user or an instance admin.
@@ -91,11 +96,23 @@ async fn create_org(
                 if org_drop_exists_tx(conn, id).await? {
                     return Ok(Outcome::Dropped);
                 }
+                let mut revoked = Vec::new();
                 let owner = match user_by_email_tx(conn, &email).await? {
                     Some(user) if user.disabled_at.is_some() || user.is_instance_admin => {
                         return Ok(Outcome::OwnerNotAllowed);
                     }
-                    Some(user) => user,
+                    Some(user) => {
+                        if user.email_verified_at.is_none() {
+                            // D148's defence against a pre-registered account: whoever signed
+                            // up with this email never proved it, so their password, sessions
+                            // and tokens go before the account owns the org.
+                            delete_user_sessions(conn, user.id, None).await?;
+                            revoked = revoke_user_tokens(conn, user.id, now).await?;
+                            set_password_hash(conn, user.id, None, now).await?;
+                            set_email_verified(conn, user.id, now).await?;
+                        }
+                        user
+                    }
                     None => {
                         insert_user(
                             conn,
@@ -113,12 +130,15 @@ async fn create_org(
                 };
                 let org = orgs::insert_org_with_derived_slug(conn, id, &name, now).await?;
                 add_org_member(conn, org.id, owner.id, OrgRole::Owner, now).await?;
-                Ok(Outcome::Created(org))
+                Ok(Outcome::Created(org, revoked))
             })
         })
         .await?;
     match outcome {
-        Outcome::Created(org) => {
+        Outcome::Created(org, revoked) => {
+            for hash in revoked {
+                state.pat_cache.evict(&hash);
+            }
             tracing::info!(
                 target: "audit",
                 org_id = %org.id,
@@ -318,6 +338,61 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(owner, "owner");
+    }
+
+    /// Review 2026-11-15 #4: an account signed up with the owner's email but never verified kept
+    /// its password and sessions, so whoever registered it first owned the new org.
+    #[tokio::test]
+    async fn an_unverified_owner_loses_the_password_and_sessions() {
+        let app = TestApp::new().await;
+        let now = app.state.clock.now_ns();
+        let user_id = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_user(
+                        conn,
+                        NewUser {
+                            email: "squatted@example.com".to_owned(),
+                            name: None,
+                            password_hash: Some("$argon2id$attacker".to_owned()),
+                            email_verified_at: None,
+                            is_instance_admin: false,
+                        },
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap()
+            .id;
+        crate::auth::session::start_session(&app.state, user_id, None, None, None)
+            .await
+            .unwrap();
+        let id = Uuid::now_v7();
+        let created = create(
+            &app,
+            &control_plane_token("orgs"),
+            &body(id, "Squat", "squatted@example.com", None),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+        let user = user_by_email(app.state.meta.reader(), "squatted@example.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.id, user_id);
+        assert_eq!(user.password_hash, None);
+        assert!(user.email_verified_at.is_some());
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM web_sessions WHERE user_id = ?")
+                .bind(user_id.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(sessions, 0);
     }
 
     #[tokio::test]

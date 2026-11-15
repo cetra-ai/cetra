@@ -160,6 +160,27 @@ pub(crate) async fn count_owners(
         .map_err(MetaError::from)
 }
 
+/// Owners whose account is not disabled. A disabled owner cannot act for the org, so it does
+/// not count toward the last-owner rule (as in [`crate::meta::users::is_last_active_owner`]).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn count_active_owners(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<i64, MetaError> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM org_members JOIN users ON users.id = org_members.user_id \
+         WHERE org_members.org_id = ? AND org_members.role = 'owner' \
+         AND users.disabled_at IS NULL",
+    )
+    .bind(org_id.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(MetaError::from)
+}
+
 /// Members whose role is owner, admin or member (viewers take no seat, D176).
 ///
 /// # Errors

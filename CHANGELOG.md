@@ -55,9 +55,18 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
   the token stays out of browser history. A token created by the sign-in page expires after 90
   days; run `llmobs login` again when it does.
+- `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
+  `api_key` again (400 on `api_key`), so a new host never receives the stored key.
 
 ### Fixed
 
+- Auth security review (`docs/research/auth/review-2026-11-15.md`): deleting another project's
+  evaluator answers 404 instead of naming that project's online rules; deleting another org's
+  connection answers 404 while it is in use; a control-plane org creation clears the password,
+  sessions and tokens of an unverified account it makes owner; a disabled owner no longer counts as
+  the org's last owner; an invitation to an org that is not active cannot be accepted; a trusted
+  proxy seen as an IPv4-mapped IPv6 address is trusted; a config file with a TOML syntax error no
+  longer prints the offending line.
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.
