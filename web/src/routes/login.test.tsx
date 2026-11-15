@@ -41,6 +41,17 @@ async function fillAndSubmit(user: UserEvent, email: string, password: string) {
   await user.click(screen.getByRole("button", { name: "Sign in" }));
 }
 
+type AppRouter = Awaited<ReturnType<typeof renderApp>>["router"];
+
+// Waits for the navigation to finish loading, not just to start: a load still running when the
+// file's environment is torn down rejects outside any test.
+async function settlesAt(router: AppRouter, pathname: string) {
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+    expect(router.state.resolvedLocation?.pathname).toBe(pathname);
+  });
+}
+
 const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
@@ -71,7 +82,7 @@ it("signs in and returns to the redirect target", async () => {
     "/login?redirect=%2Facme%2Fsupport-bot%2Ftraces",
   );
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
+  await settlesAt(router, "/acme/support-bot/traces");
   expect(bodies).toEqual([{ email: "ada@example.com", password: "correct horse battery" }]);
   // gcTime 0: once the page has unmounted, TanStack drops the mutation, whose variables
   // hold the password and whose data holds the signed-in user.
@@ -96,14 +107,14 @@ it("goes home after signing in without a redirect", async () => {
   loginSucceeds();
   const { router, user } = await renderApp("/login");
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
 });
 
 it("sends the user to setup when the server needs it", async () => {
   signedOut();
   withConfig({ setup_required: true });
   const { router } = await renderApp("/login");
-  await waitFor(() => expect(router.state.location.pathname).toBe("/setup"));
+  await settlesAt(router, "/setup");
   expect(screen.getByText(/Open the setup link printed in the server log/)).toBeInTheDocument();
 });
 
@@ -117,7 +128,8 @@ it("ignores an unsafe redirect", async () => {
   );
   await fillAndSubmit(user, "ada@example.com", "correct horse battery");
   // The app stays on its origin and lands on the default page, not on the given redirect.
-  await waitFor(() => expect(router.state.location.href).toBe("/acme"));
+  await settlesAt(router, "/acme");
+  expect(router.state.location.href).toBe("/acme");
 });
 
 it("sends a user who is already signed in to the redirect target", async () => {
@@ -251,7 +263,7 @@ it("submits with Enter", async () => {
   await user.type(screen.getByLabelText("Email"), "ada@example.com");
   await user.type(screen.getByLabelText("Password"), "correct horse battery{Enter}");
   expect(bodies).toHaveLength(1);
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
 });
 
 it("explains a rate-limited resend", async () => {
@@ -428,7 +440,7 @@ it("shows the password form for another email and goes back on request", async (
   await user.type(await screen.findByLabelText("Password"), "correct horse battery");
   expect(screen.getByLabelText("Email")).toHaveValue("ada@example.com");
   await user.click(screen.getByRole("button", { name: "Sign in" }));
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
   expect(bodies).toEqual([{ email: "ada@example.com", password: "correct horse battery" }]);
 });
 
@@ -513,7 +525,7 @@ it("shows the instance admins' password form on password=1", async () => {
   );
   expect(replaced).toEqual([]);
   expect(screen.queryByRole("link", { name: "Forgot password?" })).toBeNull();
-  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  await settlesAt(router, "/acme");
 });
 
 it("shows a provider error instead of starting the provider again", async () => {
@@ -545,7 +557,10 @@ it("links instance admins to the password form", async () => {
     await screen.findByRole("link", { name: "Instance admin? Sign in with a password" }),
   );
   expect(await screen.findByLabelText("Password")).toBeInTheDocument();
-  await waitFor(() => expect(router.state.location.search).toEqual({ password: true }));
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+    expect(router.state.resolvedLocation?.search).toEqual({ password: true });
+  });
   expect(replaced).toEqual([]);
 });
 

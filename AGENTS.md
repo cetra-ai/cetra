@@ -69,6 +69,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
+- `LLMOBS_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `LLMOBS_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings).
 - `LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1).
 - `just lazyfs` runs the crash children and a short ingest on a LazyFS mount, and drops unsynced data at each crash (D-R-5). It needs FUSE 3 and `user_allow_other` (`tools/lazyfs/README.md`).
 - `LLMOBS_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 25; the last of the 26 pairs is not in the default run).
@@ -79,6 +80,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `LLMOBS_MODEL_S3_REMOTE=1` runs the S3-mode model test against the `LLMOBS_TEST_S3_*` bucket, in a prefix of its own, and deletes the prefix's objects after each case (`just model-s3 N` with it; R M4).
 - `crates/storage/tests/s3_probe.rs` probes what our S3 code relies on against a real provider. Its tests are `#[ignore]`d and skip without `LLMOBS_TEST_S3_ENDPOINT`: `cargo test --release -p llmobs-storage --all-features --test s3_probe -- --ignored --nocapture` (R M4).
 - `LLMOBS_TEST_TOXIPROXY` (with `LLMOBS_TEST_S3_*` and optionally `LLMOBS_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway.
+- `LLMOBS_BENCH_CORPUS` overrides the benchmark corpus path. `LLMOBS_TEST_S3_REGION` and `LLMOBS_TEST_S3_PATH_STYLE` also configure the benches and the soak. `LLMOBS_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
@@ -108,6 +110,7 @@ sdks/typescript/             TypeScript SDK (pnpm)                              
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
+tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
 tools/e2e/                   run.sh for just e2e: a real llmobs serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
@@ -153,6 +156,7 @@ Run everything through `just`:
 | `just s3-chaos` | the S3 fault tests through toxiproxy in front of an S3 endpoint (R M4) |
 | `just lazyfs` | the storage crash tests and a short ingest on a LazyFS mount, which drops unsynced data at each crash (R2.12, D-R-5); needs FUSE 3 (`tools/lazyfs/README.md`) |
 | `just eval-live` | opt-in live provider tests; ignored by `just check` (D167) |
+| `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
 | `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |
 | `just deny-advisories` | RustSec advisories only |
@@ -170,6 +174,10 @@ Run everything through `just`:
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
+| `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
+| `just soak` | the storage soak (D-R-11), configured by `LLMOBS_SOAK_*` |
+| `just soak-plot <out>` | plots and a summary table of a soak run |
+| `just check-soak-plot` | lint and type-check `tools/soak` |
 | `just e2e` | build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `llmobs serve` |
 | `just dist <target>` | release archive of one target into `target/dist` (and the image context on Linux) |
 | `just image [tag]` · `just image-smoke [tag]` | build and smoke-test the Docker image from `target/dist` |

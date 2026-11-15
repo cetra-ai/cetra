@@ -194,7 +194,36 @@ Track R, plan `docs/plans/r-hardening/06-m6-concurrency.md`. The sub-phases add 
 
 **M6-1, GC deleted a file a pre-raise snapshot still read.** A deletion pass raises a clean file: `Catalog::apply` replaces its `FileMeta` with a new `Arc`. A snapshot taken before the raise holds the old `Arc`, but when the file was later removed, the committer retired only the new `Arc`, so GC's in-use check (`strong_count`) did not count the reader. Once the grace had passed, GC deleted the object under the reader. The production grace of 5 minutes hid it. The regression test is `gc::tests::gc_keeps_a_file_a_snapshot_from_before_its_raise_reads`, which fails before the change at its GC step. Class: storage. Fixed in R6.4 (commit 5b01647): the committer keeps a `Weak` of each replaced version (`superseded`), and GC treats the file as in use while one is alive.
 
+### Pending and limits
+
+- **Nightly stress.** `just stress` (R6.7) is not yet run nightly. The nightly steps wait for M3's nightly workflow (`.github/workflows/nightly.yml`); until it exists, the stress test runs only by hand.
+- **Read cache (R6.8).** `read_cache::tests::concurrent_use_never_returns_wrong_bytes` pins no wrong bytes, the capacity and the file-to-index direction under 8 threads. A block can be indexed without its file for a moment when an eviction runs between a block's write and its index insert (benign: the next read finds the file missing, drops the entry and fetches again). The test does not reach the window that `write_blocks` guards by removing a block written after its object was evicted: with that removal taken out it still passed 200 of 200 runs, so that guard had no deterministic test. `read_cache::tests::a_block_written_after_its_object_was_evicted_is_not_indexed` now covers it through a test-only hook between the block's write and its index insert: removing the guard fails it.
+- **Gate and flush races (R6.8).** The snapshot tests pin the gate against media collection, finish_drops and obsolete collection (each removal fails a test, checked by hand). One of them passes with the gate removed and needs a stronger scenario: `a_snapshot_matches_its_copy_under_concurrent_commits` (the snapshot's retired `Arc`s keep listed files in use). `the_gate_holds_a_quarantined_file` now drops the project after the verify pass, which retires the quarantined file as an obsolete row, so removing the gate fails it. `flush_now`: removing the force flag keeps `flush_now_covers_every_acknowledged_append` green but makes it take about 60 s instead of 1 s, and removing the shutdown checks keeps `flush_now_racing_shutdown_fails_cleanly` green, because the flush finishes before shutdown wins. `flush_now_gives_up_once_shutdown_began` holds the flush and fails when the in-loop shutdown check is removed. The M1 model has no `Flush` op, so B2's `flush_now` is not exercised by the model: a follow-up for the model.
+- **Watchdog scope.** The stuck-item watchdog covers `run_segment` only. `check_full`, the barriers and `settle_concurrent` run outside it, so a hang there is not caught by the watchdog.
+
 ---
+
+## M7 — Scale and soak
+
+What M7 covers:
+
+- realistic payloads for the benchmarks and the soak, from a permissively licensed corpus (R7.2);
+- the ingest benchmark on those payloads, with the measured compression of the Parquet files (R7.3);
+- the 5M-trace benchmark on those payloads, local and on S3 (R7.4);
+- the soak: its driver, its per-minute samples, and its pass/fail rules with the sampled-trace oracle (R7.5, R7.6);
+- the soak's plots and recipes (R7.7);
+- the 24 h dry run, and the 72 h soak on a dedicated server, recorded in `soak.md` (R7.7, R7.8).
+
+### Runs
+
+| date | commit | run | machine | result | write-up |
+|---|---|---|---|---|---|
+
+None yet: the benchmark runs 8–14 and the soak runs are run by hand. See `benchmarks.md` § Track R M7 runs and `soak.md` § Runs.
+
+### Findings
+
+None yet.
 
 ## Gaps toward deterministic simulation
 
