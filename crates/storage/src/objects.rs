@@ -14,6 +14,7 @@ use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use chrono::NaiveDate;
@@ -65,6 +66,9 @@ pub(crate) struct Objects {
     /// `<data_dir>/tmp/compaction`, where remote outputs spill before upload.
     spill_dir: PathBuf,
     hooks: Hooks,
+    /// Set by the first failed local fsync. Local writes and deletes check it
+    /// first (D-R-6). Never set in remote mode.
+    sync_failed: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -106,6 +110,7 @@ impl Objects {
                     url,
                     spill_dir,
                     hooks,
+                    sync_failed: Arc::new(AtomicBool::new(false)),
                 })
             }
             ObjectStoreUrl::S3 { bucket, prefix } => {
@@ -118,8 +123,25 @@ impl Objects {
                     url,
                     spill_dir,
                     hooks,
+                    sync_failed: Arc::new(AtomicBool::new(false)),
                 })
             }
+        }
+    }
+
+    /// Whether a local fsync failed in this process (D-R-6). Local writes and
+    /// deletes are refused from then until a restart.
+    pub(crate) fn sync_failed(&self) -> bool {
+        self.sync_failed.load(Ordering::SeqCst)
+    }
+
+    /// Refuses a write or delete after a failed local fsync (D-R-6). Remote
+    /// stores never set the flag, so they are not affected.
+    fn refuse_after_sync_failure(&self) -> Result<(), ObjectError> {
+        if self.sync_failed() {
+            Err(ObjectError::SyncFailed)
+        } else {
+            Ok(())
         }
     }
 
@@ -146,6 +168,7 @@ impl Objects {
             url: registered_url()?,
             spill_dir: data_dir.join("tmp").join("compaction"),
             hooks,
+            sync_failed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -216,17 +239,21 @@ impl Objects {
     /// and is not retried here. A remote data file is written through the read
     /// cache after its upload.
     pub(crate) async fn put_durable(&self, path: &str, bytes: Bytes) -> Result<(), ObjectError> {
+        self.refuse_after_sync_failure()?;
         validate_key(path)?;
         match &self.kind {
             Kind::Local { root } => {
                 let root = root.clone();
                 let key = path.to_owned();
                 let hooks = clone_hooks(&self.hooks);
-                tokio::task::spawn_blocking(move || put_local(&root, &key, &bytes, &hooks))
-                    .await
-                    .map_err(|source| {
-                        ObjectError::io("writing object", Path::new(path), io::Error::other(source))
-                    })?
+                let sync_failed = Arc::clone(&self.sync_failed);
+                tokio::task::spawn_blocking(move || {
+                    put_local(&root, &key, &bytes, &hooks, &sync_failed)
+                })
+                .await
+                .map_err(|source| {
+                    ObjectError::io("writing object", Path::new(path), io::Error::other(source))
+                })?
             }
             Kind::Remote => {
                 let through = self.write_through(path);
@@ -252,12 +279,14 @@ impl Objects {
 
     /// Deletes one object. A missing object is success. Used by GC.
     pub(crate) async fn delete(&self, path: &str) -> Result<(), ObjectError> {
+        self.refuse_after_sync_failure()?;
         validate_key(path)?;
         match &self.kind {
             Kind::Local { root } => {
                 let root = root.clone();
                 let key = path.to_owned();
-                tokio::task::spawn_blocking(move || delete_local(&root, &key))
+                let sync_failed = Arc::clone(&self.sync_failed);
+                tokio::task::spawn_blocking(move || delete_local(&root, &key, &sync_failed))
                     .await
                     .map_err(|source| {
                         ObjectError::io(
@@ -320,12 +349,14 @@ impl Objects {
 
     /// Size of `path`, then [`Self::delete`]. A missing object is `0`.
     pub(crate) async fn delete_len(&self, path: &str) -> Result<u64, ObjectError> {
+        self.refuse_after_sync_failure()?;
         validate_key(path)?;
         match &self.kind {
             Kind::Local { root } => {
                 let root = root.clone();
                 let key = path.to_owned();
-                tokio::task::spawn_blocking(move || delete_local(&root, &key))
+                let sync_failed = Arc::clone(&self.sync_failed);
+                tokio::task::spawn_blocking(move || delete_local(&root, &key, &sync_failed))
                     .await
                     .map_err(|source| {
                         ObjectError::io(
@@ -359,6 +390,7 @@ impl Objects {
     ) -> Result<(OutputTarget, fs::File), ObjectError> {
         match &self.kind {
             Kind::Local { root } => {
+                self.refuse_after_sync_failure()?;
                 validate_key(key)?;
                 let root = root.clone();
                 let key = key.to_owned();
@@ -446,16 +478,18 @@ impl Objects {
     ) -> Result<u64, ObjectError> {
         match &self.kind {
             Kind::Local { root } => {
+                self.refuse_after_sync_failure()?;
                 let root = root.clone();
                 let key = target.key.clone();
                 let temp = target.temp.clone();
                 let hooks = clone_hooks(&self.hooks);
+                let sync_failed = Arc::clone(&self.sync_failed);
                 tokio::task::spawn_blocking(move || {
                     let size = file
                         .metadata()
                         .map_err(|source| ObjectError::io("reading output size", &temp, source))?
                         .len();
-                    publish_local(&root, &key, &temp, file, &hooks)?;
+                    publish_local(&root, &key, &temp, file, &hooks, &sync_failed)?;
                     Ok(size)
                 })
                 .await
@@ -567,11 +601,12 @@ impl Objects {
         match &self.kind {
             Kind::Local { root } => {
                 let mut removed = 0;
-                remove_temps(&root.join("tables"), &mut removed)?;
-                remove_temps(&root.join("media"), &mut removed)?;
+                remove_temps(&root.join("tables"), &mut removed, &self.sync_failed)?;
+                remove_temps(&root.join("media"), &mut removed, &self.sync_failed)?;
                 // The `tables` and `media` entries live in the root itself.
-                fs::sync_dir(root)
-                    .map_err(|source| ObjectError::io("syncing object directory", root, source))?;
+                fs::sync_dir(root).map_err(|source| {
+                    sync_failure(&self.sync_failed, "syncing object directory", root, source)
+                })?;
                 Ok(removed)
             }
             Kind::Remote => {
@@ -668,7 +703,13 @@ fn build_s3(
     }
 }
 
-fn put_local(root: &Path, key: &str, bytes: &Bytes, hooks: &Hooks) -> Result<(), ObjectError> {
+fn put_local(
+    root: &Path,
+    key: &str,
+    bytes: &Bytes,
+    hooks: &Hooks,
+    sync_failed: &AtomicBool,
+) -> Result<(), ObjectError> {
     let final_path = root.join(key);
     if try_exists(&final_path)? {
         return Err(ObjectError::AlreadyExists {
@@ -700,7 +741,7 @@ fn put_local(root: &Path, key: &str, bytes: &Bytes, hooks: &Hooks) -> Result<(),
     file.write_all(bytes)
         .map_err(|source| ObjectError::io("writing object", &temp_path, source))?;
 
-    publish_local(root, key, &temp_path, file, hooks)
+    publish_local(root, key, &temp_path, file, hooks, sync_failed)
 }
 
 /// The publication tail shared by `put_local` and `Objects::publish_output`:
@@ -712,6 +753,7 @@ fn publish_local(
     temp_path: &Path,
     file: fs::File,
     hooks: &Hooks,
+    sync_failed: &AtomicBool,
 ) -> Result<(), ObjectError> {
     let final_path = root.join(key);
     let Some(directory) = final_path.parent() else {
@@ -720,10 +762,15 @@ fn publish_local(
 
     hooks.pause(HookPoint::ObjectSync);
     if let Some(source) = hooks.fail(HookPoint::ObjectSync) {
-        return Err(ObjectError::io("syncing object", temp_path, source));
+        return Err(sync_failure(
+            sync_failed,
+            "syncing object",
+            temp_path,
+            source,
+        ));
     }
     file.sync_all()
-        .map_err(|source| ObjectError::io("syncing object", temp_path, source))?;
+        .map_err(|source| sync_failure(sync_failed, "syncing object", temp_path, source))?;
     drop(file);
 
     hooks.pause(HookPoint::ObjectRename);
@@ -744,21 +791,34 @@ fn publish_local(
 
     hooks.pause(HookPoint::ObjectDirSync);
     if let Some(source) = hooks.fail(HookPoint::ObjectDirSync) {
+        let error = sync_failure(sync_failed, "syncing object directory", directory, source);
         // The rename already published the final name. Move it back so a failed
         // publish does not leave that name, and startup cleanup can drop the
         // temp file. A real `sync_dir` error below is not undone: the bytes
         // are already under the final name.
         fs::rename(&final_path, temp_path)
             .map_err(|undo| ObjectError::io("restoring object temp file", temp_path, undo))?;
-        return Err(ObjectError::io(
-            "syncing object directory",
-            directory,
-            source,
-        ));
+        return Err(error);
     }
-    fs::sync_dir(directory)
-        .map_err(|source| ObjectError::io("syncing object directory", directory, source))?;
+    fs::sync_dir(directory).map_err(|source| {
+        sync_failure(sync_failed, "syncing object directory", directory, source)
+    })?;
     Ok(())
+}
+
+/// Records a failed local fsync, so every later local write and delete is
+/// refused until a restart (D-R-6), and returns the error for the caller.
+/// Logs once, at the first failure. Logs no key: the object key is debug only.
+fn sync_failure(
+    sync_failed: &AtomicBool,
+    action: &'static str,
+    path: &Path,
+    source: io::Error,
+) -> ObjectError {
+    if !sync_failed.swap(true, Ordering::SeqCst) {
+        tracing::error!(action, "object store stopped after a failed fsync");
+    }
+    ObjectError::io(action, path, source)
 }
 
 async fn put_remote(
@@ -824,7 +884,7 @@ where
 /// before the catalog row goes. It is synced even when this call found nothing
 /// to remove: a previous attempt may have unlinked the file without the sync.
 /// A missing parent has nothing to make durable.
-fn delete_local(root: &Path, key: &str) -> Result<u64, ObjectError> {
+fn delete_local(root: &Path, key: &str, sync_failed: &AtomicBool) -> Result<u64, ObjectError> {
     let path = root.join(key);
     let Some(parent) = path.parent() else {
         return Err(ObjectError::InvalidPath);
@@ -842,7 +902,12 @@ fn delete_local(root: &Path, key: &str) -> Result<u64, ObjectError> {
     match fs::sync_dir(parent) {
         Ok(()) => Ok(size),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(size),
-        Err(source) => Err(ObjectError::io("syncing object directory", parent, source)),
+        Err(source) => Err(sync_failure(
+            sync_failed,
+            "syncing object directory",
+            parent,
+            source,
+        )),
     }
 }
 
@@ -882,7 +947,11 @@ fn is_temp_name(name: &OsStr) -> bool {
 /// Removes the temp files under `dir` and fsyncs every directory it walks,
 /// children first. A directory a crashed process created without a sync is then
 /// durable before the first write of this life. A missing `dir` is success.
-fn remove_temps(dir: &Path, removed: &mut u64) -> Result<(), ObjectError> {
+fn remove_temps(
+    dir: &Path,
+    removed: &mut u64,
+    sync_failed: &AtomicBool,
+) -> Result<(), ObjectError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -896,14 +965,15 @@ fn remove_temps(dir: &Path, removed: &mut u64) -> Result<(), ObjectError> {
             .file_type()
             .map_err(|source| ObjectError::io("reading object directory", &path, source))?;
         if kind.is_dir() {
-            remove_temps(&path, removed)?;
+            remove_temps(&path, removed, sync_failed)?;
         } else if kind.is_file() && is_temp_name(&entry.file_name()) {
             fs::remove_file(&path)
                 .map_err(|source| ObjectError::io("removing object temp file", &path, source))?;
             *removed += 1;
         }
     }
-    fs::sync_dir(dir).map_err(|source| ObjectError::io("syncing object directory", dir, source))
+    fs::sync_dir(dir)
+        .map_err(|source| sync_failure(sync_failed, "syncing object directory", dir, source))
 }
 
 /// Creates `path` and any missing parent, then fsyncs the parent of every
@@ -1222,6 +1292,11 @@ mod tests {
                 "{point:?} returned {error}"
             );
             assert!(!root.join(&key).exists(), "{point:?} left the final file");
+            assert_eq!(
+                objects.sync_failed(),
+                matches!(point, HookPoint::ObjectSync | HookPoint::ObjectDirSync),
+                "{point:?}"
+            );
             let removed = objects.remove_temp_files().unwrap();
             if point == HookPoint::ObjectWrite {
                 assert_eq!(removed, 0, "{point:?}");
@@ -1611,5 +1686,86 @@ mod tests {
             root.is_dir(),
             "the object root's entry in its parent was lost after a lossy crash"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_object_fsync_refuses_later_writes_and_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = Hooks::default();
+        let objects = Objects::new(&local_config(dir.path()), hooks.clone())
+            .await
+            .unwrap();
+        let (kept, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        let (lost, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        let (refused, _) = Objects::table_file_path(FileTable::Scores, project(), day(), 1);
+        objects
+            .put_durable(&kept, Bytes::from_static(b"kept"))
+            .await
+            .unwrap();
+
+        hooks.arm_fail(HookPoint::ObjectSync);
+        let error = objects
+            .put_durable(&lost, Bytes::from_static(b"lost"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Io { .. }), "{error}");
+        assert!(objects.sync_failed());
+
+        let error = objects
+            .put_durable(&refused, Bytes::from_static(b"refused"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::SyncFailed), "{error}");
+        let error = objects.delete(&kept).await.unwrap_err();
+        assert!(matches!(error, ObjectError::SyncFailed), "{error}");
+        let error = objects.delete_len(&kept).await.unwrap_err();
+        assert!(matches!(error, ObjectError::SyncFailed), "{error}");
+        assert!(matches!(
+            objects.create_output(&refused).await,
+            Err(ObjectError::SyncFailed)
+        ));
+
+        let root = dir.path().join("objects");
+        assert!(
+            root.join(&kept).is_file(),
+            "a refused delete removed the object"
+        );
+        assert!(!root.join(&refused).exists());
+        assert_eq!(
+            objects.get_range(&kept, None).await.unwrap(),
+            Bytes::from_static(b"kept")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_delete_sync_stops_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+        let objects = Objects::new(&local_config(&data), Hooks::default())
+            .await
+            .unwrap();
+        let (key, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        objects
+            .put_durable(&key, Bytes::from_static(b"gone"))
+            .await
+            .unwrap();
+        let parent = data
+            .join("objects")
+            .join(&key)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        lossy.fail_next_sync(&parent);
+
+        let error = objects.delete(&key).await.unwrap_err();
+        assert!(matches!(error, ObjectError::Io { .. }), "{error}");
+        assert!(objects.sync_failed());
+        let (other, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        let error = objects
+            .put_durable(&other, Bytes::from_static(b"refused"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::SyncFailed), "{error}");
     }
 }

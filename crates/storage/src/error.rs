@@ -431,6 +431,10 @@ pub enum ObjectError {
         /// Relative object key.
         path: String,
     },
+    /// A local fsync failed earlier in this process. Local object writes and
+    /// deletes are refused until a restart (D-R-6).
+    #[error("local object store stopped after a failed fsync; restart required")]
+    SyncFailed,
     /// A remote `put` or multipart upload failed.
     ///
     /// The object may already exist: a failed completion is ambiguous. The

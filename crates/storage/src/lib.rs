@@ -135,6 +135,9 @@ pub struct StorageHealth {
     pub spans_wal_failed: bool,
     /// The scores writer has stopped after a WAL error.
     pub scores_wal_failed: bool,
+    /// A local object fsync failed. Until a restart, every flush attempt and every
+    /// compaction job fails, and GC deletes nothing (D-R-6).
+    pub objects_sync_failed: bool,
     /// Accounted bytes of both memtables.
     pub memtable_bytes: u64,
     /// `storage.memtable.hard_limit`. Each table is checked against this on its own.
@@ -782,6 +785,7 @@ impl Storage {
         StorageHealth {
             spans_wal_failed: self.spans.shared().failed(),
             scores_wal_failed: self.scores.shared().failed(),
+            objects_sync_failed: self.objects.sync_failed(),
             memtable_bytes: spans.saturating_add(scores),
             memtable_hard_limit: self.hard_limit,
         }
@@ -3029,5 +3033,43 @@ mod tests {
             "the discarded segment came back after the power loss"
         );
         test_support::clean_life(&config, async |_storage| {});
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_flush_fsync_makes_storage_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.flush.max_age = Duration::from_millis(500);
+        let storage = Storage::open(config.clone()).await.unwrap();
+        storage.hooks().arm_fail(HookPoint::ObjectSync);
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        while !storage.health().objects_sync_failed {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "a failed flush fsync never reached health()"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        storage
+            .append_spans(project(), spans_at(&[2]))
+            .await
+            .unwrap();
+
+        let stopping = std::time::Instant::now();
+        storage.shutdown().await.unwrap();
+        assert!(
+            stopping.elapsed() < Duration::from_secs(5),
+            "shutdown waited for flush retries that cannot succeed"
+        );
+
+        let storage = Storage::open(config).await.unwrap();
+        assert!(!storage.health().objects_sync_failed);
+        assert_eq!(span_ids(&storage).await.len(), 2);
+        storage.shutdown().await.unwrap();
     }
 }

@@ -9,6 +9,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
