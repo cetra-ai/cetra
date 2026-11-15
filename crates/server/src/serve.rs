@@ -667,7 +667,7 @@ impl Running {
             {
                 tracing::error!("ingest commits did not finish before shutdown");
             }
-            if let Err(error) = crate::eval::trigger::flush_once(&state).await {
+            if let Err(error) = crate::eval::trigger::flush_all(&state).await {
                 tracing::error!(error = %error, "pending traces flush failed");
             }
             if let Err(error) = state.last_used.flush(&state.meta).await {

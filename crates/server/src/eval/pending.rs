@@ -16,11 +16,15 @@ pub(crate) const ROOT_IDLE_NS: i64 = 5_000_000_000;
 pub(crate) const MAX_FAILED_READS: u8 = 5;
 /// The full-map warning is logged at most this often.
 const WARN_EVERY_NS: i64 = 60_000_000_000;
+/// Most changes one [`PendingTraces::take_changes`] returns; the rest wait for the next take. The
+/// periodic flusher takes one part per tick, and shutdown drains them all (D-I-8).
+pub(crate) const MAX_CHANGES_PER_TAKE: usize = 10_000;
 
 /// One pending trace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Entry {
-    /// Ingest time of the first span seen.
+    /// Ingest time of the first span seen. It is stored with the row, but nothing reads it: the
+    /// table is loaded in key order, not by first seen.
     pub(crate) first_seen: i64,
     /// Ingest time of the last span seen.
     pub(crate) last_seen: i64,
@@ -101,54 +105,56 @@ impl PendingTraces {
     }
 
     /// Records the spans of one committed batch of `project`, when the project is tracked (D-I-8).
-    /// Evaluation and experiment spans are skipped (D-I-17). `now` is the ingest time.
+    /// Evaluation and experiment spans are skipped (D-I-17). `now` is the ingest time. The spans are
+    /// folded per trace before the lock is taken, so each trace is updated once per batch.
     pub(crate) fn observe(&self, project: ProjectId, spans: &[Span], now: i64) {
+        // The cheap check comes first: most projects have no rules, and their spans cost nothing more.
+        if !lock(&self.inner).tracked.contains(&project) {
+            return;
+        }
+        let groups = group_by_trace(spans);
         let mut warning = None;
         {
             let mut guard = lock(&self.inner);
             let inner = &mut *guard;
+            // Checked again: the tracked set may have changed while the spans were grouped.
             if !inner.tracked.contains(&project) {
                 return;
             }
             let mut dropped_here = false;
-            for span in spans {
-                if span.environment.as_deref() == Some(environment::EVAL)
-                    || span.metadata.contains_key(metadata_key::EXPERIMENT_ID)
-                {
-                    continue;
-                }
-                let root = span.parent_span_id.is_none();
+            for (trace_id, group) in groups {
+                let key = (project, trace_id);
                 let traces = inner.projects.entry(project).or_default();
-                match traces.get_mut(&span.trace_id) {
+                match traces.get_mut(&trace_id) {
                     Some(entry) => {
                         // Concurrent commits may pass older clocks: `last_seen` never moves back.
                         entry.last_seen = entry.last_seen.max(now);
-                        entry.min_start = entry.min_start.min(span.start_time);
-                        entry.root_ended |= root;
-                        entry.spans = entry.spans.wrapping_add(1);
+                        entry.min_start = entry.min_start.min(group.min_start);
+                        entry.root_ended |= group.root;
+                        entry.spans = entry.spans.wrapping_add(group.spans);
                         entry.failed_reads = 0;
                     }
                     None if inner.len < self.max => {
                         traces.insert(
-                            span.trace_id,
+                            trace_id,
                             Entry {
                                 first_seen: now,
                                 last_seen: now,
-                                min_start: span.start_time,
-                                root_ended: root,
+                                min_start: group.min_start,
+                                root_ended: group.root,
                                 failed_reads: 0,
-                                spans: 1,
+                                spans: group.spans,
                             },
                         );
                         inner.len += 1;
                     }
                     None => {
-                        inner.dropped_full += 1;
+                        // Counted per span, as it was before the spans were folded.
+                        inner.dropped_full += u64::from(group.spans);
                         dropped_here = true;
                         continue;
                     }
                 }
-                let key = (project, span.trace_id);
                 inner.removed.remove(&key);
                 inner.changed.insert(key);
             }
@@ -289,21 +295,22 @@ impl PendingTraces {
         removed_count
     }
 
-    /// Takes the changes since the last take, sorted by key so the flush order is deterministic.
+    /// Takes up to [`MAX_CHANGES_PER_TAKE`] of the changes since the last take, deletes first, and
+    /// leaves the rest for the next take. Each part is sorted by key so the flush order is deterministic.
     pub(crate) fn take_changes(&self) -> Changes {
         let mut changes = {
             let mut guard = lock(&self.inner);
             let inner = &mut *guard;
-            let changed = std::mem::take(&mut inner.changed);
-            let removed = std::mem::take(&mut inner.removed);
-            let upserts = changed
+            let deletes = take_up_to(&mut inner.removed, MAX_CHANGES_PER_TAKE);
+            let room = MAX_CHANGES_PER_TAKE - deletes.len();
+            let keys = take_up_to(&mut inner.changed, room);
+            let upserts = keys
                 .into_iter()
                 .filter_map(|(project, trace)| {
                     let entry = *inner.projects.get(&project)?.get(&trace)?;
                     Some((project, trace, entry))
                 })
                 .collect();
-            let deletes = removed.into_iter().collect();
             Changes { upserts, deletes }
         };
         changes
@@ -364,6 +371,60 @@ impl PendingTraces {
     pub(crate) fn len(&self) -> usize {
         lock(&self.inner).len
     }
+}
+
+/// The spans of one trace in a batch, folded for [`PendingTraces::observe`].
+struct Group {
+    /// Spans of the batch that belong to the trace.
+    spans: u32,
+    /// Earliest `start_time` among them.
+    min_start: i64,
+    /// One of them has no parent.
+    root: bool,
+}
+
+/// Folds a batch into one [`Group`] per trace, in first-seen order. Evaluation and experiment spans
+/// are left out (D-I-17).
+fn group_by_trace(spans: &[Span]) -> Vec<(TraceId, Group)> {
+    let mut index: HashMap<TraceId, usize> = HashMap::new();
+    let mut groups: Vec<(TraceId, Group)> = Vec::new();
+    for span in spans {
+        if span.environment.as_deref() == Some(environment::EVAL)
+            || span.metadata.contains_key(metadata_key::EXPERIMENT_ID)
+        {
+            continue;
+        }
+        let root = span.parent_span_id.is_none();
+        match index.get(&span.trace_id) {
+            Some(&slot) => {
+                let group = &mut groups[slot].1;
+                group.spans = group.spans.wrapping_add(1);
+                group.min_start = group.min_start.min(span.start_time);
+                group.root |= root;
+            }
+            None => {
+                index.insert(span.trace_id, groups.len());
+                groups.push((
+                    span.trace_id,
+                    Group {
+                        spans: 1,
+                        min_start: span.start_time,
+                        root,
+                    },
+                ));
+            }
+        }
+    }
+    groups
+}
+
+/// Removes and returns up to `limit` keys of `set`.
+fn take_up_to(set: &mut HashSet<(ProjectId, TraceId)>, limit: usize) -> Vec<(ProjectId, TraceId)> {
+    let keys: Vec<(ProjectId, TraceId)> = set.iter().take(limit).copied().collect();
+    for key in &keys {
+        set.remove(key);
+    }
+    keys
 }
 
 /// The sweeper's order: earliest `min_start` first, then trace id.
@@ -742,5 +803,82 @@ mod tests {
         pending.load((1..=3_u8).map(|index| (project, trace_of(index), entry)));
         assert_eq!(pending.len(), 2);
         assert_eq!(pending.take_changes().deletes, vec![(project, trace_of(3))]);
+    }
+
+    #[test]
+    fn a_batch_is_folded_per_trace() {
+        let pending = PendingTraces::new(10);
+        let project = project_id();
+        track(&pending, project);
+        let mut judge = span(1, true, 1);
+        judge.environment = Some(environment::EVAL.to_owned());
+        pending.observe(
+            project,
+            &[
+                span(1, false, 500),
+                judge,
+                span(1, true, 300),
+                span(1, false, 400),
+            ],
+            20,
+        );
+        let rows = pending.take_changes().upserts;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].2,
+            Entry {
+                first_seen: 20,
+                last_seen: 20,
+                min_start: 300,
+                root_ended: true,
+                failed_reads: 0,
+                spans: 3,
+            }
+        );
+        // The folded spans land on an existing entry the same way.
+        pending.observe(project, &[span(1, false, 200), span(1, false, 250)], 30);
+        let rows = pending.take_changes().upserts;
+        assert_eq!(rows[0].2.min_start, 200);
+        assert_eq!(rows[0].2.last_seen, 30);
+        assert_eq!(rows[0].2.spans, 5);
+    }
+
+    #[test]
+    fn a_full_map_counts_each_dropped_span() {
+        let pending = PendingTraces::new(1);
+        let project = project_id();
+        track(&pending, project);
+        pending.observe(
+            project,
+            &[
+                span(1, true, 1),
+                span(2, true, 1),
+                span(2, false, 1),
+                span(2, false, 1),
+            ],
+            0,
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(lock(&pending.inner).dropped_full, 3);
+    }
+
+    #[test]
+    fn take_changes_returns_at_most_the_cap_then_the_rest() {
+        let pending = PendingTraces::new(MAX_CHANGES_PER_TAKE + 10);
+        let project = project_id();
+        track(&pending, project);
+        let total = MAX_CHANGES_PER_TAKE + 5;
+        for index in 0..total {
+            let mut bytes = [0u8; 16];
+            bytes[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+            let mut row = span(1, true, 1);
+            row.trace_id = TraceId::from_bytes(bytes).unwrap();
+            pending.observe(project, &[row], 0);
+        }
+        let first = pending.take_changes();
+        assert_eq!(first.upserts.len(), MAX_CHANGES_PER_TAKE);
+        let second = pending.take_changes();
+        assert_eq!(second.upserts.len(), 5);
+        assert_eq!(pending.take_changes(), Changes::default());
     }
 }

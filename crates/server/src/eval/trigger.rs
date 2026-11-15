@@ -1,7 +1,7 @@
 //! The online-rule trigger (D-I-7 to D-I-11): the tracked projects, the flusher, startup and the
 //! sweeper, which completes traces, matches each rule through storage, samples, caps and enqueues.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use llmobs_core::ids::{ProjectId, TraceId};
@@ -52,6 +52,10 @@ pub(crate) struct FlushReport {
 pub(crate) async fn refresh_rules(
     state: &AppState,
 ) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
+    #[cfg(test)]
+    if faults::take_refresh() {
+        return Err(MetaError::Db(sqlx::Error::PoolTimedOut));
+    }
     let rules = online_rules::trigger_rules(state.meta.reader()).await?;
     let mut projects: HashMap<ProjectId, ProjectRules> = HashMap::new();
     for rule in rules {
@@ -71,14 +75,24 @@ pub(crate) async fn refresh_rules(
     Ok(projects)
 }
 
-/// Startup: [`refresh_rules`], then the table's rows into the map (D-I-8).
+/// Startup: the table's rows into the map, after [`refresh_rules`] (D-I-8). When the rules cannot
+/// be read, the rows are still loaded: their projects are tracked for now, and the first sweep's
+/// refresh sets the real tracked set and drops the rest.
 ///
 /// # Errors
 ///
-/// [`MetaError`] when either read fails.
+/// [`MetaError`] when the rows cannot be read.
 pub(crate) async fn load(state: &AppState) -> Result<(), MetaError> {
-    refresh_rules(state).await?;
     let rows = load_pending(state.meta.reader()).await?;
+    if let Err(error) = refresh_rules(state).await {
+        tracing::warn!(
+            error = %error,
+            "online rules could not be read at startup; stored pending traces are held until the first sweep"
+        );
+        state
+            .pending
+            .set_tracked(rows.iter().map(|row| row.project_id).collect());
+    }
     state.pending.load(rows.into_iter().map(|row| {
         (
             row.project_id,
@@ -96,8 +110,9 @@ pub(crate) async fn load(state: &AppState) -> Result<(), MetaError> {
     Ok(())
 }
 
-/// Writes the map's changes to `pending_traces` (D-I-8). A failed write puts back its own
-/// changes and every later part's.
+/// Writes one take of the map's changes (at most [`MAX_CHANGES_PER_TAKE`]) to `pending_traces`
+/// (D-I-8). The rest wait for the next tick; [`flush_all`] writes them now. A failed write puts back
+/// its own changes and every later part's.
 ///
 /// # Errors
 ///
@@ -139,6 +154,24 @@ pub(crate) async fn flush_once(state: &AppState) -> Result<FlushReport, MetaErro
         report.upserts += written.1;
     }
     Ok(report)
+}
+
+/// Writes every pending change, one take after another. Shutdown uses it, so the table holds the
+/// whole map when the process exits. The periodic flusher writes one take per tick instead.
+///
+/// # Errors
+///
+/// [`MetaError`] when a write fails; the unwritten changes are put back.
+pub(crate) async fn flush_all(state: &AppState) -> Result<FlushReport, MetaError> {
+    let mut total = FlushReport::default();
+    loop {
+        let report = flush_once(state).await?;
+        if report == FlushReport::default() {
+            return Ok(total);
+        }
+        total.upserts += report.upserts;
+        total.deletes += report.deletes;
+    }
 }
 
 /// Cuts `changes` into parts of at most `chunk` rows. The deletes come first, then the upserts.
@@ -218,26 +251,28 @@ struct Candidates<'a> {
 pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport, MetaError> {
     let projects = refresh_rules(state).await?;
     let mut report = SweepReport::default();
-    // A rule whose filter cannot be read is logged once per sweep.
-    let mut skipped = HashSet::new();
     for (project, project_rules) in &projects {
+        if state.eval.is_stopped() {
+            break;
+        }
         let completed =
             state
                 .pending
                 .completed(*project, now, project_rules.timeout_ns, PER_PROJECT_TICK);
         report.completed += completed.len();
+        let ctx = SweepCtx {
+            state,
+            project: *project,
+            rules: &project_rules.rules,
+            now,
+        };
         for (around, batch) in batches(&completed) {
-            let outcome = sweep_batch(
-                state,
-                *project,
-                &project_rules.rules,
-                around,
-                batch,
-                now,
-                &mut skipped,
-                &mut report,
-            )
-            .await;
+            if state.eval.is_stopped() {
+                break;
+            }
+            let outcome = sweep_batch(&ctx, around, batch, &mut report).await;
+            #[cfg(test)]
+            faults::run_before_settle();
             settle(state, *project, batch, outcome, &mut report);
         }
     }
@@ -247,20 +282,25 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
     Ok(report)
 }
 
+/// What one sweep works with for one project: its state, the rules, and the sweep's clock.
+struct SweepCtx<'a> {
+    state: &'a AppState,
+    project: ProjectId,
+    rules: &'a [TriggerRule],
+    now: i64,
+}
+
 /// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for each
-/// and drops those at the limit. Returns the traces dropped.
+/// and drops those at the limit. The drops are counted in `report`.
 fn settle(
     state: &AppState,
     project: ProjectId,
     batch: &[Completed],
     outcome: Result<(), ()>,
     report: &mut SweepReport,
-) -> usize {
+) {
     match outcome {
-        Ok(()) => {
-            state.pending.finish(project, batch);
-            0
-        }
+        Ok(()) => state.pending.finish(project, batch),
         Err(()) => {
             report.failed_batches += 1;
             let dropped = state.pending.read_failed(project, batch);
@@ -272,32 +312,31 @@ fn settle(
                 );
                 report.dropped += dropped;
             }
-            dropped
         }
     }
 }
 
-/// Reads, admits and enqueues one batch: read first, then admit, then enqueue. Only the reads
-/// can fail before the hourly cap is touched, so a failed read spends no unit and counts nothing.
-#[allow(clippy::too_many_arguments)] // one sweep's shared state: a batch needs all of it
+/// Reads, admits and enqueues one batch: read first, then, chunk by chunk, admit and enqueue. Only
+/// the reads can fail before the hourly cap is touched, so a failed read spends no unit and counts
+/// nothing. A chunk is admitted just before its write, so a failed write spends the cap of its own
+/// chunk only.
 async fn sweep_batch(
-    state: &AppState,
-    project: ProjectId,
-    rules: &[TriggerRule],
+    ctx: &SweepCtx<'_>,
     around: i64,
     batch: &[Completed],
-    now: i64,
-    skipped: &mut HashSet<Uuid>,
     report: &mut SweepReport,
 ) -> Result<(), ()> {
-    let candidates = read_candidates(state, project, rules, around, batch, skipped).await?;
+    let candidates = read_candidates(ctx, around, batch).await?;
     report.matched += candidates.matched;
     report.sampled += candidates.targets.len();
-    let mut jobs = admit_targets(&state.eval.hourly, candidates.targets, now, report);
-    while !jobs.is_empty() {
-        let rest = jobs.split_off(jobs.len().min(ENQUEUE_CHUNK));
-        let chunk = std::mem::replace(&mut jobs, rest);
-        insert_jobs(state, project, chunk, now, report).await?;
+    let mut targets = candidates.targets;
+    while !targets.is_empty() {
+        let rest = targets.split_off(targets.len().min(ENQUEUE_CHUNK));
+        let chunk = std::mem::replace(&mut targets, rest);
+        let jobs = admit_targets(&ctx.state.eval.hourly, chunk, ctx.now, report);
+        if !jobs.is_empty() {
+            insert_jobs(ctx.state, ctx.project, jobs, ctx.now, report).await?;
+        }
     }
     Ok(())
 }
@@ -305,14 +344,17 @@ async fn sweep_batch(
 /// Every rule's read of one batch, then sampling. No hourly cap and no report: that is what
 /// guarantees a failed read spends no cap unit and counts nothing.
 async fn read_candidates<'a>(
-    state: &AppState,
-    project: ProjectId,
-    rules: &'a [TriggerRule],
+    ctx: &SweepCtx<'a>,
     around: i64,
     batch: &[Completed],
-    skipped: &mut HashSet<Uuid>,
 ) -> Result<Candidates<'a>, ()> {
-    let ctx = state
+    let SweepCtx {
+        state,
+        project,
+        rules,
+        now,
+    } = *ctx;
+    let opened = state
         .storage
         .query(
             project,
@@ -323,7 +365,7 @@ async fn read_candidates<'a>(
         .await
         .ok()
         .and_then(|source| QueryContext::new(source, None).ok());
-    let Some(ctx) = ctx else {
+    let Some(ctx) = opened else {
         tracing::warn!(project_id = %project, "a trigger read could not start");
         return Err(());
     };
@@ -362,11 +404,14 @@ async fn read_candidates<'a>(
             )
             .await
         };
+        #[cfg(test)]
+        let read = faults::take_read().map_or(read, Err);
         let batches = match read {
             Ok(batches) => batches,
-            // The filter does not parse: this rule is skipped, the others go on.
+            // The filter does not parse: this rule is skipped, the others go on. The warning is
+            // logged at most once per rule per hour.
             Err(RunError::Invalid(_) | RunError::InvalidRequest(_)) => {
-                if skipped.insert(rule.id) {
+                if state.eval.filter_warning_due(rule.id, now) {
                     tracing::warn!(
                         project_id = %project,
                         rule_id = %rule.id,
@@ -426,6 +471,7 @@ async fn read_candidates<'a>(
 }
 
 /// Asks the hourly cap for each target, in order, and builds the jobs of the admitted ones (D-I-11).
+/// Called once per chunk, just before the chunk's write.
 fn admit_targets(
     hourly: &HourlyCaps,
     targets: Vec<(&TriggerRule, MatchRow)>,
@@ -461,6 +507,11 @@ async fn insert_jobs(
     now: i64,
     report: &mut SweepReport,
 ) -> Result<(), ()> {
+    #[cfg(test)]
+    if faults::take_write() {
+        tracing::error!(project_id = %project, "rule jobs could not be queued");
+        return Err(());
+    }
     let written = state
         .meta
         .write(move |conn| {
@@ -518,6 +569,61 @@ fn timeout_ns(stored: Option<i64>) -> i64 {
     i64::from(seconds) * NANOS_PER_SECOND
 }
 
+/// Test-only fault injection for the trigger's reads, writes and sweep order. Each fault is armed
+/// by a test on its own thread and fires once.
+#[cfg(test)]
+mod faults {
+    use std::cell::{Cell, RefCell};
+
+    use llmobs_storage::RunError;
+
+    thread_local! {
+        static READ: RefCell<Option<RunError>> = const { RefCell::new(None) };
+        static WRITE: Cell<bool> = const { Cell::new(false) };
+        static REFRESH: Cell<bool> = const { Cell::new(false) };
+        static BEFORE_SETTLE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// The next candidate read fails with `error`.
+    pub(super) fn fail_next_read(error: RunError) {
+        READ.with(|slot| *slot.borrow_mut() = Some(error));
+    }
+
+    /// The next rule-job write fails.
+    pub(super) fn fail_next_write() {
+        WRITE.with(|flag| flag.set(true));
+    }
+
+    /// The next rule read of the trigger fails.
+    pub(super) fn fail_next_refresh() {
+        REFRESH.with(|flag| flag.set(true));
+    }
+
+    /// Runs `hook` after the next batch's reads, before its traces are settled.
+    pub(super) fn before_next_settle(hook: impl FnOnce() + 'static) {
+        BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn take_read() -> Option<RunError> {
+        READ.with(|slot| slot.borrow_mut().take())
+    }
+
+    pub(super) fn take_write() -> bool {
+        WRITE.with(|flag| flag.replace(false))
+    }
+
+    pub(super) fn take_refresh() -> bool {
+        REFRESH.with(|flag| flag.replace(false))
+    }
+
+    pub(super) fn run_before_settle() {
+        let hook = BEFORE_SETTLE.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +663,7 @@ mod tests {
     mod db {
         use std::collections::HashSet;
 
+        use crate::eval::pending::MAX_CHANGES_PER_TAKE;
         use llmobs_core::ids::{OrgId, ProjectId, TraceId};
         use uuid::Uuid;
 
@@ -762,6 +869,75 @@ mod tests {
             let left = load_pending(app.state.meta.reader()).await.unwrap();
             assert_eq!(left.len(), 1);
             assert_eq!(left[0].project_id, tracked_project);
+        }
+
+        #[tokio::test]
+        async fn load_holds_the_rows_when_the_rules_cannot_be_read() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let now = app.state.clock.now_ns();
+            let row = PendingRow {
+                project_id: seeded.project.id,
+                trace_id: TraceId::from_bytes([1; 16]).unwrap(),
+                first_seen: now,
+                last_seen: now,
+                min_start: 0,
+                root_ended: false,
+            };
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { write_pending(conn, &[], &[row]).await }))
+                .await
+                .unwrap();
+
+            faults::fail_next_refresh();
+            load(&app.state).await.unwrap();
+            // The project is tracked until the rules can be read, so the row is held and not deleted.
+            assert_eq!(app.state.pending.len(), 1);
+            assert_eq!(
+                flush_once(&app.state).await.unwrap(),
+                FlushReport::default()
+            );
+
+            // The first refresh that works tracks no project (no rules exist), and drops the row.
+            refresh_rules(&app.state).await.unwrap();
+            assert_eq!(app.state.pending.len(), 0);
+            assert_eq!(
+                flush_once(&app.state).await.unwrap(),
+                FlushReport {
+                    upserts: 0,
+                    deletes: 1
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn flush_all_writes_every_take() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            app.state.pending.set_tracked(HashSet::from([project]));
+            let total = MAX_CHANGES_PER_TAKE + 5;
+            let spans: Vec<llmobs_core::span::Span> = (0..total)
+                .map(|index| {
+                    let mut span = rooted_span();
+                    let mut bytes = [0u8; 16];
+                    bytes[..8].copy_from_slice(&(index as u64 + 1).to_be_bytes());
+                    span.trace_id = TraceId::from_bytes(bytes).unwrap();
+                    span
+                })
+                .collect();
+            app.state.pending.observe(project, &spans, 0);
+
+            // The periodic flush writes one take; shutdown's flush writes the rest.
+            let first = flush_once(&app.state).await.unwrap();
+            assert_eq!(first.upserts, MAX_CHANGES_PER_TAKE);
+            let rest = flush_all(&app.state).await.unwrap();
+            assert_eq!(rest.upserts, 5);
+            assert_eq!(
+                load_pending(app.state.meta.reader()).await.unwrap().len(),
+                total
+            );
         }
     }
 
@@ -1359,11 +1535,13 @@ mod tests {
 
             let mut report = SweepReport::default();
             for _ in 0..4 {
-                assert_eq!(settle(&app.state, project, &done, Err(()), &mut report), 0);
+                settle(&app.state, project, &done, Err(()), &mut report);
             }
             assert_eq!(report.failed_batches, 4);
+            assert_eq!(report.dropped, 0);
             assert_eq!(app.state.pending.len(), 1);
-            assert_eq!(settle(&app.state, project, &done, Err(()), &mut report), 1);
+            settle(&app.state, project, &done, Err(()), &mut report);
+            assert_eq!(report.failed_batches, 5);
             assert_eq!(report.dropped, 1);
             assert_eq!(app.state.pending.len(), 0);
 
@@ -1380,6 +1558,7 @@ mod tests {
                     .completed(project, app.state.clock.now_ns(), 60 * SECOND, 10);
             settle(&app.state, project, &done, Ok(()), &mut report);
             assert_eq!(app.state.pending.len(), 0);
+            assert_eq!(report.failed_batches, 5, "a success counts no failure");
         }
 
         #[tokio::test]
@@ -1423,6 +1602,163 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(report, SweepReport::default());
+        }
+
+        #[tokio::test]
+        async fn a_failed_candidate_read_spends_no_cap_and_counts_nothing() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let rule_id = rule(&app, project, "trace", None, 1.0).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![span(trace_id(1), 1, true, at - 30 * SECOND)],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            faults::fail_next_read(RunError::Timeout);
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 1);
+            assert_eq!(report.matched, 0);
+            assert_eq!(report.sampled, 0);
+            assert_eq!(report.capped, 0);
+            assert_eq!(report.enqueued, 0);
+            assert!(jobs(&app).await.is_empty());
+            assert_eq!(app.state.pending.len(), 1, "the trace stays pending");
+            // Nothing was admitted: the whole hour's cap is still free.
+            assert!((0..HOURLY_CAP).all(|_| app.state.eval.hourly.admit(rule_id, now)));
+            assert_eq!(app.state.eval.hourly.dropped(rule_id, now), 0);
+        }
+
+        #[tokio::test]
+        async fn a_span_committed_before_the_finish_keeps_its_trace() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            rule(&app, project, "trace", None, 1.0).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![span(trace_id(1), 1, true, at - 30 * SECOND)],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            let state = app.state.clone();
+            faults::before_next_settle(move || {
+                // A commit lands after the read and before `finish`, at the same clock.
+                state.pending.observe(
+                    project,
+                    &[span(trace_id(1), 2, false, at - 20 * SECOND)],
+                    now,
+                );
+            });
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.enqueued, 1);
+            assert_eq!(app.state.pending.len(), 1, "the grown trace stays pending");
+
+            // Idle again, the next sweep completes it.
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(app.state.pending.len(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_stopped_sweep_takes_no_batch() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            rule(&app, project, "trace", None, 1.0).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![span(trace_id(1), 1, true, at - 30 * SECOND)],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            app.state.eval.stop();
+            let report = sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(report, SweepReport::default());
+            assert_eq!(app.state.pending.len(), 1);
+            assert!(jobs(&app).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_filter_is_warned_once_an_hour() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let broken = rule(&app, project, "trace", None, 1.0).await;
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE online_rules SET filter = ? WHERE id = ?")
+                            .bind("status = = 'x'")
+                            .bind(broken.to_string())
+                            .execute(&mut *conn)
+                            .await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+            let at = set_clock(&app);
+            // Two sweeps in one hour, then one in the next hour.
+            let mut warnings = Vec::new();
+            for (index, offset) in [0, 60 * SECOND, HOUR].into_iter().enumerate() {
+                let at = at + offset;
+                app.state.clock.set(at);
+                app.commit_spans(
+                    &seeded.project,
+                    vec![span(trace_id(index as u128 + 1), 1, true, at - 30 * SECOND)],
+                )
+                .await;
+                app.state.clock.advance(Duration::from_secs(6));
+                let (report, logs) =
+                    capture_logs(sweep_once(&app.state, app.state.clock.now_ns())).await;
+                report.unwrap();
+                warnings.push(logs.matches("was skipped").count());
+            }
+            assert_eq!(warnings, vec![1, 0, 1]);
+        }
+
+        #[tokio::test]
+        async fn a_failed_chunk_spends_only_its_own_cap() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let rule_id = rule(&app, project, "span", Some("span_kind = 'llm'"), 1.0).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            // 500 traces with three matching spans each: one batch of 1 500 targets in two chunks.
+            let mut spans = Vec::new();
+            for n in 1..=500u128 {
+                spans.push(span(trace_id(n), 1, true, start));
+                for id in 2..=4u64 {
+                    let mut child = span(trace_id(n), id, false, start + id as i64 * 1_000_000);
+                    child.span_kind = SpanKind::Llm;
+                    spans.push(child);
+                }
+            }
+            app.commit_spans(&seeded.project, spans).await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            faults::fail_next_write();
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.matched, 1_500);
+            assert_eq!(report.failed_batches, 1);
+            assert_eq!(report.enqueued, 0);
+            // The first chunk of 1 000 was admitted before its failed write. The second was never
+            // admitted, so 9 000 units are still free.
+            assert!((0..(HOURLY_CAP - 1_000)).all(|_| app.state.eval.hourly.admit(rule_id, now)));
+            assert!(!app.state.eval.hourly.admit(rule_id, now));
         }
 
         /// A judge connection to `mock`, created over HTTP.
@@ -1561,7 +1897,7 @@ mod tests {
                 .request(
                     Method::GET,
                     &format!(
-                        "/api/v1/projects/{}/scores?evaluator_id={evaluator}",
+                        "/api/v1/projects/{}/scores?rule_id={rule_id}",
                         seeded.project.id
                     ),
                 )
