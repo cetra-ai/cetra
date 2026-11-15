@@ -87,7 +87,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 
 ## Scope
 
-**In I:** everything in the decisions above. That means migrations `0004`, `0006`, `0010`, `0011` and the next free number (M6's backfills: `0014` today, renumbered at merge if another track lands first) in `meta.db` (other tracks took `0005`, `0007`–`0009`, `0012` and `0013`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
+**In I:** everything in the decisions above. That means migrations `0004`, `0006`, `0010`, `0011` and `0014` (M6's backfills) in `meta.db` (other tracks took `0005`, `0007`–`0009`, `0012` and `0013`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
 
 **Not in I:**
 - datasets, experiments and their server evaluators [J] (J calls the executor, § Interfaces);
@@ -149,14 +149,14 @@ crates/server/src/
     pending.rs           PendingTraces (M4)
     sampling.rs          sampled (M4)
     trigger.rs           refresh_rules, load, flush_once, sweep_once (M4)
-    backfill.rs          (M6)
+    backfill.rs          validate, Pager, estimate, backfill_once (M6)
   usage.rs               Usage::add_judge, judge columns in the flush (M2: test runs count usage)
   scores.rs              Writer::Evaluator (M3), definition checks and ownership (M2, M5)
   api/   connections.rs (M1), evaluators.rs, score_definitions.rs (M2), online_rules.rs, eval_jobs.rs (M3), backfills.rs (M6)
   routes/ same split
 crates/server/src/admin.rs  rotate_encryption_key (M1)
 crates/server/migrations/meta/
-  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0010_eval_queue.sql (M3)  0011_pending_traces.sql (M4)  00MM_backfills.sql (M6, the next free number: 0014 today)
+  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0010_eval_queue.sql (M3)  0011_pending_traces.sql (M4)  0014_backfills.sql (M6)
 ```
 
 Every background loop exposes a `*_once(&AppState)` function that tests call directly, with `Clock::Manual`. The loops themselves only call `*_once` on a tokio interval from `EvalTiming`. The end-to-end test in M6 uses `EvalTiming::TEST` and real time.
@@ -260,15 +260,21 @@ CREATE TABLE pending_traces (
   PRIMARY KEY (project_id, trace_id)
 );
 
--- 00MM_backfills.sql (M6, the next free number: 0014 today)
+-- 0014_backfills.sql (M6)
 CREATE TABLE backfills (
   id TEXT PRIMARY KEY,
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
-  from_ns INTEGER NOT NULL, to_ns INTEGER NOT NULL, max_targets INTEGER NOT NULL, sample_rate REAL NOT NULL,
-  status TEXT NOT NULL,                  -- 'running' | 'done' | 'failed'
-  matched INTEGER NOT NULL DEFAULT 0, enqueued INTEGER NOT NULL DEFAULT 0, error TEXT,
+  from_ns INTEGER NOT NULL,
+  to_ns INTEGER NOT NULL,
+  max_targets INTEGER NOT NULL,
+  sample_rate REAL NOT NULL,
+  status TEXT NOT NULL,
+  matched INTEGER NOT NULL DEFAULT 0,
+  enqueued INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at INTEGER NOT NULL, finished_at INTEGER
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
