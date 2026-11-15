@@ -8,12 +8,12 @@
 //! This crate is a research prototype outside the llmobs workspace. The design is in
 //! `docs/research/file-format/prototype-plan.md` (one level up from this crate).
 //!
-//! The limits of M1 are:
-//! - there are no key filters, map shredding or `lookup` (M3);
+//! The current limits are:
+//! - sort-key lookup and key filters (M3.1); no map shredding yet;
 //! - there is no `scan`, no predicates, no pruning and no coalescing (M4);
 //! - there is no DataFusion integration (M5).
 //!
-//! The hot tail sections 4, 5 and 6 are empty in M1.
+//! Hot-tail section 5 (shredded map keys) is empty until map shredding lands.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -26,6 +26,7 @@
 
 mod format;
 mod hot;
+mod index;
 mod narrow;
 mod payload;
 mod segment;

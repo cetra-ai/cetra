@@ -12,11 +12,12 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, Out, VERSION, checksum32};
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_file_header};
+use crate::index::{KeyFilter, key_bytes};
 use crate::narrow::{
     BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, numeric_of,
 };
 use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats};
-use crate::segment::{Codec, Kind, SegmentCodec, encode_segment};
+use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
 /// [`StrataWriter::finish`].
@@ -41,6 +42,9 @@ pub struct ColumnSummary {
     pub bytes: u64,
     /// Number of chunks.
     pub chunks: u32,
+    /// Bytes of the column's key filter (section-4 body or key-filter segment), not included in
+    /// `bytes`. 0 when there is none.
+    pub filter_bytes: u64,
     /// Payload-layer statistics; `None` for narrow columns.
     pub payload: Option<PayloadStats>,
 }
@@ -178,6 +182,8 @@ impl StrataWriter {
         let mut pages = Out(Vec::new());
         let mut sort_entries = Out(Vec::new());
         let mut summaries = Vec::with_capacity(self.schema.fields().len());
+        let mut sort_key_filter = Vec::new();
+        let mut key_filters: Vec<(u32, SegmentRef)> = Vec::new();
         let first_sort_column = self.sort_key.first().copied();
         for (index, field) in self.schema.fields().iter().enumerate() {
             let array = self.column(index)?;
@@ -215,10 +221,27 @@ impl StrataWriter {
                     encoding_counts: [0; 12],
                     bytes: stats.bytes,
                     chunks: 0,
+                    filter_bytes: 0,
                     payload: Some(stats),
                 });
                 continue;
             }
+            // Key filters: the first sort-key column (section 4) and the configured columns
+            // (section 6). Payload columns were handled above, and maps have no key bytes.
+            let is_sort_key = Some(index) == first_sort_column;
+            let filter_wanted = !is_sort_key
+                && !matches!(field.data_type(), DataType::Map(_, _))
+                && self
+                    .config
+                    .key_filter_columns
+                    .iter()
+                    .any(|name| name == field.name());
+            let filter_values: Option<Vec<Vec<u8>>> = if is_sort_key || filter_wanted {
+                key_bytes(array.as_ref()).map(|keys| keys.into_iter().flatten().collect())
+            } else {
+                None
+            };
+            let filter = filter_values.as_deref().map(filter_body);
             let dict = for_column(array.as_ref(), &self.config);
             let (dict_offset, dict_len) = match &dict {
                 Some(dict) => {
@@ -318,7 +341,18 @@ impl StrataWriter {
                 n_pages += 1;
             }
 
-            if Some(index) == first_sort_column {
+            let mut filter_bytes = 0u64;
+            if is_sort_key {
+                sort_key_filter = filter.unwrap_or_default();
+                filter_bytes = sort_key_filter.len() as u64;
+            } else if let Some(body) = filter {
+                let seg =
+                    encode_segment(Kind::KeyFilter, &body, Codec::Zstd, &mut codec, &mut out)?;
+                filter_bytes = u64::from(seg.len);
+                key_filters.push((column_id, seg));
+            }
+
+            if is_sort_key {
                 for entry in &entries {
                     entry.encode(&mut sort_entries);
                 }
@@ -346,6 +380,7 @@ impl StrataWriter {
                 encoding_counts: counts,
                 bytes,
                 chunks: n_chunks,
+                filter_bytes,
                 payload: None,
             });
         }
@@ -355,9 +390,9 @@ impl StrataWriter {
             schema: Arc::clone(&self.schema),
             directory,
             sort_key_entries: sort_entries.0,
-            sort_key_filter: Vec::new(),
+            sort_key_filter,
             map_keys: Vec::new(),
-            key_filter_index: Vec::new(),
+            key_filters,
             pages: pages.0,
         };
         hot.encode(&mut out)?;
@@ -366,6 +401,12 @@ impl StrataWriter {
                 what: "a hot tail of more than 4 GiB".to_string(),
             })?;
         let hot_checksum = checksum32(&[out.0.get(hot_start..).unwrap_or_default()]);
+        let sort_key_column = match first_sort_column {
+            Some(index) => u32::try_from(index).map_err(|_| StrataError::Unsupported {
+                what: "more than 4 billion columns".to_string(),
+            })?,
+            None => u32::MAX,
+        };
         let postscript = Postscript {
             hot_offset: hot_start as u64,
             hot_len,
@@ -378,6 +419,7 @@ impl StrataWriter {
             })?,
             version: VERSION,
             flags: 0,
+            sort_key_column,
         };
         postscript.encode(&mut out);
 
@@ -402,6 +444,13 @@ impl StrataWriter {
         }
         Ok(concat(&arrays)?)
     }
+}
+
+/// The encoded key-filter body over `values`.
+fn filter_body(values: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = Vec::new();
+    KeyFilter::build(values).encode(&mut body);
+    body
 }
 
 /// Whether a first sort-key column of type `dt` is allowed in M1.
@@ -445,7 +494,7 @@ mod tests {
     use super::*;
     use crate::file::StrataFile;
     use crate::narrow::Encoding;
-    use crate::testgen::{batch, schema, wide_batch, wide_schema};
+    use crate::testgen::{assert_same, batch, schema, wide_batch, wide_schema};
     use arrow::array::{FixedSizeBinaryArray, new_null_array};
     use arrow::datatypes::Field;
     use object_store::memory::InMemory;
@@ -550,9 +599,27 @@ mod tests {
         assert_eq!(record.flags & 1, 0);
     }
 
+    #[tokio::test]
+    async fn golden_columns_round_trip() {
+        let rows = wide_batch(20_000);
+        let mut w = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("golden.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let file = StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap();
+        for column in 0..rows.num_columns() {
+            let decoded = crate::reader::read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), rows.column(column).as_ref());
+        }
+    }
+
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
     /// Recorded on the M1F.2 code. A change to this value means the output changed.
-    const GOLDEN: u64 = 0x4162_9ca7_5279_492c;
+    const GOLDEN: u64 = 0xa4e6_c90d_86e4_b6fb;
 
     #[test]
     fn golden_output_hash() {

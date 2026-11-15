@@ -5,6 +5,8 @@
 //! sort-key filter, the shredded map keys, the key filter index and the
 //! block-table page index.
 
+use std::collections::HashSet;
+
 use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -14,6 +16,7 @@ use crate::format::{
     BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, Out, PAGE_REF_LEN,
     VERSION,
 };
+use crate::segment::SegmentRef;
 
 /// Writes the 8-byte file header: magic, version and flags 0.
 pub fn write_file_header(out: &mut Out) {
@@ -39,10 +42,12 @@ pub struct Postscript {
     pub version: u16,
     /// Format flags, equal to 0.
     pub flags: u16,
+    /// Index of the first sort-key column, or `u32::MAX` for none.
+    pub sort_key_column: u32,
 }
 
 impl Postscript {
-    /// Writes exactly 64 bytes: the fields in order, 28 zero bytes and the file magic.
+    /// Writes exactly 64 bytes: the fields in order, 24 zero bytes and the file magic.
     pub fn encode(&self, out: &mut Out) {
         out.u64(self.hot_offset);
         out.u32(self.hot_len);
@@ -51,7 +56,8 @@ impl Postscript {
         out.u32(self.n_columns);
         out.u16(self.version);
         out.u16(self.flags);
-        out.bytes(&[0u8; 28]);
+        out.u32(self.sort_key_column);
+        out.bytes(&[0u8; 24]);
         out.bytes(FILE_MAGIC);
     }
 
@@ -65,7 +71,8 @@ impl Postscript {
         let n_columns = c.u32("postscript")?;
         let version = c.u16("postscript")?;
         let flags = c.u16("postscript")?;
-        if c.bytes(28, "postscript")?.iter().any(|b| *b != 0) {
+        let sort_key_column = c.u32("postscript")?;
+        if c.bytes(24, "postscript")?.iter().any(|b| *b != 0) {
             return Err(StrataError::Corrupt {
                 what: "postscript reserved",
                 offset: c.position(),
@@ -97,6 +104,7 @@ impl Postscript {
             n_columns,
             version,
             flags,
+            sort_key_column,
         })
     }
 }
@@ -263,14 +271,50 @@ pub struct HotTail {
     pub directory: Vec<DirectoryRecord>,
     /// Section 3: sort-key block table entries, raw (56-byte entries).
     pub sort_key_entries: Vec<u8>,
-    /// Section 4: sort-key filter, empty in M1.
+    /// Section 4: the body of the sort-key filter. Empty when the first sort-key column has no
+    /// filter type.
     pub sort_key_filter: Vec<u8>,
-    /// Section 5: shredded map keys, empty in M1.
+    /// Section 5: shredded map keys, empty until map shredding (M3.2b).
     pub map_keys: Vec<u8>,
-    /// Section 6: key filter index, empty in M1.
-    pub key_filter_index: Vec<u8>,
+    /// Section 6: the key-filter segments of the other filtered columns, by column id.
+    pub key_filters: Vec<(u32, SegmentRef)>,
     /// Section 7: block-table page references, raw (16-byte entries).
     pub pages: Vec<u8>,
+}
+
+/// Bytes of one section-6 entry: `u32 column_id · u64 offset · u32 len`.
+const KEY_FILTER_ENTRY_LEN: usize = 16;
+
+/// Decodes section 6. Its length is `4 + 16 × n`, every column id is below `n_fields`, and no
+/// column id appears twice.
+fn decode_key_filter_index(
+    bytes: &[u8],
+    base: u64,
+    n_fields: usize,
+) -> Result<Vec<(u32, SegmentRef)>> {
+    let corrupt = || StrataError::Corrupt {
+        what: "key filter index",
+        offset: base,
+    };
+    let mut c = Cursor::new(bytes, base);
+    let n = c.u32("key filter index")? as usize;
+    let body = bytes.len().checked_sub(4).ok_or_else(corrupt)?;
+    if n.checked_mul(KEY_FILTER_ENTRY_LEN) != Some(body) {
+        return Err(corrupt());
+    }
+    let mut seen = HashSet::with_capacity(n);
+    let mut entries = Vec::with_capacity(n);
+    for _ in 0..n {
+        let column_id = c.u32("key filter index")?;
+        let offset = c.u64("key filter index")?;
+        let len = c.u32("key filter index")?;
+        let in_schema = usize::try_from(column_id).is_ok_and(|id| id < n_fields);
+        if !in_schema || !seen.insert(column_id) {
+            return Err(corrupt());
+        }
+        entries.push((column_id, SegmentRef { offset, len }));
+    }
+    Ok(entries)
 }
 
 fn write_section(out: &mut Out, body: &[u8]) -> Result<()> {
@@ -304,13 +348,27 @@ impl HotTail {
             record.encode(&mut directory);
         }
 
+        let count =
+            u32::try_from(self.key_filters.len()).map_err(|_| StrataError::Unsupported {
+                what: "more than 4 billion key filters".to_string(),
+            })?;
+        let mut key_filter_index = Out(Vec::with_capacity(
+            4 + self.key_filters.len() * KEY_FILTER_ENTRY_LEN,
+        ));
+        key_filter_index.u32(count);
+        for (column_id, segment) in &self.key_filters {
+            key_filter_index.u32(*column_id);
+            key_filter_index.u64(segment.offset);
+            key_filter_index.u32(segment.len);
+        }
+
         let sections: [&[u8]; HOT_SECTIONS] = [
             schema_stream.as_slice(),
             directory.0.as_slice(),
             self.sort_key_entries.as_slice(),
             self.sort_key_filter.as_slice(),
             self.map_keys.as_slice(),
-            self.key_filter_index.as_slice(),
+            key_filter_index.0.as_slice(),
             self.pages.as_slice(),
         ];
         for section in sections {
@@ -359,7 +417,9 @@ impl HotTail {
         }
         let (_, sort_key_filter) = read_section(&mut c)?;
         let (_, map_keys) = read_section(&mut c)?;
-        let (_, key_filter_index) = read_section(&mut c)?;
+        let (index_base, key_filter_index) = read_section(&mut c)?;
+        let key_filters =
+            decode_key_filter_index(key_filter_index, index_base, schema.fields().len())?;
 
         let (pages_base, pages) = read_section(&mut c)?;
         if !pages.len().is_multiple_of(PAGE_REF_LEN) {
@@ -381,7 +441,7 @@ impl HotTail {
             sort_key_entries: sort_key_entries.to_vec(),
             sort_key_filter: sort_key_filter.to_vec(),
             map_keys: map_keys.to_vec(),
-            key_filter_index: key_filter_index.to_vec(),
+            key_filters,
             pages: pages.to_vec(),
         })
     }
@@ -445,6 +505,7 @@ mod tests {
             n_columns: 3,
             version: VERSION,
             flags: 0,
+            sort_key_column: 7,
         };
         let mut out = Out(Vec::new());
         ps.encode(&mut out);
@@ -463,6 +524,7 @@ mod tests {
             n_columns: 0,
             version: VERSION,
             flags: 0,
+            sort_key_column: u32::MAX,
         };
         let mut out = Out(Vec::new());
         base.encode(&mut out);
@@ -483,6 +545,32 @@ mod tests {
         let mut bad_reserved = good;
         bad_reserved[40] = 1;
         assert!(Postscript::decode(&bad_reserved, 0).is_err());
+    }
+
+    #[test]
+    fn postscript_sort_key_column_round_trips_and_reserved_bytes_are_checked() {
+        let ps = Postscript {
+            hot_offset: 8,
+            hot_len: 0,
+            hot_checksum: 0,
+            row_count: 0,
+            n_columns: 0,
+            version: VERSION,
+            flags: 0,
+            sort_key_column: 3,
+        };
+        let mut out = Out(Vec::new());
+        ps.encode(&mut out);
+        let good: [u8; 64] = out.0.clone().try_into().unwrap();
+        assert_eq!(Postscript::decode(&good, 0).unwrap(), ps);
+
+        // The 24 reserved bytes are at 36..60.
+        let mut first_reserved = good;
+        first_reserved[36] = 1;
+        assert!(Postscript::decode(&first_reserved, 0).is_err());
+        let mut last_reserved = good;
+        last_reserved[59] = 1;
+        assert!(Postscript::decode(&last_reserved, 0).is_err());
     }
 
     #[test]
@@ -532,7 +620,7 @@ mod tests {
             sort_key_entries: vec![0xAB; 2 * BLOCK_ENTRY_LEN],
             sort_key_filter: Vec::new(),
             map_keys: Vec::new(),
-            key_filter_index: Vec::new(),
+            key_filters: Vec::new(),
             pages: vec![0xCD; 4 * PAGE_REF_LEN],
         };
         let mut out = Out(Vec::new());
@@ -543,9 +631,98 @@ mod tests {
         assert_eq!(decoded.sort_key_entries, hot.sort_key_entries);
         assert_eq!(decoded.sort_key_filter, hot.sort_key_filter);
         assert_eq!(decoded.map_keys, hot.map_keys);
-        assert_eq!(decoded.key_filter_index, hot.key_filter_index);
+        assert_eq!(decoded.key_filters, hot.key_filters);
         assert_eq!(decoded.pages, hot.pages);
         assert_eq!(decoded.pages_of(&hot.directory[1]).unwrap().len(), 2);
+    }
+
+    /// A hot tail whose sections 1, 2, 3, 4, 5 and 7 are valid and empty, and whose section 6
+    /// holds `index`.
+    fn hot_bytes_with_index(index: &[u8]) -> Vec<u8> {
+        let mut stream = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut stream, &spans_schema()).unwrap();
+            writer.finish().unwrap();
+        }
+        let mut out = Out(Vec::new());
+        write_section(&mut out, &stream).unwrap();
+        for section in [&[][..], &[][..], &[][..], &[][..]] {
+            write_section(&mut out, section).unwrap();
+        }
+        write_section(&mut out, index).unwrap();
+        write_section(&mut out, &[]).unwrap();
+        out.0
+    }
+
+    fn index_entry(column_id: u32) -> Vec<u8> {
+        let mut entry = Out(Vec::new());
+        entry.u32(column_id);
+        entry.u64(4096);
+        entry.u32(77);
+        entry.0
+    }
+
+    #[test]
+    fn key_filter_index_round_trips_with_zero_and_two_entries() {
+        let empty = hot_bytes_with_index(&0u32.to_le_bytes());
+        assert!(HotTail::decode(&empty, 0).unwrap().key_filters.is_empty());
+
+        let mut index = 2u32.to_le_bytes().to_vec();
+        index.extend(index_entry(1));
+        index.extend(index_entry(3));
+        let decoded = HotTail::decode(&hot_bytes_with_index(&index), 0).unwrap();
+        assert_eq!(
+            decoded.key_filters,
+            vec![
+                (
+                    1,
+                    SegmentRef {
+                        offset: 4096,
+                        len: 77
+                    }
+                ),
+                (
+                    3,
+                    SegmentRef {
+                        offset: 4096,
+                        len: 77
+                    }
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn key_filter_index_corruptions_are_corrupt() {
+        let fields = spans_schema().fields().len() as u32;
+        let mut bad_length = 1u32.to_le_bytes().to_vec();
+        bad_length.extend(vec![0u8; 15]);
+        let mut trailing = 1u32.to_le_bytes().to_vec();
+        trailing.extend(index_entry(0));
+        trailing.push(0);
+        let mut repeated = 2u32.to_le_bytes().to_vec();
+        repeated.extend(index_entry(0));
+        repeated.extend(index_entry(0));
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("an empty section 6", Vec::new()),
+            ("a length of 4 + 15 bytes for one entry", bad_length),
+            ("a trailing byte", trailing),
+            ("a column id at the schema length", index_entry(fields)),
+            ("a repeated column id", repeated),
+        ];
+        for (name, index) in cases {
+            let result = HotTail::decode(&hot_bytes_with_index(&index), 0);
+            assert!(
+                matches!(
+                    result,
+                    Err(StrataError::Corrupt {
+                        what: "key filter index",
+                        ..
+                    })
+                ),
+                "{name} must be a Corrupt error"
+            );
+        }
     }
 
     #[test]
@@ -556,7 +733,7 @@ mod tests {
             sort_key_entries: vec![0; BLOCK_ENTRY_LEN],
             sort_key_filter: Vec::new(),
             map_keys: Vec::new(),
-            key_filter_index: Vec::new(),
+            key_filters: Vec::new(),
             pages: vec![0; PAGE_REF_LEN],
         };
         let mut out = Out(Vec::new());
@@ -618,7 +795,7 @@ mod tests {
                 sort_key_entries: Vec::new(),
                 sort_key_filter: Vec::new(),
                 map_keys: Vec::new(),
-                key_filter_index: Vec::new(),
+                key_filters: Vec::new(),
                 pages,
             };
             let rec = DirectoryRecord { n_pages, ..record(0, pages_offset) };

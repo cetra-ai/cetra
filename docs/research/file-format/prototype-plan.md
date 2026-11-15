@@ -181,10 +181,10 @@ The writer reports it in `FileSummary::hot_len`.
 
 ```
 u64 hot_offset · u32 hot_len · u32 checksum32(hot tail) · u64 row_count · u32 n_columns (directory records)
-u16 version (= header version) · u16 flags (= header flags) · [u8; 28] zero · "STRA"
+u16 version (= header version) · u16 flags (= header flags) · u32 sort_key_column · [u8; 24] zero · "STRA"
 ```
 
-Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 28 + 4 = 64. The reader checks:
+Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 4 + 24 + 4 = 64. `sort_key_column` is the index of the first sort-key column, or `u32::MAX` for none. The reader checks:
 - `hot_offset + hot_len + 64 == file length`;
 - the version and flags equal the header's.
 
@@ -394,19 +394,23 @@ The writer reports filter bytes, rollup saturation and the percentage of frames 
 
 ### S5. Indexes
 
-**Sort-key lookup** (FixedSizeBinary(16) `trace_id`), using the hot-tail block table:
-1. `i = max(0, partition_point(min < key) − 1)`.
-2. Fetch and decode chunks `i, i+1, …` while `chunk.min ≤ key`.
-3. Binary-search each decoded chunk for the row range equal to `key`.
+**Sort-key lookup** (the first sort-key column, FixedSizeBinary of 1 to 16 bytes), using the sort-key block table (hot-tail section 3):
+1. Candidates are the entries whose zone holds the key, compared bytewise over the first `w` bytes (`min ≤ key ≤ max`), plus the entries that have no zone. The table is scanned linearly; it is short.
+2. The candidate chunks are fetched concurrently and decoded. The rows equal to `key` are collected, and adjacent rows are merged into ranges.
+3. A sort-key filter that answers "absent" ends the lookup before any read.
 
 The result is a list of row ranges (usually 1–2 chunks).
 
-**Key filters.** A binary fuse 8-bit filter (a#2) from the `xorf` crate (version looked up when added; if `xorf` is unusable, a self-written 8-bit binary fuse following its algorithm).
-- Built over `xxh3_64` of the distinct non-null values, deduplicated before construction. With fewer than 2 distinct values, no filter is written (length 0), and `may_contain` answers from the values themselves (0 or 1 value, kept inline in the filter index entry's place as raw bytes).
-- `xorf` is fetched from crates.io; it is not in the local registry.
-- Serialization is self-written: seed, segment length, segment length mask, segment count length, then the fingerprints. The commit records the exact field list.
-- Kept for the first sort-key column (hot-tail section 4), and for `user_id` and `session_id` (kind 9 segments, indexed by hot-tail section 6).
-- Exposed as `StrataFile::key_filter(column) -> Option<&BinaryFuse8>` and `StrataFile::may_contain(column, value) -> Option<bool>`.
+**Key filters.** A binary fuse 8-bit filter (a#2) from the `xorf` crate 0.13.0 (crates.io, `default-features = false`, feature `binary-fuse`).
+- Built over `xxh3_64` of the distinct non-null values, sorted and deduplicated before construction. Integer and timestamp values are their 8-byte little-endian `i64`.
+- A filter body starts with a tag:
+  - `0` empty: no non-null value; always absent;
+  - `1` one value, stored inline as `u32 len · bytes`, with `len ≤ 1024`;
+  - `2` binary fuse: `u64 seed · u32 segment_length · u32 segment_length_mask · u32 segment_count_length · u32 n_fingerprints · fingerprints[n_fingerprints]`;
+  - `3` unknown: the filter could not be built; always "may contain".
+- Validity for tag 2: `segment_length` is a power of two; `segment_length_mask = segment_length − 1`; `segment_count_length ≥ segment_length` and is a multiple of it; `n_fingerprints = segment_count_length + 2 × segment_length`. These keep `contains` in bounds, so a forged geometry is `Corrupt`, never a panic. Any other byte after the body is `Corrupt`.
+- Kept for the first sort-key column (hot-tail section 4, the body raw), and for `user_id` and `session_id` (kind 9 segments, indexed by hot-tail section 6). Only narrow columns with key bytes get one; maps and payload columns do not.
+- The only accessor is `StrataFile::may_contain(column, value) -> Result<Option<bool>>`. `Some(false)` is a proof of absence; `None` means the column has no filter.
 
 ### S6. Shredded maps
 

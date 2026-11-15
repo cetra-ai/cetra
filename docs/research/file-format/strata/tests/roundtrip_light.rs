@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, RecordBatch};
+use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::compute::concat;
 use bytes::Bytes;
 use fmt_testdata::datagen;
@@ -84,6 +84,26 @@ async fn roundtrip_light() {
         );
     }
 
+    // Sort-key lookup: every 500th trace id finds the rows that a scan of the column finds.
+    let trace_column = schema.index_of("trace_id").unwrap();
+    let trace_ids = read_column(&file, trace_column).await.unwrap();
+    let ids = trace_ids.as_fixed_size_binary();
+    for row in (0..ids.len()).step_by(500) {
+        let key = ids.value(row);
+        let scan: Vec<u32> = (0..ids.len())
+            .filter(|&r| ids.value(r) == key)
+            .map(|r| r as u32)
+            .collect();
+        let found: Vec<u32> = file
+            .lookup(key)
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(found, scan, "rows of the trace id of row {row}");
+    }
+
     // The same batches with the bench's `pq_default` properties: zstd level 3, defaults otherwise.
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
@@ -112,8 +132,8 @@ async fn roundtrip_light() {
         summary.columns.iter().map(|c| c.chunks).sum::<u32>()
     );
     println!(
-        "{:<22} {:>12} {:>12} {:>7}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc, Map)",
-        "column", "strata B", "pq_default B", "ratio"
+        "{:<22} {:>12} {:>10} {:>12} {:>7}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc, Map)",
+        "column", "strata B", "filter B", "pq_default B", "ratio"
     );
     for column in &summary.columns {
         let pq = parquet_columns.get(&column.name).copied().unwrap_or(0);
@@ -124,9 +144,10 @@ async fn roundtrip_light() {
             .map(|c| c.to_string())
             .collect();
         println!(
-            "{:<22} {:>12} {:>12} {:>7.2}  {}",
+            "{:<22} {:>12} {:>10} {:>12} {:>7.2}  {}",
             column.name,
             column.bytes,
+            column.filter_bytes,
             pq,
             ratio,
             counts.join(" ")

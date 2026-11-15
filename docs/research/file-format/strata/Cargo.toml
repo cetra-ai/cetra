@@ -15,6 +15,7 @@ zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 thiserror = "2.0"
 memchr = "2"
+xorf = { version = "0.13.0", default-features = false, features = ["binary-fuse"] }
 
 [dev-dependencies]
 async-trait = "0.1.92"

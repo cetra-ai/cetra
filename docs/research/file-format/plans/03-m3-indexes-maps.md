@@ -242,7 +242,7 @@ impl KeyFilter {
 - **Corruption.** Add `fn section_bounds(hot: &[u8]) -> [Range<usize>; 7]` to the `file.rs` tests. It walks the seven `u32`-prefixed sections, starting from `hot_offset_of(bytes)`; use it with the existing `refresh_hot_checksum`-style helpers. Every patch is length-preserving:
   - **Segment checksum:** open the file, take `file.hot.key_filters[0].1` (a `SegmentRef`), flip the byte at `offset + SEGMENT_HEADER_LEN`, write the file back, reopen it, and call `may_contain("user_id", ..)`: it gives `Corrupt`;
   - **Bad geometry:** in the `batch(20_000)` file, overwrite the 4 bytes at `section4.start + 1 + 8` (`segment_length`) with `3u32.to_le_bytes()`, then refresh the hot checksum: `open` gives `Corrupt { what: "key filter" }`;
-  - patch the postscript's `sort_key_column` (not checksummed) to `u32::MAX`: `lookup` gives `Unsupported`; to `n_fields`: `open` gives `Corrupt`.
+  - patch the postscript's `sort_key_column` (not checksummed) to `u32::MAX`: `open` gives `Corrupt { what: "sort-key block table" }`, because with no sort key section 3 must be empty (step 6); to `n_fields`: `open` gives `Corrupt`.
 
 **`golden_columns_round_trip`** (new, permanent, `writer.rs`): every column of `wide_batch(20_000)` written and read back equals the input.
 

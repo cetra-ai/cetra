@@ -1,9 +1,11 @@
 //! Opening a Strata file from an object store with one suffix read (S1 open).
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use arrow::datatypes::SchemaRef;
+use arrow::array::{Array, FixedSizeBinaryArray};
+use arrow::datatypes::{DataType, SchemaRef};
 use futures::future::try_join_all;
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
@@ -14,7 +16,8 @@ use crate::format::{
     Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
-use crate::narrow::BlockEntry;
+use crate::index::{KeyFilter, merge_rows, zone_may_hold};
+use crate::narrow::{BlockEntry, decode_chunk};
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -37,6 +40,43 @@ fn segment_end(offset: u64, len: u32, hot_offset: u64) -> Result<u64> {
     }
 }
 
+/// Decodes the sort-key block table (hot-tail section 3) of the sort-key column `sort`. The
+/// entries are contiguous from row 0, cover `row_count` rows, match the column's chunk count
+/// and have in-range segments.
+fn read_sort_key_entries(
+    hot: &HotTail,
+    sort: usize,
+    row_count: u64,
+    hot_offset: u64,
+) -> Result<Vec<BlockEntry>> {
+    let corrupt = || StrataError::Corrupt {
+        what: "sort-key block table",
+        offset: hot_offset,
+    };
+    let n_chunks = hot.directory.get(sort).ok_or_else(corrupt)?.n_chunks;
+    let mut c = Cursor::new(&hot.sort_key_entries, hot_offset);
+    let mut entries = Vec::new();
+    let mut next_row = 0u64;
+    while c.remaining() > 0 {
+        let entry = BlockEntry::decode(&mut c)?;
+        if u64::from(entry.first_row) != next_row || entry.n_rows == 0 {
+            return Err(corrupt());
+        }
+        if entry.segment_len > 0 {
+            segment_end(entry.segment_offset, entry.segment_len, hot_offset)
+                .map_err(|_| corrupt())?;
+        }
+        next_row = next_row
+            .checked_add(u64::from(entry.n_rows))
+            .ok_or_else(corrupt)?;
+        entries.push(entry);
+    }
+    if next_row != row_count || entries.len() != n_chunks as usize {
+        return Err(corrupt());
+    }
+    Ok(entries)
+}
+
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
 /// segments from.
 pub struct StrataFile {
@@ -45,6 +85,15 @@ pub struct StrataFile {
     size: u64,
     postscript: Postscript,
     pub(crate) hot: HotTail,
+    /// Index of the first sort-key column, or `None` when the file has no sort key.
+    sort_key: Option<usize>,
+    /// The sort-key filter (hot-tail section 4), decoded at open. `None` when the section is
+    /// empty.
+    sort_key_filter: Option<KeyFilter>,
+    /// The sort-key block table (hot-tail section 3), decoded at open, in row order.
+    sort_key_entries: Vec<BlockEntry>,
+    /// Key filters read on first use, by column id.
+    key_filters: Mutex<HashMap<u32, Arc<KeyFilter>>>,
     /// Block-table entries of each column, read on first use.
     blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
 }
@@ -167,12 +216,53 @@ impl StrataFile {
                 });
             }
         }
+        // Checked after the directory loop, so the id and layer errors above come first.
+        let bad_sort_key = || StrataError::Corrupt {
+            what: "sort key column",
+            offset: postscript.hot_offset,
+        };
+        let sort_key = match postscript.sort_key_column {
+            u32::MAX => None,
+            column => {
+                let index = usize::try_from(column).map_err(|_| bad_sort_key())?;
+                match hot.directory.get(index) {
+                    Some(record) if index < n_fields && record.layer == Layer::Narrow => {
+                        Some(index)
+                    }
+                    _ => return Err(bad_sort_key()),
+                }
+            }
+        };
+        let sort_key_filter = if hot.sort_key_filter.is_empty() {
+            None
+        } else {
+            Some(KeyFilter::decode(
+                &hot.sort_key_filter,
+                postscript.hot_offset,
+            )?)
+        };
+        let sort_key_entries = match sort_key {
+            Some(sort) => {
+                read_sort_key_entries(&hot, sort, postscript.row_count, postscript.hot_offset)?
+            }
+            None if hot.sort_key_entries.is_empty() => Vec::new(),
+            None => {
+                return Err(StrataError::Corrupt {
+                    what: "sort-key block table",
+                    offset: postscript.hot_offset,
+                });
+            }
+        };
         Ok(StrataFile {
             store,
             path,
             size,
             postscript,
             hot,
+            sort_key,
+            sort_key_filter,
+            sort_key_entries,
+            key_filters: Mutex::new(HashMap::new()),
             blocks: Mutex::new(HashMap::new()),
         })
     }
@@ -302,6 +392,130 @@ impl StrataFile {
             .insert(column, Arc::clone(&entries));
         Ok(entries)
     }
+
+    /// Whether `value` may occur in column `column`. `Ok(None)` means the column has no
+    /// filter. `Some(false)` is a proof of absence. Integer and timestamp values are passed as
+    /// their 8-byte little-endian `i64`.
+    pub async fn may_contain(&self, column: &str, value: &[u8]) -> Result<Option<bool>> {
+        let index = self
+            .hot
+            .schema
+            .fields()
+            .iter()
+            .position(|field| field.name() == column)
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("no column {column}"),
+            })?;
+        if Some(index) == self.sort_key {
+            return Ok(self
+                .sort_key_filter
+                .as_ref()
+                .and_then(|filter| filter.may_contain(value)));
+        }
+        let Some(&(column_id, segment)) = self
+            .hot
+            .key_filters
+            .iter()
+            .find(|(id, _)| usize::try_from(*id).ok() == Some(index))
+        else {
+            return Ok(None);
+        };
+        let cached = self
+            .key_filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&column_id)
+            .cloned();
+        let filter = match cached {
+            Some(filter) => filter,
+            None => {
+                let bytes = self.read_segment(&segment, Kind::KeyFilter).await?;
+                let filter = Arc::new(KeyFilter::decode(&bytes, segment.offset)?);
+                self.key_filters
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(column_id, Arc::clone(&filter));
+                filter
+            }
+        };
+        Ok(filter.may_contain(value))
+    }
+
+    /// The row ranges whose first sort-key column equals `key`, in row order, with adjacent
+    /// rows merged. Only the sort-key chunks whose zones may hold `key` are read.
+    ///
+    /// The first sort-key column must be FixedSizeBinary of 1 to 16 bytes, and `key` must have
+    /// that width. Otherwise this is `Unsupported`.
+    pub async fn lookup(&self, key: &[u8]) -> Result<Vec<Range<u32>>> {
+        let unsupported = || StrataError::Unsupported {
+            what: "lookup on this sort key".to_string(),
+        };
+        let sort = self.sort_key.ok_or_else(unsupported)?;
+        let field = self.hot.schema.fields().get(sort).ok_or_else(unsupported)?;
+        let width = match field.data_type() {
+            DataType::FixedSizeBinary(w) => usize::try_from(*w).ok(),
+            _ => None,
+        };
+        if !matches!(width, Some(w) if (1..=16).contains(&w) && w == key.len()) {
+            return Err(unsupported());
+        }
+
+        if self
+            .sort_key_filter
+            .as_ref()
+            .and_then(|filter| filter.may_contain(key))
+            == Some(false)
+        {
+            return Ok(Vec::new());
+        }
+        let candidates: Vec<BlockEntry> = self
+            .sort_key_entries
+            .iter()
+            .filter(|entry| zone_may_hold(entry, key))
+            .copied()
+            .collect();
+        let hot_offset = self.postscript.hot_offset;
+        let corrupt = || StrataError::Corrupt {
+            what: "sort-key block table",
+            offset: hot_offset,
+        };
+
+        let bodies = try_join_all(candidates.iter().map(|entry| async move {
+            if entry.segment_len == 0 {
+                return Ok::<Option<Vec<u8>>, StrataError>(None);
+            }
+            let segment = SegmentRef {
+                offset: entry.segment_offset,
+                len: entry.segment_len,
+            };
+            self.read_segment(&segment, Kind::NarrowChunk)
+                .await
+                .map(Some)
+        }))
+        .await?;
+
+        let mut rows = Vec::new();
+        for (entry, body) in candidates.iter().zip(&bodies) {
+            let array = decode_chunk(entry, body.as_deref(), field.as_ref(), None)?;
+            let column = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .ok_or_else(corrupt)?;
+            for i in 0..column.len() {
+                if column.is_valid(i) && column.value(i) == key {
+                    let row = u32::try_from(i)
+                        .ok()
+                        .and_then(|i| entry.first_row.checked_add(i))
+                        .ok_or_else(corrupt)?;
+                    if u64::from(row) >= self.row_count() {
+                        return Err(corrupt());
+                    }
+                    rows.push(row);
+                }
+            }
+        }
+        Ok(merge_rows(&rows))
+    }
 }
 
 #[cfg(test)]
@@ -313,14 +527,18 @@ impl StrataFile {
 )]
 mod tests {
     use super::*;
-    use crate::format::PAGE_REF_LEN;
+    use crate::format::{PAGE_REF_LEN, SEGMENT_HEADER_LEN};
     use crate::testgen::{assert_same, batch, schema as batch_schema};
     use crate::writer::StrataWriter;
+    use arrow::array::{AsArray, FixedSizeBinaryArray, RecordBatch, StringArray};
+    use arrow::buffer::Buffer;
+    use arrow::datatypes::{Field, Schema};
     use counting::Counting;
     use llmobs_core::schema::spans_schema;
     use object_store::PutPayload;
     use object_store::memory::InMemory;
     use proptest::prelude::*;
+    use xxhash_rust::xxh3::xxh3_128;
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
@@ -621,6 +839,244 @@ mod tests {
                 crate::reader::read_column(&file, 2).await,
                 Err(StrataError::Corrupt {
                     what: "dictionary flag",
+                    ..
+                })
+            ));
+        });
+    }
+
+    /// The body ranges of the seven `u32`-prefixed sections of `hot`, a hot tail. Each range
+    /// excludes its length prefix and is relative to the start of `hot`.
+    fn section_bounds(hot: &[u8]) -> [Range<usize>; 7] {
+        let mut at = 0usize;
+        std::array::from_fn(|_| {
+            let len = u32::from_le_bytes(hot[at..at + 4].try_into().unwrap()) as usize;
+            let range = at + 4..at + 4 + len;
+            at = range.end;
+            range
+        })
+    }
+
+    /// `batch(20_000)` written with the default configuration.
+    fn batch_file() -> Vec<u8> {
+        let mut w = StrataWriter::new(
+            batch_schema(),
+            &["trace_id", "start_time"],
+            Config::default(),
+        )
+        .unwrap();
+        w.write(&batch(20_000)).unwrap();
+        w.finish().unwrap().0
+    }
+
+    /// The schema of [`user_file`]: a 16-byte trace id and a nullable `user_id`.
+    fn user_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("user_id", DataType::Utf8, true),
+        ]))
+    }
+
+    /// A file of 5,000 rows sorted by `trace_id`. `user_id` is `user-{i % 500}`, and null
+    /// when `i % 3 == 0`.
+    fn user_file() -> Vec<u8> {
+        let ids: Vec<u8> = (0..5_000usize)
+            .flat_map(|i| ((i / 5) as u128).to_be_bytes())
+            .collect();
+        let ids = FixedSizeBinaryArray::try_new(16, Buffer::from_vec(ids), None).unwrap();
+        let users = StringArray::from_iter(
+            (0..5_000usize).map(|i| (i % 3 != 0).then(|| format!("user-{}", i % 500))),
+        );
+        let rows =
+            RecordBatch::try_new(user_schema(), vec![Arc::new(ids), Arc::new(users)]).unwrap();
+        let mut w = StrataWriter::new(user_schema(), &["trace_id"], Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        w.finish().unwrap().0
+    }
+
+    #[test]
+    fn lookup_returns_the_rows_of_present_ids() {
+        runtime().block_on(async {
+            let file = open_patched(batch_file()).await.unwrap();
+            let decoded = crate::reader::read_column(&file, 0).await.unwrap();
+            let ids = decoded.as_fixed_size_binary();
+            for k in (0..4_000u128).step_by(97) {
+                let key = k.to_be_bytes();
+                let expected: Vec<u32> = (0..ids.len())
+                    .filter(|&row| ids.value(row) == key.as_slice())
+                    .map(|row| row as u32)
+                    .collect();
+                assert!(!expected.is_empty());
+                let got: Vec<u32> = file
+                    .lookup(&key)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                assert_eq!(got, expected, "rows of id {k}");
+            }
+        });
+    }
+
+    #[test]
+    fn absent_ids_are_empty_and_mostly_filtered() {
+        runtime().block_on(async {
+            let file = open_patched(batch_file()).await.unwrap();
+            let mut filtered = 0;
+            for i in 0..1_000u64 {
+                let key = xxh3_128(&(1_000_000 + i).to_le_bytes()).to_le_bytes();
+                assert!(file.lookup(&key).await.unwrap().is_empty());
+                if file.may_contain("trace_id", &key).await.unwrap() == Some(false) {
+                    filtered += 1;
+                }
+            }
+            assert!(
+                filtered >= 980,
+                "{filtered} of 1000 absent ids were filtered"
+            );
+        });
+    }
+
+    #[test]
+    fn present_lookup_costs_at_most_two_gets() {
+        runtime().block_on(async {
+            let counting = Arc::new(Counting::new());
+            let store: Arc<dyn ObjectStore> = counting.clone();
+            put(store.as_ref(), batch_file()).await;
+            let file = StrataFile::open(store, path(), None, &Config::default())
+                .await
+                .unwrap();
+            let before = counting.gets();
+            let rows = file.lookup(&1_234u128.to_be_bytes()).await.unwrap();
+            assert!(!rows.is_empty());
+            assert!(counting.gets() - before <= 2);
+        });
+    }
+
+    #[test]
+    fn lookup_on_an_unsupported_sort_key_is_unsupported() {
+        runtime().block_on(async {
+            let file = open_patched(batch_file()).await.unwrap();
+            let short = file.lookup(&[0u8; 15]).await;
+            assert!(matches!(short, Err(StrataError::Unsupported { .. })));
+
+            let mut w =
+                StrataWriter::new(batch_schema(), &["start_time"], Config::default()).unwrap();
+            w.write(&batch(100)).unwrap();
+            let file = open_patched(w.finish().unwrap().0).await.unwrap();
+            let by_time = file.lookup(&[0u8; 16]).await;
+            assert!(matches!(by_time, Err(StrataError::Unsupported { .. })));
+        });
+    }
+
+    #[test]
+    fn user_id_key_filter_answers_membership() {
+        runtime().block_on(async {
+            let file = open_patched(user_file()).await.unwrap();
+            for j in 0..500 {
+                let value = format!("user-{j}");
+                let found = file.may_contain("user_id", value.as_bytes()).await;
+                assert_eq!(found.unwrap(), Some(true), "{value}");
+            }
+            let mut absent = 0;
+            for i in 0..1_000 {
+                let value = format!("other-{i}");
+                if file.may_contain("user_id", value.as_bytes()).await.unwrap() == Some(false) {
+                    absent += 1;
+                }
+            }
+            assert!(
+                absent >= 980,
+                "{absent} of 1000 absent values were filtered"
+            );
+        });
+    }
+
+    #[test]
+    fn a_column_without_a_filter_and_an_unknown_name() {
+        runtime().block_on(async {
+            let file = open_patched(batch_file()).await.unwrap();
+            assert_eq!(file.may_contain("input_tokens", b"1").await.unwrap(), None);
+            assert!(matches!(
+                file.may_contain("no_such_column", b"1").await,
+                Err(StrataError::Schema { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn zero_row_file_has_no_rows_to_find() {
+        runtime().block_on(async {
+            let file = open_patched(write_empty_file(batch_schema()))
+                .await
+                .unwrap();
+            assert!(file.lookup(&[0u8; 16]).await.unwrap().is_empty());
+            let found = file.may_contain("trace_id", &[0u8; 16]).await;
+            assert_eq!(found.unwrap(), Some(false));
+        });
+    }
+
+    #[test]
+    fn flipped_key_filter_segment_is_corrupt_on_first_use() {
+        runtime().block_on(async {
+            let mut bytes = user_file();
+            let file = open_patched(bytes.clone()).await.unwrap();
+            let segment = file.hot.key_filters[0].1;
+            let at = segment.offset as usize + SEGMENT_HEADER_LEN;
+            bytes[at] ^= 0xFF;
+            let file = open_patched(bytes).await.unwrap();
+            assert!(is_corrupt(&file.may_contain("user_id", b"user-1").await));
+        });
+    }
+
+    #[test]
+    fn key_filter_with_bad_geometry_is_corrupt_at_open() {
+        runtime().block_on(async {
+            let mut bytes = populated().0;
+            let hot = hot_offset_of(&bytes) as usize;
+            let body = section_bounds(&bytes[hot..bytes.len() - 64])[3].clone();
+            // Section 4 is the sort-key filter: tag, seed, then segment_length.
+            let at = hot + body.start + 1 + 8;
+            bytes[at..at + 4].copy_from_slice(&3u32.to_le_bytes());
+            refresh_hot_checksum(&mut bytes);
+            assert!(matches!(
+                open_patched(bytes).await,
+                Err(StrataError::Corrupt {
+                    what: "key filter",
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn no_sort_key_with_a_block_table_is_corrupt_at_open() {
+        runtime().block_on(async {
+            let mut bytes = populated().0;
+            let ps = bytes.len() - 64;
+            bytes[ps + 32..ps + 36].copy_from_slice(&u32::MAX.to_le_bytes());
+            assert!(matches!(
+                open_patched(bytes).await,
+                Err(StrataError::Corrupt {
+                    what: "sort-key block table",
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn sort_key_column_out_of_the_schema_is_corrupt_at_open() {
+        runtime().block_on(async {
+            let mut bytes = populated().0;
+            let fields = batch_schema().fields().len() as u32;
+            let ps = bytes.len() - 64;
+            bytes[ps + 32..ps + 36].copy_from_slice(&fields.to_le_bytes());
+            assert!(matches!(
+                open_patched(bytes).await,
+                Err(StrataError::Corrupt {
+                    what: "sort key column",
                     ..
                 })
             ));

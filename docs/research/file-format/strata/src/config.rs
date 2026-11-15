@@ -22,6 +22,9 @@ pub struct Config {
     /// A Utf8 or Binary column whose average non-null value is at least this many bytes is
     /// stored with the payload layer. Default 256.
     pub payload_min_avg: usize,
+    /// Columns, besides the first sort-key column, that get a key filter. Names absent from the
+    /// schema, or of an unsupported type, are ignored. Default `["user_id", "session_id"]`.
+    pub key_filter_columns: Vec<String>,
     /// Suffix read length when no hot-tail length hint is given. Default 256 KiB.
     pub open_default_suffix: u64,
 }
@@ -36,6 +39,7 @@ impl Default for Config {
             dict_max_values: 65_535,
             dict_max_bytes: 64 * 1024,
             payload_min_avg: 256,
+            key_filter_columns: vec!["user_id".into(), "session_id".into()],
             open_default_suffix: 256 * 1024,
         }
     }
