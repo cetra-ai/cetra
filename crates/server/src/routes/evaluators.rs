@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(response.status, 409, "{}", text(&response));
         assert_eq!(
             response.problem().errors[0].message,
-            "Budgeted: the judge model has no price, so the rule cannot have a budget"
+            "Budgeted: the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices"
         );
     }
 

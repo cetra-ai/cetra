@@ -1323,7 +1323,7 @@ mod tests {
         assert!(
             field_errors(&create(&app, &seeded, &body).await).contains(&(
                 "budget_usd".to_owned(),
-                "the judge model has no price, so the rule cannot have a budget".to_owned()
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices".to_owned()
             ))
         );
 
@@ -1482,7 +1482,7 @@ mod tests {
             field_errors(&create(&app, &seeded, &body).await),
             [(
                 "budget_usd".to_owned(),
-                "the judge model has no price, so the rule cannot have a budget".to_owned()
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices".to_owned()
             )]
         );
 
