@@ -296,9 +296,31 @@ impl Storage {
             })??;
         let committer = Arc::new(Committer::open(&data_dir, share_hooks(&hooks)).await?);
         let mut objects = open_objects(&config, &hooks, remote).await?;
+        // Spill directories of a crashed process, then the query runtime. The disk monitor
+        // caps the spill of that runtime's disk manager, so the runtime exists before `Disk`.
+        // `LOCK` is held (taken by `prepare_layout`), so no live storage uses the directories.
+        let spill_dir = data_dir.join("tmp").join("query");
+        let spill_for_cleanup = spill_dir.clone();
+        let removed = tokio::task::spawn_blocking(move || remove_spill_files(&spill_for_cleanup))
+            .await
+            .map_err(|_| {
+                open_io(
+                    "removing query spill files",
+                    &spill_dir,
+                    io::Error::other("cleanup task panicked"),
+                )
+            })??;
+        if removed > 0 {
+            tracing::info!(removed, "removed leftover query spill files");
+        }
+        let runtime = build_runtime(config.query.metadata_cache_bytes.0, &spill_dir)?;
         let mut disk_paths = vec![data_dir.clone()];
         disk_paths.extend(objects.local_root().map(Path::to_path_buf));
-        let disk = Arc::new(disk::Disk::open(disk_paths, config.min_free_bytes.0)?);
+        let disk = Arc::new(disk::Disk::open(
+            disk_paths,
+            config.min_free_bytes.0,
+            Arc::clone(&runtime.disk_manager),
+        )?);
         // The read cache is for remote stores only: local files are on disk already.
         if objects.local_root().is_none() {
             let capacity = read_cache_capacity(&config.query, &data_dir)?;
@@ -334,23 +356,6 @@ impl Storage {
         if removed > 0 {
             tracing::info!(removed, "removed leftover object temp files");
         }
-        // Spill directories of a crashed process. `LOCK` is held (taken by
-        // `prepare_layout`), so no live storage uses them.
-        let spill_dir = data_dir.join("tmp").join("query");
-        let spill_for_cleanup = spill_dir.clone();
-        let removed = tokio::task::spawn_blocking(move || remove_spill_files(&spill_for_cleanup))
-            .await
-            .map_err(|_| {
-                open_io(
-                    "removing query spill files",
-                    &spill_dir,
-                    io::Error::other("cleanup task panicked"),
-                )
-            })??;
-        if removed > 0 {
-            tracing::info!(removed, "removed leftover query spill files");
-        }
-        let runtime = build_runtime(config.query.metadata_cache_bytes.0, &spill_dir)?;
         objects.register(&runtime);
         let (query_memory, total_memory) = resolve_query_memory(&config.query);
         let memory = Arc::new(memory::SharedPool::new(total_memory));
@@ -396,10 +401,16 @@ impl Storage {
         // independent of the query runtime's.
         let compactor = {
             let memory = usize::try_from(config.compaction.max_memory.0).unwrap_or(usize::MAX);
+            // The merge never spills, so the compaction runtime has no spill directory: a
+            // spill would fail, and would not be capped by the query spill limit.
             let runtime = RuntimeEnvBuilder::new()
                 .with_memory_pool(Arc::new(
                     datafusion::execution::memory_pool::GreedyMemoryPool::new(memory),
                 ))
+                .with_disk_manager_builder(
+                    datafusion::execution::disk_manager::DiskManagerBuilder::default()
+                        .with_mode(datafusion::execution::disk_manager::DiskManagerMode::Disabled),
+                )
                 .build_arc()
                 .map_err(|error| {
                     tracing::error!(%error, "building the compaction runtime");
@@ -2260,6 +2271,81 @@ mod tests {
             Ok(_) => panic!("the join fit in one megabyte"),
         }
         drop(ctx);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// One sort of every span row, whose spill passes through the query's disk manager.
+    /// The window sorts every row and the outer count returns one row: there is no top-k
+    /// that would avoid the sort.
+    async fn spill_query(storage: &Storage) -> Result<(), RunError> {
+        let params = serde_json::Map::new();
+        let ctx = QueryContext::new(
+            storage.query(project(), Default::default()).await.unwrap(),
+            None,
+        )
+        .unwrap();
+        ctx.sql_json(SqlRequest {
+            query: "SELECT count(*) AS n FROM (SELECT row_number() OVER (ORDER BY input, span_id) AS r FROM spans) WHERE r > 0",
+            params: &params,
+            limit: 1,
+            timeout: Duration::from_secs(30),
+        })
+        .await
+        .map(drop)
+    }
+
+    #[tokio::test]
+    async fn a_spill_past_the_cap_fails_as_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_with_query_memory(dir.path(), 32);
+        config.query.initial_memory = ByteSize::mib(16);
+        config.query.target_partitions = 1;
+        config.min_free_bytes = ByteSize::mib(1);
+        let storage = Storage::open(config.clone()).await.unwrap();
+        // 40,000 spans of one trace, each with a 1 KiB input: the window below sorts
+        // all of them, and 32 MiB of memory makes the sort spill.
+        let spans: Vec<_> = (1..=40_000_u64)
+            .map(|index| {
+                let mut span = span_row(1, 0, i64::try_from(index).unwrap(), 1);
+                span.span_id = llmobs_core::ids::SpanId::from_bytes(index.to_be_bytes()).unwrap();
+                span.input = Some("i".repeat(1024));
+                span
+            })
+            .collect();
+        storage
+            .append_spans(project(), span_rows(&spans))
+            .await
+            .unwrap();
+        // Shutdown flushes the memtable to a Parquet file.
+        storage.shutdown().await.unwrap();
+
+        let storage = Storage::open(config).await.unwrap();
+
+        // Run 1, on the real free disk: the spill fits.
+        spill_query(&storage)
+            .await
+            .expect("the spill fits on the real disk");
+
+        // Run 2: the free disk is at the threshold, so the spill limit is 0.
+        storage.disk().set_free_for_test(Some(1 << 20));
+        let error = spill_query(&storage)
+            .await
+            .expect_err("the spill is past the cap");
+        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+        // The failed query's spill files go away as its tasks wind down.
+        let started = std::time::Instant::now();
+        while storage.runtime.disk_manager.used_disk_space() != 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "spill files left: {} bytes",
+                storage.runtime.disk_manager.used_disk_space()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Run 3: the threshold is gone, so the spill fits again.
+        storage.disk().set_free_for_test(None);
+        spill_query(&storage).await.expect("the spill fits again");
         storage.shutdown().await.unwrap();
     }
 
