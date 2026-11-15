@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { MoreHorizontal } from "lucide-react";
 import { useState } from "react";
 import { $api } from "@/api/client";
@@ -210,6 +210,8 @@ export function ExperimentsTable(props: {
  * stays disabled with its reason until the picks can be compared (D-J-13).
  */
 export function CompareSelection({ experiments }: { experiments: Schema<"Experiment">[] }) {
+  const { org, project } = useProject();
+  const navigate = useNavigate();
   const [baseline] = experiments;
   if (baseline === undefined) {
     return null;
@@ -218,9 +220,19 @@ export function CompareSelection({ experiments }: { experiments: Schema<"Experim
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
       <p>{`Baseline: ${baseline.name}`}</p>
-      {/* The comparison view (J6.4) adds the navigation to the compare route. */}
       <DisabledReason reason={reason}>
-        <Button type="button" disabled={reason !== undefined}>
+        <Button
+          type="button"
+          disabled={reason !== undefined}
+          onClick={() => {
+            // The ids in pick order, the first is the baseline (D-J-17).
+            void navigate({
+              to: "/$org/$project/experiments/compare",
+              params: { org, project },
+              search: { ids: experiments.map((experiment) => experiment.id).join(",") },
+            });
+          }}
+        >
           Compare
         </Button>
       </DisabledReason>

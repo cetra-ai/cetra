@@ -5,11 +5,13 @@ import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 import datasetsFixture from "../../../../../../fixtures/api/responses/datasets.json";
+import comparisonFixture from "../../../../../../fixtures/api/static/experiment-comparison.json";
 import experimentsFixture from "../../../../../../fixtures/api/static/experiments.json";
 
 const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
 const CANDIDATE_ID = "01900000-0000-7000-8000-000000000e02";
 const EXPERIMENTS_PATH = "/api/v1/projects/:project/experiments";
+const COMPARE_PATH = "/api/v1/projects/:project/experiments/compare";
 
 function firstDataset() {
   const dataset = datasetsFixture.data[0];
@@ -180,4 +182,26 @@ it("deletes an experiment after confirmation", async () => {
   await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
   await waitFor(() => expect(deleted).toEqual([BASELINE_ID]));
+});
+
+it("opens the comparison with the picks in order", async () => {
+  const user = userEvent.setup();
+  const requested: (string | null)[] = [];
+  server.use(
+    http.get(COMPARE_PATH, ({ request }) => {
+      requested.push(new URL(request.url).searchParams.get("ids"));
+      return HttpResponse.json(comparisonFixture);
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  await user.click(screen.getByRole("checkbox", { name: "Select candidate" }));
+  await user.click(screen.getByRole("checkbox", { name: "Select baseline" }));
+  await user.click(screen.getByRole("button", { name: "Compare" }));
+
+  await waitFor(() => expect(router.state.location.pathname).toMatch(/\/experiments\/compare$/));
+  const href = decodeURIComponent(router.state.location.href);
+  expect(href).toContain(`ids=${CANDIDATE_ID},${BASELINE_ID}`);
+  await waitFor(() => expect(requested).toContain(`${CANDIDATE_ID},${BASELINE_ID}`));
 });

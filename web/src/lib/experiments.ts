@@ -24,6 +24,11 @@ export function parseExperimentsSearch(search: Record<string, unknown>): { datas
   return dataset && UUID.test(dataset) ? { dataset } : {};
 }
 
+/** The ids of a compare search (`parseCompareSearch().ids`) as a list, in URL order. */
+export function compareIdList(ids: string): string[] {
+  return ids === "" ? [] : ids.split(",");
+}
+
 /** `?errors=1` of the experiment page. */
 export function parseExperimentSearch(search: Record<string, unknown>): { errors?: 1 } {
   return isFlag(search.errors) ? { errors: 1 } : {};
@@ -31,11 +36,12 @@ export function parseExperimentSearch(search: Record<string, unknown>): { errors
 
 /**
  * `?ids=a,b&threshold=0.2&regressions=1` of the compare view. `ids`: split on commas, trimmed,
- * empty parts dropped, duplicates dropped (first kept), UUID strings only, at most 4 kept.
- * `threshold`: a finite number in [0, 1000], else undefined (the view uses DEFAULT_THRESHOLD).
+ * empty parts dropped, duplicates dropped (first kept), UUID strings only, at most 4 kept, and
+ * joined back with commas (the URL keeps the string; `compareIdList` splits it). `threshold`: a
+ * finite number in [0, 1000], else undefined (the view uses DEFAULT_THRESHOLD).
  */
 export function parseCompareSearch(search: Record<string, unknown>): {
-  ids: string[];
+  ids: string;
   threshold?: number;
   regressions?: 1;
 } {
@@ -51,7 +57,7 @@ export function parseCompareSearch(search: Record<string, unknown>): {
   const threshold =
     Number.isFinite(value) && value >= 0 && value <= MAX_THRESHOLD ? value : undefined;
   return {
-    ids,
+    ids: ids.join(","),
     ...(threshold !== undefined ? { threshold } : {}),
     ...(isFlag(search.regressions) ? { regressions: 1 as const } : {}),
   };

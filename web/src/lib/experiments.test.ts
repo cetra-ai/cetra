@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Schema } from "@/api/types";
 import {
   compareBlockReason,
+  compareIdList,
   deltaDirection,
   deltaText,
   expectedRuns,
@@ -25,7 +26,12 @@ function summary(partial: Partial<Schema<"ScoreSummary">>): Schema<"ScoreSummary
 describe("parseCompareSearch", () => {
   it("keeps the first four distinct UUIDs in order", () => {
     const parsed = parseCompareSearch({ ids: `${A}, ${B},,${A},x,${C},${D},${E}` });
-    expect(parsed.ids).toEqual([A, B, C, D]);
+    expect(parsed.ids).toBe([A, B, C, D].join(","));
+    expect(compareIdList(parsed.ids)).toEqual([A, B, C, D]);
+  });
+
+  it("reads no ids as an empty list", () => {
+    expect(compareIdList(parseCompareSearch({}).ids)).toEqual([]);
   });
 
   it("reads the threshold within [0, 1000] only", () => {
