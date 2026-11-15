@@ -17,6 +17,7 @@ CREATE TABLE users (
   name TEXT,
   password_hash TEXT,                 -- argon2id PHC string; NULL for SSO-only users
   email_verified_at INTEGER,
+  email_verified_via TEXT,            -- 'mail_token' | 'idp' | 'invite' | 'control_plane' | 'operator' (D-P-66)
   is_instance_admin INTEGER NOT NULL DEFAULT 0,   -- first user; can manage instance settings
   disabled_at INTEGER,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -37,7 +38,8 @@ CREATE TABLE web_sessions (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
   user_agent TEXT, ip TEXT,
-  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL -- the org whose provider started it (D-P-59, track P M5)
+  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL, -- the org whose provider started it (D-P-59, track P M5)
+  via_provider INTEGER NOT NULL DEFAULT 0  -- 1 when any identity provider started it (D-P-69)
 );
 
 CREATE TABLE orgs (

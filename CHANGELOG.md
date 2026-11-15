@@ -9,6 +9,12 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Upgrade notes
 
+- Migration `0015` adds `users.email_verified_via` and `web_sessions.via_provider`. Verified accounts
+  that exist already have no recorded origin and count as unproven: when an identity provider links
+  one of them, its password is cleared. With `auth.enforce_sso_domains`, sessions that predate the
+  upgrade stop resolving for the listed domains, and those users sign in again through their provider.
+- The cloud control plane must sign `method` and `path` claims in its `control_plane` tokens; a token
+  without them is refused (D-P-71).
 - With `auth.signup = open`, an email alert channel that lists an address which is not a verified,
   enabled member of its org is refused on its next edit, and its deliveries skip that address and are
   recorded as failed. Change the recipients, or use `invite_only` signup.
@@ -60,6 +66,17 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Security review of the auth code: an invitation no longer counts as proof of an email address, so
+  linking Google, GitHub or an org's identity provider clears the password of an account made with an
+  invitation (D-P-66).
+- API keys can no longer list the org's members through `GET /projects/{project}/members` (D-P-67).
+- An instance admin cannot mint a reset link for the owner of an org they are not a member of (D-P-68).
+- `auth.enforce_sso_domains` now also ends password sessions, personal access tokens and password
+  resets of the listed domains (D-P-69).
+- Dropping a project or an org needs a browser session; a personal access token gets 403 (D-P-70).
+- Control-plane tokens are valid for one method and path only (D-P-71).
+- Org SSO domains are re-checked daily; a domain whose TXT record is gone stops being verified
+  (D-P-72).
 - Auth security review (`docs/research/auth/review-2026-11-15.md`): deleting another project's
   evaluator answers 404 instead of naming that project's online rules; deleting another org's
   connection answers 404 while it is in use; a control-plane org creation clears the password,
