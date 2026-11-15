@@ -70,6 +70,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Storage: a read-cache size file torn by a power loss could make S3-mode queries read short ranges. The size file now carries a CRC-32C; cache directories written in the old format are dropped at open and fetched again.
 - The span list no longer shows a re-sent span twice, and its pages no longer depend on the page size. A re-send that changed its `start_time` is still listed twice until compaction merges them.
 - Storage GC no longer deletes a data file that a query started before a deletion pass still reads (the deletion's raise of a clean file hid the query's reference).
+- The trace list no longer hides a trace ingested after a deletion of the same trace id while another deletion of the project is pending.
 - The traces page shows onboarding only for a project with no trace at all (an all-time one-row probe); a project whose traces are older than the selected range sees its empty range instead.
 - The live traces list refetches its first page at most once at a time: a busy stream no longer cancels the refetch it started, and the traces that arrived meanwhile are fetched by one trailing refetch.
 - The live traces list and the trace view stop their stream on a 4xx answer instead of retrying forever, a 401 on a stream goes to `/login`, and the live list opens no stream while it shows an invalid filter.

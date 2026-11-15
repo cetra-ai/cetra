@@ -929,6 +929,34 @@ fn regression_lossy_crash_tears_the_wal_tail() {
     assert!(crash.torn_writes > 0, "the crash tore no write: {crash:?}");
 }
 
+/// Found by `just model 200` (interval mode). Deletion A covers trace 11 and is applied to the
+/// traces file flushed after it, which records A's sequence. Trace 11 is then re-appended after
+/// A's cut-off, and deletion B (of trace 0) gates that file. The file gate must not apply A again:
+/// trace 11 is visible (spec 03 §7).
+#[test]
+fn regression_applied_deletion_does_not_hide_a_later_trace() {
+    run_case(
+        &[
+            Op::DeleteTraces {
+                project: P::A,
+                picks: vec![11],
+            },
+            Op::Append {
+                project: P::A,
+                trace: 11,
+                count: 1,
+                split: false,
+            },
+            Op::Restart,
+            Op::DeleteTraces {
+                project: P::A,
+                picks: vec![0],
+            },
+        ],
+        (P::A, P::B),
+    );
+}
+
 /// S3 mode with a schedule (R4.5): the schedule is off once the run returns, whatever it injected.
 /// A run whose boosted ops (R4.5) reach `before` 0.24 injects faults over a fixed list of Restart,
 /// Compact, Verify and FaultyRead ops. The base rates stay the model's, since a shutdown retries

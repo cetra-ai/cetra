@@ -290,14 +290,16 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
     );
     // A `traces` file is gated by `deletions_applied_seq` alone: its
     // `min_ingest_time` is the smallest per-trace *latest* ingest time, so it
-    // cannot bound a cut-off (spec 03 §7).
+    // cannot bound a cut-off (spec 03 §7). Gated files are grouped by that
+    // sequence, since each group has its own set of deletions to apply.
     let mut clean = Vec::with_capacity(files.len());
-    let mut gated = Vec::with_capacity(files.len());
+    let mut gated: BTreeMap<u64, Vec<Arc<FileMeta>>> = BTreeMap::new();
     for file in files {
-        if applicable(&ctx.deletions, Some(file.deletions_applied_seq), i64::MIN).is_empty() {
+        let applied = file.deletions_applied_seq;
+        if applicable(&ctx.deletions, Some(applied), i64::MIN).is_empty() {
             clean.push(file);
         } else {
-            gated.push(file);
+            gated.entry(applied).or_default().push(file);
         }
     }
     let batches = mem_batches(&ctx.spans_mem, ctx.project, &padded);
@@ -319,21 +321,24 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
             &ctx.suspects,
         )?);
     }
-    if !gated.is_empty() {
+    for (applied, group) in &gated {
+        // The deletions this group has not applied. A deletion the file already
+        // applied must not hide a trace ingested after it: a traces partial has
+        // no per-row ingest time to test the cut-off against (spec 03 §7).
+        let pending = applicable(&ctx.deletions, Some(*applied), i64::MIN);
         // The merge input always holds `trace_id`, so the trace-id-only rule
         // fits the input schema. A `None` predicate (no deletion has trace
         // ids) means no filter.
         let gated_plan = file_plan(
             &schema,
             &input_indices,
-            &gated,
+            group,
             &input_df,
             file_pred.as_ref(),
             ctx.partitions,
             &ctx.suspects,
         )?;
-        let gated_plan = match covered_predicate(FileTable::Traces, &input_schema, &ctx.deletions)?
-        {
+        let gated_plan = match covered_predicate(FileTable::Traces, &input_schema, &pending)? {
             Some(predicate) => Arc::new(FilterExec::try_new(
                 Arc::new(NotExpr::new(predicate)),
                 gated_plan,
@@ -3422,6 +3427,54 @@ mod tests {
                 "{table} bounded"
             );
         }
+        storage.shutdown().await.unwrap();
+    }
+
+    /// Spec 03 §7: a traces file is gated only by the deletions it has not applied. Deletion A
+    /// covers trace 1 and the traces file flushed after it records A's sequence. Trace 1 is
+    /// then ingested again after A's cut-off, and deletion B (of trace 2) gates that file: A
+    /// must not hide the new partial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn applied_deletion_does_not_hide_a_later_trace() {
+        let (covered, other) = (trace_id(1), trace_id(2));
+        let deletion = |trace: TraceId, cutoff: i64| crate::deletion::Deletion {
+            id: uuid::Uuid::now_v7(),
+            project: project(),
+            cutoff,
+            scope: crate::deletion::DeletionScope::Traces {
+                trace_ids: vec![trace],
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        // The span is ingested after deletion A's cut-off, as a request received later is.
+        let cutoff = crate::catalog::now_ns();
+        storage
+            .register_deletion(deletion(covered, cutoff))
+            .await
+            .unwrap();
+        let mut span = base_span(covered, span_id(1), 20_000 * DAY + 100);
+        span.ingest_time = cutoff + 1;
+        storage
+            .append_spans(project(), spans_batch(&[span]))
+            .await
+            .unwrap();
+        // The shutdown flushes the spans, and the traces file records deletion A as applied.
+        let storage = reopen(dir.path(), storage).await;
+        storage
+            .register_deletion(deletion(other, crate::catalog::now_ns()))
+            .await
+            .unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(query, None).unwrap();
+        assert_eq!(
+            count_of(&collect(ctx.session(), "SELECT count(*) FROM traces").await),
+            1,
+            "trace 1 was ingested after deletion A and must stay visible"
+        );
         storage.shutdown().await.unwrap();
     }
 
