@@ -271,6 +271,9 @@ async fn update_evaluator(
     let user = principal::session_user(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let _prices = state.ingest.prices().lock_writes().await;
     let expected = store::get_evaluator(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1566,6 +1569,29 @@ mod tests {
         let mut config = judge_body()["config"].clone();
         config["prompt"] = json!(prompt);
         config
+    }
+
+    /// D-T-8: the rules are checked against the prices in the write, so the PATCH waits for a
+    /// price write in progress.
+    #[tokio::test]
+    async fn a_patch_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rename = json!({"name": "Renamed judge"});
+        let mut pending = std::pin::pin!(patch(&app, &seeded, &id, &rename));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the patch did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 200, "{}", text(&response));
     }
 
     #[tokio::test]

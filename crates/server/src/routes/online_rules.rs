@@ -259,6 +259,9 @@ async fn create_online_rule(
         budget_period: body.budget_period,
         enabled: body.enabled,
     };
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let _prices = state.ingest.prices().lock_writes().await;
     let evaluator_id = body.evaluator_id;
     let evaluator = evaluators::get_evaluator(state.meta.reader(), project, evaluator_id).await?;
     validate(&state, org, project, &draft, evaluator.as_ref(), now).await?;
@@ -311,6 +314,9 @@ async fn update_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let _prices = state.ingest.prices().lock_writes().await;
     let stored = store::get_rule(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -1202,6 +1208,48 @@ mod tests {
         assert_eq!(page["data"], json!([created]));
         assert_eq!(page["org_enabled_rules"], 1);
         assert!(page["next_cursor"].is_null());
+    }
+
+    /// D-T-8: a write waits while a price write holds the lock, so the price table it checks
+    /// against is read after that price write has committed.
+    #[tokio::test]
+    async fn a_create_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rule = rule_body(evaluator);
+        let mut pending = std::pin::pin!(create(&app, &seeded, &rule));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the create did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 201, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn a_patch_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &rule_body(evaluator)).await;
+        let id = id_of(&created);
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rename = json!({"name": "Renamed"});
+        let mut pending = std::pin::pin!(patch(&app, &seeded, id, &rename));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the patch did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 200, "{}", text(&response));
     }
 
     #[tokio::test]

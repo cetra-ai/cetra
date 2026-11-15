@@ -929,8 +929,8 @@ mod tests {
             .expect("one span")
     }
 
-    /// The `cost_source` the span list shows for `span_id`.
-    async fn listed_cost_source(app: &TestApp, seeded: &Seeded, span_id: &str) -> Value {
+    /// The `cost_total` the span list shows for `span_id`.
+    async fn listed_cost_total(app: &TestApp, seeded: &Seeded, span_id: &str) -> Value {
         let response = app
             .request(
                 Method::GET,
@@ -946,7 +946,7 @@ mod tests {
             .expect("data")
             .iter()
             .find(|span| span["span_id"] == span_id)
-            .map(|span| span["cost_source"].clone())
+            .map(|span| span["cost_total"].clone())
             .expect("the span is listed")
     }
 
@@ -954,22 +954,7 @@ mod tests {
     async fn a_new_price_applies_to_spans_ingested_after_it() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let before = accept_chat(&app, &seeded, 1).await;
-        assert_eq!(
-            serde_json::to_value(before.cost_source).expect("cost source"),
-            json!("none")
-        );
-        // Store the first span, so the list can show it.
-        app.commit_spans(&seeded.project, vec![before.clone()])
-            .await;
-        let span_id = before.span_id.to_string();
-        // The list omits `cost_source` when the stored span has none (absent is `none`).
-        assert_eq!(
-            listed_cost_source(&app, &seeded, &span_id).await,
-            Value::Null
-        );
-
-        created_id(
+        let price = created_id(
             &post(
                 &app,
                 &seeded,
@@ -978,17 +963,33 @@ mod tests {
             )
             .await,
         );
+        // 1 000 000 input tokens at 1.0 USD per 1M.
+        let before = accept_chat(&app, &seeded, 1).await;
+        assert_eq!(before.cost_total, Some(1.0));
+        let span_id = before.span_id.to_string();
+        app.commit_spans(&seeded.project, vec![before]).await;
+        assert_eq!(listed_cost_total(&app, &seeded, &span_id).await, json!(1.0));
+
+        let url = format!("{}/{price}", path(seeded.project.id));
+        let patched = write_as(
+            &app,
+            &seeded,
+            Method::PATCH,
+            &url,
+            Some(&body("llama3.1:8b", 3.0, 3.0)),
+        )
+        .await;
+        assert_eq!(
+            patched.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&patched.body)
+        );
 
         let after = accept_chat(&app, &seeded, 2).await;
-        assert_eq!(
-            serde_json::to_value(after.cost_source).expect("cost source"),
-            json!("computed")
-        );
-        // D-T-5: the stored span keeps its cost.
-        assert_eq!(
-            listed_cost_source(&app, &seeded, &span_id).await,
-            Value::Null
-        );
+        assert_eq!(after.cost_total, Some(3.0));
+        // D-T-5: the stored span keeps the cost it was priced with.
+        assert_eq!(listed_cost_total(&app, &seeded, &span_id).await, json!(1.0));
     }
 
     #[tokio::test]
