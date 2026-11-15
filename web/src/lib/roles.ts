@@ -64,6 +64,11 @@ export function canManageEvaluation(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::Annotate`: project members and above write scores (D-G-16). Same logic as `canManageEvaluation`, kept separate on purpose: it mirrors a different server permission. */
+export function canAnnotate(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Members and above manage alert rules and channels (D-K-9). */
 export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");

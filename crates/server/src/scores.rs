@@ -11,7 +11,7 @@ use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::api::common::FieldError;
+use crate::api::common::{FieldError, ProblemCode};
 use crate::api::convert;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::scores::ScoreCreate;
@@ -32,12 +32,19 @@ const DAY_NS: i64 = 86_400_000_000_000;
 /// Prefix of the derived-id input (spec 06).
 const DERIVE_TAG: &[u8] = b"llmobs.score.v1";
 
-/// Who is writing, which decides `source` and the author (D-G-27).
+/// Who is writing, which decides `source`, the author and the ownership check (D-G-27, D-I-36).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Writer {
-    /// A web session on the project route.
-    Human { user_id: Uuid },
-    /// A PAT (`token_id`) or `sk` key (`key_id`) on the project route.
+    /// A web session on the project route. `admin`: the caller's effective project role is admin.
+    Human { user_id: Uuid, admin: bool },
+    /// A personal access token on the project route: the token, its user, and whether that user
+    /// is a project admin. Its scores are stored as `api`, like a key's (D-G-27).
+    Pat {
+        token_id: Uuid,
+        user_id: Uuid,
+        admin: bool,
+    },
+    /// An `sk` key (`key_id`) on the project route.
     Api { author: Uuid },
     /// An `sk` key on `POST /api/v1/scores`.
     Sdk { key_id: Uuid },
@@ -56,8 +63,10 @@ impl Writer {
     fn source(self, requested: Option<ScoreSource>) -> Option<ScoreSource> {
         match (self, requested) {
             (Self::Human { .. }, None | Some(ScoreSource::Human)) => Some(ScoreSource::Human),
-            (Self::Api { .. }, None | Some(ScoreSource::Api)) => Some(ScoreSource::Api),
-            (Self::Api { .. }, Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
+            (Self::Api { .. } | Self::Pat { .. }, None | Some(ScoreSource::Api)) => {
+                Some(ScoreSource::Api)
+            }
+            (Self::Api { .. } | Self::Pat { .. }, Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::Sdk { .. }, None | Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::EndUser { .. }, None | Some(ScoreSource::EndUser)) => Some(ScoreSource::EndUser),
             (Self::Evaluator { kind, .. }, None) => Some(evaluator_source(kind)),
@@ -73,7 +82,8 @@ impl Writer {
     /// The id a derived `score_id` uses as its author (D-G-27).
     fn author(self) -> Uuid {
         match self {
-            Self::Human { user_id } => user_id,
+            Self::Human { user_id, .. } => user_id,
+            Self::Pat { token_id, .. } => token_id,
             Self::Api { author } => author,
             Self::Sdk { key_id } | Self::EndUser { key_id } => key_id,
             Self::Evaluator {
@@ -87,7 +97,22 @@ impl Writer {
     /// `author_user_id` of the stored row. Only a person has one.
     fn author_user(self) -> Option<Uuid> {
         match self {
-            Self::Human { user_id } => Some(user_id),
+            Self::Human { user_id, .. } => Some(user_id),
+            Self::Pat { .. }
+            | Self::Api { .. }
+            | Self::Sdk { .. }
+            | Self::EndUser { .. }
+            | Self::Evaluator { .. } => None,
+        }
+    }
+
+    /// The person behind a session or PAT write, and whether they are a project admin. `None`
+    /// for keys, feedback and evaluators, which the ownership check leaves alone (D-I-26).
+    fn person(self) -> Option<(Uuid, bool)> {
+        match self {
+            Self::Human { user_id, admin } | Self::Pat { user_id, admin, .. } => {
+                Some((user_id, admin))
+            }
             Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } | Self::Evaluator { .. } => {
                 None
             }
@@ -102,9 +127,11 @@ impl Writer {
                 rule_id,
                 ..
             } => (Some(evaluator_id), rule_id),
-            Self::Human { .. } | Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } => {
-                (None, None)
-            }
+            Self::Human { .. }
+            | Self::Pat { .. }
+            | Self::Api { .. }
+            | Self::Sdk { .. }
+            | Self::EndUser { .. } => (None, None),
         }
     }
 }
@@ -116,6 +143,20 @@ fn evaluator_source(kind: EvaluatorKind) -> ScoreSource {
         EvaluatorKind::Check => ScoreSource::Check,
         EvaluatorKind::Webhook => ScoreSource::Webhook,
     }
+}
+
+/// `403 forbidden` when a person who is not a project admin would replace or delete another
+/// user's `human` score (D-I-26, D-I-36). Keys, feedback and evaluators always pass.
+fn check_owner(writer: Writer, live: &Score) -> Result<(), ApiError> {
+    let Some((user_id, admin)) = writer.person() else {
+        return Ok(());
+    };
+    if admin || live.source != ScoreSource::Human || live.author_user_id == Some(user_id) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden {
+        code: ProblemCode::Forbidden,
+    })
 }
 
 /// Validates `items`, resolves ids and times, appends the rows, and returns one id per item
@@ -178,12 +219,20 @@ pub(crate) async fn write(
         .filter_map(|(index, pending)| (last.get(&pending.id) == Some(&index)).then_some(pending))
         .collect();
 
+    // A person's write also looks up the UUIDv7 ids it supplies, for the ownership check
+    // (D-I-36). Other writers need only the non-v7 ids, for the times.
+    let person = writer.person().is_some();
     let lookup: Vec<String> = kept
         .iter()
-        .filter(|pending| !is_v7(pending.id))
+        .filter(|pending| person || !is_v7(pending.id))
         .map(|pending| pending.id.to_string())
         .collect();
     let live = live_scores(state, project, &lookup).await?;
+    for pending in &kept {
+        if let Some(found) = live.get(&pending.id) {
+            check_owner(writer, found)?;
+        }
+    }
 
     let author_user = writer.author_user();
     let (evaluator_id, rule_id) = writer.evaluator_ids();
@@ -242,10 +291,12 @@ pub(crate) async fn write(
     Ok(ids)
 }
 
-/// Appends a deleted copy of the live score `score_id` (spec 03 §5). `NotFound` when none.
+/// Appends a deleted copy of the live score `score_id` (spec 03 §5). `NotFound` when none;
+/// `Forbidden` when `writer` may not delete it (D-I-36).
 pub(crate) async fn delete(
     state: &AppState,
     project: &ProjectRow,
+    writer: Writer,
     score_id: Uuid,
 ) -> Result<(), ApiError> {
     let now = state.clock.now_ns();
@@ -253,6 +304,7 @@ pub(crate) async fn delete(
     let Some(mut tombstone) = live.remove(&score_id) else {
         return Err(ApiError::NotFound);
     };
+    check_owner(writer, &tombstone)?;
     tombstone.deleted = true;
     tombstone.updated_at = now.max(tombstone.updated_at.saturating_add(1));
     tombstone.ingest_time = now;
@@ -512,9 +564,8 @@ mod tests {
     use llmobs_core::ids::OrgId;
 
     use super::*;
-    use crate::api::common::ProblemCode;
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
-    use crate::test_support::{TestApp, set_limits};
+    use crate::test_support::{Seeded, TestApp, set_limits};
     use llmobs_core::enums::ScoreDataType;
     use llmobs_storage::ScoreListRequest;
 
@@ -857,13 +908,15 @@ mod tests {
         .await
         .unwrap();
 
-        delete(&app.state, &seeded.project, id).await.unwrap();
+        delete(&app.state, &seeded.project, api_writer(), id)
+            .await
+            .unwrap();
         assert!(
             stored(&app, seeded.org_id, seeded.project.id)
                 .await
                 .is_empty()
         );
-        match delete(&app.state, &seeded.project, id).await {
+        match delete(&app.state, &seeded.project, api_writer(), id).await {
             Err(ApiError::NotFound) => {}
             other => panic!("expected not found, got {other:?}"),
         }
@@ -874,7 +927,10 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let user = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0500);
-        let human = Writer::Human { user_id: user };
+        let human = Writer::Human {
+            user_id: user,
+            admin: false,
+        };
         let sdk = Writer::Sdk { key_id: author() };
 
         // A person may not send `source: api`.
@@ -928,6 +984,15 @@ mod tests {
         write(&app.state, &seeded.project, human, vec![item("tone", 1.0)])
             .await
             .unwrap();
+        // A PAT's score is stored as `api`, with no author, like a key's (D-G-27).
+        let pat = Writer::Pat {
+            token_id: author(),
+            user_id: user,
+            admin: false,
+        };
+        write(&app.state, &seeded.project, pat, vec![item("clarity", 0.5)])
+            .await
+            .unwrap();
 
         // Feedback is stored as `end_user`; any other source is refused.
         let end_user = Writer::EndUser { key_id: author() };
@@ -960,9 +1025,378 @@ mod tests {
         let tone = rows.iter().find(|row| row.name == "tone").unwrap();
         assert_eq!(tone.source, ScoreSource::Human);
         assert_eq!(tone.author_user_id, Some(user));
+        let clarity = rows.iter().find(|row| row.name == "clarity").unwrap();
+        assert_eq!(clarity.source, ScoreSource::Api);
+        assert_eq!(clarity.author_user_id, None);
         let helpful = rows.iter().find(|row| row.name == "helpful").unwrap();
         assert_eq!(helpful.source, ScoreSource::EndUser);
         assert_eq!(helpful.author_user_id, None);
+    }
+
+    /// A UUIDv7 score id with an explicit `score_id`.
+    fn with_id(id: Uuid, name: &str, value: f64) -> ScoreCreate {
+        ScoreCreate {
+            score_id: Some(id),
+            ..item(name, value)
+        }
+    }
+
+    fn user_a() -> Uuid {
+        Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0600)
+    }
+
+    fn user_b() -> Uuid {
+        Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0601)
+    }
+
+    /// Asserts that a write or delete answered `403 forbidden`.
+    fn assert_forbidden<T: std::fmt::Debug>(result: &Result<T, ApiError>) {
+        assert!(
+            matches!(result, Err(ApiError::Forbidden { .. })),
+            "expected forbidden, got {result:?}"
+        );
+    }
+
+    /// The live row with `id`, if there is one.
+    async fn live_row(app: &TestApp, seeded: &Seeded, id: Uuid) -> Option<Score> {
+        stored(app, seeded.org_id, seeded.project.id)
+            .await
+            .into_iter()
+            .find(|row| row.score_id == id)
+    }
+
+    /// Writes `A`'s human score `id` (value 1.0, `tone`) through a session.
+    async fn human_score_of_a(app: &TestApp, seeded: &Seeded, id: Uuid) {
+        let writer = Writer::Human {
+            user_id: user_a(),
+            admin: false,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            writer,
+            vec![with_id(id, "tone", 1.0)],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_refuses_another_users_human_score_to_a_person() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id: Uuid = V7_FIXED.parse().unwrap();
+        let (a, b) = (user_a(), user_b());
+        human_score_of_a(&app, &seeded, id).await;
+
+        let by_b = Writer::Human {
+            user_id: b,
+            admin: false,
+        };
+        assert_forbidden(
+            &write(
+                &app.state,
+                &seeded.project,
+                by_b,
+                vec![with_id(id, "tone", 0.0)],
+            )
+            .await,
+        );
+        let row = live_row(&app, &seeded, id).await.unwrap();
+        assert_eq!(row.value, ScoreValue::Numeric(1.0));
+        assert_eq!(row.author_user_id, Some(a));
+
+        // A PAT of B is checked as B.
+        let pat_of_b = Writer::Pat {
+            token_id: author(),
+            user_id: b,
+            admin: false,
+        };
+        assert_forbidden(
+            &write(
+                &app.state,
+                &seeded.project,
+                pat_of_b,
+                vec![with_id(id, "tone", 0.0)],
+            )
+            .await,
+        );
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let by_a = Writer::Human {
+            user_id: a,
+            admin: false,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            by_a,
+            vec![with_id(id, "tone", 0.5)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live_row(&app, &seeded, id).await.unwrap().value,
+            ScoreValue::Numeric(0.5)
+        );
+
+        // A project admin replaces it and becomes its author.
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let admin_b = Writer::Human {
+            user_id: b,
+            admin: true,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            admin_b,
+            vec![with_id(id, "tone", 0.0)],
+        )
+        .await
+        .unwrap();
+        let row = live_row(&app, &seeded, id).await.unwrap();
+        assert_eq!(row.value, ScoreValue::Numeric(0.0));
+        assert_eq!(row.author_user_id, Some(b));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_batch_stores_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id: Uuid = V7_FIXED.parse().unwrap();
+        let new_id = v7_at(1_717_986_918_401);
+        human_score_of_a(&app, &seeded, id).await;
+
+        let by_b = Writer::Human {
+            user_id: user_b(),
+            admin: false,
+        };
+        assert_forbidden(
+            &write(
+                &app.state,
+                &seeded.project,
+                by_b,
+                vec![with_id(new_id, "tone", 0.3), with_id(id, "tone", 0.0)],
+            )
+            .await,
+        );
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].score_id, id);
+        assert_eq!(rows[0].value, ScoreValue::Numeric(1.0));
+        assert_eq!(rows[0].author_user_id, Some(user_a()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_checks_ownership_after_validation() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id: Uuid = V7_FIXED.parse().unwrap();
+        human_score_of_a(&app, &seeded, id).await;
+
+        let by_b = Writer::Human {
+            user_id: user_b(),
+            admin: false,
+        };
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                by_b,
+                vec![with_id(id, "tone", 0.0), item("", 1.0)],
+            )
+            .await,
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "scores[1].name");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keys_and_evaluators_skip_the_ownership_check() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id: Uuid = V7_FIXED.parse().unwrap();
+        human_score_of_a(&app, &seeded, id).await;
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![with_id(id, "tone", 0.25)],
+        )
+        .await
+        .unwrap();
+        let row = live_row(&app, &seeded, id).await.unwrap();
+        assert_eq!(row.source, ScoreSource::Api);
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let by_a = Writer::Human {
+            user_id: user_a(),
+            admin: false,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            by_a,
+            vec![with_id(id, "tone", 1.0)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live_row(&app, &seeded, id).await.unwrap().source,
+            ScoreSource::Human
+        );
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let evaluator = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            evaluator,
+            vec![with_id(id, "tone", 0.5)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live_row(&app, &seeded, id).await.unwrap().source,
+            ScoreSource::Check
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_person_may_replace_another_users_non_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id = v4(7);
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![with_id(id, "tone", 1.0)],
+        )
+        .await
+        .unwrap();
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let by_b = Writer::Human {
+            user_id: user_b(),
+            admin: false,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            by_b,
+            vec![with_id(id, "tone", 0.0)],
+        )
+        .await
+        .unwrap();
+        let row = live_row(&app, &seeded, id).await.unwrap();
+        assert_eq!(row.source, ScoreSource::Human);
+        assert_eq!(row.author_user_id, Some(user_b()));
+        assert_eq!(row.value, ScoreValue::Numeric(0.0));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_person_may_delete_a_non_human_score() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let by_b = Writer::Human {
+            user_id: user_b(),
+            admin: false,
+        };
+
+        let api_id = v4(8);
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![with_id(api_id, "tone", 1.0)],
+        )
+        .await
+        .unwrap();
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        delete(&app.state, &seeded.project, by_b, api_id)
+            .await
+            .unwrap();
+        assert!(live_row(&app, &seeded, api_id).await.is_none());
+
+        let evaluator_id = v4(9);
+        let evaluator = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            evaluator,
+            vec![with_id(evaluator_id, "tone", 1.0)],
+        )
+        .await
+        .unwrap();
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        delete(&app.state, &seeded.project, by_b, evaluator_id)
+            .await
+            .unwrap();
+        assert!(live_row(&app, &seeded, evaluator_id).await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_refuses_another_users_human_score_to_a_person() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id: Uuid = V7_FIXED.parse().unwrap();
+        let (a, b) = (user_a(), user_b());
+        human_score_of_a(&app, &seeded, id).await;
+
+        let by_b = Writer::Human {
+            user_id: b,
+            admin: false,
+        };
+        assert_forbidden(&delete(&app.state, &seeded.project, by_b, id).await);
+        assert!(live_row(&app, &seeded, id).await.is_some());
+
+        let pat_of_b = Writer::Pat {
+            token_id: v4(9),
+            user_id: b,
+            admin: false,
+        };
+        assert_forbidden(&delete(&app.state, &seeded.project, pat_of_b, id).await);
+        assert!(live_row(&app, &seeded, id).await.is_some());
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        delete(&app.state, &seeded.project, api_writer(), id)
+            .await
+            .unwrap();
+        assert!(live_row(&app, &seeded, id).await.is_none());
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        human_score_of_a(&app, &seeded, id).await;
+        assert!(live_row(&app, &seeded, id).await.is_some());
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let admin_b = Writer::Human {
+            user_id: b,
+            admin: true,
+        };
+        delete(&app.state, &seeded.project, admin_b, id)
+            .await
+            .unwrap();
+        assert!(live_row(&app, &seeded, id).await.is_none());
+
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        human_score_of_a(&app, &seeded, id).await;
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        let by_a = Writer::Human {
+            user_id: a,
+            admin: false,
+        };
+        delete(&app.state, &seeded.project, by_a, id).await.unwrap();
+        assert!(live_row(&app, &seeded, id).await.is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

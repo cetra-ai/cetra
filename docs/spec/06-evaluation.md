@@ -8,7 +8,7 @@ Data model in 01; written through:
 |---|---|
 | `POST /api/v1/scores` (batch ≤ 1000) with `sk` key (`ingest` scope) | `sdk` (D-F-1) |
 | `POST /api/v1/projects/{p}/scores` (batch ≤ 1000) with `sk` key or PAT | `api` (or `sdk` when the SDK sets it) |
-| UI annotation panel (human, with score definitions as controls) | `human`, `author_user_id` set |
+| UI annotation form on traces, spans and sessions (one control per live score definition; only the caller's own scores, D-I-37) | `human`, `author_user_id` set |
 | `POST /api/public/feedback` with `pk` key | `end_user` |
 | Online rules / experiment server evaluators | `llm_judge` \| `check` \| `webhook` |
 
@@ -17,6 +17,8 @@ Evaluator scores (`llm_judge`, `check`, `webhook`) are written by the eval queue
 Scores go through a WAL + memtable exactly like spans (03), so they are durable on `200` and visible in seconds. Update = write a new row with the same `score_id` and later `updated_at`; delete = row with `deleted = true`. Every version keeps the first version's `created_at` (03 §5): a UUIDv7 `score_id` takes it from the id's time, any other id from the live version, and a new id from the write time (D-G-26).
 
 The caller decides `source` (D-G-27): a session on the project route writes `human` (with `author_user_id`); a PAT or `sk` key there writes `api`, or `sdk` when the body says so; `POST /api/v1/scores` writes `sdk`; feedback writes `end_user`. Any other `source` in a request is a `400`.
+
+**Ownership** (D-I-26, D-I-36). A `human` score belongs to its `author_user_id`. Through a session or a personal access token, a write whose `score_id` names the live `human` score of another user, or a `DELETE` of one, is `403 forbidden` unless the caller is a project admin. Validation errors (`400`) and the units cap (`402`) come first. An admin who replaces another user's score becomes its author. A member may replace another user's non-`human` score (`api`, `sdk`, `end_user` or an evaluator's) by its id, deliberately: the stored version becomes their own `human` score (D-I-26). `sk` keys, public feedback and evaluators keep the rules above: they can replace a `human` score whose id they know. A person's write without `score_id` derives the id from their own user, so it never replaces anyone else's score. A person's write that supplies UUIDv7 ids looks them up in storage first, so it can answer `503` when storage is unavailable. The check and the append are not atomic; a concurrent race is accepted.
 
 **Deterministic score IDs** (one row per annotator, as Opik's `authored_feedback_scores`): when the client does not provide `score_id`, the server derives it as a UUIDv8 (the first 16 bytes of SHA-256 over the ASCII tag `llmobs.score.v1` followed by the project id, target kind, trace id, span id or session id, name, source and author, each as a big-endian `u32` byte length then its UTF-8 bytes; D-G-28) where `author` = `author_user_id` for `human`, `rule_id` for online judges, `experiment_id + dataset_item_id` for experiments, the key or PAT id for `api`/`sdk`/`end_user`. The SDKs always send a `score_id` (a UUIDv7 per `score()` call, D-F-2), so this applies to other clients that omit it. Consequences: re-annotating replaces your own score instead of adding a duplicate; two reviewers scoring the same trace keep two rows; a backfill re-run overwrites instead of duplicating. Aggregations (`score()` in the DSL, dashboards) average across authors.
 

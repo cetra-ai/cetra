@@ -109,6 +109,8 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 
 Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24).
 
+Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
+
 LLM connections belong to the org. Org admins and owners manage and test them, and every org member can list them without their keys (D-I-4, D-I-24).
 
 A resource outside the caller's reach answers **404**, never 403, so ids cannot be probed. A visible resource with too low a role answers **403** (D138).

@@ -73,7 +73,8 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/score-definitions") ||
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules") ||
-        path.startsWith("/api/v1/projects/{project}/online-rules");
+        path.startsWith("/api/v1/projects/{project}/online-rules") ||
+        path.startsWith("/api/v1/projects/{project}/scores");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
       }
@@ -212,6 +213,32 @@ it("answers the channel and alert rule writes", async () => {
 
   expect((await send("DELETE", `${PROJECT}/channels/${SLACK_CHANNEL_ID}`)).status).toBe(204);
   expect((await send("DELETE", `${PROJECT}/alert-rules/${FIRING_RULE_ID}`)).status).toBe(204);
+});
+
+it("answers the score writes", async () => {
+  const created = await send(
+    "POST",
+    `${PROJECT}/scores`,
+    JSON.stringify({
+      scores: [
+        {
+          target: { type: "trace", trace_id: "a1000000000000000000000000000001" },
+          name: "tone",
+          value: { data_type: "boolean", value: true },
+        },
+        {
+          target: { type: "session", session_id: "sess-001" },
+          name: "note",
+          value: { data_type: "text", value: "ok" },
+        },
+      ],
+    }),
+  );
+  expect(created.status).toBe(200);
+  expect(created.json?.score_ids).toHaveLength(2);
+
+  const deleted = await send("DELETE", `${PROJECT}/scores/01900000-0000-7000-8000-000000000310`);
+  expect(deleted.status).toBe(204);
 });
 
 it("answers 204 for deletes", async () => {
