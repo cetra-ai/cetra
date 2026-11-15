@@ -94,22 +94,6 @@ pub async fn alert_value(
     }
 }
 
-/// Parses `text` as a `traces` filter, as [`alert_value`] would, without running anything.
-///
-/// # Errors
-///
-/// [`RunError::Invalid`] when the text does not parse or names an unknown column.
-/// Empty or all-whitespace text is accepted (it means no filter).
-pub fn check_alert_filter(ctx: &QueryContext, text: &str) -> Result<(), RunError> {
-    match present(Some(text)) {
-        None => Ok(()),
-        Some(text) => ctx
-            .parse_filter(FilterView::Traces, text)
-            .map(|_| ())
-            .map_err(RunError::from),
-    }
-}
-
 async fn compute(
     ctx: &QueryContext,
     request: AlertValueRequest<'_>,
@@ -768,17 +752,5 @@ mod tests {
         let ctx = context(&[in_window(0)], &[]);
         let result = measure(&ctx, AlertMeasure::ErrorRate, Some("nonsense_column = 1")).await;
         assert!(matches!(result, Err(RunError::Invalid(_))), "{result:?}");
-    }
-
-    #[test]
-    fn check_alert_filter_accepts_empty_and_rejects_bad_text() {
-        let ctx = context(&[], &[]);
-        assert!(check_alert_filter(&ctx, "").is_ok());
-        assert!(check_alert_filter(&ctx, "  ").is_ok());
-        assert!(matches!(
-            check_alert_filter(&ctx, "error_count >"),
-            Err(RunError::Invalid(_))
-        ));
-        assert!(check_alert_filter(&ctx, "error_count > 0").is_ok());
     }
 }

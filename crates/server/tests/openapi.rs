@@ -375,6 +375,51 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/online-rules",
+        "list_online_rules",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules",
+        "post_online_rule",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "get_online_rule",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "patch_online_rule",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/online-rules/{id}",
+        "delete_online_rule",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/resume",
+        "post_online_rule_resume",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/eval-jobs",
+        "list_eval_jobs",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/eval-jobs/{id}",
+        "get_eval_job",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/evaluators/{id}/run",
+        "post_evaluator_run",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/score-definitions",
         "list_score_definitions",
     ),
@@ -426,6 +471,8 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_org_deletions",
     "list_evaluators",
     "list_score_definitions",
+    "list_online_rules",
+    "list_eval_jobs",
 ];
 
 /// Read operations with a handler (D-G-23): their errors include 422.
@@ -694,17 +741,24 @@ fn document_lint() {
             || *id == "delete_org"
             || *id == "post_evaluator"
             || *id == "patch_evaluator"
+            || *id == "delete_evaluator"
             || *id == "post_score_definition"
             || *id == "patch_score_definition"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator"
-            || *id == "delete_evaluator"
-            || *id == "delete_score_definition"
-        {
+        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_online_rule" || *id == "patch_online_rule" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "get_online_rule"
+            || *id == "delete_online_rule"
+            || *id == "post_online_rule_resume"
+            || *id == "get_eval_job"
+            || *id == "post_evaluator_run"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if READ_OPERATIONS.contains(id) || *id == "preview_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
@@ -794,6 +848,8 @@ fn document_lint() {
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
+        ("OnlineRulePage", "OnlineRule"),
+        ("EvalJobPage", "EvalJob"),
     ];
     for (page, item) in pages {
         let schema = &schemas[page];
@@ -1050,6 +1106,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",
+        "OnlineRulePage",
+        "EvalJobPage",
         "InternalUsagePage",
     ];
     let expected: BTreeSet<String> = pages

@@ -1,0 +1,31 @@
+{
+  "id": "01900000-0000-7000-8000-000000000700",
+  "name": "Relevance on answers",
+  "evaluator_id": "01900000-0000-7000-8000-000000000500",
+  "target": "trace",
+  "filter": "status = 'ok'",
+  "variable_mapping": {
+    "input": "trace.input",
+    "output": "trace.output"
+  },
+  "sample_rate": 0.25,
+  "budget_usd": 5.0,
+  "budget_period": "day",
+  "enabled": true,
+  "spend": {
+    "period_start": "2026-01-01T00:00:00.000000000Z",
+    "spent_usd": 0.42,
+    "reserved_usd": 0.01
+  },
+  "jobs_last_24h": {
+    "queued": 2,
+    "running": 1,
+    "done": 40,
+    "failed": 3,
+    "skipped": 0
+  },
+  "dropped_last_hour": 0,
+  "created_by": "01900000-0000-7000-8000-000000000100",
+  "created_at": "2026-01-01T09:00:00.000000000Z",
+  "updated_at": "2026-01-01T09:00:00.000000000Z"
+}

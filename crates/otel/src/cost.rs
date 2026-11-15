@@ -123,6 +123,12 @@ impl PriceTable {
             })?;
         Ok(Self { rows, set })
     }
+
+    /// The row that prices `model` for `provider` at `at`, as span costing would pick it.
+    #[must_use]
+    pub fn price_for(&self, model: &str, provider: Option<&str>, at: i64) -> Option<&PriceRow> {
+        lookup(self, model, provider, at)
+    }
 }
 
 /// Built-in price rows from the committed LiteLLM snapshot.
@@ -632,6 +638,20 @@ mod tests {
         ]);
         let matched = lookup(&prices, "same", None, 0).expect("row");
         assert_eq!(matched.price_input, Some(1.0));
+    }
+
+    #[test]
+    fn price_for_finds_a_builtin_row_and_no_row_for_an_unknown_model() {
+        let prices = PriceTable::new(builtin_price_rows()).expect("builtin patterns");
+        let matched = prices
+            .price_for("Codestral-2501", None, 0)
+            .expect("the built-in table prices Codestral-2501");
+        assert!(matched.price_input.is_some());
+        assert!(
+            prices
+                .price_for("no-such-model-anywhere", None, 0)
+                .is_none()
+        );
     }
 
     #[test]
