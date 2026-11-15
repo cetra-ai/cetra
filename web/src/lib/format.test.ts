@@ -124,6 +124,12 @@ describe("ids and nanosecond differences", () => {
 
   it("shortens an id to eight characters", () => {
     expect(shortId("0123456789abcdef")).toBe("01234567");
+    expect(shortId("01900000-0000-7000-8000-000000000100")).toBe("01900000");
+  });
+
+  it("keeps free-form ids whole, up to 40 characters", () => {
+    expect(shortId("sess-02-1")).toBe("sess-02-1");
+    expect(shortId("s".repeat(41))).toBe(`${"s".repeat(40)}…`);
   });
 
   it("documents instantNs as a layout number", () => {

@@ -1,4 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
+import { api } from "@/api/client";
 import type { Schema } from "@/api/types";
 
 type Deletion = Schema<"Deletion">;
@@ -51,9 +52,10 @@ export function deletionSubject(deletion: Deletion): string {
         (deletion.filter?.search !== undefined
           ? `search "${deletion.filter.search}"`
           : "all traces");
+      // `trace_count` includes the evaluation traces of the selected traces.
       return deletion.trace_count === undefined
         ? selection
-        : `${selection} (${count(deletion.trace_count, "trace")})`;
+        : `${selection} (${count(deletion.trace_count, "trace")} incl. evaluation traces)`;
     }
     case "project":
     case "org":
@@ -96,6 +98,30 @@ export function invalidateProjectReads(queryClient: QueryClient): Promise<void> 
       return typeof path === "string" && path.startsWith("/api/v1/projects/{project}/");
     },
   });
+}
+
+/**
+ * Storage hides the rows only once the deletion leaves `resolving`, which happens a moment
+ * after the request returns, so the refetch right after it can still show them. Polls the
+ * deletion until it is resolved, then refetches the reads again.
+ */
+export async function invalidateWhenHidden(
+  queryClient: QueryClient,
+  ref: string,
+  deletion: Deletion,
+): Promise<void> {
+  let current = deletion;
+  for (let attempt = 0; attempt < 30 && current.status === "resolving"; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const { data } = await api.GET("/api/v1/projects/{project}/deletions/{id}", {
+      params: { path: { project: ref, id: current.id } },
+    });
+    if (!data) {
+      break;
+    }
+    current = data;
+  }
+  await invalidateProjectReads(queryClient);
 }
 
 /** The project path value of a project read's key (`[method, path, init]`), or undefined. */
