@@ -338,6 +338,13 @@ impl TestApp {
         )
         .await
         .expect("stored org tokens load");
+        let org_sso = crate::ee::org_sso::OrgSso::new(
+            llmobs_eval::EgressPolicy {
+                allow_private_network: config.security.allow_private_network_egress,
+            },
+            crate::ee::org_sso::dns::TxtResolver::fixed(),
+        )
+        .expect("org SSO state");
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -365,7 +372,13 @@ impl TestApp {
             ingest_rate: crate::entitlements::rate::IngestRate::default(),
             trace_loads: crate::eval::trace_load::TraceLoads::default(),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            org_sso,
         });
+        state
+            .org_sso
+            .reload(&state.meta, &state.secrets, &state.config.auth)
+            .await
+            .expect("org SSO reload");
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
         } else if let Some(routes) = routes {
@@ -378,6 +391,16 @@ impl TestApp {
             state,
             router,
         }
+    }
+
+    /// Sets the TXT records the fixed resolver answers for `name`.
+    pub(crate) fn dns_txt(&self, name: &str, values: &[&str]) {
+        self.state.org_sso.dns.set(name, values);
+    }
+
+    /// Makes every TXT lookup fail (P8's 503 test).
+    pub(crate) fn dns_fail(&self, fail: bool) {
+        self.state.org_sso.dns.set_fail(fail);
     }
 
     pub(crate) fn request(&self, method: Method, path: &str) -> TestRequest {

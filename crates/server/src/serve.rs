@@ -47,6 +47,9 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// How often org SSO routing is reloaded from `meta.db` (D-P-62).
+const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
+
 /// How often the 80 % and 100 % usage notices are checked (D-P-38).
 const NOTICES_EVERY: Duration = Duration::from_secs(60);
 
@@ -302,6 +305,35 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             return Err(ServeError::Meta(error));
         }
     };
+    let org_sso = match crate::ee::org_sso::OrgSso::new(
+        llmobs_eval::EgressPolicy {
+            allow_private_network: config.security.allow_private_network_egress,
+        },
+        crate::ee::org_sso::dns::TxtResolver::system(),
+    ) {
+        Ok(org_sso) => org_sso,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Init {
+                reason: error.to_string(),
+            });
+        }
+    };
+    let reloaded = match org_sso.reload(&meta, &secrets, &config.auth).await {
+        Ok(reloaded) => reloaded,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
+    if reloaded.claimed > 0 {
+        tracing::error!(
+            domains = reloaded.claimed,
+            "verified org SSO domains are ignored: the server configuration lists them"
+        );
+    }
     let storage = Arc::new(storage);
     let state = AppState::new(AppInner {
         config,
@@ -330,6 +362,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         ingest_rate: crate::entitlements::rate::IngestRate::default(),
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
+        org_sso,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -387,6 +420,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     tasks.push(spawn_retention(state.clone()));
     tasks.push(spawn_usage(state.clone()));
     tasks.push(spawn_notices(state.clone()));
+    tasks.push(spawn_org_sso(state.clone()));
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -568,6 +602,18 @@ fn spawn_usage(state: AppState) -> JoinHandle<()> {
             if let Err(error) = state.usage.flush(&state.meta).await {
                 tracing::error!(error = %error, "usage flush failed");
             }
+        }
+    })
+}
+
+fn spawn_org_sso(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            crate::ee::org_sso::refresh(&state).await;
         }
     })
 }
