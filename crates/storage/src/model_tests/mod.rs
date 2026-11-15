@@ -11,6 +11,7 @@ mod resources;
 mod shape;
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -372,7 +373,7 @@ fn record_stats(harness: &Harness) {
     stats.aborts += chaos.count(Call::Abort);
     stats.abandoned_uploads +=
         u64::try_from(chaos.abandoned_uploads().len()).expect("a count of uploads fits in u64");
-    stats.faulty_read_errors += harness.faulty_read_errors;
+    stats.faulty_read_errors += harness.faulty_read_errors.load(Ordering::Relaxed);
     if std::env::var("LLMOBS_MODEL_S3_STATS").is_ok_and(|value| value == "1")
         && stats.cases.is_multiple_of(50)
     {

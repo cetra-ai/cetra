@@ -37,6 +37,7 @@ use llmobs_core::ids::TraceId;
 use llmobs_core::span::Span;
 use object_store::path::Path as ObjectPath;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
 pub(super) const MICRO_NS: i64 = 1_000;
@@ -333,7 +334,7 @@ pub(super) enum StepEvent<'a> {
 
 /// Runs one op against storage and the model. `clock` advances first (by one microsecond,
 /// and by the op's own hours for `Compact`). Ops that need `&mut Harness` (`Restart`, `Crash`,
-/// `LossyCrash`, `FaultyRead`, `Settle`) run here; the rest run in `apply_storage`.
+/// `LossyCrash`, `Settle`) run here; the rest run in `apply_storage`.
 pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &mut i64) {
     model.ops_applied += 1;
     match *op {
@@ -351,12 +352,6 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             *clock += MICRO_NS;
             lossy_crash(harness, model, seed);
         }
-        Op::FaultyRead { project, pick } => {
-            *clock += MICRO_NS;
-            require_s3(harness, op);
-            let index = model.ops_applied - 1;
-            faulty_read(harness, model, project, pick, index);
-        }
         Op::Settle => {
             *clock += MICRO_NS;
             settle(harness, model, clock);
@@ -371,8 +366,8 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
 /// A call that is refused changes nothing and reports nothing. Ops that call nothing visible
 /// (`Compact`, `Gc`, `ApplyDeletions`, `Verify`, `EvictCache`) report nothing.
 ///
-/// Never called with `Restart`, `Crash`, `LossyCrash`, `FaultyRead` or `Settle`: those need
-/// `&mut Harness`, so they run in `apply`.
+/// Never called with `Restart`, `Crash`, `LossyCrash` or `Settle`: those need `&mut Harness`, so
+/// they run in `apply`.
 pub(super) fn apply_storage(
     op: &Op,
     h: &Harness,
@@ -393,7 +388,7 @@ pub(super) fn apply_storage(
             trace,
             pick,
         } => resend(h, model, project, trace, pick, *clock, step),
-        Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::FaultyRead { .. } | Op::Settle => {
+        Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle => {
             unreachable!("{op:?} needs &mut Harness: use apply")
         }
         Op::Verify { pick } => {
@@ -403,6 +398,11 @@ pub(super) fn apply_storage(
         Op::EvictCache => {
             require_s3(h, op);
             evict_cache(h);
+        }
+        Op::FaultyRead { project, pick } => {
+            require_s3(h, op);
+            let index = model.ops_applied - 1;
+            faulty_read(h, model, project, pick, index);
         }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
@@ -900,7 +900,7 @@ fn evict_cache(harness: &Harness) {
 /// `FaultyRead` (R4.5): one read of `project` under faults, picked by `pick % 4`: the trace list,
 /// the span list, the score list, or the aggregates over days D..D+4. A failed read is allowed
 /// only under an injected fault; a successful one must match the model as `check_quick` requires.
-fn faulty_read(harness: &mut Harness, model: &Model, project: P, pick: u8, index: usize) {
+fn faulty_read(harness: &Harness, model: &Model, project: P, pick: u8, index: usize) {
     let before = injected_so_far(harness);
     let state = model.project(project);
     let at = format!("op {index}, project {project:?}");
@@ -928,7 +928,7 @@ fn faulty_read(harness: &mut Harness, model: &Model, project: P, pick: u8, index
             allow_failure(harness, before),
             "a read failed without an injected fault: {error}"
         );
-        harness.faulty_read_errors += 1;
+        harness.faulty_read_errors.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1326,15 +1326,23 @@ fn lossy_crash(harness: &mut Harness, model: &mut Model, seed: u64) {
 mod tests {
     use super::*;
 
-    /// One event `apply_storage` reported: `Done` carries the copies the model of `a` holds.
+    /// One event `apply_storage` reported. `Done` carries the copies and the deletions the model
+    /// of `a` holds after the call.
     #[derive(Debug, PartialEq)]
     enum Seen {
         Begin,
-        Done(usize),
+        Done { copies: usize, deletions: usize },
     }
 
     fn copies(state: &ProjectModel) -> usize {
         state.spans.values().map(Vec::len).sum()
+    }
+
+    /// The span rows storage returns for `project` now.
+    fn stored_spans(harness: &Harness, project: P) -> usize {
+        try_observe_spans(harness, project, MAX_PAGE)
+            .expect("span_list on a project")
+            .len()
     }
 
     /// Runs one op through `apply_storage` and returns the events it reported.
@@ -1342,7 +1350,10 @@ mod tests {
         let mut seen = Vec::new();
         apply_storage(op, harness, model, clock, &mut |event| match event {
             StepEvent::Begin => seen.push(Seen::Begin),
-            StepEvent::Done(state) => seen.push(Seen::Done(copies(&state.a))),
+            StepEvent::Done(state) => seen.push(Seen::Done {
+                copies: copies(&state.a),
+                deletions: state.a.deletions.len(),
+            }),
         });
         seen
     }
@@ -1354,15 +1365,50 @@ mod tests {
         let start = midnight(day(0)) + 12 * HOUR_NS;
         let mut clock = start;
 
+        // Before the first Begin of the first append, storage does not hold the batch yet.
         let split = Op::Append {
             project: P::A,
             trace: 0,
             count: 4,
             split: true,
         };
+        let mut split_seen = Vec::new();
+        apply_storage(
+            &split,
+            &harness,
+            &mut model,
+            &mut clock,
+            &mut |event| match event {
+                StepEvent::Begin => {
+                    if split_seen.is_empty() {
+                        assert_eq!(
+                            stored_spans(&harness, P::A),
+                            0,
+                            "the first Begin is before storage holds the batch"
+                        );
+                    }
+                    split_seen.push(Seen::Begin);
+                }
+                StepEvent::Done(state) => split_seen.push(Seen::Done {
+                    copies: copies(&state.a),
+                    deletions: state.a.deletions.len(),
+                }),
+            },
+        );
         assert_eq!(
-            run(&split, &harness, &mut model, &mut clock),
-            [Seen::Begin, Seen::Done(2), Seen::Begin, Seen::Done(4)],
+            split_seen,
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 2,
+                    deletions: 0
+                },
+                Seen::Begin,
+                Seen::Done {
+                    copies: 4,
+                    deletions: 0
+                },
+            ],
             "a split append reports two steps, each with the copies so far"
         );
 
@@ -1374,7 +1420,13 @@ mod tests {
         };
         assert_eq!(
             run(&whole, &harness, &mut model, &mut clock),
-            [Seen::Begin, Seen::Done(8)],
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 8,
+                    deletions: 0
+                }
+            ],
             "an unsplit append reports one step"
         );
 
@@ -1391,13 +1443,99 @@ mod tests {
         };
         assert_eq!(
             run(&delete, &harness, &mut model, &mut clock),
-            [Seen::Begin, Seen::Done(8)],
-            "a deletion reports one step, after its resolution reads"
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 8,
+                    deletions: 1
+                }
+            ],
+            "a deletion reports one step, after its resolution reads, and adds one deletion"
+        );
+
+        let score = Op::Score {
+            project: P::A,
+            target: 0,
+            name: 0,
+        };
+        assert_eq!(
+            run(&score, &harness, &mut model, &mut clock),
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 8,
+                    deletions: 1
+                }
+            ],
+            "a score write reports one step"
+        );
+
+        // Keeps days D+1 and later: trace 0 (day D) loses its copies.
+        let retention = Op::Retention {
+            project: P::A,
+            keep: 0,
+        };
+        assert_eq!(
+            run(&retention, &harness, &mut model, &mut clock),
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 0,
+                    deletions: 1
+                }
+            ],
+            "a retention pass reports one step, after the watermark moves"
+        );
+
+        let drop_b = Op::DropB;
+        assert_eq!(
+            run(&drop_b, &harness, &mut model, &mut clock),
+            [
+                Seen::Begin,
+                Seen::Done {
+                    copies: 0,
+                    deletions: 1
+                }
+            ],
+            "dropping project B reports one step"
+        );
+
+        let append_b = Op::Append {
+            project: P::B,
+            trace: 0,
+            count: 2,
+            split: false,
+        };
+        assert_eq!(
+            run(&append_b, &harness, &mut model, &mut clock),
+            [],
+            "an append to a dropped project is refused and reports no step"
+        );
+
+        let score_b = Op::Score {
+            project: P::B,
+            target: 0,
+            name: 0,
+        };
+        assert_eq!(
+            run(&score_b, &harness, &mut model, &mut clock),
+            [],
+            "a score write to a dropped project is refused and reports no step"
+        );
+
+        let delete_b = Op::DeleteTraces {
+            project: P::B,
+            picks: vec![0],
+        };
+        assert_eq!(
+            run(&delete_b, &harness, &mut model, &mut clock),
+            [],
+            "a deletion on a dropped project reports no step"
         );
 
         assert_eq!(
             clock,
-            start + 4 * MICRO_NS + HOUR_NS,
+            start + 10 * MICRO_NS + HOUR_NS,
             "each op ticks the clock once; a compaction also advances its hours"
         );
     }

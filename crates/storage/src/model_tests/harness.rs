@@ -2,6 +2,7 @@
 //! crashes, each life on a tokio runtime of its own (D-R-4).
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -131,7 +132,7 @@ pub(super) struct Harness {
     /// and no others: storage never lists the bucket (spec 03 §5).
     pub(super) audit_lists: u64,
     /// The `FaultyRead` ops of this case that failed under an injected fault (S3 mode, R4.5).
-    pub(super) faulty_read_errors: u64,
+    pub(super) faulty_read_errors: AtomicU64,
 }
 
 /// How long a shutdown runs before the ending window opens (R4.5). `Storage::shutdown` cuts its
@@ -263,7 +264,7 @@ impl Harness {
             remote,
             workers,
             audit_lists: 0,
-            faulty_read_errors: 0,
+            faulty_read_errors: AtomicU64::new(0),
         }
     }
 
