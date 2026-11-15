@@ -28,6 +28,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
 - Python SDK: `llmobs.Client` for datasets and `llmobs.evaluate` / `aevaluate` to run experiments on your machine (track J).
 - TypeScript SDK: `new llmobs.Client()` for datasets and `llmobs.evaluate` to run experiments on your machine (track J).
+- Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
+- Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
