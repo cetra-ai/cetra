@@ -179,7 +179,7 @@ export function openStream(
     });
 
     source.addEventListener("error", () => {
-      if (socket !== source) {
+      if (closed || socket !== source) {
         return;
       }
       if (opened) {

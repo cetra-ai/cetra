@@ -114,6 +114,13 @@ export function useLiveTraces({
   const refetchFirstPageRef = useRef(refetchFirstPage);
   refetchFirstPageRef.current = refetchFirstPage;
 
+  // A queued refetch belongs to the list it was queued for. A new query key or stream url
+  // starts clean, so the flag cannot refetch the new list.
+  const listId = JSON.stringify(queryKey);
+  useEffect(() => {
+    refetchQueued.current = false;
+  }, [listId, url]);
+
   // When the running refetch settles, run the queued one. Watching the query cache also
   // covers a page-1 fetch this hook did not start (for example a next-page load).
   useEffect(() => {
@@ -222,6 +229,12 @@ export function useLiveTraces({
     if (firstPageWouldExceed(current, 1, limits.page)) {
       refetchFirstPage();
       mark([trace.trace_id]);
+      return;
+    }
+    // A first-page fetch in flight would overwrite this insert with its own result, so the
+    // trailing refetch brings the trace instead.
+    if (queryClient.isFetching({ queryKey: key, exact: true }) > 0) {
+      refetchQueued.current = true;
       return;
     }
     const result = insertLiveTraces(current, [trace]);

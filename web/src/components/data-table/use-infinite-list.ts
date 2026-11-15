@@ -66,6 +66,8 @@ export function traceProbeOptions(org: string, project: string) {
   });
   return {
     queryKey,
+    // A cached empty answer must not show onboarding after a trace has arrived.
+    staleTime: 0,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
       const { data, error } = await api.GET("/api/v1/projects/{project}/traces", {
         params: { path, query },

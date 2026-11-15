@@ -16,8 +16,13 @@ export function tracesNeedOnboarding(
 
 /**
  * Onboarding replaces an empty list only when the list is unconstrained and the all-time
- * probe found no trace (`probeRows` is undefined while the probe loads).
+ * probe found no trace, or the probe failed (the state is unknown, and onboarding was the
+ * old behaviour). `probeRows` is undefined while the probe loads.
  */
-export function onboardingShown(needs: boolean, probeRows: number | undefined): boolean {
-  return needs && probeRows === 0;
+export function onboardingShown(
+  needs: boolean,
+  probeRows: number | undefined,
+  probeFailed: boolean,
+): boolean {
+  return needs && (probeFailed || probeRows === 0);
 }

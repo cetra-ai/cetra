@@ -61,8 +61,14 @@ it("keeps onboarding for a preset and drops it when the list is constrained", ()
 });
 
 it("shows onboarding only when the all-time probe found no trace", () => {
-  expect(onboardingShown(true, 0)).toBe(true);
-  expect(onboardingShown(true, 1)).toBe(false);
-  expect(onboardingShown(true, undefined)).toBe(false);
-  expect(onboardingShown(false, 0)).toBe(false);
+  expect(onboardingShown(true, 0, false)).toBe(true);
+  expect(onboardingShown(true, 1, false)).toBe(false);
+  expect(onboardingShown(true, undefined, false)).toBe(false);
+  expect(onboardingShown(false, 0, false)).toBe(false);
+});
+
+it("shows onboarding when the probe failed, and not while it loads", () => {
+  expect(onboardingShown(true, undefined, true)).toBe(true);
+  expect(onboardingShown(true, 1, true)).toBe(true);
+  expect(onboardingShown(false, undefined, true)).toBe(false);
 });

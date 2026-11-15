@@ -32,6 +32,7 @@ import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { orderedTraceColumns, scoreNames, traceColumnSpecs } from "@/components/trace-columns";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { atLeast } from "@/lib/roles";
 import {
@@ -128,8 +129,10 @@ function TracesPage() {
       if (!data || data.pages.some((page) => page.data.length > 0)) {
         return false;
       }
-      const probeRows = queryClient.getQueryData<Schema<"TracePage">>(probe.queryKey)?.data.length;
-      return onboardingShown(needsOnboarding, probeRows) ? onboardingPollMs() : false;
+      const probeState = queryClient.getQueryState<Schema<"TracePage">>(probe.queryKey);
+      const probeRows = probeState?.data?.data.length;
+      const probeFailed = probeState?.status === "error";
+      return onboardingShown(needsOnboarding, probeRows, probeFailed) ? onboardingPollMs() : false;
     },
   });
   const fetchNextPage = useCallback(() => {
@@ -201,7 +204,8 @@ function TracesPage() {
   const listEmpty = !hold && list.data !== undefined && rows.length === 0;
   const projectProbe = useQuery({ ...probe, enabled: listEmpty && needsOnboarding });
   const probeRows = projectProbe.data?.data.length;
-  const onboarding = listEmpty && onboardingShown(needsOnboarding, probeRows);
+  const onboarding =
+    listEmpty && onboardingShown(needsOnboarding, probeRows, projectProbe.isError);
   const probing = listEmpty && needsOnboarding && projectProbe.isPending;
   const reason = traceLiveReason(search);
   const liveOn = search.live === 1 && reason === undefined && !hold;
@@ -365,6 +369,12 @@ function TracesPage() {
                   <div className="mx-auto flex max-w-md flex-col gap-2 px-4 py-16">
                     <h2 className="text-sm font-medium">{filterError.title}</h2>
                     <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
+                  </div>
+                ) : probing ? (
+                  <div className="flex flex-col gap-2 p-4">
+                    <Skeleton className="h-8 w-full" />
+                    <Skeleton className="h-8 w-full" />
+                    <Skeleton className="h-8 w-full" />
                   </div>
                 ) : onboarding ? (
                   <div className="min-h-0 flex-1 overflow-auto">

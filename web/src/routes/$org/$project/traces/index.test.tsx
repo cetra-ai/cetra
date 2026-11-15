@@ -592,6 +592,49 @@ it("replaces onboarding with the table when a trace arrives", async () => {
   }
 });
 
+it("shows onboarding when the all-time probe fails", async () => {
+  savedViewHandlers([]);
+  server.use(
+    http.get("/api/v1/projects/:project/traces", ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        return problemResponse(500, "internal", { detail: "probe failed" });
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  await renderApp("/acme/support-bot/traces");
+  expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+});
+
+it("shows neither the empty range nor onboarding while the probe loads", async () => {
+  savedViewHandlers([]);
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      const url = new URL(request.url);
+      if (!url.searchParams.has("from")) {
+        await gate;
+      }
+      return HttpResponse.json({ data: [], next_cursor: null });
+    }),
+  );
+  try {
+    await renderApp("/acme/support-bot/traces");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByText("No traces in this time range.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "OTel env vars" })).not.toBeInTheDocument();
+    release?.();
+    expect(await screen.findByRole("tab", { name: "OTel env vars" })).toBeInTheDocument();
+  } finally {
+    release?.();
+  }
+});
+
 it("asks for one trace over all time before it shows onboarding", async () => {
   savedViewHandlers([]);
   const probes: URL[] = [];
@@ -964,6 +1007,59 @@ it("keeps one first-page refetch in flight and queues one trailing refetch", asy
     release?.();
     expect(await screen.findByText("after the burst")).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(requests).toBe(2);
+    expect(maxInFlight).toBe(1);
+    expect(aborted).toBe(0);
+    expect(screen.queryByText("first refresh")).not.toBeInTheDocument();
+  } finally {
+    release?.();
+    setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  }
+});
+
+it("queues a trace that arrives during a first-page refetch instead of inserting it", async () => {
+  setLiveLimits({ buffer: LIVE_BUFFER_MAX, page: LIVE_PAGE_MAX });
+  const { emit } = await openLive("/acme/support-bot/traces?live=1");
+  expect(screen.getByText("5 loaded")).toBeInTheDocument();
+  let requests = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let aborted = 0;
+  let release: (() => void) | undefined;
+  server.use(
+    http.get("/api/v1/projects/:project/traces", async ({ request }) => {
+      requests += 1;
+      const call = requests;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      request.signal.addEventListener("abort", () => {
+        aborted += 1;
+      });
+      try {
+        if (call === 1) {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        }
+        const rows =
+          call === 1
+            ? [liveTrace("c1000000000000000000000000000041", "first refresh", LATER)]
+            : [liveTrace("c1000000000000000000000000000042", "arrived mid-fetch", LATER)];
+        return HttpResponse.json({ data: rows, next_cursor: null });
+      } finally {
+        inFlight -= 1;
+      }
+    }),
+  );
+  try {
+    emit.resync();
+    await waitFor(() => expect(requests).toBe(1));
+    emit.trace(liveTrace("c1000000000000000000000000000043", "arrived mid-fetch", LATER));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(screen.queryByText("arrived mid-fetch")).not.toBeInTheDocument();
+    expect(requests).toBe(1);
+    release?.();
+    expect(await screen.findByText("arrived mid-fetch")).toBeInTheDocument();
     expect(requests).toBe(2);
     expect(maxInFlight).toBe(1);
     expect(aborted).toBe(0);
