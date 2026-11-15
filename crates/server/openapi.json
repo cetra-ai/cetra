@@ -67,7 +67,7 @@
           "auth"
         ],
         "summary": "Finish an OAuth or OIDC login",
-        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
         "operationId": "get_oauth_callback",
         "parameters": [
           {
@@ -704,6 +704,52 @@
                 }
               }
             }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/sso/authorize": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start an org's single sign-on login",
+        "description": "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+        "operationId": "get_sso_authorize",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "The email domain, e.g. `acme.com`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect",
+            "in": "query",
+            "description": "Relative path to open after a successful login.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the identity provider, or to `/login?error=sso_unavailable`."
           },
           "429": {
             "description": "Too many requests.",

@@ -5,6 +5,7 @@ pub(crate) mod hook_receiver;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
+pub(crate) mod oauth;
 
 use std::future::Future;
 use std::io::{self, Write};

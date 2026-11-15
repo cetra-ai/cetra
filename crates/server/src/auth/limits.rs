@@ -245,6 +245,9 @@ pub(crate) struct Limits {
     pub(crate) connection_tests: KeyedLimiter<Uuid>,
     /// Org domain verifications, D-P-54, D-P-64: 10 per minute per org.
     pub(crate) sso_dns_checks: KeyedLimiter<llmobs_core::ids::OrgId>,
+    /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
+    /// behind NAT, so the bucket is generous.
+    pub(crate) sso_discover: KeyedLimiter<IpAddr>,
     /// 60 requests per minute and 4 at once per personal access token on `POST /mcp` (D-H-10).
     pub(crate) mcp: McpLimits,
     /// 20 failures lock password login for 15 minutes.
@@ -298,6 +301,13 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            sso_discover: KeyedLimiter::new(
+                Bucket {
+                    capacity: 300,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             mcp: McpLimits::new(MAX_KEYS),
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
         }
@@ -311,6 +321,7 @@ impl Limits {
         self.feedback.prune(now);
         self.connection_tests.prune(now);
         self.sso_dns_checks.prune(now);
+        self.sso_discover.prune(now);
         self.mcp.prune(now);
         self.lockout.prune(now);
     }

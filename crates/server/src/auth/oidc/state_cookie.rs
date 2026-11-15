@@ -49,6 +49,12 @@ pub(crate) struct OAuthState {
     pub(crate) setup_token: Option<String>,
     /// `Clock::now_ns` when the cookie was issued.
     pub(crate) created_ns: i64,
+    /// The org of an org-provider login (D-P-65).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) org_id: Option<uuid::Uuid>,
+    /// An owner's Test sign-in of a disabled provider (D-P-57).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) test: bool,
 }
 
 impl fmt::Debug for OAuthState {
@@ -58,6 +64,8 @@ impl fmt::Debug for OAuthState {
             .field("provider", &self.provider)
             .field("redirect", &self.redirect)
             .field("created_ns", &self.created_ns)
+            .field("org_id", &self.org_id)
+            .field("test", &self.test)
             .finish_non_exhaustive()
     }
 }
@@ -207,6 +215,8 @@ mod tests {
             redirect: redirect.to_owned(),
             setup_token: None,
             created_ns,
+            org_id: None,
+            test: false,
         }
     }
 

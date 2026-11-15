@@ -378,6 +378,83 @@ fn parse_uuid(value: &str, table: &'static str, column: &'static str) -> Result<
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails.
+/// The org's pending, unexpired invitation for `email` (D-P-56).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value is corrupt.
+pub(crate) async fn pending_invite_for_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+    email: &str,
+    now: i64,
+) -> Result<Option<InviteRow>, MetaError> {
+    let record: Option<InviteRecord> = sqlx::query_as(
+        "SELECT id, org_id, email, role, created_at, expires_at, accepted_at FROM invites \
+         WHERE org_id = ? AND email = ? AND accepted_at IS NULL AND expires_at > ?",
+    )
+    .bind(org_id.to_string())
+    .bind(email)
+    .bind(now)
+    .fetch_optional(&mut *conn)
+    .await?;
+    record.map(invite_row).transpose()
+}
+
+/// Whether the person has a membership in an org other than `org` (`user_id` given) or a
+/// pending, unexpired invitation of `email` to another org (D-P-56).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn has_membership_or_invite_elsewhere_tx(
+    conn: &mut SqliteConnection,
+    user_id: Option<Uuid>,
+    email: &str,
+    org: OrgId,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let found: i64 = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM org_members WHERE user_id = ? AND org_id != ?) \
+         OR EXISTS (SELECT 1 FROM invites WHERE email = ? AND org_id != ? \
+                    AND accepted_at IS NULL AND expires_at > ?)",
+    )
+    .bind(user_id.map(|id| id.to_string()))
+    .bind(org.to_string())
+    .bind(email)
+    .bind(org.to_string())
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(found == 1)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InviteRecord {
+    id: String,
+    org_id: String,
+    email: String,
+    role: String,
+    created_at: i64,
+    expires_at: i64,
+    accepted_at: Option<i64>,
+}
+
+fn invite_row(record: InviteRecord) -> Result<InviteRow, MetaError> {
+    Ok(InviteRow {
+        id: Uuid::parse_str(&record.id).map_err(|_| MetaError::Corrupt {
+            table: "invites",
+            column: "id",
+        })?,
+        org_id: parse_org_id(&record.org_id)?,
+        email: record.email,
+        role: decode_role(&record.role)?,
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        accepted_at: record.accepted_at,
+    })
+}
+
 pub(crate) async fn has_pending_invite(
     conn: &mut SqliteConnection,
     email: &str,

@@ -37,8 +37,8 @@ pub(crate) struct LoginClaims {
     pub(crate) subject: String,
     /// Provider email. Absent when the provider did not assert one.
     pub(crate) email: Option<String>,
-    /// Missing means false.
-    pub(crate) email_verified: bool,
+    /// `None` when the provider did not assert it (D-P-55). Only `Some(true)` verifies an email.
+    pub(crate) email_verified: Option<bool>,
     /// Google hosted-domain claim. Absent for GitHub and when Google omits it.
     pub(crate) hd: Option<String>,
     /// Display name, before trimming.

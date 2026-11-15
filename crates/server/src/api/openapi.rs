@@ -833,7 +833,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -1018,7 +1018,34 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             &[401, 403, 404, 429],
         ))
         .build();
+    let sso_authorize = operation(
+        "get_sso_authorize",
+        "auth",
+        "Start an org's single sign-on login",
+    )
+    .description(Some(
+        "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![
+        query_string("domain", "The email domain, e.g. `acme.com`.", false),
+        query_string(
+            "redirect",
+            "Relative path to open after a successful login.",
+            false,
+        ),
+    ]))
+    .responses(responses(
+        "302",
+        redirect_to("Redirect to the identity provider, or to `/login?error=sso_unavailable`."),
+        &[429],
+    ))
+    .build();
     paths
+        .path(
+            "/api/auth/sso/authorize",
+            PathItem::new(HttpMethod::Get, sso_authorize),
+        )
         .path(
             "/api/auth/authorize/{provider}",
             PathItem::new(HttpMethod::Get, authorize),

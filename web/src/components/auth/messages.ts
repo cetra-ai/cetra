@@ -18,6 +18,9 @@ const OAUTH_MESSAGES: Record<OAuthErrorCode, string> = {
   link_refused:
     "An account with this email already exists and could not be linked to this provider. Sign in with your password.",
   setup_required: "This server is not set up yet. Open the setup link printed in the server log.",
+  seat_limit:
+    "Your organization has no free seat for you. Ask an owner to free one or upgrade the plan.",
+  sso_unavailable: "Single sign-on is not set up for this email domain.",
 };
 
 export function oauthErrorMessage(code: OAuthErrorCode): string {

@@ -584,6 +584,7 @@ fn manifest_covers_the_read_operations() {
                 && id != "stream_traces"
                 && id != "stream_trace"
                 && id != "get_oauth_authorize"
+                && id != "get_sso_authorize"
                 && id != "get_oauth_callback"
             {
                 gets.insert(id.to_owned());

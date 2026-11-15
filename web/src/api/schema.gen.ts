@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * Finish an OAuth or OIDC login
-         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.
+         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).
          */
         get: operations["get_oauth_callback"];
         put?: never;
@@ -242,6 +242,26 @@ export interface paths {
         put?: never;
         /** Create an account */
         post: operations["post_signup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/sso/authorize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start an org's single sign-on login
+         * @description Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.
+         */
+        get: operations["get_sso_authorize"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -5892,6 +5912,38 @@ export interface operations {
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sso_authorize: {
+        parameters: {
+            query?: {
+                /** @description The email domain, e.g. `acme.com`. */
+                domain?: string;
+                /** @description Relative path to open after a successful login. */
+                redirect?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the identity provider, or to `/login?error=sso_unavailable`. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Too many requests. */
             429: {

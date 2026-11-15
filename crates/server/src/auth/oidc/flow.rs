@@ -19,6 +19,7 @@ use crate::http::AppState;
 use crate::meta::identities::{self, identity_user};
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaError, invites, members, orgs, personal_tokens, web_sessions};
+use llmobs_core::ids::OrgId;
 
 /// Why `GET /authorize` did not redirect to the provider.
 pub(crate) enum StartError {
@@ -36,6 +37,8 @@ pub(crate) struct LoggedIn {
     pub(crate) user_id: Uuid,
     /// Sanitized relative path from the state cookie.
     pub(crate) redirect: String,
+    /// The org whose provider signed the user in (D-P-59). `None` for the instance providers.
+    pub(crate) sso_org: Option<OrgId>,
 }
 
 /// Why the callback redirects to `/login`. [`LoginError::Internal`] is HTTP 500.
@@ -58,6 +61,10 @@ pub(crate) enum LoginError {
     LinkRefused,
     /// The users table is empty and the setup token did not match.
     SetupRequired,
+    /// The org's seats are full and this person has no other org (D-P-56).
+    SeatLimit,
+    /// No usable provider for this login: unknown domain, disabled provider, or no owner test (D-P-57, D-P-60).
+    SsoUnavailable,
     /// The database or the random source failed.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -75,6 +82,8 @@ impl LoginError {
             Self::AccountDisabled => "account_disabled",
             Self::LinkRefused => "link_refused",
             Self::SetupRequired => "setup_required",
+            Self::SeatLimit => "seat_limit",
+            Self::SsoUnavailable => "sso_unavailable",
             Self::Internal(_) => return None,
         })
     }
@@ -139,6 +148,8 @@ pub(crate) async fn start(
             redirect: state_cookie::safe_redirect(redirect),
             setup_token,
             created_ns: now,
+            org_id: None,
+            test: false,
         },
         state.config.public_url.is_https(),
     )
@@ -186,6 +197,7 @@ pub(crate) async fn finish(
     Ok(LoggedIn {
         user_id,
         redirect: saved.redirect,
+        sso_org: None,
     })
 }
 
@@ -215,7 +227,7 @@ async fn exchange(
                 .map_err(login_exchange)?;
             LoginClaims {
                 subject: profile.subject,
-                email_verified: profile.email.is_some(),
+                email_verified: Some(profile.email.is_some()),
                 email: profile.email,
                 hd: None,
                 name: profile.name,
@@ -310,7 +322,7 @@ fn check_domain(rules: &LoginRules, claims: &LoginClaims) -> Result<(), LoginErr
 }
 
 fn verified_email(claims: &LoginClaims) -> Option<String> {
-    if !claims.email_verified {
+    if claims.email_verified != Some(true) {
         return None;
     }
     let email = claims.email.as_deref()?;
@@ -335,7 +347,7 @@ fn setup_matches(state: &AppState, presented: Option<&str>) -> Result<bool, Logi
 }
 
 /// 1 to 100 characters after trimming. Anything else is stored as no name.
-fn display_name(value: Option<String>) -> Option<String> {
+pub(crate) fn display_name(value: Option<String>) -> Option<String> {
     let name = value.unwrap_or_default();
     let name = name.trim();
     let length = name.chars().count();
@@ -594,14 +606,14 @@ fn start_exchange(error: ExchangeError) -> StartError {
     }
 }
 
-fn login_exchange(error: ExchangeError) -> LoginError {
+pub(crate) fn login_exchange(error: ExchangeError) -> LoginError {
     match error {
         ExchangeError::Unavailable => LoginError::ProviderUnavailable,
         ExchangeError::Rejected => LoginError::ProviderError,
     }
 }
 
-fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LoginError {
+pub(crate) fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LoginError {
     LoginError::Internal(Box::new(error))
 }
 

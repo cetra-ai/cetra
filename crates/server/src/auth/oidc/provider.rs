@@ -430,7 +430,7 @@ impl OidcProvider {
         Ok(LoginClaims {
             subject,
             email: claims.email().map(|email| email.to_string()),
-            email_verified: matches!(claims.email_verified(), Some(true)),
+            email_verified: claims.email_verified(),
             hd: hosted_domain(id_token),
             name: claims
                 .name()
