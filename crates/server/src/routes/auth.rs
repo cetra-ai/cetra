@@ -781,6 +781,8 @@ fn user_view(user: &UserRow) -> User {
         email: user.email.clone(),
         name: user.name.clone(),
         is_instance_admin: user.is_instance_admin,
+        email_verified: user.email_verified_at.is_some(),
+        has_password: user.password_hash.is_some(),
     }
 }
 
@@ -1143,6 +1145,8 @@ mod tests {
         let me: Me = logged_in.json();
         assert_eq!(me.user.email, "ada@example.com");
         assert_eq!(me.user.name.as_deref(), Some("Ada"));
+        assert!(me.user.email_verified);
+        assert!(me.user.has_password);
         assert_eq!(me.orgs.len(), 1);
         assert_eq!(me.orgs[0].slug, "acme");
         assert_eq!(me.orgs[0].role, OrgRole::Owner);

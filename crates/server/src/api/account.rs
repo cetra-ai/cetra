@@ -82,6 +82,10 @@ pub struct User {
     pub name: Option<String>,
     /// Instance administrator, allowed to manage instance settings.
     pub is_instance_admin: bool,
+    /// The address has been verified.
+    pub email_verified: bool,
+    /// A password is set. SSO-only accounts are false.
+    pub has_password: bool,
 }
 
 /// One org membership of the signed-in user.
@@ -347,6 +351,8 @@ mod tests {
             email: "ada@example.com".to_owned(),
             name: Some("Ada Example".to_owned()),
             is_instance_admin: true,
+            email_verified: true,
+            has_password: true,
         }
     }
 

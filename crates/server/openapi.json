@@ -17552,12 +17552,22 @@
         "required": [
           "id",
           "email",
-          "is_instance_admin"
+          "is_instance_admin",
+          "email_verified",
+          "has_password"
         ],
         "properties": {
           "email": {
             "type": "string",
             "description": "Email address."
+          },
+          "email_verified": {
+            "type": "boolean",
+            "description": "The address has been verified."
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "A password is set. SSO-only accounts are false."
           },
           "id": {
             "type": "string",

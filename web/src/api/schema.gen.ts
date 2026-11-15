@@ -5065,6 +5065,10 @@ export interface components {
         User: {
             /** @description Email address. */
             email: string;
+            /** @description The address has been verified. */
+            email_verified: boolean;
+            /** @description A password is set. SSO-only accounts are false. */
+            has_password: boolean;
             /**
              * Format: uuid
              * @description User id.
