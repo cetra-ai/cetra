@@ -467,6 +467,19 @@ fn derive_id(
     uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
 
+/// The `score_id` that [`write`] derives for a rule's evaluator score on `target` without a
+/// given id (D-I-18): the rule is the author and the evaluator kind gives the source. Backfill
+/// looks these ids up to skip targets the rule already scored (D-I-40).
+pub(crate) fn rule_score_id(
+    project: ProjectId,
+    target: &ScoreTarget,
+    name: &str,
+    kind: EvaluatorKind,
+    rule: Uuid,
+) -> Uuid {
+    derive_id(project, target, name, evaluator_source(kind), rule)
+}
+
 /// The live versions of `ids` (UUID strings), keyed by score id. No ids means no lookup.
 async fn live_scores(
     state: &AppState,
@@ -1047,6 +1060,47 @@ mod tests {
                 "scores[0].source".to_owned(),
                 "source human is not allowed here".to_owned()
             )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rule_score_id_matches_the_written_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator: Uuid = "01900000-0000-7000-8000-000000000500".parse().unwrap();
+        let rule: Uuid = "01900000-0000-7000-8000-000000000700".parse().unwrap();
+        let project = seeded.project.id;
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::LlmJudge,
+            evaluator_id: evaluator,
+            rule_id: Some(rule),
+        };
+        let trace = ScoreTarget::Trace {
+            trace_id: TRACE.parse().unwrap(),
+        };
+        let items = vec![
+            ScoreCreate {
+                target: trace.clone(),
+                ..item("same", 1.0)
+            },
+            item("same", 0.0),
+        ];
+        let ids = write(&app.state, &seeded.project, writer, items)
+            .await
+            .unwrap();
+        assert_eq!(
+            ids[0],
+            rule_score_id(project, &trace, "same", EvaluatorKind::LlmJudge, rule)
+        );
+        assert_eq!(
+            ids[1],
+            rule_score_id(
+                project,
+                &span_target(),
+                "same",
+                EvaluatorKind::LlmJudge,
+                rule
+            )
         );
     }
 
