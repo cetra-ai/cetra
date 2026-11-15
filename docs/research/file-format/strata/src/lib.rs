@@ -9,7 +9,6 @@
 //! `docs/research/file-format/prototype-plan.md` (one level up from this crate).
 //!
 //! The limits of M1 are:
-//! - payload columns have no search filters yet (M2.3);
 //! - there are no key filters, map shredding or `lookup` (M3);
 //! - there is no `scan`, no predicates, no pruning and no coalescing (M4);
 //! - there is no DataFusion integration (M5).

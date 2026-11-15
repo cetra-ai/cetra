@@ -1383,6 +1383,7 @@ dependencies = [
  "fmt-testdata",
  "futures",
  "llmobs-core",
+ "memchr",
  "object_store",
  "parquet",
  "proptest",

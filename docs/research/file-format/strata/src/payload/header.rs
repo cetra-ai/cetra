@@ -2,8 +2,8 @@
 //! the frame table of one payload column. The header is stored as one `PayloadHeader`
 //! segment; this module encodes and decodes its body.
 
-use super::HEADER_FIXED_LEN;
 use super::frames::FrameEntry;
+use super::{EDGE_GROUP_CHUNKS, HEADER_FIXED_LEN};
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, Out};
 
@@ -25,7 +25,7 @@ pub(crate) struct RefPage {
     pub first_row: u32,
 }
 
-/// One edge group. M2.2 writes none.
+/// One edge group: the tails of up to `EDGE_GROUP_CHUNKS` consecutive chunks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeGroup {
     /// Absolute file offset of the group segment.
@@ -43,13 +43,13 @@ pub(crate) struct PayloadHeader {
     pub n_rows: u32,
     /// Unique chunks of the column.
     pub n_chunks: u32,
-    /// Offset of the filters. Zero in M2.2.
+    /// Offset of the filters segment.
     pub filters_offset: u64,
-    /// Length of the filters. Zero in M2.2.
+    /// Length of the filters segment, header included.
     pub filters_len: u32,
     /// The refs pages, in row order.
     pub ref_pages: Vec<RefPage>,
-    /// The edge groups. None in M2.2.
+    /// The edge groups, in chunk order: group `i` starts at chunk `i × EDGE_GROUP_CHUNKS`.
     pub edge_groups: Vec<EdgeGroup>,
     /// The frames, in chunk order.
     pub frames: Vec<FrameEntry>,
@@ -162,6 +162,17 @@ impl PayloadHeader {
             return Err(corrupt("payload chunk count"));
         }
 
+        // One edge group per EDGE_GROUP_CHUNKS chunks, each starting at its own multiple.
+        if edge_groups.len() != (n_chunks as usize).div_ceil(EDGE_GROUP_CHUNKS) {
+            return Err(corrupt("payload edge groups"));
+        }
+        for (i, group) in edge_groups.iter().enumerate() {
+            let first = (i as u64) * (EDGE_GROUP_CHUNKS as u64);
+            if u64::from(group.first_chunk) != first {
+                return Err(corrupt("payload edge groups"));
+            }
+        }
+
         // The refs pages start at row 0, are strictly increasing, and lie inside the column.
         if n_rows > 0 && ref_pages.is_empty() {
             return Err(corrupt("payload ref pages"));
@@ -220,7 +231,11 @@ mod tests {
                     first_row: 4096,
                 },
             ],
-            edge_groups: Vec::new(),
+            edge_groups: vec![EdgeGroup {
+                offset: 300,
+                len: 40,
+                first_chunk: 0,
+            }],
             frames: vec![
                 FrameEntry {
                     offset: 16,
@@ -254,9 +269,73 @@ mod tests {
     fn round_trip_and_exact_length() {
         let h = sample();
         let bytes = encoded(&h);
-        // 32 fixed bytes, two 16-byte refs entries, two 24-byte frame entries.
-        assert_eq!(bytes.len(), 32 + 2 * 16 + 2 * 24);
+        // 32 fixed bytes, two 16-byte refs entries, one 16-byte edge group entry, two 24-byte
+        // frame entries.
+        assert_eq!(bytes.len(), 32 + 2 * 16 + 16 + 2 * 24);
         assert_eq!(PayloadHeader::decode(&bytes, 0).unwrap(), h);
+    }
+
+    /// A header of `n_chunks` chunks in one frame, with `groups` edge groups laid out as the
+    /// writer lays them out.
+    fn with_chunks(n_chunks: u32, groups: usize) -> PayloadHeader {
+        PayloadHeader {
+            n_rows: 0,
+            n_chunks,
+            filters_offset: 0,
+            filters_len: 0,
+            ref_pages: Vec::new(),
+            edge_groups: (0..groups)
+                .map(|i| EdgeGroup {
+                    offset: 300 + 40 * i as u64,
+                    len: 40,
+                    first_chunk: (i * EDGE_GROUP_CHUNKS) as u32,
+                })
+                .collect(),
+            frames: if n_chunks == 0 {
+                Vec::new()
+            } else {
+                vec![FrameEntry {
+                    offset: 16,
+                    len: 100,
+                    raw_len: 200,
+                    first_chunk: 0,
+                    n_chunks,
+                }]
+            },
+        }
+    }
+
+    #[test]
+    fn edge_group_counts_round_trip() {
+        for (n_chunks, groups) in [(0, 0), (1024, 1), (1025, 2)] {
+            let h = with_chunks(n_chunks, groups);
+            assert_eq!(PayloadHeader::decode(&encoded(&h), 0).unwrap(), h);
+        }
+    }
+
+    #[test]
+    fn wrong_edge_group_count_is_corrupt() {
+        let mut h = with_chunks(1025, 2);
+        h.edge_groups.pop();
+        assert!(is_corrupt(PayloadHeader::decode(&encoded(&h), 0)));
+        let mut h = with_chunks(1024, 1);
+        h.edge_groups.push(EdgeGroup {
+            offset: 400,
+            len: 40,
+            first_chunk: 1024,
+        });
+        assert!(is_corrupt(PayloadHeader::decode(&encoded(&h), 0)));
+        assert!(is_corrupt(PayloadHeader::decode(
+            &encoded(&with_chunks(0, 1)),
+            0
+        )));
+    }
+
+    #[test]
+    fn wrong_edge_group_first_chunk_is_corrupt() {
+        let mut h = with_chunks(1025, 2);
+        h.edge_groups[1].first_chunk = 1023;
+        assert!(is_corrupt(PayloadHeader::decode(&encoded(&h), 0)));
     }
 
     #[test]

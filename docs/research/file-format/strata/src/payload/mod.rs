@@ -7,6 +7,8 @@ mod frames;
 mod header;
 mod read;
 mod refs;
+mod search;
+mod trigram;
 mod varint;
 mod write;
 
@@ -32,3 +34,19 @@ pub(crate) const REFS_MAX_BACK: usize = 32;
 pub(crate) const REFS_MAX_DEPTH: u8 = 15;
 /// Length of the fixed part of the payload header.
 pub(crate) const HEADER_FIXED_LEN: usize = 32;
+/// Bytes of a chunk tail kept in the edge groups.
+pub(crate) const EDGE: usize = 63;
+/// Length of one edge group entry: `u8 tail_len` and `tail[63]`.
+pub(crate) const EDGE_ENTRY_LEN: usize = 64;
+/// Chunk ids per edge group segment.
+pub(crate) const EDGE_GROUP_CHUNKS: usize = 1024;
+/// Smallest frame filter, in bits.
+pub(crate) const FILTER_MIN_BITS: u32 = 1024;
+/// A frame filter may be at most this share of its frame's stored size.
+pub(crate) const FILTER_MAX_SHARE: f64 = 0.5;
+/// Bits of the file-level rollup (32 KiB).
+pub(crate) const ROLLUP_BITS: u32 = 1 << 18;
+/// Above this share of set bits the rollup is dropped.
+pub(crate) const ROLLUP_MAX_FILL: f64 = 0.5;
+/// Longest needle `payload_contains` accepts.
+pub(crate) const MAX_NEEDLE: usize = EDGE + 1;

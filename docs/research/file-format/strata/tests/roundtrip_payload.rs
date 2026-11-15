@@ -75,6 +75,19 @@ async fn roundtrip_payload() {
         summary.columns[input].payload.is_some(),
         "input must be a payload column"
     );
+    let input_stats = summary.columns[input].payload.as_ref().unwrap();
+    assert!(
+        input_stats.frames >= 5,
+        "input: {} frames",
+        input_stats.frames
+    );
+    assert!(
+        input_stats.frames_without_filter * 5 <= input_stats.frames,
+        "input: frames {}, frames without filter {}, filter bytes {}",
+        input_stats.frames,
+        input_stats.frames_without_filter,
+        input_stats.filter_bytes
+    );
 
     let mut expected_columns = Vec::with_capacity(schema.fields().len());
     for (column, field) in schema.fields().iter().enumerate() {
@@ -151,6 +164,23 @@ async fn roundtrip_payload() {
                 "{:<22} {:<8} {:>12} {:>12} {:>12} {:>8} {:>8} {:>12} {:>8.2}",
                 summary_column.name, "narrow", summary_column.bytes, pq, "-", "-", "-", "-", ratio
             ),
+        }
+    }
+    println!(
+        "{:<22} {:>12} {:>12} {:>8} {:>8} {:>8}",
+        "payload column", "filter B", "edge B", "no filt", "frames", "rollup"
+    );
+    for summary_column in &summary.columns {
+        if let Some(stats) = &summary_column.payload {
+            println!(
+                "{:<22} {:>12} {:>12} {:>8} {:>8} {:>8}",
+                summary_column.name,
+                stats.filter_bytes,
+                stats.edge_bytes,
+                stats.frames_without_filter,
+                stats.frames,
+                stats.rollup
+            );
         }
     }
     let pq_total = parquet.len() as u64;

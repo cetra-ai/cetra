@@ -1,12 +1,13 @@
 //! Frame building and chunk dedup (S4 step 3). Unique chunks are appended to an open frame;
 //! a frame is closed when it is full, and written as one `PayloadFrame` segment.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use xxhash_rust::xxh3::xxh3_128;
 
-use super::{FRAME_INITIAL_RATIO, FRAME_MAX_EST, FRAME_MAX_RAW};
+use super::trigram::add_trigrams;
+use super::{EDGE, FRAME_INITIAL_RATIO, FRAME_MAX_EST, FRAME_MAX_RAW};
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, Out};
 use crate::segment::{Codec, Kind, SegmentCodec, encode_segment};
@@ -45,6 +46,12 @@ pub(crate) struct FrameBuilder {
     pub frames: Vec<FrameEntry>,
     /// Sum of the frame segments' lengths.
     pub stored_bytes: u64,
+    /// Last ≤ `EDGE` bytes of every unique chunk, by id.
+    pub tails: Vec<Vec<u8>>,
+    /// First ≤ `EDGE` bytes of every unique chunk, by id (used only to build boundary trigrams).
+    pub heads: Vec<Vec<u8>>,
+    /// In-chunk trigram hashes of each closed frame, by frame index.
+    pub frame_trigrams: Vec<HashSet<u32>>,
 }
 
 impl FrameBuilder {
@@ -61,6 +68,9 @@ impl FrameBuilder {
             stored_total: 0,
             frames: Vec::new(),
             stored_bytes: 0,
+            tails: Vec::new(),
+            heads: Vec::new(),
+            frame_trigrams: Vec::new(),
         }
     }
 
@@ -84,6 +94,18 @@ impl FrameBuilder {
                 what: "more than 4 billion chunks".to_string(),
             })?;
         self.ids.insert(hash, id);
+        self.tails.push(
+            chunk
+                .get(chunk.len().saturating_sub(EDGE)..)
+                .unwrap_or_default()
+                .to_vec(),
+        );
+        self.heads.push(
+            chunk
+                .get(..chunk.len().min(EDGE))
+                .unwrap_or_default()
+                .to_vec(),
+        );
         self.cur.extend_from_slice(chunk);
         let end = u32::try_from(self.cur.len()).map_err(|_| StrataError::Unsupported {
             what: "a payload frame of more than 4 GiB".to_string(),
@@ -138,11 +160,33 @@ impl FrameBuilder {
         if self.stored_total > 0 {
             self.ratio = self.raw_total as f64 / self.stored_total as f64;
         }
+        // Trigrams never span two chunks, so each chunk is hashed on its own.
+        let mut trigrams = HashSet::new();
+        let mut start = 0usize;
+        for &end in &self.cur_ends {
+            let end = end as usize;
+            if let Some(chunk) = self.cur.get(start..end) {
+                add_trigrams(chunk, &mut trigrams);
+            }
+            start = end;
+        }
+        self.frame_trigrams.push(trigrams);
         self.cur.clear();
         self.cur_ends.clear();
         self.cur_first = self.next_id;
         Ok(())
     }
+}
+
+/// The index of the frame that holds chunk `id`, or `None` when no frame holds it. `frames`
+/// must be in chunk order, as the header decoder guarantees.
+pub(crate) fn frame_of(frames: &[FrameEntry], id: u32) -> Option<usize> {
+    let f = frames
+        .partition_point(|frame| frame.first_chunk <= id)
+        .checked_sub(1)?;
+    let entry = frames.get(f)?;
+    let local = id.checked_sub(entry.first_chunk)?;
+    (local < entry.n_chunks).then_some(f)
 }
 
 /// Decodes the raw body of a frame into the byte ranges of its chunks. The ranges index into
