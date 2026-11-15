@@ -42,7 +42,7 @@ H12 adds to the console:
   Not modelled: backslash escapes in `E'…'` strings and the `Q'…'` / `N'…'` / `X'…'` prefixes beyond their quote. The scanner shows no input for a placeholder with an unknown type or written with spaces (`{ a:Int }`); the server reports those when the query runs.
 - **Server timestamps** (`parse_rfc3339`): the character at index 10 is `T` or `t`, at most 9 fractional digits, `Z`, `z` or `±HH:MM`, a real calendar date, seconds below 60. `2026-01-01` and `2026-01-01 00:00:00Z` are refused.
 - **Saved views mock.** `web/src/test/setup.ts` installs `savedViewHandlers(seedSavedViews())` before every test. After H3 the seed (`fixtures/api/static/saved-views.json`) has one `sql` view: id `01900000-0000-7000-8000-000000000211`, name `Cost per model per day`, owner Ada (`ADA_ID`, the user of `me.json`), not shared, `state.query` = `SELECT model, date_trunc('day', start_time) AS day, sum(cost_total) AS cost FROM spans WHERE span_kind = 'llm' GROUP BY model, day ORDER BY day, cost DESC`, `state.params` = `{}`, `state.range` = `"24h"`. If the file still has `"params": []` or no `range`, STOP: H3 is not merged. Unit tests never read the seed: they pass literal states. The mock's POST sets `owner_user_id` to Ada; its GET filters by `kind`, ignores `limit`, answers `next_cursor: null`, and hides other users' private views; PATCH and DELETE work on the in-memory store. A test replaces the store with `server.use(...savedViewHandlers([...]))`.
-- **Listing (D-H-13).** The console lists saved queries with `kind=sql&limit=1000`, the per-owner cap, in one request. The menu shows them in the order the server returns them (by id, H3); it does not re-sort.
+- **Listing (D-H-13).** The console lists saved queries with `kind=sql`, following `next_cursor` until it is null (page size 200), so every visible view is listed. The per-owner cap (D-H-6) does not bound this: shared views of other members count too. A `?view=` id that no page holds is read with `GET /saved-views/{id}`. The menu shows the list in the order the server returns it (by id, H3); it does not re-sort.
 - **Project role.** `useProject().data.role`; the fixture says `owner`. Compare with `atLeast(role, "member")` / `atLeast(role, "admin")`, never `===`. Ada is `owner`, so she counts as admin.
 - **D-H-6 rules the UI mirrors** (the server enforces them; the UI hides or disables): any role saves a private query; sharing, and any change to a query that stays shared, needs member; an owner may stop sharing and delete their own query at any role; only the owner saves over or renames; a project admin may stop sharing or delete any shared query; stopping sharing of a shared query whose owner was deleted is a `409`, so the UI hides "Stop sharing" for an ownerless query (Delete stays). There is no default saved query.
 - **Saved state (D-H-7).** `{ query, params: { name: string }, range }` or `{ query, params, from, to }`: one of the two, never both. Parameter values are the strings the user typed; only the parameters the query uses are saved. With no range in the URL, Save stores the effective preset `"24h"` (the picker's default).
@@ -628,7 +628,7 @@ export function historyLabel(query: string): string {
 Append next to `savedViewsQuery`:
 
 ```ts
-/** Saved SQL queries, all in one page (D-H-13: 1,000 is the per-owner cap). */
+/** Saved SQL queries, every page (D-H-13; the per-owner cap does not bound the list). */
 export function savedQueriesQuery(org: string, project: string) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/saved-views", {
     params: {
@@ -971,7 +971,7 @@ Keep H11's code; make these changes.
      }
    }, [search.view, savedQueries.isSuccess, listed, complete]);
    ```
-   The comment sits directly above the `useEffect`, as written. A view deleted elsewhere disappears from the refetched list, so this effect also drops it from the URL. A list that is not complete (a `next_cursor`) never drops `view`: the query may be on a later page.
+   The comment sits directly above the `useEffect`, as written. A view deleted elsewhere disappears from the refetched list, so this effect also drops it from the URL. The list holds every page, so a `?view=` id it lacks is read with `GET /saved-views/{id}` first; the link is dropped only when that read fails.
 7. Below the toolbar, before the body: `{savedQueries.isError ? <p role="alert" className="px-3 py-1 text-destructive text-xs">Saved queries could not be loaded.</p> : null}`. A failed list keeps `?view=` and the draft untouched.
 8. Body building, shared by Run (and by H13's Export):
    ```ts

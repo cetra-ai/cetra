@@ -547,6 +547,7 @@ fn generated_files_roundtrip() {
             "get_evaluator" | "post_evaluator" => roundtrip::<Evaluator>(&example.file),
             "list_evaluator_templates" => roundtrip::<EvaluatorTemplateList>(&example.file),
             "post_evaluator_test" => roundtrip::<EvaluatorTestResult>(&example.file),
+            "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
             other => panic!("{other} has no round-trip"),

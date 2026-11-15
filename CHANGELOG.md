@@ -12,6 +12,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
+- `GET /api/v1/projects/{project}/saved-views/{id}` returns one saved view by id.
 
 ### Fixed
 
@@ -22,3 +23,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - CSV exports prefix a string cell or header name that starts with `=`, `+`, `-`, `@`, tab or CR
   with `'`, so a spreadsheet shows it as text instead of running it (D-A2-5). NDJSON and Parquet
   are unchanged.
+- The SQL console lists every saved query you can see, not only the first 1,000, and opens a
+  `?view=` link to a query past the listed pages.

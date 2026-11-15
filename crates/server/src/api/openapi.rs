@@ -2265,6 +2265,20 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let get = operation("get_saved_view", "saved_views", "Get a saved view")
+        .description(Some(
+            "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Saved view id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<SavedView>("The saved view."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let update = operation("update_saved_view", "saved_views", "Update a saved view")
         .description(Some(
             "The owner changes name, state, shared and is_default; sharing, or editing a shared view, needs role member. A project admin may also unshare another user's shared view. Setting is_default clears the other default of the same scope: the caller's private views of that kind, or the project's shared views of that kind.",
@@ -2302,6 +2316,10 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views"),
             PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
