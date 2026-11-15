@@ -236,7 +236,7 @@ http-body-util = "0.1.5"
 # `zlib-rs` is the backend parquet already uses, so no `miniz_oxide` is added.
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 # zstd OTLP request bodies. Same version as `parquet`'s pin (`Cargo.lock`). Default features stay off.
-zstd = { version = "0.13.4", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [profile.dev]
 debug = "line-tables-only"
