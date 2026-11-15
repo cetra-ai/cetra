@@ -726,6 +726,32 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
                 "application/json",
             )
         },
+        example(
+            "list_backfills",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/backfills.json",
+            "application/json",
+        ),
+        example(
+            "list_backfills",
+            params(&[("id", "01900000-0000-7000-8000-000000000701")]),
+            BTreeMap::new(),
+            "static/backfills.json",
+            "application/json",
+        ),
+        example(
+            "post_backfill_estimate",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            BTreeMap::new(),
+            "static/backfill-estimate.json",
+            "application/json",
+        ),
+        example_accepted(
+            "post_backfill",
+            params(&[("id", "01900000-0000-7000-8000-000000000700")]),
+            "static/backfill.json",
+        ),
     ]);
     out.manifest.sort_by(|left, right| {
         left.operation_id

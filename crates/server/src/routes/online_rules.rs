@@ -718,7 +718,7 @@ fn check_fields(draft: &Draft, errors: &mut Vec<FieldError>) -> Option<VariableM
 }
 
 /// The adapter of a judge's connection, `None` for other kinds or when the connection is gone.
-async fn judge_adapter(
+pub(crate) async fn judge_adapter(
     state: &AppState,
     org: OrgId,
     subject: &Subject,

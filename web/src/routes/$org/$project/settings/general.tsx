@@ -326,7 +326,7 @@ function ProjectGeneralPage() {
       </section>
       <DangerZone
         title="Delete project"
-        description="Deletes every trace, span, score, media file and setting of this project. Data is erased within 24 hours. This cannot be undone."
+        description="Deletes every trace, span, score, media file and setting of this project. Data is removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
         buttonLabel="Delete project…"
         disabled={!canDelete}
         disabledReason={
@@ -343,7 +343,7 @@ function ProjectGeneralPage() {
           open={dropOpen}
           onOpenChange={setDropOpen}
           title={`Delete project ${data.name}?`}
-          description="Deletes every trace, span, score, media file and setting of this project. Data is erased within 24 hours. This cannot be undone."
+          description="Deletes every trace, span, score, media file and setting of this project. Data is removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone."
           expected={data.slug}
           inputLabel={`Type the project slug "${data.slug}" to confirm`}
           confirmLabel="Delete project"

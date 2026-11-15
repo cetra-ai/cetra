@@ -71,7 +71,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 | D-I-38 | **The estimate is its own operation.** `POST /online-rules/{id}/backfills/estimate` takes the create body and answers `200 BackfillEstimate`; `POST /online-rules/{id}/backfills` answers `202 Backfill`. This replaces D-I-25's `dry_run` flag: each operation has one success status and one schema, as track M's `POST /deletions/preview` beside `POST /deletions`. |
 | D-I-39 | **The backfill runner is an eval loop.** Creating a backfill inserts the row and wakes the runner. The runner (`backfill_once`, every 5 s or on a wake-up; TEST 50 ms) runs the `running` backfills of active projects oldest first, one at a time, each to its end, and checks the stop flag between pages. There is no task per request, so shutdown joins the runner like the other eval loops. A backfill the runner was running at shutdown stays `running`, and `eval::recover` marks it `failed` (`interrupted`) at the next start, before the loops start. One backfill's error never holds up the others: the runner logs it and goes on to the next (D-I-41). |
 | D-I-40 | **What a backfill reads and enqueues.** Pages of at most 1 000 rows of `trace_list` (trace rules) or `span_list` (span rules), `start_time ∈ [from, to)`, newest first, with the rule's current filter and strict exclusions. The first `max_targets` rows are the backfill's targets (`matched`); the estimate reads up to `max_targets + 1` to say "more than". Each target is sampled with D-I-10's function, the rule's id and the backfill's `sample_rate` (default: the rule's), so a backfill at the rule's rate picks the targets live sampling would have picked. A span rule's backfill does not apply the live 50-spans-per-trace cut; `max_targets` bounds it. Targets that already have this rule's score are skipped: per page, the derived score ids (D-G-28: the rule as author, the evaluator kind's source, the evaluator's current output name) are looked up with one `scores_by_id` read. This replaces D-I-25's "the `rule_id` score filter", which would read every score of the rule; a score written under an older output name does not count. Each page is one `meta.db` write: the rule must still exist and be enabled, then every job is upserted (D-I-11) and `matched` and `enqueued` are updated. |
-| D-I-41 | **Failures during a run.** A storage read that fails fails the backfill: `storage unavailable` for `QueryError::Busy` and `RunError::Timeout`, `invalid filter` for `RunError::Invalid` (the rule's stored filter no longer parses), `storage read failed` for anything else (another `RunError`, a `QueryError`, a row that does not convert). The jobs already enqueued stay; there is no retry, and running the backfill again is cheap (dedup keys and the scored check). A rule disabled during a run fails it (`rule disabled`). A rule deleted during a run deletes its backfills (`ON DELETE CASCADE`) and the runner stops at its next write: D-I-25's "marks the backfill failed" can only hold for a rule that still exists. A rule paused during a run does not stop it (D-I-14). A stored rule, project or evaluator that does not decode (`MetaError::Corrupt`) fails the backfill (`rule could not be read`, or `evaluator could not be read`). Any other `meta.db` error (`MetaError::Db`) leaves the backfill `running`: the runner logs it, goes on to the next backfill, and runs this one again from the start at its next pass. An undecodable `backfills` row fails the whole pass (accepted: status is constrained and rows are written only by this code). |
+| D-I-41 | **Failures during a run.** A storage read that fails fails the backfill: `storage unavailable` for `QueryError::Busy` and `RunError::Timeout`, `invalid filter` for `RunError::Invalid` (the rule's stored filter no longer parses), `storage read failed` for anything else (another `RunError`, a `QueryError`, a row that does not convert). The jobs already enqueued stay; there is no retry, and running the backfill again is cheap (dedup keys and the scored check). A rule disabled during a run fails it (`rule disabled`). A rule deleted during a run deletes its backfills (`ON DELETE CASCADE`) and the runner stops at its next write: D-I-25's "marks the backfill failed" can only hold for a rule that still exists. A rule paused during a run does not stop it (D-I-14). A stored rule, project or evaluator that does not decode (`MetaError::Corrupt`) fails the backfill (`rule could not be read`, or `evaluator could not be read`). Any other `meta.db` error (`MetaError::Db`) leaves the backfill `running`: the runner logs it, goes on to the next backfill, and runs this one again from the start at its next pass. An undecodable `backfills` row fails the whole pass (accepted: status is constrained and rows are written only by this code). A rule whose filter, variable mapping, sample rate, target or evaluator changes during a run fails it (`rule changed`); a pause, resume or budget change does not. An edit to the evaluator itself (its template or output) during a run is not detected. |
 | D-I-42 | **Limits and the list.** `from < to`, `to ≤ now − 5 min`, `to − from ≤ 30 days`, `max_targets` 1–10 000, `sample_rate` in `(0, 1]`; every failing field is reported (`400`). Creating checks, in one write, that the rule exists in the project (`404`), is enabled and unpaused (`409`), and has no running backfill (`409`). The estimate's cost is for judges only: per target `ceil((template chars + 2 000 × mapped variables) / 4)` input tokens and `max_output_tokens` output tokens; the cost is absent when the model has no price. The estimate does not subtract already-scored targets: it is an upper bound. `GET /online-rules/{id}/backfills` answers the newest 50 (`BackfillPage`, `next_cursor` always `null`, as alert rules are not paged); rows are kept until their rule is deleted. A backfill's start is an audit event. |
 | D-I-43 | **A tool crate as a test dependency.** A `tools/` crate may be a dev-dependency of a shipped crate, for tests only: `llmobs-capture`'s mock provider serves the judge in `llmobs-cli`'s `llmobs serve` end-to-end test. A `tools/` crate is never a normal dependency of a shipped crate. AGENTS.md § Layout's crate graph says so. |
 
@@ -87,7 +87,7 @@ The user chose each option marked "(user)" on 2026-11-14. The other decisions fo
 
 ## Scope
 
-**In I:** everything in the decisions above. That means migrations `0004`, `0006`, `0010`, `0011` and the next free number (M6's backfills: `0014` today, renumbered at merge if another track lands first) in `meta.db` (other tracks took `0005`, `0007`–`0009`, `0012` and `0013`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
+**In I:** everything in the decisions above. That means migrations `0004`, `0006`, `0010`, `0011` and `0014` (M6's backfills) in `meta.db` (other tracks took `0005`, `0007`–`0009`, `0012` and `0013`), the crypto module, connections, evaluators, score definitions, online rules, the queue, the trigger, judge traces, evaluator scores, `usage_daily.judge_*`, backfill, the annotation panel and every page listed in D-I-27.
 
 **Not in I:**
 - datasets, experiments and their server evaluators [J] (J calls the executor, § Interfaces);
@@ -149,14 +149,14 @@ crates/server/src/
     pending.rs           PendingTraces (M4)
     sampling.rs          sampled (M4)
     trigger.rs           refresh_rules, load, flush_once, sweep_once (M4)
-    backfill.rs          (M6)
+    backfill.rs          validate, Pager, estimate, backfill_once (M6)
   usage.rs               Usage::add_judge, judge columns in the flush (M2: test runs count usage)
   scores.rs              Writer::Evaluator (M3), definition checks and ownership (M2, M5)
   api/   connections.rs (M1), evaluators.rs, score_definitions.rs (M2), online_rules.rs, eval_jobs.rs (M3), backfills.rs (M6)
   routes/ same split
 crates/server/src/admin.rs  rotate_encryption_key (M1)
 crates/server/migrations/meta/
-  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0010_eval_queue.sql (M3)  0011_pending_traces.sql (M4)  00MM_backfills.sql (M6, the next free number: 0014 today)
+  0004_connections.sql (M1)  0006_evaluators.sql (M2)  0010_eval_queue.sql (M3)  0011_pending_traces.sql (M4)  0014_backfills.sql (M6)
 ```
 
 Every background loop exposes a `*_once(&AppState)` function that tests call directly, with `Clock::Manual`. The loops themselves only call `*_once` on a tokio interval from `EvalTiming`. The end-to-end test in M6 uses `EvalTiming::TEST` and real time.
@@ -260,15 +260,21 @@ CREATE TABLE pending_traces (
   PRIMARY KEY (project_id, trace_id)
 );
 
--- 00MM_backfills.sql (M6, the next free number: 0014 today)
+-- 0014_backfills.sql (M6)
 CREATE TABLE backfills (
   id TEXT PRIMARY KEY,
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
-  from_ns INTEGER NOT NULL, to_ns INTEGER NOT NULL, max_targets INTEGER NOT NULL, sample_rate REAL NOT NULL,
-  status TEXT NOT NULL,                  -- 'running' | 'done' | 'failed'
-  matched INTEGER NOT NULL DEFAULT 0, enqueued INTEGER NOT NULL DEFAULT 0, error TEXT,
+  from_ns INTEGER NOT NULL,
+  to_ns INTEGER NOT NULL,
+  max_targets INTEGER NOT NULL,
+  sample_rate REAL NOT NULL,
+  status TEXT NOT NULL,
+  matched INTEGER NOT NULL DEFAULT 0,
+  enqueued INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at INTEGER NOT NULL, finished_at INTEGER
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
 CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);

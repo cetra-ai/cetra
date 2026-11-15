@@ -16,6 +16,7 @@ use llmobs_server::api::account::{
 };
 use llmobs_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use llmobs_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use llmobs_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use llmobs_server::api::common::Page;
 use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
@@ -422,6 +423,9 @@ fn static_files_match_their_types() {
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
+    roundtrip::<Page<Backfill>>("static/backfills.json");
+    roundtrip::<Backfill>("static/backfill.json");
+    roundtrip::<BackfillEstimate>("static/backfill-estimate.json");
 }
 
 #[test]
@@ -443,6 +447,16 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<OnlineRulePreviewRequest>(&preview_text)
         .unwrap_or_else(|error| panic!("requests/online-rule-preview.json: {error}"));
+    // `CreateBackfillRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    for file in [
+        "requests/backfill-create.json",
+        "requests/backfill-estimate.json",
+    ] {
+        let text =
+            fs::read_to_string(api_dir().join(file)).unwrap_or_else(|error| panic!("{error}"));
+        serde_json::from_str::<CreateBackfillRequest>(&text)
+            .unwrap_or_else(|error| panic!("{file}: {error}"));
+    }
     let test_text = fs::read_to_string(api_dir().join("requests/evaluator-test.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<EvaluatorTestRequest>(&test_text)
@@ -476,6 +490,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
             "post_score_definition",
             "requests/score-definition-create.json",
         ),
+        ("post_backfill", "requests/backfill-create.json"),
+        ("post_backfill_estimate", "requests/backfill-estimate.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -594,6 +610,9 @@ fn generated_files_roundtrip() {
             "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
             "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
             "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
+            "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
+            "post_backfill" => roundtrip::<Backfill>(&example.file),
+            "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }

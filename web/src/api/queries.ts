@@ -142,6 +142,7 @@ export function scoresQuery(
   query: {
     trace_id?: string;
     span_id?: string;
+    session_id?: string;
     rule_id?: string;
     target?: Schema<"ScoreTargetKind">;
     limit?: number;

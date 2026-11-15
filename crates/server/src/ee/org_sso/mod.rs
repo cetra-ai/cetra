@@ -17,6 +17,7 @@ use crate::meta::{MetaDb, MetaError};
 
 pub(crate) mod dns;
 pub(crate) mod login;
+pub(crate) mod recheck;
 pub(crate) mod settings;
 pub(crate) mod store;
 

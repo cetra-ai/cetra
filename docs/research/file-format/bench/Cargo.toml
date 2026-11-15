@@ -1,0 +1,33 @@
+[package]
+name = "fmtbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+llmobs-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
+arrow = { version = "59.2", default-features = false, features = ["ipc", "prettyprint"] }
+parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd"] }
+datafusion = { version = "55.2", default-features = false, features = ["nested_expressions", "parquet", "sql", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }
+object_store = "0.13"
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs"] }
+futures = "0.3.34"
+async-trait = "0.1.92"
+bytes = "1.12"
+serde_json = "1"
+vortex = { path = "/home/sebastien/github/vortex/vortex", features = ["tokio", "files", "zstd", "object_store"] }
+vortex-arrow = { path = "/home/sebastien/github/vortex/vortex-arrow" }
+vortex-datafusion = { path = "/home/sebastien/github/vortex/vortex-datafusion" }
+mimalloc = "0.1"
+url = "2"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+memchr = "2"
+cpu-time = "1.0.0"
+
+[profile.release]
+debug = 1
+lto = "thin"
+codegen-units = 16

@@ -184,6 +184,7 @@ mod tests {
                 "deletion/resolve.rs",
                 "eval/trace_load.rs",
                 "eval/trigger.rs",
+                "eval/backfill.rs",
                 "test_support/mod.rs",
             ],
             "direct storage reads",

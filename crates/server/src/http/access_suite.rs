@@ -193,7 +193,7 @@ async fn build(app: &TestApp) -> World {
         create_key(app, &ada.cookie, &project_a, "secret", &["read"], "extra").await;
     let (_, key_foreign) =
         create_key(app, &bob.cookie, &project_b, "secret", &["read"], "foreign").await;
-    let control_plane = control_plane_token("orgs");
+    let control_plane = control_plane_token("orgs", "GET", "/");
     for secret in [
         control_plane.clone(),
         pat_read.clone(),
@@ -251,6 +251,7 @@ async fn build(app: &TestApp) -> World {
             bearer(Who::KeyIngest, key_ingest),
             bearer(Who::KeyPublic, key_public),
             bearer(Who::KeyForeign, key_foreign),
+            // Signed per request in `call`: a control-plane token names its method and path.
             bearer(Who::ControlPlane, control_plane),
         ],
     }
@@ -404,12 +405,14 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
 
 async fn call(app: &TestApp, route: &RouteDef, path: &str, caller: &Caller) -> TestResponse {
     let body = route.method != Method::GET && route.method != Method::HEAD;
+    let control_plane = (caller.who == Who::ControlPlane)
+        .then(|| control_plane_token("orgs", route.method.as_str(), path));
     send(
         app,
         route.method.clone(),
         path,
         caller.cookie.as_deref(),
-        caller.bearer.as_deref(),
+        control_plane.as_deref().or(caller.bearer.as_deref()),
         body,
     )
     .await

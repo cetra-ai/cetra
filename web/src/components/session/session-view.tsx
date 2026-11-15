@@ -6,6 +6,8 @@ import { useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { sessionQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AnnotationForm } from "@/components/annotation/annotation-form";
+import { DisabledReason } from "@/components/disabled-reason";
 import { IdText } from "@/components/id-text";
 import { ChatView } from "@/components/payload/chat-view";
 import { PayloadView } from "@/components/payload/payload-view";
@@ -15,8 +17,18 @@ import { TimeText } from "@/components/time-text";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
+import { targetKey } from "@/lib/annotation";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
+import { canAnnotate } from "@/lib/roles";
 import type { SessionPageSearch } from "@/lib/search/sessions";
 
 const TURN_ESTIMATE = 96;
@@ -118,7 +130,9 @@ export function SessionView({
 }
 
 function SessionHeader({ session }: { session: Schema<"SessionSummary"> }) {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
+  const [annotating, setAnnotating] = useState(false);
+  const canAnnotateSession = canAnnotate(data.role);
   return (
     <header className="flex shrink-0 flex-col gap-1 border-b px-3 py-1.5 text-xs">
       <div className="flex min-w-0 items-center gap-2">
@@ -132,6 +146,21 @@ function SessionHeader({ session }: { session: Schema<"SessionSummary"> }) {
             {session.user_id}
           </Link>
         ) : null}
+        <div className="ml-auto flex shrink-0 items-center">
+          <DisabledReason reason={canAnnotateSession ? undefined : "Only members can annotate"}>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={!canAnnotateSession}
+              onClick={() => {
+                setAnnotating(true);
+              }}
+            >
+              Annotate
+            </Button>
+          </DisabledReason>
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
         <span>
@@ -162,6 +191,21 @@ function SessionHeader({ session }: { session: Schema<"SessionSummary"> }) {
             </Badge>
           ))}
       </div>
+      <Sheet open={annotating} onOpenChange={setAnnotating}>
+        <SheetContent side="right" className="overflow-y-auto">
+          <SheetHeader>
+            <SheetTitle>Annotate session</SheetTitle>
+            <SheetDescription>{session.session_id}</SheetDescription>
+          </SheetHeader>
+          <div className="px-4 pb-4">
+            <AnnotationForm
+              key={targetKey({ type: "session", sessionId: session.session_id })}
+              target={{ type: "session", sessionId: session.session_id }}
+              context={{ userId: session.user_id }}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
     </header>
   );
 }

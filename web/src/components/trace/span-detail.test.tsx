@@ -5,6 +5,7 @@ import { PAYLOAD_FORMAT_KEY } from "@/components/payload/format-switch";
 import { server } from "@/mocks/node";
 import { STORAGE_PREFIX } from "@/product";
 import { renderApp } from "@/test/render";
+import { serveAnnotationDefinitions } from "@/test/score-definitions";
 import llmSpan from "../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000012.json";
 import errorSpan from "../../../../fixtures/api/responses/spans/a1000000000000000000000000000003/b100000000000032.json";
 
@@ -185,6 +186,17 @@ it("keeps a stored input output tab on a messages span", async () => {
   expect(
     within(panel).getByRole("tab", { name: "Input / Output", selected: true }),
   ).toBeInTheDocument();
+});
+
+it("remembers the Annotate tab", async () => {
+  serveAnnotationDefinitions();
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  fireEvent.mouseDown(within(panel).getByRole("tab", { name: "Annotate" }));
+
+  expect(within(panel).getByRole("tab", { name: "Annotate", selected: true })).toBeInTheDocument();
+  expect(localStorage.getItem(`${STORAGE_PREFIX}span-tab`)).toBe("annotate");
+  expect(await within(panel).findByRole("form", { name: "Annotations" })).toBeInTheDocument();
 });
 
 it("falls back when the stored chat tab does not apply", async () => {
