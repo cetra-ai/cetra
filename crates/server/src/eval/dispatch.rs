@@ -984,7 +984,12 @@ mod tests {
         let mut running = JoinSet::new();
         assert_eq!(pass(&app, &mut running).await, 2);
         settle(&mut running).await;
-        let text = app.state.telemetry.render(&app.state).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
         for line in [
             "llmobs_eval_jobs_finished_total{outcome=\"done\"} 1",
             "llmobs_eval_jobs_finished_total{outcome=\"failed\"} 1",

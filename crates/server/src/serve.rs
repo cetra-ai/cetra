@@ -77,18 +77,23 @@ fn metrics_router(state: AppState) -> axum::Router {
         .with_state(state)
 }
 
-/// The OpenMetrics document, refreshed on each scrape (`telemetry::Telemetry::render`).
+/// The OpenMetrics document, refreshed on each scrape (`telemetry::Telemetry::render`). An encoding
+/// failure answers 500 with an empty body, never a partial document.
 async fn metrics(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> impl axum::response::IntoResponse {
-    let body = state.telemetry.render(&state).await;
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/openmetrics-text; version=1.0.0; charset=utf-8",
-        )],
-        body,
-    )
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match state.telemetry.render(&state).await {
+        Some(body) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+        None => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// How often idle rate-limit keys are dropped (D143).
@@ -533,12 +538,13 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
-    // Usage notices send email, which restore mode does not do (N M3, D-N-25).
+    // Usage notices send email, and the org-SSO recheck looks up DNS, which restore mode does
+    // not do (N M3, D-N-25). `spawn_org_sso` only reloads from `meta.db`, so it keeps running.
     if !state.config.restore_mode {
         tasks.push(spawn_notices(state.clone()));
+        tasks.push(spawn_org_sso_recheck(state.clone()));
     }
     tasks.push(spawn_org_sso(state.clone()));
-    tasks.push(spawn_org_sso_recheck(state.clone()));
     if state.config.restore_mode {
         tracing::warn!(
             "restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)"
@@ -1045,6 +1051,23 @@ mod tests {
             txt_resolver(&restore),
             crate::ee::org_sso::dns::TxtResolver::Unconfigured
         ));
+    }
+
+    /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email) and the org-SSO recheck (DNS). The eval
+    /// dispatcher and backfill runner live in `eval_tasks`, which is not counted here.
+    #[tokio::test]
+    async fn restore_mode_skips_the_sending_and_dns_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal = bind(config(dir.path()), None).await.unwrap();
+        let normal_tasks = normal.tasks.len();
+        normal.shutdown().await.unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let restored = bind(restore, None).await.unwrap();
+        let restore_tasks = restored.tasks.len();
+        restored.shutdown().await.unwrap();
+        assert_eq!(normal_tasks - restore_tasks, 4);
     }
 
     #[tokio::test]

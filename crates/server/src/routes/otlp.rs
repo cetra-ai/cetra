@@ -958,7 +958,12 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status, StatusCode::OK);
-        let text = app.state.telemetry.render(&app.state).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
         assert!(
             has_line(
                 &text,
@@ -992,7 +997,12 @@ mod tests {
         .send()
         .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
-        let text = app.state.telemetry.render(&app.state).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
         assert!(
             has_line(
                 &text,

@@ -106,7 +106,8 @@ There is no Prometheus code and no metrics dependency. `routes/metrics.rs` (`Met
 5. **Loops not started:**
    - the alert **evaluation** and **delivery** loops (the history-prune loop still runs);
    - the eval **dispatcher** and **backfill runner** (the janitor, prune, flusher, sweeper and budget ticker still run: they only touch `meta.db`);
-   - `spawn_notices` (usage notices send email).
+   - `spawn_notices` (usage notices send email);
+   - the org-SSO domain recheck (`spawn_org_sso_recheck`, a DNS TXT lookup per pass).
 
    `spawn_org_sso` keeps running: it only reloads from `meta.db`.
 

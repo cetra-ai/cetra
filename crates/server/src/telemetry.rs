@@ -37,8 +37,22 @@ use crate::ingest::body::BodyError;
 /// The prefix of every `llmobs_*` metric. The product rename (D46) changes this line.
 const PREFIX: &str = "llmobs";
 
-/// How long a queue count is reused. Scrapes every second must not load `meta.db` each time.
-const EVAL_COUNT_TTL: Duration = Duration::from_secs(10);
+/// How long a queue count is reused, in nanoseconds of `state.clock`. Scrapes every second must
+/// not load `meta.db` each time.
+const EVAL_COUNT_TTL_NS: i64 = 10_000_000_000;
+
+/// How long one queue count query may take before it counts as a failure.
+const EVAL_COUNT_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Adds the growth of a cumulative `now` total to `counter`, once. `last` holds the largest total
+/// seen so far, so overlapping scrapes never add the same growth twice, and a total that reads
+/// lower than an earlier one adds nothing.
+fn advance(counter: &Counter, last: &AtomicU64, now: u64) {
+    let prev = last.fetch_max(now, Ordering::Relaxed);
+    if now > prev {
+        counter.inc_by(now - prev);
+    }
+}
 
 /// The Prometheus registry and every metric of the `/metrics` table (N M3).
 ///
@@ -65,8 +79,10 @@ pub(crate) struct Telemetry {
     read_cache_seen_misses: AtomicU64,
     /// `llmobs_eval_jobs{status}`, from `meta.db`, cached for [`EVAL_COUNT_TTL`].
     eval_jobs: Family<EvalStatusLabel, Gauge>,
-    /// The last queue count and when it was read.
-    eval_open: Mutex<Option<(Instant, [i64; 2])>>,
+    /// The last queue count attempt and when it was made, in `state.clock` nanoseconds. The
+    /// cache uses the app clock, not tokio's: a paused tokio clock auto-advances past the TTL
+    /// while the query waits on `meta.db`, and the app clock is a manual clock in tests.
+    eval_open: Mutex<Option<(i64, [i64; 2])>>,
     /// `process_resident_memory_bytes`. Linux only; left as it was elsewhere.
     process_resident_memory_bytes: Gauge,
     /// `process_open_fds`. Linux only; left as it was elsewhere.
@@ -283,16 +299,20 @@ impl Telemetry {
         }
     }
 
-    /// Refreshes the scrape-time gauges from `state`, then encodes the registry.
-    pub(crate) async fn render(&self, state: &AppState) -> String {
+    /// Refreshes the scrape-time gauges from `state`, then encodes the registry. `None` when the
+    /// encoding fails; the `/metrics` handler then answers 500.
+    pub(crate) async fn render(&self, state: &AppState) -> Option<String> {
         self.refresh_storage(state);
         self.refresh_eval_jobs(state).await;
         self.refresh_process();
         let mut out = String::new();
-        if text::encode(&mut out, &self.registry).is_err() {
-            tracing::error!("metrics encoding failed");
+        match text::encode(&mut out, &self.registry) {
+            Ok(()) => Some(out),
+            Err(_) => {
+                tracing::error!("metrics encoding failed");
+                None
+            }
         }
-        out
     }
 
     fn refresh_storage(&self, state: &AppState) {
@@ -312,15 +332,16 @@ impl Telemetry {
                 .set(i64::from(failed));
         }
         if let Some(stats) = state.storage.read_cache_stats() {
-            let hits = self
-                .read_cache_seen_hits
-                .swap(stats.hits, Ordering::Relaxed);
-            self.read_cache_hits.inc_by(stats.hits.saturating_sub(hits));
-            let misses = self
-                .read_cache_seen_misses
-                .swap(stats.misses, Ordering::Relaxed);
-            self.read_cache_misses
-                .inc_by(stats.misses.saturating_sub(misses));
+            advance(
+                &self.read_cache_hits,
+                &self.read_cache_seen_hits,
+                stats.hits,
+            );
+            advance(
+                &self.read_cache_misses,
+                &self.read_cache_seen_misses,
+                stats.misses,
+            );
             self.read_cache_bytes.set(gauge_value(stats.bytes));
         }
     }
@@ -339,25 +360,42 @@ impl Telemetry {
             .set(running);
     }
 
-    /// `[queued, running]` from `meta.db`, reused for [`EVAL_COUNT_TTL`]. A failed query keeps
-    /// the last values (zeros before the first success) and logs the error, which has no payload.
+    /// `[queued, running]` from `meta.db`, reused for [`EVAL_COUNT_TTL_NS`].
+    ///
+    /// The lock is held across the query on purpose: it is single-flight, so scrapes that arrive
+    /// during a query wait for it and reuse its result. A failed or timed-out query keeps the
+    /// previous values (zeros before the first success), logs at `warn` with no payload, and
+    /// stores its attempt time too, so the next scrape waits out the TTL instead of retrying a
+    /// stalled `meta.db`. A backwards jump of `state.clock` counts as stale.
     async fn eval_open(&self, state: &AppState) -> [i64; 2] {
         let mut cached = self.eval_open.lock().await;
+        let now = state.clock.now_ns();
         if let Some((read_at, counts)) = *cached
-            && read_at.elapsed() < EVAL_COUNT_TTL
+            && now
+                .checked_sub(read_at)
+                .is_some_and(|age| (0..EVAL_COUNT_TTL_NS).contains(&age))
         {
             return counts;
         }
-        match crate::meta::eval_jobs::count_open(state.meta.reader()).await {
-            Ok(counts) => {
-                *cached = Some((Instant::now(), counts));
-                counts
-            }
-            Err(error) => {
+        let previous = cached.map_or([0, 0], |(_, counts)| counts);
+        let counts = match tokio::time::timeout(
+            EVAL_COUNT_QUERY_TIMEOUT,
+            crate::meta::eval_jobs::count_open(state.meta.reader()),
+        )
+        .await
+        {
+            Ok(Ok(counts)) => counts,
+            Ok(Err(error)) => {
                 tracing::warn!(error = %error, "eval queue count failed; keeping the last value");
-                cached.map_or([0, 0], |(_, counts)| counts)
+                previous
             }
-        }
+            Err(_elapsed) => {
+                tracing::warn!("eval queue count timed out; keeping the last value");
+                previous
+            }
+        };
+        *cached = Some((now, counts));
+        counts
     }
 
     /// Counts a refused OTLP ingest request.
@@ -786,7 +824,21 @@ mod tests {
     }
 
     async fn render(app: &TestApp) -> String {
-        app.state.telemetry.render(&app.state).await
+        app.state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics encode")
+    }
+
+    #[test]
+    fn advance_never_goes_backwards() {
+        let counter: Counter = Counter::default();
+        let last = AtomicU64::new(0);
+        advance(&counter, &last, 5);
+        advance(&counter, &last, 9);
+        advance(&counter, &last, 7);
+        assert_eq!(counter.get(), 9);
     }
 
     async fn create_webhook(app: &TestApp, seeded: &Seeded) -> Uuid {
@@ -877,7 +929,6 @@ mod tests {
         let seeded = app.seed().await;
         let evaluator = create_webhook(&app, &seeded).await;
         enqueue(&app, &seeded, evaluator, "a1000000000000000000000000000081").await;
-        tokio::time::pause();
         let queued = "llmobs_eval_jobs{status=\"queued\"}";
         assert_eq!(sample(&render(&app).await, queued), Some(1));
 
@@ -888,7 +939,7 @@ mod tests {
             "reused within 10 s"
         );
 
-        tokio::time::advance(Duration::from_secs(11)).await;
+        app.state.clock.advance(Duration::from_secs(11));
         assert_eq!(sample(&render(&app).await, queued), Some(2), "read again");
     }
 

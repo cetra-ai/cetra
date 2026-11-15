@@ -636,7 +636,12 @@ mod tests {
         send(&app.state, &[bearer(&seeded.ingest_key)], &message)
             .await
             .expect("exported");
-        let text = app.state.telemetry.render(&app.state).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
         let expected = [
             "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
             format!("llmobs_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
@@ -656,7 +661,12 @@ mod tests {
         send(&app.state, &[], &traces())
             .await
             .expect_err("no credentials");
-        let text = app.state.telemetry.render(&app.state).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
         let line =
             "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
         assert!(text.lines().any(|candidate| candidate == line), "{text}");
