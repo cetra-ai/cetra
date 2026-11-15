@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import {
   atLeast,
+  canAnnotate,
   canChangeRole,
   canHaveOverride,
   canManageAlerts,
@@ -50,6 +51,14 @@ it("removes members like the server", () => {
   expect(canRemoveMember("owner", "owner", false)).toBe(true);
   expect(canRemoveMember("admin", "member", false)).toBe(true);
   expect(canRemoveMember("member", "viewer", false)).toBe(false);
+});
+
+it("lets members and above annotate", () => {
+  expect(canAnnotate("owner")).toBe(true);
+  expect(canAnnotate("admin")).toBe(true);
+  expect(canAnnotate("member")).toBe(true);
+  expect(canAnnotate("viewer")).toBe(false);
+  expect(canAnnotate(undefined)).toBe(false);
 });
 
 it("lets only admins and owners manage connections", () => {

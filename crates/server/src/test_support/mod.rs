@@ -42,7 +42,7 @@ use crate::api::common::Problem;
 use crate::auth::Limits;
 use crate::auth::roles::{KeyScope, OrgRole};
 use crate::auth::secret::{self, KeyKind, NewKey};
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
     AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig, MediaConfig,
@@ -55,6 +55,7 @@ use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
@@ -168,8 +169,8 @@ pub(crate) fn set_limits(
 }
 
 /// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
-/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
-pub(crate) fn control_plane_token(scope: &str) -> String {
+/// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope, for one request (D-P-71).
+pub(crate) fn control_plane_token(scope: &str, method: &str, path: &str) -> String {
     sign_token(&serde_json::json!({
         "kind": "control_plane",
         "id": Uuid::now_v7().to_string(),
@@ -177,6 +178,8 @@ pub(crate) fn control_plane_token(scope: &str) -> String {
         "expires_at": "2026-01-01T00:05:00Z",
         "audience": PublicUrl::default().origin(),
         "scope": scope,
+        "method": method,
+        "path": path,
     }))
 }
 
@@ -472,6 +475,7 @@ impl TestApp {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -566,7 +570,9 @@ impl TestApp {
         self.state
             .meta
             .write(move |conn| {
-                Box::pin(async move { set_email_verified(conn, user_id, now).await })
+                Box::pin(async move {
+                    set_email_verified(conn, user_id, now, EmailVerifiedVia::MailToken).await
+                })
             })
             .await
             .unwrap();
@@ -636,6 +642,7 @@ impl TestApp {
                             name: Some("Ada Example".to_owned()),
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: true,
                         },
                         now,
@@ -845,9 +852,15 @@ pub(crate) async fn session_cookie_via(
     user_id: Uuid,
     sso_org: Option<OrgId>,
 ) -> String {
-    let header = start_session(&app.state, user_id, None, None, sso_org)
-        .await
-        .unwrap();
+    let header = start_session(
+        &app.state,
+        user_id,
+        None,
+        None,
+        sso_org.map_or(SessionOrigin::Password, SessionOrigin::OrgProvider),
+    )
+    .await
+    .unwrap();
     header
         .to_str()
         .unwrap()
@@ -935,6 +948,17 @@ impl TestRequest {
             HeaderValue::from_str(value).unwrap(),
         );
         self
+    }
+
+    /// Authenticates as the control plane with a token of `scope` for this request only: its
+    /// method and path (D-P-71).
+    pub(crate) fn control_plane(self, scope: &str) -> Self {
+        let token = control_plane_token(
+            scope,
+            self.method.as_str(),
+            self.path.split('?').next().unwrap_or_default(),
+        );
+        self.header("authorization", &format!("Bearer {token}"))
     }
 
     pub(crate) fn body(mut self, body: impl Into<Bytes>) -> Self {
@@ -1239,6 +1263,7 @@ pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: 
                         name: None,
                         password_hash: None,
                         email_verified_at: None,
+                        email_verified_via: None,
                         is_instance_admin: false,
                     },
                     now,

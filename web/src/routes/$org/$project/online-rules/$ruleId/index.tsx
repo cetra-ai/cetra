@@ -1,16 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound } from "@tanstack/react-router";
+import { useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery } from "@/api/queries-evaluation";
 import {
+  backfillsQuery,
   evalJobsKey,
   onlineRuleKey,
   onlineRuleQuery,
   onlineRulesKey,
 } from "@/api/queries-online-rules";
 import { connectionsInit } from "@/api/queries-settings";
+import { DisabledReason } from "@/components/disabled-reason";
+import { BackfillDialog } from "@/components/online-rules/backfill-dialog";
+import { BackfillsTable } from "@/components/online-rules/backfills-table";
 import { JobsTable } from "@/components/online-rules/jobs-table";
 import { RuleBanner } from "@/components/online-rules/rule-banner";
 import { ruleStatusLabel } from "@/components/online-rules/rule-form";
@@ -69,6 +74,9 @@ function OnlineRulePage() {
     gcTime: 0,
   });
   const canManage = canManageEvaluation(data.role);
+  const [backfillOpen, setBackfillOpen] = useState(false);
+  // The same query as the table's, so the button sees a running backfill as soon as the table does.
+  const backfills = useQuery(backfillsQuery(org, project, ruleId));
 
   if (detail.isPending) {
     return null;
@@ -95,6 +103,17 @@ function OnlineRulePage() {
       },
     );
   }
+
+  const backfillRunning = (backfills.data?.data ?? []).some(
+    (backfill) => backfill.status === "running",
+  );
+  const backfillReason = !rule.enabled
+    ? "Enable the rule to run it on existing data."
+    : rule.paused_reason !== undefined
+      ? "Resume the rule to run it on existing data."
+      : backfillRunning
+        ? "A backfill of this rule is running."
+        : undefined;
 
   const period = rule.budget_period === "month" ? "this month" : "today";
   const spent = rule.spend?.spent_usd ?? 0;
@@ -213,6 +232,30 @@ function OnlineRulePage() {
           <p className="text-xs text-muted-foreground">
             {`${rule.dropped_last_hour} matches dropped this hour by the 10 000 per hour cap`}
           </p>
+        ) : null}
+      </section>
+
+      <section aria-label="Backfills" className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-medium">Backfills</h2>
+          {canManage ? (
+            <DisabledReason reason={backfillReason}>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={backfillReason !== undefined}
+                onClick={() => {
+                  setBackfillOpen(true);
+                }}
+              >
+                Run on existing data
+              </Button>
+            </DisabledReason>
+          ) : null}
+        </div>
+        <BackfillsTable org={org} project={project} ruleId={rule.id} />
+        {canManage ? (
+          <BackfillDialog open={backfillOpen} onOpenChange={setBackfillOpen} rule={rule} />
         ) : null}
       </section>
 

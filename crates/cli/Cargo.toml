@@ -34,8 +34,10 @@ name = "llmobs"
 path = "src/main.rs"
 
 [dev-dependencies]
+axum.workspace = true
 bytes.workspace = true
 insta.workspace = true
+llmobs-capture.workspace = true
 opentelemetry-proto.workspace = true
 parquet.workspace = true
 prost.workspace = true

@@ -4,6 +4,7 @@ import { problemOf } from "@/api/problem";
 import { spanDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { useProject } from "@/components/shell/project-context";
+import { AnnotateTab } from "@/components/trace/annotate-tab";
 import { AttributesTab } from "@/components/trace/attributes-tab";
 import { ChatTab } from "@/components/trace/chat-tab";
 import { IoTab } from "@/components/trace/io-tab";
@@ -15,7 +16,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { STORAGE_PREFIX } from "@/product";
 
 const TAB_KEY = `${STORAGE_PREFIX}span-tab`;
-type SpanTab = "chat" | "io" | "attributes" | "scores";
+type SpanTab = "chat" | "io" | "attributes" | "scores" | "annotate";
 
 export function SpanDetail({
   traceId,
@@ -32,7 +33,7 @@ export function SpanDetail({
   const span = useQuery(spanDetailQuery(org, project, traceId, spanId));
   const [choice, setChoice] = useState(readStoredTab);
   function select(value: string) {
-    if (value !== "chat" && value !== "io" && value !== "attributes" && value !== "scores") return;
+    if (!isSpanTab(value)) return;
     setChoice(value);
     localStorage.setItem(TAB_KEY, value);
   }
@@ -75,6 +76,9 @@ export function SpanDetail({
             <TabsTrigger value="scores" className="text-xs">
               Scores
             </TabsTrigger>
+            <TabsTrigger value="annotate" className="text-xs">
+              Annotate
+            </TabsTrigger>
           </TabsList>
           {messages ? (
             <TabsContent value="chat" className="min-h-0 overflow-auto px-3 pb-3">
@@ -90,6 +94,9 @@ export function SpanDetail({
           <TabsContent value="scores" className="min-h-0 overflow-auto px-3 pb-3">
             <ScoresTab traceId={traceId} spanId={spanId} />
           </TabsContent>
+          <TabsContent value="annotate" className="min-h-0 overflow-auto px-3 pb-3">
+            <AnnotateTab traceId={traceId} spanId={spanId} />
+          </TabsContent>
         </Tabs>
       </section>
     </TooltipProvider>
@@ -100,16 +107,25 @@ function hasMessages(span: Schema<"SpanDetail">): boolean {
   return span.input?.format === "messages" || span.output?.format === "messages";
 }
 
+function isSpanTab(value: string): value is SpanTab {
+  return (
+    value === "chat" ||
+    value === "io" ||
+    value === "attributes" ||
+    value === "scores" ||
+    value === "annotate"
+  );
+}
+
 function readStoredTab(): SpanTab | null {
   const stored = localStorage.getItem(TAB_KEY);
-  if (stored === "chat" || stored === "io" || stored === "attributes" || stored === "scores") {
-    return stored;
-  }
-  return null;
+  return stored !== null && isSpanTab(stored) ? stored : null;
 }
 
 function activeTab(choice: SpanTab | null, messages: boolean): SpanTab {
-  if (choice === "scores" || choice === "attributes" || choice === "io") return choice;
+  if (choice === "scores" || choice === "annotate" || choice === "attributes" || choice === "io") {
+    return choice;
+  }
   if (choice === "chat" && messages) return "chat";
   if (messages) return "chat";
   return "io";

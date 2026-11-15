@@ -20,6 +20,7 @@ use crate::meta::api_keys::{ApiKeyRow, NewApiKey, insert_api_key};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::{OrgRow, insert_org_with_derived_slug};
 use crate::meta::projects::{ProjectRow, insert_project_with_derived_slug};
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{
     NewUser, UserRow, count_users, count_users_tx, insert_user, normalize_email,
 };
@@ -236,6 +237,7 @@ async fn insert_first(
             name: input.name.clone(),
             password_hash: Some(input.password_hash.clone()),
             email_verified_at: Some(now),
+            email_verified_via: Some(EmailVerifiedVia::Operator),
             is_instance_admin: true,
         },
         now,

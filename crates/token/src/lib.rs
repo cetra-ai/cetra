@@ -214,6 +214,11 @@ pub struct ControlPlaneClaims {
     pub audience: String,
     /// One of `orgs`, `usage`, `deletions`, `members`, `users`; the cell matches it per route.
     pub scope: String,
+    /// The HTTP method of the one request the token is for, in capitals (D-P-71).
+    pub method: String,
+    /// The path of that request, without the query: it names the org or user acted on, so a
+    /// captured token cannot be replayed on another resource (D-P-71).
+    pub path: String,
 }
 
 /// A payload, tagged by `kind`.

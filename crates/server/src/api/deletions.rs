@@ -31,7 +31,7 @@ pub enum DeletionKind {
 pub enum DeletionStatus {
     /// Finding the traces it covers. The data is still visible.
     Resolving,
-    /// Hidden from every read; bytes are erased within 24 h.
+    /// Hidden from every read; removed from live data within 24 h and from storage after `gc.grace` (D181).
     Pending,
     /// Erased.
     Applied,

@@ -380,7 +380,10 @@ async fn delete_evaluator(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let rules = rules::rules_of_evaluator(conn, id).await?;
+                // Only this project's rules: an id from another project must answer 404 and
+                // name none of that project's rules.
+                let mut rules = rules::rules_of_evaluator(conn, id).await?;
+                rules.retain(|rule| rule.project_id == project);
                 if !rules.is_empty() {
                     return Ok(Removal::InUse(rules));
                 }
@@ -1310,6 +1313,32 @@ mod tests {
         assert_eq!(response.json::<Value>(), expected);
     }
 
+    /// Review 2026-11-15 #3: another org's connection id answered 409 while used, not 404.
+    #[tokio::test]
+    async fn connection_delete_from_another_org_is_404_while_used() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        create_ok(&app, &seeded, &judge_body()).await;
+        let other = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({ "name": "Other" }))
+            .send()
+            .await;
+        assert_eq!(other.status, 201, "{}", text(&other));
+        let slug = other.json::<Value>()["slug"].as_str().unwrap().to_owned();
+        let response = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/{slug}/llm-connections/{FIXTURE_CONNECTION}"),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+    }
+
     #[tokio::test]
     async fn connection_delete_is_409_while_used() {
         let app = TestApp::new().await;
@@ -1577,6 +1606,33 @@ mod tests {
             .send()
             .await;
         assert_eq!(kept.status, 200);
+    }
+
+    /// Review 2026-11-15 #1: the rule check ran before the project check, so another project's
+    /// evaluator id answered 409 with that project's rule ids and names.
+    #[tokio::test]
+    async fn delete_from_another_project_names_none_of_its_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let created = create_ok(&app, &seeded, &judge_body()).await;
+        let id = id_of(&created);
+        rule_on(
+            &app,
+            &seeded,
+            Uuid::from_str(&id).unwrap(),
+            "Secret rule name",
+            None,
+        )
+        .await;
+        let response = app
+            .request(Method::DELETE, &format!("{}/{id}", path(other.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+        assert!(!text(&response).contains("Secret rule name"));
     }
 
     #[tokio::test]

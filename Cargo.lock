@@ -3437,12 +3437,14 @@ name = "llmobs-cli"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.23.1",
  "bytes",
  "chrono",
  "clap",
  "dirs",
  "insta",
+ "llmobs-capture",
  "llmobs-core",
  "llmobs-server",
  "llmobs-ui",

@@ -42,6 +42,7 @@ llmobs-storage = { path = "crates/storage" }
 llmobs-token = { path = "crates/token" }
 llmobs-server = { path = "crates/server" }
 llmobs-ui = { path = "crates/ui" }
+llmobs-capture = { path = "tools/capture" }
 
 # --- pinned families (must stay mutually compatible) ---
 # datafusion 55.2.0 depends on arrow/parquet 59.2 and object_store 0.13.2.

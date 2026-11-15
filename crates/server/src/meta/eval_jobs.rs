@@ -370,6 +370,63 @@ pub(crate) async fn insert_rule_job(
     Ok(result.rows_affected() > 0)
 }
 
+/// Enqueues a backfill job (`kind = 'backfill'`, priority 2, D-I-11). A job with the same dedup
+/// key that `failed` or was `skipped` is re-queued as a backfill job; a queued, running or done
+/// one is left alone. True when a row was inserted or re-queued.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the statement fails, or `MetaError::Corrupt` for a `job` whose kind
+/// is not `KIND_BACKFILL` or that has no rule.
+pub(crate) async fn upsert_backfill_job(
+    conn: &mut SqliteConnection,
+    job: &NewJob,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let corrupt = MetaError::Corrupt {
+        table: "eval_jobs",
+        column: "kind",
+    };
+    if job.kind != KIND_BACKFILL {
+        return Err(corrupt);
+    }
+    let Some(rule_id) = job.rule_id else {
+        return Err(corrupt);
+    };
+    let dedup = dedup_key(job);
+    let result = sqlx::query(
+        "INSERT INTO eval_jobs \
+         (id, project_id, kind, priority, rule_id, evaluator_id, variable_mapping, trace_id, \
+         span_id, trace_start_ns, dedup_key, status, attempts, claims, load_retries, \
+         interruptions, not_before, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, 'queued', 0, 0, 0, 0, ?11, ?11, ?11) \
+         ON CONFLICT(dedup_key) DO UPDATE SET \
+         status = 'queued', kind = excluded.kind, priority = excluded.priority, \
+         attempts = 0, interruptions = 0, load_retries = 0, \
+         error_class = NULL, error = NULL, judge_trace_id = NULL, score_id = NULL, \
+         evaluator_version = NULL, input_tokens = NULL, output_tokens = NULL, cost_usd = NULL, \
+         latency_ms = NULL, finished_at = NULL, \
+         trace_start_ns = excluded.trace_start_ns, \
+         not_before = excluded.not_before, created_at = excluded.created_at, \
+         updated_at = excluded.updated_at \
+         WHERE eval_jobs.status IN ('failed', 'skipped')",
+    )
+    .bind(job.id.to_string())
+    .bind(job.project_id.to_string())
+    .bind(KIND_BACKFILL)
+    .bind(i64::from(priority_of(KIND_BACKFILL)))
+    .bind(rule_id.to_string())
+    .bind(job.evaluator_id.to_string())
+    .bind(job.trace_id.as_bytes().to_vec())
+    .bind(job.span_id.map(|span| span.as_bytes().to_vec()))
+    .bind(job.trace_start_ns)
+    .bind(dedup)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// The job `id` in `project`.
 ///
 /// # Errors
@@ -1121,7 +1178,7 @@ mod tests {
         Candidate, Finish, JobFilter, JobRow, JobUsage, KIND_BACKFILL, KIND_MANUAL, KIND_RULE,
         NewJob, candidates, claim, counts_since, dedup_key, delete_jobs, finish, get_job,
         insert_job, insert_rule_job, jobs_for_traces, list_jobs, prune, recover, requeue_stale,
-        skip_queued_of_rule, start_attempt,
+        skip_queued_of_rule, start_attempt, upsert_backfill_job,
     };
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
@@ -1373,6 +1430,149 @@ mod tests {
         let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
         let job = manual_job(&seeded, trace_id, seeded.judge);
         let error = enqueue_rule(&db, job).await.unwrap_err();
+        assert!(matches!(error, MetaError::Corrupt { .. }), "{error}");
+        assert_eq!(job_count(&db).await, 0);
+    }
+
+    fn backfill_job(seeded: &Seed, trace_id: TraceId) -> NewJob {
+        NewJob {
+            kind: KIND_BACKFILL,
+            ..rule_job(seeded, trace_id, None)
+        }
+    }
+
+    async fn upsert_backfill(db: &MetaDb, job: NewJob, now: i64) -> Result<bool, MetaError> {
+        db.write(move |conn| Box::pin(async move { upsert_backfill_job(conn, &job, now).await }))
+            .await
+    }
+
+    /// Sets a job's status and, for a requeue test, its finish columns.
+    async fn set_finished(db: &MetaDb, id: Uuid, status: &'static str) {
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    "UPDATE eval_jobs SET status = ?, attempts = 6, claims = 7, \
+                     error_class = 'retryable', error = 'x', score_id = ?, evaluator_version = 1, \
+                     input_tokens = 1, output_tokens = 2, cost_usd = 0.5, latency_ms = 9, \
+                     finished_at = ?, created_at = 1, not_before = 1, updated_at = 1 WHERE id = ?",
+                )
+                .bind(status)
+                .bind(Uuid::now_v7().to_string())
+                .bind(NOW)
+                .bind(id.to_string())
+                .execute(&mut *conn)
+                .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upsert_backfill_job_inserts_a_backfill_job() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+        let job = backfill_job(&seeded, trace_id);
+        let id = job.id;
+        assert!(upsert_backfill(&db, job, NOW).await.unwrap());
+
+        let row = read(&db, seeded.project, id).await;
+        assert_eq!(row.kind, KIND_BACKFILL);
+        assert_eq!(row.priority, 2);
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.rule_id, Some(seeded.rule));
+        let key: String = sqlx::query_scalar("SELECT dedup_key FROM eval_jobs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(key, format!("rule:{}:{trace_id}:-", seeded.rule));
+    }
+
+    #[tokio::test]
+    async fn upsert_backfill_job_requeues_failed_and_skipped_jobs() {
+        for status in ["failed", "skipped"] {
+            let (_dir, db) = crate::meta::test_db().await;
+            let seeded = seed(&db).await;
+            let trace_id = trace("0102030405060708090a0b0c0d0e0f10");
+            let rule = rule_job(&seeded, trace_id, None);
+            let id = rule.id;
+            assert!(enqueue_rule(&db, rule).await.unwrap());
+            set_finished(&db, id, status).await;
+
+            let job = backfill_job(&seeded, trace_id);
+            assert!(
+                upsert_backfill(&db, job, NOW + 10).await.unwrap(),
+                "{status}"
+            );
+
+            let row = read(&db, seeded.project, id).await;
+            assert_eq!(row.kind, KIND_BACKFILL);
+            assert_eq!(row.priority, 2);
+            assert_eq!(row.status, "queued");
+            assert_eq!(row.attempts, 0);
+            assert_eq!(row.claims, 7, "the fence survives a requeue");
+            assert_eq!(row.error_class, None);
+            assert_eq!(row.error, None);
+            assert_eq!(row.score_id, None);
+            assert_eq!(row.evaluator_version, None);
+            assert_eq!(row.input_tokens, None);
+            assert_eq!(row.output_tokens, None);
+            assert_eq!(row.cost_usd, None);
+            assert_eq!(row.latency_ms, None);
+            assert_eq!(row.finished_at, None);
+            assert_eq!(row.created_at, NOW + 10);
+            assert_eq!(row.not_before, NOW + 10);
+            assert_eq!(row.updated_at, NOW + 10);
+            assert_eq!(job_count(&db).await, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_backfill_job_leaves_live_jobs_alone() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        for (hex, status) in [
+            ("0102030405060708090a0b0c0d0e0f10", "queued"),
+            ("0102030405060708090a0b0c0d0e0f11", "running"),
+            ("0102030405060708090a0b0c0d0e0f12", "done"),
+        ] {
+            let rule = rule_job(&seeded, trace(hex), None);
+            let id = rule.id;
+            assert!(enqueue_rule(&db, rule).await.unwrap());
+            db.write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE eval_jobs SET status = ? WHERE id = ?")
+                        .bind(status)
+                        .bind(id.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+
+            let job = backfill_job(&seeded, trace(hex));
+            assert!(
+                !upsert_backfill(&db, job, NOW + 1).await.unwrap(),
+                "{status}"
+            );
+            let row = read(&db, seeded.project, id).await;
+            assert_eq!(row.kind, KIND_RULE);
+            assert_eq!(row.priority, 1);
+            assert_eq!(row.status, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_backfill_job_refuses_other_kinds() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let seeded = seed(&db).await;
+        let job = rule_job(&seeded, trace("0102030405060708090a0b0c0d0e0f10"), None);
+        let error = upsert_backfill(&db, job, NOW).await.unwrap_err();
         assert!(matches!(error, MetaError::Corrupt { .. }), "{error}");
         assert_eq!(job_count(&db).await, 0);
     }

@@ -826,6 +826,13 @@ fn path_string(path: &Path) -> Result<String, ConfigError> {
 
 fn map_figment(error: figment::Error) -> ConfigError {
     for part in error.clone() {
+        // The toml parser quotes the offending line, which may hold a secret. Its first line
+        // names the position only.
+        let text = part.to_string();
+        if part.path.is_empty() && text.starts_with("TOML parse error") {
+            let position = text.lines().next().unwrap_or("TOML parse error").to_owned();
+            return ConfigError::Figment(Box::new(figment::Error::from(position)));
+        }
         if let Some(key) = secret_key(&part.path) {
             // Figment's own text can quote the rejected URL, password included.
             // Only the static reason is kept.
@@ -1961,6 +1968,21 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("http_addr"), "{text}");
         assert!(!text.contains("nope"), "{text}");
+    }
+
+    /// Review 2026-11-15 #7: a TOML syntax error quoted the offending line, so a typo next to
+    /// a secret printed the secret.
+    #[test]
+    fn toml_syntax_errors_omit_the_line() {
+        for toml in [
+            "smtp_url = \"smtp://u:hunter2@x.com\" junk\n",
+            "smtp_url = \"smtp://u:hunter2@x.com\n",
+            "[auth.github]\nclient_secret = hunter2\n",
+        ] {
+            let text = load_from(Some(toml), &[]).unwrap_err().to_string();
+            assert!(text.contains("TOML parse error at line"), "{text}");
+            assert!(!text.contains("hunter2"), "{text}");
+        }
     }
 
     #[test]

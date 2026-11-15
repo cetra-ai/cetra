@@ -3,6 +3,8 @@ import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-cr
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
+import backfillDocument from "../../../fixtures/api/static/backfill.json";
+import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
 import channelsDocument from "../../../fixtures/api/static/channels.json";
 import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json";
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
@@ -239,9 +241,25 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/projects/{project}/online-rules/{id}/resume",
   },
   {
+    operationId: "post_backfill_estimate",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate",
+  },
+  {
+    operationId: "post_backfill",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/backfills",
+  },
+  {
     operationId: "post_evaluator_run",
     method: "post",
     path: "/api/v1/projects/{project}/evaluators/{id}/run",
+  },
+  { operationId: "create_scores", method: "post", path: "/api/v1/projects/{project}/scores" },
+  {
+    operationId: "delete_score",
+    method: "delete",
+    path: "/api/v1/projects/{project}/scores/{score_id}",
   },
 ];
 
@@ -525,7 +543,16 @@ const RESPONSES: Record<string, Respond> = {
   post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
+  post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
+  post_backfill: () => HttpResponse.json(backfillDocument, { status: 202 }),
   post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
+  create_scores: ({ body }) => {
+    const scores = Array.isArray(body.scores) ? body.scores : [];
+    return HttpResponse.json({
+      score_ids: scores.map(() => "01900000-0000-7000-8000-000000000310"),
+    });
+  },
+  delete_score: () => noContent(),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
