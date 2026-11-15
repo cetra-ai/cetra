@@ -810,3 +810,261 @@ async fn deletion_end_to_end() {
     drop(server.client);
     server.running.shutdown().await.unwrap();
 }
+
+/// The judge prompt of the end-to-end evaluator.
+const JUDGE_PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
+
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+/// One chat turn of the mock provider: the judge's numeric answer.
+fn judge_turn() -> llmobs_capture::Turn {
+    serde_json::from_value(json!({
+        "api": "openai.chat",
+        "model": "gpt-test",
+        "message": {"text": "{\"explanation\": \"Relevant.\", \"value\": 0.9}"},
+        "finish": "stop",
+        "usage": {"input": 10, "output": 3},
+        "ttft_ms": 0
+    }))
+    .unwrap()
+}
+
+/// `sdk-generator-text`'s one root span (it has an input and an output), on `trace`,
+/// starting at `start_ns` and lasting 998 ms.
+fn timed_request(trace: &str, start_ns: i64) -> ExportTraceServiceRequest {
+    let mut request = fixture_request("sdk-generator-text", trace);
+    let start = u64::try_from(start_ns).unwrap();
+    let end = u64::try_from(start_ns + 998_000_000).unwrap();
+    for resource in &mut request.resource_spans {
+        for scope in &mut resource.scope_spans {
+            for span in &mut scope.spans {
+                span.start_time_unix_nano = start;
+                span.end_time_unix_nano = end;
+            }
+        }
+    }
+    request
+}
+
+/// Nanoseconds since the Unix epoch, now.
+fn now_ns() -> i64 {
+    chrono::Utc::now().timestamp_nanos_opt().unwrap()
+}
+
+/// Reads `path` until its `data` has `count` rows, every 200 ms, for at most `wait`.
+/// Returns the last body read, and whether it had `count` rows.
+async fn rows_until(api: &Api, path: &str, count: usize, wait: Duration) -> (Value, bool) {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let body = api.get(path).await;
+        let done = body["data"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == count);
+        if done || tokio::time::Instant::now() >= deadline {
+            return (body, done);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Track I end to end (D-G-20): a live trigger scores a new trace, and a backfill scores a
+/// trace stored before the rule existed, both against the capture tool's mock provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn online_rules_and_backfill_end_to_end() {
+    // The mock provider answers the judge twice: once for the live trace, once for the backfill.
+    let mock = llmobs_capture::Mock::new(vec![judge_turn(), judge_turn()]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_addr = listener.local_addr().unwrap();
+    let router = mock.router();
+    let provider = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    // The mock listens on 127.0.0.1, a private address the judge may reach only when allowed.
+    let server = start(
+        dir.path(),
+        "\n[security]\nallow_private_network_egress = true\n",
+    )
+    .await;
+    let project = format!("/api/v1/projects/{}", server.proto_id);
+
+    // A trace that is stored before any rule exists, so the live trigger does not track it.
+    let old = format!("{:032x}", 31);
+    post_otlp_http(
+        &server.client,
+        format!("{}/v1/traces", server.http),
+        INIT_KEY,
+        "application/x-protobuf",
+        timed_request(&old, now_ns() - 20 * 60 * NANOS_PER_SECOND).encode_to_vec(),
+    )
+    .await;
+
+    // The connection to the mock, the judge and the rule.
+    let connection = server
+        .api
+        .post(
+            "/api/v1/orgs/acme/llm-connections",
+            &json!({
+                "name": "Mock",
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": format!("http://{provider_addr}/v1"),
+                "default_model": "gpt-test",
+                "max_concurrency": 4,
+                "requests_per_minute": 600
+            }),
+        )
+        .await;
+    let evaluator = server
+        .api
+        .post(
+            &format!("{project}/evaluators"),
+            &json!({
+                "name": "Relevance",
+                "kind": "llm_judge",
+                "config": {
+                    "connection_id": connection["id"],
+                    "model": "gpt-test",
+                    "prompt": JUDGE_PROMPT,
+                    "output": {"type": "numeric", "min": 0.0, "max": 1.0},
+                    "include_reason": true,
+                    "temperature": null,
+                    "max_output_tokens": 1024,
+                    "timeout_ms": 60000
+                },
+                "output_score": {"name": "relevance", "data_type": "numeric"}
+            }),
+        )
+        .await;
+    let rule = server
+        .api
+        .post(
+            &format!("{project}/online-rules"),
+            &json!({
+                "name": "Relevance on traces",
+                "evaluator_id": evaluator["id"],
+                "target": "trace",
+                "variable_mapping": {"input": "trace.input", "output": "trace.output"},
+                "sample_rate": 1.0,
+                "enabled": true
+            }),
+        )
+        .await;
+    let rule_id = rule["id"].as_str().unwrap().to_owned();
+    let scores_path = format!("{project}/scores?rule_id={rule_id}");
+
+    // A live trace, sent until the rule scores it. The sweeper picks up the project within one
+    // tick, so an early send may miss it; resending is safe (D-I-11's dedup key).
+    let live = format!("{:032x}", 32);
+    let live_request = timed_request(&live, now_ns() - NANOS_PER_SECOND).encode_to_vec();
+    let mut live_scores = None;
+    let mut last = Value::Null;
+    for _ in 0..4 {
+        post_otlp_http(
+            &server.client,
+            format!("{}/v1/traces", server.http),
+            INIT_KEY,
+            "application/x-protobuf",
+            live_request.clone(),
+        )
+        .await;
+        let (body, done) = rows_until(&server.api, &scores_path, 1, Duration::from_secs(10)).await;
+        if done {
+            live_scores = Some(body);
+            break;
+        }
+        last = body;
+    }
+    let live_scores =
+        live_scores.unwrap_or_else(|| panic!("no live score after four sends: {last}"));
+
+    // The live score: the rule's judge wrote it for the live trace.
+    let row = &live_scores["data"][0];
+    assert_eq!(row["target"]["trace_id"], live, "{live_scores}");
+    assert_eq!(row["name"], "relevance", "{live_scores}");
+    assert_eq!(row["source"], "llm_judge", "{live_scores}");
+
+    // The estimate: the live trace is after `to`, and its judge trace is an evaluation trace,
+    // so neither counts.
+    let from = chrono::DateTime::from_timestamp_nanos(now_ns() - 3600 * NANOS_PER_SECOND)
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let to = chrono::DateTime::from_timestamp_nanos(now_ns() - 360 * NANOS_PER_SECOND)
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let body = json!({"from": from, "to": to, "max_targets": 100});
+    let estimate_path = format!("{project}/online-rules/{rule_id}/backfills/estimate");
+    let estimate = server.api.post(&estimate_path, &body).await;
+    assert_eq!(estimate["matched"], 1, "{estimate}");
+    assert_eq!(estimate["capped"], false, "{estimate}");
+    assert_eq!(estimate["sampled"], 1, "{estimate}");
+    let input_chars = u64::try_from(JUDGE_PROMPT.chars().count()).unwrap();
+    assert_eq!(
+        estimate["estimated_input_tokens"],
+        json!((input_chars + 4000).div_ceil(4)),
+        "{estimate}"
+    );
+    assert_eq!(estimate["estimated_output_tokens"], 1024, "{estimate}");
+    assert!(estimate.get("estimated_cost_usd").is_none(), "{estimate}");
+
+    // The backfill runs over the old trace and finishes.
+    let backfills_path = format!("{project}/online-rules/{rule_id}/backfills");
+    let created = server.api.post(&backfills_path, &body).await;
+    assert_eq!(created["status"], "running", "{created}");
+    let listed = poll_json(
+        &server.api,
+        &backfills_path,
+        |body| body["data"][0]["status"] == "done",
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(listed["data"][0]["matched"], 1, "{listed}");
+    assert_eq!(listed["data"][0]["enqueued"], 1, "{listed}");
+    let (scores, done) = rows_until(&server.api, &scores_path, 2, Duration::from_secs(10)).await;
+    assert!(done, "no second score: {scores}");
+    assert!(
+        scores["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|score| score["target"]["trace_id"] == old),
+        "{scores}"
+    );
+
+    // A second backfill of the same window pays for nothing: the target is already scored.
+    let again = server.api.post(&backfills_path, &body).await;
+    let again_id = again["id"].as_str().unwrap().to_owned();
+    let listed = poll_json(
+        &server.api,
+        &backfills_path,
+        |body| body["data"][0]["id"] == again_id.as_str() && body["data"][0]["status"] == "done",
+        Duration::from_secs(30),
+    )
+    .await;
+    assert_eq!(listed["data"][0]["matched"], 1, "{listed}");
+    assert_eq!(listed["data"][0]["enqueued"], 0, "{listed}");
+
+    // One judge job per target: the live trace's and the backfill's, both done.
+    let jobs = server
+        .api
+        .get(&format!("{project}/eval-jobs?rule_id={rule_id}"))
+        .await;
+    let jobs = jobs["data"].as_array().unwrap();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    for job in jobs {
+        assert_eq!(job["status"], "done", "{job}");
+    }
+    let mut kinds: Vec<&str> = jobs
+        .iter()
+        .map(|job| job["kind"].as_str().unwrap())
+        .collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["backfill", "rule"]);
+
+    // The mock served exactly the two judge calls, with no error.
+    let log = mock.finish();
+    assert!(log.errors.is_empty(), "{:?}", log.errors);
+    assert_eq!(log.served.len(), 2, "{:?}", log.served);
+
+    drop(server.api);
+    drop(server.client);
+    server.running.shutdown().await.unwrap();
+    provider.abort();
+}
