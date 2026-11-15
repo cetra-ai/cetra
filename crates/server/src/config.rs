@@ -44,6 +44,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("LLMOBS_HTTP_ADDR", "http_addr"),
     ("LLMOBS_OTLP_HTTP_ADDR", "otlp_http_addr"),
     ("LLMOBS_GRPC_ADDR", "grpc_addr"),
+    ("LLMOBS_METRICS_ADDR", "metrics_addr"),
     ("LLMOBS_TRUSTED_PROXIES", "trusted_proxies"),
     ("LLMOBS_OBJECT_STORE", "storage.object_store"),
     ("LLMOBS_SMTP_URL", "smtp_url"),
@@ -617,6 +618,9 @@ pub struct ServerConfig {
         deserialize_with = "deserialize_optional_socket_addr"
     )]
     pub grpc_addr: Option<SocketAddr>,
+    /// Prometheus metrics listener (`GET /metrics`, N M3, D-N-28). Unset or `""`: off.
+    #[serde(default, deserialize_with = "deserialize_optional_socket_addr")]
+    pub metrics_addr: Option<SocketAddr>,
     /// Restore mode (N M3, D-N-25): serve reads and run no outbound work. For restore drills.
     #[serde(default)]
     pub restore_mode: bool,
@@ -925,6 +929,35 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from otlp_http_addr",
+        });
+    }
+    if config
+        .metrics_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
+        return Err(ConfigError::Invalid {
+            key: "metrics_addr",
+            reason: "must differ from http_addr",
+        });
+    }
+    if config.metrics_addr.is_some_and(|addr| {
+        config
+            .otlp_http_addr
+            .is_some_and(|other| same_listener(addr, other))
+    }) {
+        return Err(ConfigError::Invalid {
+            key: "metrics_addr",
+            reason: "must differ from otlp_http_addr",
+        });
+    }
+    if config.metrics_addr.is_some_and(|addr| {
+        config
+            .grpc_addr
+            .is_some_and(|other| same_listener(addr, other))
+    }) {
+        return Err(ConfigError::Invalid {
+            key: "metrics_addr",
+            reason: "must differ from grpc_addr",
         });
     }
     validate_ingest(&config.ingest, &config.media)?;
@@ -3025,6 +3058,21 @@ link_existing_by_email = true
                 "grpc_addr: must differ from otlp_http_addr",
                 "7073",
             ),
+            (
+                "http_addr = \"127.0.0.1:7074\"\nmetrics_addr = \"127.0.0.1:7074\"\n",
+                "metrics_addr: must differ from http_addr",
+                "7074",
+            ),
+            (
+                "otlp_http_addr = \"127.0.0.1:7075\"\nmetrics_addr = \"127.0.0.1:7075\"\n",
+                "metrics_addr: must differ from otlp_http_addr",
+                "7075",
+            ),
+            (
+                "grpc_addr = \"127.0.0.1:7076\"\nmetrics_addr = \"127.0.0.1:7076\"\n",
+                "metrics_addr: must differ from grpc_addr",
+                "7076",
+            ),
         ];
         for (toml, expected, rejected) in cases {
             let error = load_from(Some(toml), &[]).unwrap_err();
@@ -3032,6 +3080,24 @@ link_existing_by_email = true
             assert_eq!(text, expected, "{toml}");
             assert!(!text.contains(rejected), "{text}");
         }
+    }
+
+    #[test]
+    fn metrics_addr_is_off_by_default_and_when_empty() {
+        let default = load_from(None, &[]).unwrap();
+        assert_eq!(default.metrics_addr, None);
+
+        let toml = load_from(Some("metrics_addr = \"\"\n"), &[]).unwrap();
+        assert_eq!(toml.metrics_addr, None);
+
+        let env = load_from(None, &[("LLMOBS_METRICS_ADDR", "  ")]).unwrap();
+        assert_eq!(env.metrics_addr, None);
+
+        let set = load_from(Some("metrics_addr = \"127.0.0.1:9464\"\n"), &[]).unwrap();
+        assert_eq!(set.metrics_addr, Some(socket("127.0.0.1:9464")));
+
+        let from_env = load_from(None, &[("LLMOBS_METRICS_ADDR", "127.0.0.1:9465")]).unwrap();
+        assert_eq!(from_env.metrics_addr, Some(socket("127.0.0.1:9465")));
     }
 
     #[test]

@@ -360,6 +360,7 @@ impl TestApp {
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
         .expect("org SSO state");
+        let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -394,6 +395,7 @@ impl TestApp {
             backup_slot: tokio::sync::Mutex::new(()),
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
+            telemetry,
         });
         state
             .org_sso
@@ -881,6 +883,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         otlp_http_addr: None,
         // Tests must not bind the gRPC port (4317).
         grpc_addr: None,
+        metrics_addr: None,
         restore_mode: false,
         storage: StorageConfig {
             data_dir: data_dir.to_path_buf(),
@@ -1430,6 +1433,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         trusted_proxies: Vec::new(),
         otlp_http_addr: None,
         grpc_addr: None,
+        metrics_addr: None,
         restore_mode: false,
         storage: StorageConfig {
             data_dir: data_dir.to_path_buf(),
