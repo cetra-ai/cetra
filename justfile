@@ -27,6 +27,10 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
 
+# The storage model test with more cases (D-R-14), in release mode.
+model cases="500":
+    LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1

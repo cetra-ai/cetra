@@ -5,6 +5,11 @@
 //! proptest prints the shrunk op list.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use arrow::array::AsArray;
+use datafusion::execution::context::{SessionConfig, SessionContext};
+use llmobs_core::schema::{scores, spans};
 
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
@@ -14,9 +19,11 @@ use super::observe::{
     observe_spans, observe_trace_detail, observe_traces, observe_users, window_of,
 };
 use super::ops::{SPANS, TRACES, score_key_space};
-use super::shape::{DAY_NS, P, day, hex, midnight, score_id, span_id, trace_id};
+use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, trace_id};
+use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
 use crate::reads::{AlertMeasure, Kpi, KpiName, ListScope, MAX_PAGE};
+use crate::test_support::{object_rows, trace_ids_of};
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
@@ -946,4 +953,213 @@ fn expected_score_avg(
     let count = i64::try_from(values.len()).expect("a model has few scores");
     let mean = (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64);
     (count, mean)
+}
+
+/// After `Settle`, the files on disk hold what the model predicts and nothing more (plan § R1.7):
+/// no row a deletion covers, no row before the retention watermark, no file of a dropped project,
+/// one partial per trace (two for class 2), and no staged object left.
+pub(super) fn check_settled_files(h: &Harness, model: &Model) {
+    let traces_by_id: BTreeMap<[u8; 16], u8> = (0..TRACES)
+        .map(|trace| (*trace_id(trace).as_bytes(), trace))
+        .collect();
+    let keys_by_id: BTreeMap<String, ScoreKey> = score_key_space()
+        .into_iter()
+        .map(|key| (score_id(&key).to_string(), key))
+        .collect();
+    for project in [P::A, P::B] {
+        let state = model.project(project);
+        check_settled_spans(h, state, project, &traces_by_id);
+        check_settled_scores(h, state, project, &keys_by_id);
+        check_settled_traces(h, state, project, &traces_by_id);
+    }
+    let staged = h
+        .block_on(h.storage().staged_paths())
+        .expect("staged_paths after settle");
+    assert!(staged.is_empty(), "objects staged after settle: {staged:?}");
+}
+
+/// The catalogued files of `table` that belong to `project`.
+fn files_of(h: &Harness, table: FileTable, project: P) -> Vec<Arc<crate::catalog::FileMeta>> {
+    h.storage()
+        .catalog_files(table)
+        .into_iter()
+        .filter(|file| file.project == project.id())
+        .collect()
+}
+
+fn check_settled_spans(
+    h: &Harness,
+    state: &ProjectModel,
+    project: P,
+    traces_by_id: &BTreeMap<[u8; 16], u8>,
+) {
+    for file in files_of(h, FileTable::Spans, project) {
+        assert!(
+            !state.dropped,
+            "project {project:?} is dropped, but spans file {} is still catalogued",
+            file.path
+        );
+        if let Some(keep) = state.keep_from {
+            assert!(
+                file.day >= keep,
+                "spans file {} of day {} is before the retention watermark {keep}",
+                file.path,
+                file.day
+            );
+        }
+        let batch = object_rows(h.dir(), &file);
+        let trace_bytes = trace_ids_of(&batch);
+        let span_bytes = batch
+            .column_by_name(spans::SPAN_ID)
+            .expect("a spans file has a span_id column")
+            .as_fixed_size_binary();
+        let ingests = batch
+            .column_by_name(spans::INGEST_TIME)
+            .expect("a spans file has an ingest_time column")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        let mut keys = BTreeSet::new();
+        for (row, bytes) in trace_bytes.iter().enumerate() {
+            let trace = *traces_by_id
+                .get(bytes)
+                .expect("a stored span belongs to a trace of the model");
+            let ingest = ingests.value(row);
+            assert!(
+                !state.covers_span(trace, ingest),
+                "project {project:?}: spans file {} keeps trace {trace} written at {ingest}, \
+                 which a deletion covers",
+                file.path
+            );
+            assert!(
+                keys.insert((trace, span_bytes.value(row).to_vec())),
+                "project {project:?}: spans file {} holds a span of trace {trace} twice",
+                file.path
+            );
+        }
+    }
+}
+
+fn check_settled_scores(
+    h: &Harness,
+    state: &ProjectModel,
+    project: P,
+    keys_by_id: &BTreeMap<String, ScoreKey>,
+) {
+    for file in files_of(h, FileTable::Scores, project) {
+        assert!(
+            file.fully_merged,
+            "scores file {} is not fully merged after settle",
+            file.path
+        );
+        let batch = object_rows(h.dir(), &file);
+        let ids = batch
+            .column_by_name(scores::SCORE_ID)
+            .expect("a scores file has a score_id column")
+            .as_string::<i32>();
+        let deleted = batch
+            .column_by_name(scores::DELETED)
+            .expect("a scores file has a deleted column")
+            .as_boolean();
+        let ingests = batch
+            .column_by_name(scores::INGEST_TIME)
+            .expect("a scores file has an ingest_time column")
+            .as_primitive::<arrow::datatypes::TimestampNanosecondType>();
+        for row in 0..batch.num_rows() {
+            let key = keys_by_id
+                .get(ids.value(row))
+                .expect("a stored score belongs to a key of the model");
+            assert_eq!(
+                key.project, project,
+                "scores file {} of project {project:?} holds a score of {:?}",
+                file.path, key.project
+            );
+            assert!(
+                !deleted.value(row),
+                "scores file {} keeps a deleted version after settle",
+                file.path
+            );
+            assert!(
+                !state.covers_score(key, ingests.value(row)),
+                "project {project:?}: scores file {} keeps a score a deletion covers",
+                file.path
+            );
+        }
+    }
+}
+
+/// The merged `traces` rows of `project`, read through the traces provider as the server does:
+/// one row per trace, with its partial count.
+fn stored_partials(h: &Harness, project: P) -> Vec<(String, i32)> {
+    h.block_on(async {
+        let query = h
+            .storage()
+            .query(project.id(), Default::default())
+            .await
+            .expect("query for the traces file check");
+        let ctx =
+            SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
+        ctx.register_table("traces_t", Arc::clone(&query.traces))
+            .expect("register traces_t");
+        let batches = ctx
+            .sql("SELECT trace_id, partial_count FROM traces_t")
+            .await
+            .expect("select from traces_t")
+            .collect()
+            .await
+            .expect("collect traces_t");
+        let mut rows = Vec::new();
+        for batch in batches {
+            let ids = batch.column(0).as_fixed_size_binary();
+            let partials = batch
+                .column(1)
+                .as_primitive::<arrow::datatypes::Int32Type>();
+            for row in 0..batch.num_rows() {
+                rows.push((hex(ids.value(row)), partials.value(row)));
+            }
+        }
+        rows
+    })
+}
+
+fn check_settled_traces(
+    h: &Harness,
+    state: &ProjectModel,
+    project: P,
+    traces_by_id: &BTreeMap<[u8; 16], u8>,
+) {
+    let expected: BTreeSet<String> = state
+        .expected_traces()
+        .into_iter()
+        .map(|row| row.trace_id)
+        .collect();
+    let stored = stored_partials(h, project);
+    let observed: BTreeSet<String> = stored.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(
+        observed.len(),
+        stored.len(),
+        "project {project:?}: the traces provider returns a trace twice after settle"
+    );
+    assert_eq!(
+        observed, expected,
+        "project {project:?}: the traces provider after settle lists other traces than the model"
+    );
+    let trace_of_hex: BTreeMap<String, u8> = traces_by_id
+        .iter()
+        .map(|(bytes, trace)| (hex(bytes), *trace))
+        .collect();
+    for (id, partials) in &stored {
+        let trace = trace_of_hex[id];
+        if trace % 4 == 2 {
+            // Class 2 crosses midnight: one partial per day once its anchor expired (spec 03
+            // § Trace anchor, known limit).
+            assert!(
+                (1..=2).contains(partials),
+                "project {project:?}: class-2 trace {trace} has {partials} partials, expected 1 or 2"
+            );
+        } else {
+            assert_eq!(
+                *partials, 1,
+                "project {project:?}: trace {trace} has {partials} partials after settle, expected 1"
+            );
+        }
+    }
 }

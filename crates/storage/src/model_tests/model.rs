@@ -220,7 +220,7 @@ impl ProjectModel {
     }
 
     /// Whether a span copy of `trace` written at `ingest` is covered by a deletion (spec 03 §7).
-    fn covers_span(&self, trace: u8, ingest: i64) -> bool {
+    pub(super) fn covers_span(&self, trace: u8, ingest: i64) -> bool {
         let user = trace_shape(self.project, trace).user;
         self.deletions.iter().any(|deletion| {
             ingest <= deletion.cutoff
@@ -230,7 +230,7 @@ impl ProjectModel {
     }
 
     /// Whether a score version written at `ingest` is covered by a deletion (spec 03 §7).
-    fn covers_score(&self, key: &ScoreKey, ingest: i64) -> bool {
+    pub(super) fn covers_score(&self, key: &ScoreKey, ingest: i64) -> bool {
         let (trace, session, user) = score_context(self.project, key);
         self.deletions.iter().any(|deletion| {
             ingest <= deletion.cutoff

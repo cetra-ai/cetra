@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use proptest::strategy::Union;
 use uuid::Uuid;
 
+use super::check::check_settled_files;
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, SpanCopy};
 use super::observe::{observe_eval_trace_ids, observe_user_scope};
@@ -764,12 +765,15 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
         "compaction still has jobs after {SETTLE_PASSES} passes"
     );
 
-    // 5. Nothing obsolete.
+    // 5. Nothing obsolete, nothing staged: the outputs of failed jobs stay staged until GC.
     collect_obsolete(harness);
+    harness
+        .block_on(harness.storage().collect_staged(Duration::ZERO))
+        .expect("collect_staged while settling");
 
     // 6. Compaction collapsed every key to one copy.
     keep_newest_copies(&mut model.a);
     keep_newest_copies(&mut model.b);
 
-    // R1.7: the physical checks of the settled files go here.
+    check_settled_files(harness, model);
 }

@@ -1,4 +1,3 @@
-#![allow(dead_code)] // removed in R1.7, once every item is used
 //! Track R M1: random operations against `Storage` and an in-memory model of
 //! every read (docs/plans/r-hardening/01-m1-model.md).
 
@@ -365,5 +364,28 @@ fn regression_m1_1_span_paging_with_duplicates() {
             split: true,
         },
         Op::Crash,
+    ]);
+}
+
+/// The first case of the retired `compaction/model.rs` regression file, on the new op set: a
+/// trace re-sent after a restart and after its day was compacted.
+#[test]
+fn regression_compaction_restart_resend() {
+    run_case(&[
+        Op::Append {
+            project: P::A,
+            trace: 1,
+            count: 1,
+            split: false,
+        },
+        Op::Restart,
+        Op::Compact { hours: 41 },
+        Op::Compact { hours: 66 },
+        Op::Compact { hours: 34 },
+        Op::Resend {
+            project: P::A,
+            trace: 1,
+            pick: 0,
+        },
     ]);
 }

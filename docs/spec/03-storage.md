@@ -454,6 +454,8 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Crash | WAL replay before ingestion opens; staged objects are GC'd |
 | Corrupted Parquet file | A read that fails with a decode error makes the files it read **suspects**: compaction and rewrite jobs (their inputs), the deletion pass's check scan, the anchor rebuild at open (which skips the file instead of failing), the media GC and queries (every file the query scanned). After each deletion pass, a verify pass reads each suspect again, whole, from the object store (never the read cache). A store error puts it back in the queue; a file read whole with the catalog's row count is healthy and isn't re-verified for an hour; a decode error, a wrong size or row count, or a missing object makes it **corrupt**, logged as an error. A corrupt `spans` file is quarantined with its `traces` file, a corrupt `scores` file alone: state `quarantined`, out of every snapshot, object kept for inspection, its rows lost. A corrupt `traces` file is rebuilt from its `spans` file by a rewrite job instead; nothing is lost. Quarantined files become `obsolete` (and GC deletes them) when retention drops their day, when their project is dropped, or when a pending deletion may cover them (§7). There is no periodic scrub (D-A1-10) |
 
+The model test (`crates/storage/src/model_tests/`, track R M1) checks every read against an in-memory model through restarts and crashes.
+
 ## 11. Toward multi-node
 
 Nothing here assumes a single node, apart from the WAL and memtable living in the same process as the querier. The planned split:
