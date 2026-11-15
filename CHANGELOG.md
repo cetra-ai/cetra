@@ -12,3 +12,16 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
+- Plans with a data-access window hide older traces, spans, scores and media from every read
+  (UI, API, SQL, MCP, alerts, evaluators); the time-range picker shows the limit.
+- Control-plane org deletion (`DELETE /api/internal/v1/orgs/{org_id}`) and an applied-drops feed
+  (`GET /api/internal/v1/deletions`) for cloud cells.
+
+### Changed
+
+- A dropped organization's daily usage is kept 40 days after the drop, for billing, then deleted.
+
+### Upgrade notes
+
+- Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*`
+  answers 404 and org and control-plane tokens are refused (D-P-50).
