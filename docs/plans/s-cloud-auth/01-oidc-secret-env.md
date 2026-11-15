@@ -92,6 +92,7 @@ fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), C
 Notes for the implementer:
 - `split_key` returns `None` for names that are not `LLMOBS_…` or are filtered; it lower-cases and joins the parts with `.`, so `LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET` gives `auth.oidc.cloud.client_secret`. Do not change `split_key`.
 - The error key is the variable's name (not secret: it holds the provider name). `ConfigError::Provider`'s `key` is a `String`, so this needs no new variant. Its doc comment says "Dotted path"; change that line to `/// Dotted path, for example \`auth.oidc.okta.issuer\`, or the name of the environment variable at fault.`
+- When the environment holds the same variable in two spellings (`LLMOBS_…` and `llmobs_…`), both apply and the last in iteration order wins; that order is unspecified, as for every other `LLMOBS_` variable.
 - A provider whose `name` is invalid (uppercase, `_`, too long) still gets its variable applied when one matches; `validate_oidc` rejects the name right after. That is fine.
 
 ### 3. Call it from `load_from`
@@ -161,7 +162,7 @@ Add these tests:
 2. `oidc_env_name_ignores_case`: the same with the variable written `llmobs_auth__oidc__my_idp__client_secret` → the secret is applied.
 3. `oidc_env_secret_wins_over_the_file`: `load_from(Some(&oidc("")), &[("LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET", "from-env")])` → `client_secret.expose() == "from-env"` (the `oidc` helper's provider is `okta` with `client_secret = "secret"`).
 4. `oidc_secret_is_still_required`: `assert_rejected(OIDC_WITHOUT_SECRET, "auth.oidc.my-idp.client_secret", "client secret is required")`; and `load_from(Some(OIDC_WITHOUT_SECRET), &[("LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET", "")])` fails with the same text.
-5. `stray_oidc_env_is_refused`: for each of `LLMOBS_AUTH__OIDC__OTHER__CLIENT_SECRET` (no such provider), `LLMOBS_AUTH__OIDC__0__CLIENT_SECRET`, `LLMOBS_AUTH__OIDC__OKTA__CLIENT_ID` and `LLMOBS_AUTH__OIDC__0__NAME`, with the value `"leaked-value"`, `load_from(Some(&oidc("")), &[(var, "leaked-value")])` fails; its `to_string()` equals `format!("{var}: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file")` and does not contain `leaked-value`.
+5. `stray_oidc_env_is_refused`: for each of `LLMOBS_AUTH__OIDC__OTHER__CLIENT_SECRET` (no such provider), `LLMOBS_AUTH__OIDC__0__CLIENT_SECRET`, `LLMOBS_AUTH__OIDC__OKTA__CLIENT_ID` and `LLMOBS_AUTH__OIDC__0__NAME`, all written in upper case (the error key is the upper-cased variable name), with the value `"leaked-value"`, `load_from(Some(&oidc("")), &[(var, "leaked-value")])` fails; its `to_string()` equals `format!("{var}: only LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET is read, for a provider of the config file")` and does not contain `leaked-value`.
 6. `oidc_env_without_any_provider_is_refused`: `load_from(None, &[("LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET", "x")])` fails with the same reason (the key is `LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET`).
 7. `oidc_env_name_maps_dashes`: `assert_eq!(oidc_env_name("cloud"), "LLMOBS_AUTH__OIDC__CLOUD__CLIENT_SECRET")` and `assert_eq!(oidc_env_name("my-idp-2"), "LLMOBS_AUTH__OIDC__MY_IDP_2__CLIENT_SECRET")`.
 
@@ -183,13 +184,23 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 
 ### 7. Spec 08
 
-In `docs/spec/08-auth.md` § OAuth / OIDC, in the TOML block, replace the `[[auth.oidc]]` line `client_secret = "…"` (the one after `client_id = "…"` under `issuer = "https://acme.okta.com"`) with:
+In `docs/spec/08-auth.md` § OAuth / OIDC, `client_secret = "…"` appears three times; edit only the `[[auth.oidc]]` one. Replace the three lines
 
 ```toml
-client_secret = "…"      # or LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET (spec 12, D-S-2)
+client_id = "…"
+client_secret = "…"
+scopes = ["openid", "email", "profile"]
 ```
 
-Change only that one line of the block (GitHub and Google keep theirs).
+with
+
+```toml
+client_id = "…"
+client_secret = "…"      # or LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET (spec 12, D-S-2)
+scopes = ["openid", "email", "profile"]
+```
+
+(GitHub and Google keep theirs).
 
 ### 8. Self-hosting docs
 
