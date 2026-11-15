@@ -62,7 +62,7 @@ name = "okta"            # provider id → identities.provider = "oidc:okta"
 display_name = "Okta"
 issuer = "https://acme.okta.com"
 client_id = "…"
-client_secret = "…"
+client_secret = "…"      # or LLMOBS_AUTH__OIDC__OKTA__CLIENT_SECRET (spec 12, D-S-2)
 scopes = ["openid", "email", "profile"]
 link_existing_by_email = false   # default false
 allowed_domains = []             # verified email domain

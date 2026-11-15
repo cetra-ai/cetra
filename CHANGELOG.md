@@ -20,9 +20,15 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
+- An `LLMOBS_AUTH__OIDC__*` environment variable other than
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
+  server at start; such variables used to be ignored. Remove them.
 
 ### Added
 
+- Auth: an `[[auth.oidc]]` provider's client secret can come from
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
+  `llmobs.toml` (D-S-2).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
