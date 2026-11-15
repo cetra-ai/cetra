@@ -36,7 +36,8 @@ CREATE TABLE web_sessions (
   id TEXT PRIMARY KEY,                -- SHA-256 hex of the cookie value (32 random bytes, base64url)
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-  user_agent TEXT, ip TEXT
+  user_agent TEXT, ip TEXT,
+  sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL -- the org whose provider started it (D-P-59, track P M5)
 );
 
 CREATE TABLE orgs (
@@ -513,6 +514,42 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
 
 `spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
+
+## Per-org SSO (track P, `ee`)
+
+One OIDC provider and any number of email domains per org (D-P-52, D-P-54). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57).
+
+```sql
+CREATE TABLE org_sso_providers (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
+    org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    enabled INTEGER NOT NULL DEFAULT 0,
+    enforced INTEGER NOT NULL DEFAULT 0,
+    jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
+    last_login_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE org_sso_domains (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,               -- lowercase, no trailing dot
+    token TEXT NOT NULL,                -- 32 lowercase hex; the TXT value's random part (public)
+    verified_at INTEGER,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (org_id, domain)
+);
+
+CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL;
+```
+
+Deleting an org deletes its provider and domains by cascade, and its identities (`identities.provider = 'org:<org_id>'`) explicitly, since no key references the org from `identities`.
 
 ## Encryption of secrets
 

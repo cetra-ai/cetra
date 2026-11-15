@@ -3,5 +3,6 @@
 //! the rest of the crate is MIT. Core code calls these modules directly.
 
 pub(crate) mod license;
+pub(crate) mod org_sso;
 pub(crate) mod project_roles;
 pub(crate) mod sso_enforcement;
