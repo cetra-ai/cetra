@@ -53,6 +53,14 @@ pub(super) const MODEL_PUT_SIZES: PutSizes = PutSizes {
     part: 8 * 1024,
 };
 
+/// The sizes of a run against a real bucket (R4.8). Every part but the last must be at least 5 MiB
+/// (`EntityTooSmall` otherwise), so the parts are 5 MiB; a file above 16 KiB is still multipart, as
+/// one last part.
+pub(super) const REMOTE_PUT_SIZES: PutSizes = PutSizes {
+    single_max: 16 * 1024,
+    part: 5 * 1024 * 1024,
+};
+
 /// `model_config` for S3 mode (R4.4): the read cache is on, so every data-file read goes through
 /// it, and uploads and compaction run one at a time, so most calls are sequential and a seed
 /// usually replays. The data directory keeps the WAL and the catalog.

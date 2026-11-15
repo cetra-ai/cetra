@@ -75,6 +75,8 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `LLMOBS_MODEL_S3_CASES=N` sets the case count of the S3-mode model test (`model_tests::storage_matches_the_model_on_s3`, default 4, measured in R4.5); `just model-s3 N` runs it in release mode with the statistics on.
 - `LLMOBS_TEST_S3_ENDPOINT` (with `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage S3 test against a real S3-compatible server; `crates/storage/tests/s3.rs` shows how to start one (D119).
 - `LLMOBS_TEST_S3_REGION` and `LLMOBS_TEST_S3_PATH_STYLE` adapt it to a remote provider (R M4).
+- `LLMOBS_MODEL_S3_REMOTE=1` runs the S3-mode model test against the `LLMOBS_TEST_S3_*` bucket, in a prefix of its own, and deletes the prefix's objects after each case (`just model-s3 N` with it; R M4).
+- `crates/storage/tests/s3_probe.rs` probes what our S3 code relies on against a real provider. Its tests are `#[ignore]`d and skip without `LLMOBS_TEST_S3_ENDPOINT`: `cargo test --release -p llmobs-storage --all-features --test s3_probe -- --ignored --nocapture` (R M4).
 - `LLMOBS_TEST_TOXIPROXY` (with `LLMOBS_TEST_S3_*` and optionally `LLMOBS_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway.
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.

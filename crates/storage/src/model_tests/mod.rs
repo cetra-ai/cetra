@@ -16,7 +16,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 
 use check::{check_deletions, check_dropped, check_full, check_no_leaked_uploads, check_quick};
-use harness::{Harness, MODEL_PUT_SIZES};
+use harness::{Harness, MODEL_PUT_SIZES, REMOTE_PUT_SIZES};
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
@@ -26,12 +26,16 @@ use uuid::Uuid;
 use crate::config::{StorageConfig, WalSync};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::fs::lossy::CrashMode;
+use crate::objects::PutSizes;
 use crate::reads::MAX_PAGE;
 use crate::test_support::{Call, ChaosStore, Rates};
 use bytes::Bytes;
-use object_store::ObjectStoreExt;
+use futures::TryStreamExt;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
+use object_store::prefix::PrefixStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
 fn cases() -> u32 {
@@ -88,8 +92,17 @@ proptest! {
     /// replay a failure, script the faults of the printed journal (R4.10), not the seed.
     #[test]
     fn storage_matches_the_model_on_s3(ops in ops::ops_s3(), seed in any::<u64>().no_shrink()) {
-        let harness = run_case_s3(&ops, Some((seed, Rates::MODEL)));
-        record_stats(&harness);
+        if remote_mode() {
+            run_case_s3_remote(&ops, seed);
+        } else {
+            let harness = run_case_s3(
+                &ops,
+                Some((seed, Rates::MODEL)),
+                Arc::new(InMemory::new()),
+                MODEL_PUT_SIZES,
+            );
+            record_stats(&harness);
+        }
     }
 }
 
@@ -109,12 +122,101 @@ fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness
     run_with(Harness::with_config(change), ops, None)
 }
 
-/// Runs `ops` in S3 mode (R4.4): the store is an in-memory bucket behind a chaos store, with
-/// `MODEL_PUT_SIZES`. `faults`: `Some((seed, rates))` sets the fault schedule (`set_schedule`).
-/// The schedule is on during each op but `Settle`, and off during the checks (R4.5). Returns the
-/// harness, with the schedule off.
-fn run_case_s3(ops: &[Op], faults: Option<(u64, Rates)>) -> Harness {
-    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+/// `LLMOBS_MODEL_S3_REMOTE=1` (R4.8): the S3-mode case runs against the bucket of the
+/// `LLMOBS_TEST_S3_*` variables instead of an in-memory one.
+fn remote_mode() -> bool {
+    std::env::var("LLMOBS_MODEL_S3_REMOTE").is_ok_and(|value| value == "1")
+}
+
+/// One S3-mode case against the bucket (R4.8), in a prefix of its own, with `REMOTE_PUT_SIZES`.
+/// The case's objects are deleted afterwards, whether the case passed or not. Its abandoned uploads
+/// (a failed abort, a lost create answer, a cancelled task) cannot be listed through `object_store`:
+/// the bucket's lifecycle rule removes them (`docs/self-hosting/s3.md`).
+fn run_case_s3_remote(ops: &[Op], seed: u64) {
+    let prefix = format!("model-{}-{seed:016x}", now_ms());
+    let inner: Arc<dyn ObjectStore> = Arc::new(PrefixStore::new(
+        remote_bucket(),
+        ObjectPath::from(prefix.as_str()),
+    ));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        let harness = run_case_s3(ops, Some((seed, Rates::MODEL)), inner, REMOTE_PUT_SIZES);
+        record_stats(&harness);
+    }));
+    let deleted = block_on_fresh(delete_prefix(&remote_bucket(), &prefix));
+    if let Err(panic) = outcome {
+        resume_unwind(panic);
+    }
+    deleted.expect("delete the objects of an S3 model case");
+}
+
+/// The bucket of an `LLMOBS_MODEL_S3_REMOTE=1` run: `LLMOBS_TEST_S3_ENDPOINT` and
+/// `LLMOBS_TEST_S3_BUCKET`, with the region and addressing style `tests/s3.rs` reads, and the
+/// `AWS_*` credentials from the environment.
+fn remote_bucket() -> AmazonS3 {
+    let endpoint = std::env::var("LLMOBS_TEST_S3_ENDPOINT")
+        .expect("LLMOBS_TEST_S3_ENDPOINT is set when LLMOBS_MODEL_S3_REMOTE=1");
+    let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET")
+        .expect("LLMOBS_TEST_S3_BUCKET is set when LLMOBS_MODEL_S3_REMOTE=1");
+    let region = std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let path_style = !matches!(
+        std::env::var("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+        Ok("false")
+    );
+    AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_endpoint(&endpoint)
+        .with_region(region)
+        .with_virtual_hosted_style_request(!path_style)
+        .with_allow_http(endpoint.starts_with("http://"))
+        .build()
+        .expect("an S3 client for the LLMOBS_TEST_S3_* bucket")
+}
+
+/// Deletes every object under `prefix`. It lists the bucket itself, not a chaos store, so the
+/// listing is not counted as a bucket listing (`check_full`, R4.4).
+async fn delete_prefix(bucket: &AmazonS3, prefix: &str) -> Result<(), String> {
+    let root = ObjectPath::from(prefix);
+    let locations: Vec<ObjectPath> = bucket
+        .list(Some(&root))
+        .map_ok(|meta| meta.location)
+        .try_collect()
+        .await
+        .map_err(|error| error.to_string())?;
+    for location in locations {
+        bucket
+            .delete(&location)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn block_on_fresh<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for the cleanup")
+        .block_on(future)
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+/// Runs `ops` in S3 mode (R4.4): the store is `inner` behind a chaos store, with `put_sizes`
+/// (`MODEL_PUT_SIZES` in memory, `REMOTE_PUT_SIZES` on a bucket). `faults`: `Some((seed, rates))`
+/// sets the fault schedule (`set_schedule`). The schedule is on during each op but `Settle`, and off
+/// during the checks (R4.5). Returns the harness, with the schedule off.
+fn run_case_s3(
+    ops: &[Op],
+    faults: Option<(u64, Rates)>,
+    inner: Arc<dyn ObjectStore>,
+    put_sizes: PutSizes,
+) -> Harness {
+    let harness = Harness::new_s3(inner, put_sizes);
     let seed = faults.map(|(seed, _)| seed);
     if let Some((seed, rates)) = faults {
         harness
@@ -737,7 +839,12 @@ fn a_high_rate_run_injects_faults() {
         Op::Compact { hours: 60 },
     ]);
     // Seed 3 has factor 4: the boosted ops run at `before` 0.24 (0.06 times 4).
-    let harness = run_case_s3(&ops, Some((3, rates)));
+    let harness = run_case_s3(
+        &ops,
+        Some((3, rates)),
+        Arc::new(InMemory::new()),
+        MODEL_PUT_SIZES,
+    );
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store");
@@ -812,6 +919,8 @@ fn a_run_leaves_the_schedule_off() {
             Op::Settle,
         ],
         Some((1, Rates::MODEL)),
+        Arc::new(InMemory::new()),
+        MODEL_PUT_SIZES,
     );
     let chaos = harness
         .chaos()
@@ -833,7 +942,7 @@ fn s3_mode_uses_both_upload_paths() {
         })
         .collect();
     ops.extend([Op::Restart, Op::Compact { hours: 60 }, Op::Settle]);
-    let harness = run_case_s3(&ops, None);
+    let harness = run_case_s3(&ops, None, Arc::new(InMemory::new()), MODEL_PUT_SIZES);
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store");
