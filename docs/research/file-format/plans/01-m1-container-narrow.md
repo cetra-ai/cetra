@@ -636,7 +636,14 @@ The § Conventions checks pass.
    - **Decode** with `arrow::ipc::reader::StreamReader::try_new(body, None)`, where `body: &[u8]` (a byte slice implements `Read`). Do not use `std::io::Cursor`, which would clash with `format::Cursor`. Validation stays on (the default). Require exactly one batch, one column, and the field's data type, otherwise `Corrupt { what: "ipc chunk" }`.
 3. **Chunker.**
    - For `Varbin`, a row counts as `len + 4` bytes.
-   - For `Ipc`, measure each 256-row slice with `slice.to_data().get_slice_memory_size()?`. Do not use `get_array_memory_size()`, which counts the whole underlying buffers of a slice. Close the chunk when the sum reaches `chunk_max_bytes`, or at `chunk_max_rows`.
+   - For `Ipc`, measure each 256-row slice with `fn slice_bytes(array: &dyn Array) -> Result<usize>`, defined recursively:
+     - **List / LargeList / Map:** `(rows + 1) × offset width` plus `slice_bytes` of the child sliced to `offsets[first] .. offsets[last]`. The child range comes from `value_offsets()`; an empty slice adds 0.
+     - **Struct:** the sum of `slice_bytes` of its (already sliced) columns, plus `ceil(rows / 8)` when it has nulls.
+     - **Anything else:** `array.to_data().get_slice_memory_size()?`.
+
+     arrow 59.3's `get_slice_memory_size` on a list slice counts the whole child array, which is why the recursion is needed.
+
+     Close the chunk when the sum reaches `chunk_max_bytes`, or at `chunk_max_rows`. Do not use `get_array_memory_size()`.
 4. **`writer.rs` type dispatch.** A column is encoded by the first rule that matches:
 
    | Column type | Encoding |
