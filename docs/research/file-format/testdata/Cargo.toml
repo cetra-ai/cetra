@@ -11,3 +11,4 @@ llmobs-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
 arrow = { version = "59.2", default-features = false, features = ["ipc", "prettyprint"] }
 parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd"] }
 serde_json = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

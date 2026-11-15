@@ -412,7 +412,7 @@ fn zipf_doc(rng: &mut Rng, n: usize) -> usize {
     ((u * u * u) * n as f64) as usize % n
 }
 
-fn preview(s: &str) -> String {
+pub fn preview(s: &str) -> String {
     s.chars().take(512).collect()
 }
 

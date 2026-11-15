@@ -1711,6 +1711,7 @@ dependencies = [
  "llmobs-core",
  "parquet",
  "serde_json",
+ "xxhash-rust",
 ]
 
 [[package]]

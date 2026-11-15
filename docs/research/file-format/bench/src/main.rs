@@ -19,6 +19,8 @@ use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTable
 use datafusion::prelude::{SessionConfig, SessionContext};
 use fmt_testdata::datagen;
 use llmobs_core::batch::spans_to_record_batch;
+use llmobs_core::enums::SpanKind;
+use llmobs_core::span::Span;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
@@ -50,7 +52,19 @@ async fn main() -> R<()> {
             let dir = PathBuf::from(&args[2]);
             let traces: usize = args[3].parse()?;
             let files: usize = args[4].parse()?;
-            generate(&dir, traces, files).await
+            let swe = match args.get(5).map(String::as_str) {
+                None => None,
+                Some("--swe") => {
+                    let max: usize = args.get(6).ok_or(USAGE)?.parse()?;
+                    let shards = args.get(7..).unwrap_or_default();
+                    if shards.is_empty() {
+                        return Err(USAGE.into());
+                    }
+                    Some((max, shards))
+                }
+                Some(_) => return Err(USAGE.into()),
+            };
+            generate(&dir, traces, files, swe).await
         }
         Some("query") => {
             let dir = PathBuf::from(&args[2]);
@@ -75,20 +89,36 @@ async fn main() -> R<()> {
             let dir = PathBuf::from(&args[2]);
             payload_cmd(&dir)
         }
-        _ => Err("usage: fmtbench gen <dir> <traces> <files> | query <dir> [runs] [only]".into()),
+        _ => Err(USAGE.into()),
     }
 }
 
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir> [runs] [only]";
+
 // ------------------------------------------------------------------ generate
 
-async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
+/// `swe` = (maximum trajectories, shard paths): spans come from the SWE-agent
+/// shards instead of synthetic traces, and `traces` is ignored.
+async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &[String])>) -> R<()> {
     let t0 = Instant::now();
     let world = datagen::World::new(7);
     let mut rng = datagen::Rng::new(42);
-    let mut spans = Vec::new();
-    for _ in 0..traces {
-        world.trace(&mut rng, &mut spans);
-    }
+    let (mut spans, needles) = match swe {
+        Some((max, shards)) => {
+            println!("traces argument ignored: spans come from {} SWE shards", shards.len());
+            let paths: Vec<PathBuf> = shards.iter().map(PathBuf::from).collect();
+            let spans = fmt_testdata::swe::spans(&paths, max, &world, &mut rng)?;
+            let needles = pick_needles(&spans);
+            (spans, needles)
+        }
+        None => {
+            let mut spans = Vec::new();
+            for _ in 0..traces {
+                world.trace(&mut rng, &mut spans);
+            }
+            (spans, Vec::new())
+        }
+    };
     if std::env::var_os("FMT_LIGHT").is_some() {
         for s in &mut spans {
             s.input = None;
@@ -102,18 +132,20 @@ async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
             }
         }
     }
-    // Plant a rare needle in ~20 LLM inputs for the substring query.
-    let mut planted = 0;
-    let step = spans.len() / 23;
-    let mut i = 7;
-    while planted < 20 && i < spans.len() {
-        if let Some(inp) = spans[i].input.as_mut() {
-            if let Some(p) = inp.find("\"content\":\"") {
-                inp.insert_str(p + 11, "zqxjneedle ");
-                planted += 1;
+    // Plant a rare needle in ~20 LLM inputs for the substring query (synthetic traces only).
+    if swe.is_none() {
+        let mut planted = 0;
+        let step = spans.len() / 23;
+        let mut i = 7;
+        while planted < 20 && i < spans.len() {
+            if let Some(inp) = spans[i].input.as_mut() {
+                if let Some(p) = inp.find("\"content\":\"") {
+                    inp.insert_str(p + 11, "zqxjneedle ");
+                    planted += 1;
+                }
             }
+            i += step.max(1);
         }
-        i += step.max(1);
     }
     // Sample trace ids for point lookups.
     let mut ids = Vec::new();
@@ -123,6 +155,10 @@ async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
     }
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("trace_ids.txt"), ids.join("\n"))?;
+    if swe.is_some() {
+        let lines: Vec<String> = needles.iter().map(|n| hex(n)).collect();
+        std::fs::write(dir.join("needles.txt"), lines.join("\n"))?;
+    }
     println!("generated {} spans from {traces} traces in {:?}", spans.len(), t0.elapsed());
 
     // Arrow batches, sorted by start_time, cut into `files` time slices,
@@ -220,6 +256,57 @@ async fn generate(dir: &Path, traces: usize, files: usize) -> R<()> {
 
     column_sizes_parquet(&dir.join("pq_tuned"))?;
     Ok(())
+}
+
+/// Twenty substrings of LLM outputs that occur in 1 to 1,000 span inputs, for the
+/// SWE substring needles. Picks use `Rng::new(77)`; gives up after 2,000 attempts.
+fn pick_needles(spans: &[Span]) -> Vec<Vec<u8>> {
+    let mut needles: Vec<Vec<u8>> = Vec::new();
+    if spans.is_empty() {
+        return needles;
+    }
+    let mut rng = datagen::Rng::new(77);
+    let mut attempts = 0usize;
+    while needles.len() < 20 && attempts < 2000 {
+        attempts += 1;
+        let s = &spans[rng.below(spans.len())];
+        if !matches!(s.span_kind, SpanKind::Llm) {
+            continue;
+        }
+        let Some(out) = s.output.as_deref() else {
+            continue;
+        };
+        let mut start = out.len() / 2;
+        while start < out.len() && !out.is_char_boundary(start) {
+            start += 1;
+        }
+        let want = rng.range(8, 32);
+        let mut end = (start + want).min(out.len());
+        while end > start && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        let Some(sub) = out.get(start..end) else {
+            continue;
+        };
+        if sub.len() < 8 || sub.contains(['%', '_', '\\', '\'', '\n', '\r']) {
+            continue;
+        }
+        let finder = memchr::memmem::Finder::new(sub.as_bytes());
+        let mut hits = 0usize;
+        for sp in spans {
+            if sp.input.as_deref().is_some_and(|inp| finder.find(inp.as_bytes()).is_some()) {
+                hits += 1;
+                if hits > 1000 {
+                    break;
+                }
+            }
+        }
+        if (1..=1000).contains(&hits) {
+            println!("needle {sub:?}: {hits} hits");
+            needles.push(sub.as_bytes().to_vec());
+        }
+    }
+    needles
 }
 
 const PQ_VARIANTS: &[&str] = &["pq_default", "pq_tuned", "pq_llmobs"];
