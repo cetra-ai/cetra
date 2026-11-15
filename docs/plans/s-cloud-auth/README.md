@@ -102,6 +102,7 @@ The decisions are also recorded in `docs/mvp-decisions.md` § Track S.
 - A `client_secret_file` form (D-S-2), and env forms for the other `[[auth.oidc]]` keys.
 - Starting the provider from `/signup` or `/setup` (D-S-8).
 - Self-service password reset by email for instance admins under `disable_password` (D-S-3).
+- A stronger login limiter. With password login live for admins, a caller varying the email can make the server run one Argon2 verification per request within the per-IP form limits, and can lock an admin's email for 15 minutes with 20 wrong passwords, as on any instance with password login on (D143); the admin recovers with `llmobs admin reset-password` or waits.
 
 ## Closeout (S4)
 
