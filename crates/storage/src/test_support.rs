@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
@@ -27,6 +28,8 @@ use llmobs_core::schema::traces_schema;
 use llmobs_core::score::Score;
 use llmobs_core::span::Span;
 
+use crate::Storage;
+use crate::config::StorageConfig;
 use crate::views::{ProjectQuery, QueryContext};
 
 fn dataset_dir() -> PathBuf {
@@ -871,6 +874,100 @@ mod fault_store {
 
         async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
             self.inner.copy_opts(from, to, options).await
+        }
+    }
+}
+
+/// One storage life on a runtime of its own, ended like a crash (D-R-4): the
+/// storage is dropped without `shutdown`, then the runtime is shut down, so no
+/// task of this life can touch the directory afterwards.
+pub(crate) fn crashed_life<T>(config: &StorageConfig, body: impl AsyncFnOnce(&Storage) -> T) -> T {
+    let runtime = life_runtime();
+    let storage = runtime
+        .block_on(Storage::open(config.clone()))
+        .expect("open storage for a life");
+    let output = runtime.block_on(body(&storage));
+    drop(storage);
+    runtime.shutdown_timeout(Duration::from_secs(10));
+    output
+}
+
+/// The same life, ended with `shutdown`.
+pub(crate) fn clean_life<T>(config: &StorageConfig, body: impl AsyncFnOnce(&Storage) -> T) -> T {
+    let runtime = life_runtime();
+    let storage = runtime
+        .block_on(Storage::open(config.clone()))
+        .expect("open storage for a life");
+    let output = runtime.block_on(body(&storage));
+    runtime
+        .block_on(storage.shutdown())
+        .expect("clean shutdown");
+    drop(storage);
+    runtime.shutdown_timeout(Duration::from_secs(10));
+    output
+}
+
+/// The runtime `Objects` and `Storage` run on in a life (as M1's `open_life`).
+fn life_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime for a life")
+}
+
+/// Object keys under `objects/tables` and `objects/media` (temp names
+/// excluded) that no `data_files`, `staged_objects` or `media` row names.
+/// Opens `catalog.db` read-only, on a connection of its own.
+pub(crate) async fn orphan_objects(data_dir: &Path) -> Vec<String> {
+    use sqlx::ConnectOptions;
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(data_dir.join("catalog.db"))
+        .read_only(true)
+        .connect()
+        .await
+        .expect("open catalog.db read-only");
+    let named: BTreeSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT path FROM data_files
+         UNION SELECT path FROM staged_objects
+         UNION SELECT 'media/' || project_id || '/' || sha256 FROM media",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("read the object names of the catalog")
+    .into_iter()
+    .collect();
+    let objects = data_dir.join("objects");
+    let mut keys = Vec::new();
+    for table_dir in ["tables", "media"] {
+        collect_object_keys(&objects.join(table_dir), &objects, &mut keys);
+    }
+    keys.sort();
+    keys.retain(|key| !named.contains(key));
+    keys
+}
+
+/// Adds the key of every non-temp file under `dir`, relative to `objects`.
+fn collect_object_keys(dir: &Path, objects: &Path, keys: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_object_keys(&path, objects, keys);
+        } else if kind.is_file() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') && name.contains(".tmp-") {
+                continue;
+            }
+            if let Ok(key) = path.strip_prefix(objects) {
+                keys.push(key.to_string_lossy().into_owned());
+            }
         }
     }
 }

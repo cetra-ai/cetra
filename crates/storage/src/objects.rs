@@ -86,7 +86,9 @@ impl Objects {
         match config.object_store_url() {
             ObjectStoreUrl::Local(root) => {
                 let error_path = root.clone();
-                let prepared = tokio::task::spawn_blocking(move || prepare_local_root(&root)).await;
+                let data_dir = config.data_dir.clone();
+                let prepared =
+                    tokio::task::spawn_blocking(move || prepare_local_root(&root, &data_dir)).await;
                 let (root, store) = prepared.map_err(|source| {
                     ObjectError::io(
                         "opening object store",
@@ -562,6 +564,9 @@ impl Objects {
                 let mut removed = 0;
                 remove_temps(&root.join("tables"), &mut removed)?;
                 remove_temps(&root.join("media"), &mut removed)?;
+                // The `tables` and `media` entries live in the root itself.
+                fs::sync_dir(root)
+                    .map_err(|source| ObjectError::io("syncing object directory", root, source))?;
                 Ok(removed)
             }
             Kind::Remote => {
@@ -623,8 +628,11 @@ fn registered_url() -> Result<RegisteredUrl, ObjectError> {
     RegisteredUrl::parse(OBJECT_STORE_URL).map_err(|_| ObjectError::InvalidPath)
 }
 
-fn prepare_local_root(root: &Path) -> Result<(PathBuf, LocalFileSystem), ObjectError> {
-    create_dir_chain(root)?;
+fn prepare_local_root(
+    root: &Path,
+    data_dir: &Path,
+) -> Result<(PathBuf, LocalFileSystem), ObjectError> {
+    create_dir_chain(root, data_dir)?;
     let root = fs::canonicalize(root)
         .map_err(|source| ObjectError::io("opening object store", root, source))?;
     let store = LocalFileSystem::new_with_prefix(&root).map_err(ObjectError::client)?;
@@ -806,17 +814,30 @@ where
 
 /// Unlinks the local object `key` under `root` and returns its size before the
 /// unlink. A missing object is success, with size 0.
+///
+/// The parent directory is fsynced after the unlink, so the removal is durable
+/// before the catalog row goes. It is synced even when this call found nothing
+/// to remove: a previous attempt may have unlinked the file without the sync.
+/// A missing parent has nothing to make durable.
 fn delete_local(root: &Path, key: &str) -> Result<u64, ObjectError> {
     let path = root.join(key);
+    let Some(parent) = path.parent() else {
+        return Err(ObjectError::InvalidPath);
+    };
     let size = match fs::metadata(&path) {
         Ok(meta) => meta.len(),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => 0,
         Err(source) => return Err(ObjectError::io("reading object metadata", &path, source)),
     };
     match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => return Err(ObjectError::io("deleting object", &path, source)),
+    }
+    match fs::sync_dir(parent) {
         Ok(()) => Ok(size),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(size),
-        Err(source) => Err(ObjectError::io("deleting object", &path, source)),
+        Err(source) => Err(ObjectError::io("syncing object directory", parent, source)),
     }
 }
 
@@ -853,6 +874,9 @@ fn is_temp_name(name: &OsStr) -> bool {
     name.starts_with('.') && name.contains(".tmp-")
 }
 
+/// Removes the temp files under `dir` and fsyncs every directory it walks,
+/// children first. A directory a crashed process created without a sync is then
+/// durable before the first write of this life. A missing `dir` is success.
 fn remove_temps(dir: &Path, removed: &mut u64) -> Result<(), ObjectError> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -874,12 +898,50 @@ fn remove_temps(dir: &Path, removed: &mut u64) -> Result<(), ObjectError> {
             *removed += 1;
         }
     }
+    fs::sync_dir(dir).map_err(|source| ObjectError::io("syncing object directory", dir, source))
+}
+
+/// Creates `path` and any missing parent, then fsyncs the parent of every
+/// directory of the chain, whether this call created it or not. A process
+/// killed after `create_dir` and before its sync leaves an entry that every
+/// later call takes for existing, so the sync must not depend on who created
+/// the entry.
+///
+/// The walk goes down. It starts at `data_dir` when `path` is inside it, and
+/// below the nearest existing ancestor otherwise, so it never syncs from `/`
+/// down into directories the process does not own. Runs at open only.
+fn create_dir_chain(path: &Path, data_dir: &Path) -> Result<(), ObjectError> {
+    let base = match path.strip_prefix(data_dir) {
+        Ok(relative) if relative.components().next().is_some() => data_dir.to_path_buf(),
+        _ => nearest_existing_ancestor(path)?,
+    };
+    let Ok(relative) = path.strip_prefix(&base) else {
+        return Err(ObjectError::InvalidPath);
+    };
+    let mut current = base;
+    for segment in relative.components() {
+        current.push(segment);
+        match fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists && current.is_dir() => {}
+            Err(source) => {
+                return Err(ObjectError::io(
+                    "creating object directory",
+                    &current,
+                    source,
+                ));
+            }
+        }
+        if let Some(parent) = current.parent() {
+            fs::sync_dir(parent)
+                .map_err(|source| ObjectError::io("syncing object directory", parent, source))?;
+        }
+    }
     Ok(())
 }
 
-/// Creates `path` and any missing parent. Each new directory's parent is fsynced.
-fn create_dir_chain(path: &Path) -> Result<(), ObjectError> {
-    let mut missing = Vec::new();
+/// The nearest ancestor of `path` (or `path` itself) that exists. It must be a directory.
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ObjectError> {
     let mut cursor = path;
     loop {
         if try_exists(cursor)? {
@@ -890,9 +952,8 @@ fn create_dir_chain(path: &Path) -> Result<(), ObjectError> {
                     io::Error::other("not a directory"),
                 ));
             }
-            break;
+            return Ok(cursor.to_path_buf());
         }
-        missing.push(cursor.to_path_buf());
         cursor = cursor.parent().ok_or_else(|| {
             ObjectError::io(
                 "creating object directory",
@@ -901,22 +962,6 @@ fn create_dir_chain(path: &Path) -> Result<(), ObjectError> {
             )
         })?;
     }
-    for dir in missing.iter().rev() {
-        match fs::create_dir(dir) {
-            Ok(()) => {
-                if let Some(parent) = dir.parent() {
-                    fs::sync_dir(parent).map_err(|source| {
-                        ObjectError::io("syncing object directory", parent, source)
-                    })?;
-                }
-            }
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
-            Err(source) => {
-                return Err(ObjectError::io("creating object directory", dir, source));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn create_dir_chain_from(root: &Path, relative: &Path) -> Result<(), ObjectError> {
@@ -1035,6 +1080,7 @@ mod tests {
         WalConfig,
     };
     use crate::error::ObjectError;
+    use crate::fs::lossy::{CrashMode, Lossy};
     use crate::hooks::{HookPoint, Hooks};
     use crate::objects::Objects;
     use crate::test_support::{FaultKind, FaultStore};
@@ -1453,5 +1499,72 @@ mod tests {
             b"not-hidden"
         );
         assert_eq!(std::fs::read(root.join(&key)).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_object_stays_deleted_after_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+        let objects = Objects::new(&local_config(&data), Hooks::default())
+            .await
+            .unwrap();
+        let (key, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        objects
+            .put_durable(&key, Bytes::from_static(b"gone"))
+            .await
+            .unwrap();
+        objects.delete(&key).await.unwrap();
+        drop(objects);
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert!(
+            !data.join("objects").join(&key).exists(),
+            "a deleted object came back after a lossy crash"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_object_in_a_directory_left_unsynced_survives_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+        let (key, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        // The state a killed process leaves: every directory of the chain
+        // created, none of them synced.
+        let root = data.join("objects");
+        crate::fs::create_dir(&root).unwrap();
+        let mut current = root.clone();
+        for segment in std::path::Path::new(&key).parent().unwrap().components() {
+            current.push(segment);
+            crate::fs::create_dir(&current).unwrap();
+        }
+
+        let objects = Objects::new(&local_config(&data), Hooks::default())
+            .await
+            .unwrap();
+        objects.remove_temp_files().unwrap();
+        objects
+            .put_durable(&key, Bytes::from_static(b"survives"))
+            .await
+            .unwrap();
+        drop(objects);
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert_eq!(
+            std::fs::read(root.join(&key)).expect("the object is lost with its directory"),
+            b"survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_key_whose_directory_is_missing_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = Objects::new(&local_config(dir.path()), Hooks::default())
+            .await
+            .unwrap();
+        let (key, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        assert_eq!(objects.delete_len(&key).await.unwrap(), 0);
+        objects.delete(&key).await.unwrap();
     }
 }

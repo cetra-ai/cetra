@@ -1537,18 +1537,19 @@ fn validate_batch(
     Ok(())
 }
 
+/// Creates `path` if it is missing, then fsyncs its parent. The sync runs
+/// whether this call created the directory or found it: a killed process may
+/// have created it without the sync.
 fn ensure_dir(path: &Path) -> Result<(), OpenError> {
     match fs::create_dir(path) {
-        Ok(()) => {
-            if let Some(parent) = path.parent() {
-                fs::sync_dir(parent)
-                    .map_err(|source| open_io("syncing directory", parent, source))?;
-            }
-            Ok(())
-        }
-        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(source) => Err(open_io("creating directory", path, source)),
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(source) => return Err(open_io("creating directory", path, source)),
     }
+    if let Some(parent) = path.parent() {
+        fs::sync_dir(parent).map_err(|source| open_io("syncing directory", parent, source))?;
+    }
+    Ok(())
 }
 
 fn lock_dir(data_dir: &Path) -> Result<File, OpenError> {
@@ -2732,5 +2733,81 @@ mod tests {
         assert_eq!(report.healthy, 1, "{report:?}");
         assert_eq!(report.quarantined, 0);
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn the_data_dir_layout_is_durable_after_a_crash_before_its_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        // A first open that was killed after it created `wal/` and its two
+        // segment directories, before it synced any of them. The weaker state,
+        // with only `wal/` unsynced, is masked: `lock_dir` syncs `data_dir`
+        // during the same open, and `ensure_dir(wal/scores)` syncs `wal/`, so
+        // a crash after that open cannot lose the layout.
+        fs::create_dir(data.join("wal")).unwrap();
+        fs::create_dir(data.join("wal").join(Table::Spans.name())).unwrap();
+        fs::create_dir(data.join("wal").join(Table::Scores.name())).unwrap();
+
+        let config = config_in(&data);
+        test_support::crashed_life(&config, async |storage| {
+            storage
+                .append_spans(project(), spans_at(&[1]))
+                .await
+                .unwrap();
+        });
+        lossy.crash_with(fs::lossy::CrashMode::DropAll, 0);
+
+        test_support::clean_life(&config, async |storage| {
+            let query = storage.query(project(), Default::default()).await.unwrap();
+            assert_eq!(
+                span_names(query.spans).await.len(),
+                1,
+                "the acknowledged span is gone with the wal directory"
+            );
+        });
+    }
+
+    #[test]
+    fn gc_leaves_no_orphan_after_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let mut config = config_in(&data);
+        config.compaction.interval = Duration::from_secs(3_600);
+        config.compaction.l0_files = 2;
+
+        // Three lives, each appending one span of trace 1 and shutting down:
+        // three L0 spans files.
+        let start = NaiveDate::from_ymd_opt(2026, 3, 5)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_nanos_opt()
+            .unwrap();
+        for index in 0..3_u8 {
+            let at = start + i64::from(index) * 60_000_000_000;
+            test_support::clean_life(&config, async |storage| {
+                let span = span_row(0, index, at, at + 1_000_000_000);
+                storage
+                    .append_spans(project(), span_rows(&[span]))
+                    .await
+                    .unwrap();
+            });
+        }
+
+        // A fourth life compacts them, removes the inputs, and crashes.
+        let noon = start + 2 * 3_600_000_000_000;
+        test_support::crashed_life(&config, async |storage| {
+            storage.compact(noon).await.unwrap();
+            storage.collect_obsolete(Duration::ZERO).await.unwrap();
+        });
+        lossy.crash_with(fs::lossy::CrashMode::DropAll, 0);
+
+        test_support::clean_life(&config, async |_storage| {
+            let orphans = test_support::orphan_objects(&data).await;
+            assert!(orphans.is_empty(), "orphan objects after GC: {orphans:?}");
+        });
     }
 }

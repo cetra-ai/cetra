@@ -15,4 +15,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Storage: a local object deleted by garbage collection, or a directory created just before a crash, could reappear or disappear after a power loss.
 - The span list no longer shows a re-sent span twice, and its pages no longer depend on the page size. A re-send that changed its `start_time` is still listed twice until compaction merges them.
