@@ -216,7 +216,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 | 1 | payload column |
 | 2 | shredded map parent, no data of its own |
 | 3 | shredded map child (narrow rules) |
-| 4 | residual map (narrow rules, `IPC` encoding) |
+| 4 | residual map (narrow rules, `MAP` encoding) |
 
 `flags`: bit 0 = sorted dictionary present.
 
@@ -427,7 +427,7 @@ Applies to `Map<Utf8, Utf8>` columns.
 - a null residual means the map is null;
 - an empty residual with every child null means an empty map.
 
-**Residual.** Keys that are not promoted form the residual map column (layer 4, `IPC` encoding).
+**Residual.** Keys that are not promoted form the residual map column (layer 4, `MAP` encoding).
 
 **Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. llmobs-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys.
 
