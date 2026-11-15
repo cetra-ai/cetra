@@ -61,6 +61,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Web UI: the sidebar opens on screens under 768 px (a trigger above the page); session ids show in full in the session header; the traces list refreshes after "Delete matching…" once storage hides the rows, and the deletion history says its trace count includes evaluation traces; Enter submits the Save view and Rename view dialogs.
 - Auth security review (`docs/research/auth/review-2026-11-15.md`): deleting another project's
   evaluator answers 404 instead of naming that project's online rules; deleting another org's
   connection answers 404 while it is in use; a control-plane org creation clears the password,
