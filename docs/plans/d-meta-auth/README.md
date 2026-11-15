@@ -10,7 +10,7 @@ This is the implementation plan for track D (Wave 1). It covers:
 
 The work is split into 26 sub-phases, P1–P26. Each is done by one agent, in order, and ends with `just check` green and one commit. A sub-phase is self-contained: it lists the files it may edit, the behaviour, the tests and the commit subject. Do the sub-phase you were given, nothing more.
 
-**Status:** decisions settled with the user (2026-11-11). Nothing is implemented.
+**Status:** P1–P25 implemented (#21, #25). P26 ran on 2026-11-15 ([`review-2026-11-15.md`](../../research/auth/review-2026-11-15.md)); its open high finding #9 keeps the track at "Done except P26 findings".
 
 **Read first** (every sub-phase):
 - `AGENTS.md`;

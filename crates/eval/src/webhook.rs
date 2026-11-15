@@ -193,15 +193,16 @@ fn headers(
     signature: HeaderValue,
 ) -> Result<Vec<(HeaderName, HeaderValue)>, WebhookError> {
     let mut map = HeaderMap::new();
-    map.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
     for (name, value) in &config.headers {
         let name = HeaderName::try_from(name.as_str()).map_err(|_| WebhookError::InvalidHeader)?;
         let value = HeaderValue::from_str(value).map_err(|_| WebhookError::InvalidHeader)?;
         map.insert(name, value);
     }
+    // Set after the configured headers so they cannot override either (D-I-46).
+    map.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("application/json"),
+    );
     map.insert(HeaderName::from_static(SIGNATURE_HEADER), signature);
     Ok(map
         .into_iter()

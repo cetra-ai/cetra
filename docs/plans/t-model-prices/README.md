@@ -2,7 +2,7 @@ Status: planned on 2026-11-15; T1–T7 not started
 
 # T · Model prices
 
-Track T adds what the MVP scope promises and nobody built: per-org and per-project custom model prices (`model_prices`, spec 04 § Pricing), the `/models` API (spec 09 § Pricing & GDPR), a server price registry that prices every span and judge call with the project's table instead of the built-in snapshot alone, and the two settings pages (spec 11). The coordinator created the track by D184 (cross-track review X29; D184 is in PR #116, not yet on `main` when this plan was written). G left the hook for it: the `RwLock<Arc<PriceTable>>` in `crates/server/src/ingest/mod.rs` and its `#[cfg(test)] replace_prices` (D-G-10). T removes both.
+Track T adds what the MVP scope promises and nobody built: per-org and per-project custom model prices (`model_prices`, spec 04 § Pricing), the `/models` API (spec 09 § Pricing & GDPR), a server price registry that prices every span and judge call with the project's table instead of the built-in snapshot alone, and the two settings pages (spec 11). The coordinator created the track by D184 (cross-track review X29). G left the hook for it: the `RwLock<Arc<PriceTable>>` in `crates/server/src/ingest/mod.rs` and its `#[cfg(test)] replace_prices` (D-G-10). T removes both.
 
 The main use: a local Ollama or vLLM judge has no built-in price, so D-I-15 refuses a budgeted online rule on it. With T, a project admin adds a price for the model (even `0`), and the rule can carry a budget.
 
