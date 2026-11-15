@@ -200,6 +200,26 @@ pub(crate) async fn org_members(
     records.into_iter().map(member_row).collect()
 }
 
+/// Emails of the org's members whose address is verified, ordered by email (D-K-19).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn verified_member_emails(
+    pool: &SqlitePool,
+    org_id: OrgId,
+) -> Result<Vec<String>, MetaError> {
+    let emails: Vec<String> = sqlx::query_scalar(
+        "SELECT users.email FROM org_members JOIN users ON users.id = org_members.user_id \
+         WHERE org_members.org_id = ? AND users.email_verified_at IS NOT NULL \
+         ORDER BY users.email",
+    )
+    .bind(org_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(emails)
+}
+
 /// The user's project override, if one is stored.
 ///
 /// # Errors

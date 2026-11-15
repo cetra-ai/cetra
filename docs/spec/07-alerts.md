@@ -44,7 +44,7 @@ ok / no_data ──(breaching)──► firing ──(2 clear or insufficient in
 |---|---|---|
 | `slack` | `{url}` (an `https` Slack incoming webhook) | Block Kit message: title, project, metric, value, threshold, window, samples, buttons to the rule and to the trace list |
 | `webhook` | `{url, secret (16–256), headers?}` (≤ 10 headers) | `POST` JSON (below), `X-Llmobs-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` (as the webhook evaluator), `X-Llmobs-Delivery: <delivery id>` |
-| `email` | `{recipients}` (1–20) | the `alert` email template (08 § Email), one message per recipient; creating one needs SMTP, and existing ones show "SMTP not configured" without it |
+| `email` | `{recipients}` (1–20) | the `alert` email template (08 § Email), one message per recipient; creating one needs SMTP, and existing ones show "SMTP not configured" without it. Under `auth.signup = open` each recipient must be a verified member of the org (D-K-19): create and update refuse others with `400` on `recipients`, and a send skips them and fails the delivery. Each org may send 1,000 recipient messages per UTC day, test sends included (D-K-19) |
 
 Webhook payload (`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or `alert.test`; `value` and `count` are `null` when absent):
 
@@ -57,7 +57,7 @@ Webhook payload (`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or 
  "rule_url": "https://…/<org>/<project>/alerts/<rule id>"}
 ```
 
-Deliveries go through `notification_deliveries`: a loop every 10 s sends due ones (at most 4 at once, 10 s timeout). Retryable failures (timeouts, connection errors, 408, 429, 5xx, SMTP connection, TLS and authentication errors) wait `min(30 s · 2^(attempts−1), 1 h)`, up to 8 attempts; other failures fail at once. Delivery is at least once. Channels are never disabled automatically: the UI shows each channel's last finished delivery, and "Send test" sends one sample message synchronously (D-K-7).
+Deliveries go through `notification_deliveries`: a loop every 10 s sends due ones (at most 4 at once, 10 s timeout). Retryable failures (timeouts, connection errors, 408, 429, 5xx, SMTP connection, TLS and authentication errors) wait `min(30 s · 2^(attempts−1), 1 h)`, up to 8 attempts; other failures fail at once. Delivery is at least once. Channels are never disabled automatically: the UI shows each channel's last finished delivery, and "Send test" sends one sample message synchronously (D-K-7). A test send is limited to 5 per minute per user and 5 per minute per channel (`429 rate_limited`, D-K-19). An email over the org's daily cap fails with `daily alert email limit reached`; the cap and the member rule are D-K-19.
 
 History: events are kept 90 days and finished deliveries 30 days, pruned hourly (D-K-10).
 

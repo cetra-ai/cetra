@@ -1,9 +1,46 @@
-//! The per-org alert rule limit (D178, D-K-14).
+//! The per-org alert rule limit (D178, D-K-14) and the daily alert email cap (D-K-19).
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use llmobs_core::ids::OrgId;
 
 use crate::http::AppState;
 use crate::http::error::ApiError;
+
+/// Alert email recipient messages one org may send per UTC day, test sends included (D-K-19).
+pub(crate) const DAILY_EMAIL_LIMIT: u64 = 1000;
+
+const DAY_NS: i64 = 86_400_000_000_000;
+
+/// Recipient messages sent per org on the current UTC day. It lives in memory, so a restart
+/// starts every count again (D-K-19).
+#[derive(Default)]
+pub(crate) struct DailyEmailCount {
+    /// The UTC day index of `counts`, and the messages per org that day.
+    state: Mutex<(i64, HashMap<OrgId, u64>)>,
+}
+
+impl DailyEmailCount {
+    /// Reserves `messages` for `org_id` on the UTC day of `now`. Returns `false` and reserves
+    /// nothing when that would pass [`DAILY_EMAIL_LIMIT`].
+    pub(crate) fn reserve(&self, org_id: OrgId, messages: u64, now: i64) -> bool {
+        let day = now.div_euclid(DAY_NS);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.0 != day {
+            *state = (day, HashMap::new());
+        }
+        let count = state.1.entry(org_id).or_insert(0);
+        if count.saturating_add(messages) > DAILY_EMAIL_LIMIT {
+            return false;
+        }
+        *count += messages;
+        true
+    }
+}
 
 /// The most enabled alert rules `org_id` may have; `None` means no limit.
 ///
@@ -52,6 +89,22 @@ mod tests {
             panic!("three enabled rules reach a limit of three");
         };
         assert_eq!(detail, "Your plan allows 3 enabled alert rules.");
+    }
+
+    #[test]
+    fn daily_email_cap_is_per_org_and_per_utc_day() {
+        const DAY: i64 = 86_400_000_000_000;
+        let count = DailyEmailCount::default();
+        let (acme, other) = (OrgId::new_v7(), OrgId::new_v7());
+        let noon = DAY + DAY / 2;
+        assert!(count.reserve(acme, DAILY_EMAIL_LIMIT - 1, noon));
+        // Two more would pass the cap: refused, and nothing is reserved.
+        assert!(!count.reserve(acme, 2, noon));
+        assert!(count.reserve(acme, 1, noon));
+        assert!(!count.reserve(acme, 1, noon));
+        assert!(count.reserve(other, DAILY_EMAIL_LIMIT, noon));
+        // The next UTC day starts again.
+        assert!(count.reserve(acme, DAILY_EMAIL_LIMIT, 2 * DAY));
     }
 
     #[test]

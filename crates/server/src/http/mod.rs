@@ -68,6 +68,8 @@ pub(crate) struct AppInner {
     pub(crate) metrics_cache: crate::routes::metrics::MetricsCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
+    /// Alert emails sent per org on the current UTC day (D-K-19).
+    pub(crate) alert_email_count: crate::alerts::quota::DailyEmailCount,
     /// Deletion worker state: wake-up, guard, attempts (D-M-3).
     pub(crate) deletions: crate::deletion::Deletions,
     /// Seals and opens secret columns (D-I-2).

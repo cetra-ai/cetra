@@ -2395,7 +2395,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_channel", "alerts", "Create a notification channel")
         .description(Some(
-            "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+            "Needs role member. Email channels need SMTP. At most 20 channels per project (409). \
+             Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateChannelRequest")))
@@ -2406,6 +2407,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let update = operation("update_channel", "alerts", "Update a notification channel")
+        .description(Some(
+            "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+        ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .request_body(Some(json_body("UpdateChannelRequest")))
         .responses(responses(
@@ -2426,7 +2430,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let test = operation("test_channel", "alerts", "Send a test notification")
         .description(Some(
-            "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+            "Sends one sample message now and reports the result. Nothing is stored. Needs role member. \
+             At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). \
+             Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .responses(responses(

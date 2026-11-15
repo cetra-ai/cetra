@@ -334,6 +334,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         live: crate::live::LiveBus::new(crate::live::StreamTiming::DEFAULT),
         metrics_cache: crate::routes::metrics::MetricsCache::default(),
         usage: crate::usage::Usage::default(),
+        alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
         deletions: crate::deletion::Deletions::new(),
         secrets,
         eval_runner,
