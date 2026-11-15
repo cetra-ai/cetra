@@ -9,6 +9,19 @@ This plan builds a prototype of the two-layer format from [README.md](README.md)
 - [parquet.md](parquet.md) and [vortex.md](vortex.md): what to keep and what to avoid;
 - [other-formats-a.md](other-formats-a.md) and [other-formats-b.md](other-formats-b.md): ideas from other formats. This plan adopts some of them, cited by number (a#3 is idea 3 in `other-formats-a.md`).
 
+**Design versus implementation plans.** This file is the design. § Phases below is the milestone outline only. Each milestone gets a detailed implementation plan in [`plans/`](plans/), written just before the milestone starts, from the code that exists then, in the format of `docs/plans/a1-storage/01-m1-walking-skeleton.md`. Each sub-phase there has an **Edit** list, numbered steps with exact types, signatures and formats, a **Tests** list, **Done when** and a **Commit** message.
+
+| Milestone | Phases here | Plan |
+|---|---|---|
+| M0 | 0 | the phase 0 brief (moving the test-data crate) |
+| M1 | 1, 2a, 2b, 2c | [plans/01-m1-container-narrow.md](plans/01-m1-container-narrow.md) |
+| M2 | 3a, 3b, 3c | written after M1 |
+| M3 | 4 | written after M2 |
+| M4 | 5a, 5b | written after M3 |
+| M5 | 6, 7 | written after M4 |
+| M6 | 8 | written after M5 |
+| M7 | 9a, 9b, 9c | written after M6 |
+
 **Who works on it.**
 - Phases 0–9b are implemented by Haiku, one commit each, on the research branch.
 - A Sonnet review runs after phases 3c, 6 and 9b.
@@ -208,7 +221,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 4 = 60. Add the
 
 **Chunks.**
 - Each column is cut into chunks independently.
-- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the sum of value lengths + 4 B per row. For `IPC` columns, the slice's `get_array_memory_size()` is used.
+- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the sum of value lengths + 4 B per row. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
 - The chunk is the unit of I/O and decoding: a mini-block in the Lance sense (b#1).
 
 **Block table.** One 56-byte entry per chunk, stored raw in kind 7 pages of at most 64 entries (3.6 KiB). A lookup fetches only the page holding its row range, found through hot-tail section 7. The sort-key column's entries are also copied whole into hot-tail section 3.
