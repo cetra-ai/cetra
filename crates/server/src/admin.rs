@@ -28,6 +28,7 @@ use crate::meta::orgs::{org_by_id, org_by_slug};
 use crate::meta::password_resets::insert_reset;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaDb, MetaError};
+use crate::usage::flushed_month_units;
 
 /// A user created by [`create_user`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +72,8 @@ pub struct EntitlementsReport {
     /// The largest data window of the last 30 days (D-P-30). Omitted when unlimited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_window_days: Option<u64>,
+    /// Units (spans + scores) this UTC month, flushed only (D-P-16).
+    pub month_units: u64,
 }
 
 /// Why an admin command failed. The text never includes an email, a password, or a token.
@@ -286,6 +289,9 @@ async fn entitlements_in(
         features: resolved.features(),
         limits: resolved.limits.into(),
         retention_window_days,
+        month_units: flushed_month_units(meta.reader(), row.id, now)
+            .await
+            .map_err(map_meta)?,
     })
 }
 
@@ -874,6 +880,49 @@ mod tests {
             .unwrap();
         assert_eq!(row.id, created.id);
         assert!(created.reset_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn month_units_counts_the_flushed_rows_of_this_month() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        let (first, _) = crate::usage::month_bounds(Clock::System.now_ns());
+        let this_month = first.format("%Y-%m-%d").to_string();
+        let last_month = first.pred_opt().unwrap().format("%Y-%m-%d").to_string();
+        let project = ProjectId::new_v7().to_string();
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO usage_daily (org_id, project_id, day, spans, scores) \
+                     VALUES (?, ?, ?, 10, 5)",
+                )
+                .bind(org.to_string())
+                .bind(project.clone())
+                .bind(this_month)
+                .execute(&mut *conn)
+                .await
+                .map_err(MetaError::from)?;
+                sqlx::query(
+                    "INSERT INTO usage_daily (org_id, project_id, day, spans, scores) \
+                     VALUES (?, ?, ?, 100, 0)",
+                )
+                .bind(org.to_string())
+                .bind(project)
+                .bind(last_month)
+                .execute(&mut *conn)
+                .await
+                .map_err(MetaError::from)?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        let report = entitlements(&config, "acme").await.unwrap();
+        assert_eq!(report.month_units, 15);
     }
 
     async fn seed_org(db: &MetaDb) {

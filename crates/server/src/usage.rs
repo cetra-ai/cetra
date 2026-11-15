@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Datelike, Months, NaiveDate};
 use llmobs_core::ids::{OrgId, ProjectId};
+use sqlx::SqlitePool;
 
 use crate::meta::MetaDb;
 use crate::meta::MetaError;
@@ -40,6 +41,31 @@ pub(crate) async fn prune_dropped_orgs(meta: &MetaDb, now: i64) -> Result<u64, M
         })
     })
     .await
+}
+
+/// Units (spans + scores) `org_id` has flushed to `usage_daily` in the UTC month of `now_ns`.
+/// Counts a running server has not flushed yet (at most 10 s) are missing: this reads only
+/// stored rows (D-P-16).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn flushed_month_units(
+    pool: &SqlitePool,
+    org_id: OrgId,
+    now_ns: i64,
+) -> Result<u64, MetaError> {
+    let (first, next) = month_bounds(now_ns);
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(spans + scores), 0) FROM usage_daily \
+         WHERE org_id = ? AND day >= ? AND day < ?",
+    )
+    .bind(org_id.to_string())
+    .bind(first.format("%Y-%m-%d").to_string())
+    .bind(next.format("%Y-%m-%d").to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(u64::try_from(stored).unwrap_or(0))
 }
 
 /// One `usage_daily` row.
@@ -241,16 +267,7 @@ impl Usage {
             return Ok(units);
         }
         let (first, next) = month_bounds(now_ns);
-        let stored: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(spans + scores), 0) FROM usage_daily \
-             WHERE org_id = ? AND day >= ? AND day < ?",
-        )
-        .bind(org_id.to_string())
-        .bind(first.format("%Y-%m-%d").to_string())
-        .bind(next.format("%Y-%m-%d").to_string())
-        .fetch_one(meta.reader())
-        .await?;
-        let mut units = u64::try_from(stored).unwrap_or(0);
+        let mut units = flushed_month_units(meta.reader(), org_id, now_ns).await?;
         {
             let counts = self.lock();
             for (key, pending) in counts.iter() {
