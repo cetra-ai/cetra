@@ -182,13 +182,14 @@ cd ../bench && cargo +1.99.1 build --release
    ```
 
    - **`location`:**
-     - **local** (`dir` has no scheme): canonicalize it. `url` is `file:///<abs>/`, `prefix` is `Path::from_filesystem_path(&abs)?`, and the inner store is `LocalFileSystem::new()`.
+     - **local** (`dir` has no scheme): canonicalize it. `url` is `file:///` (the store root), `prefix` is `Path::from_filesystem_path(&abs)?` (the absolute directory, without a leading slash), and the inner store is `LocalFileSystem::new()`.
      - **S3** (`dir` is `s3://bucket/key`): the inner store is `AmazonS3Builder::from_env().with_bucket_name(bucket).with_virtual_hosted_style_request(false).build()?`. `url` is `s3://bucket/` and `prefix` is `key`. Required environment variables: `AWS_ENDPOINT`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION` and `AWS_ALLOW_HTTP=true`. Document them in the usage text.
    - **`new_ctx`** builds the `SessionConfig` that `query` uses today (the Parquet pushdown settings), plus `with_target_partitions(n)` when `partitions` is `Some(n)`. It calls `ctx.register_object_store(&loc.url, loc.store.clone())`. **Every** `SessionContext` in the bench is made with it.
    - **`read_text`** reads `prefix.join(name)` with `use object_store::ObjectStoreExt;` and `store.get(..).await?.bytes().await?`. A not-found error gives `None`.
    - **`has_files`** is true when `store.list(Some(&prefix.join(variant)))` yields at least one object.
    - **`open_strata`** lists `prefix.join(variant)` and keeps the `.strata` objects sorted by path. It opens them concurrently with `try_join_all` of `StrataFile::open(loc.store.clone() as Arc<dyn ObjectStore>, path, None, &Config::default())`, then maps each with `Arc::new`.
-   - Use `Path::join`, not the deprecated `child`.
+   - Use `Path::join`, not the deprecated `child`. It takes `self` by value: `loc.prefix.clone().join(..)`.
+   - Every listing URL is `loc.url` joined with `prefix/variant/`; this is right for both local (`file:///` + absolute path) and S3 (`s3://bucket/` + key).
 
 4. **`Format` and `table`.**
    - `enum Format { Parquet, Vortex, Strata }`, with `Format::of(variant)` from the directory variant's prefix (`pq`, `vx`, `st`). It applies only to directory variants; `st_fast` and `pq_fast` are runner kinds (M7.2b).
@@ -203,6 +204,7 @@ cd ../bench && cargo +1.99.1 build --release
    - Variants are skipped when `!has_files(..)`.
    - `profile()` takes `&Location` instead of `&Path`, and its contexts come from `new_ctx`.
    - The `canonicalize` calls move into `location`.
+   - Delete `profile.rs`'s `Direct` reader and its `FMT_DIRECT` block, which read local files. `pq_fast` (M7.2b) replaces it as the engine-free Parquet floor. `unhex` stays.
 
 6. **`gen` writes `st`** (gen stays local-only).
    - After the Vortex variants, `create_dir_all(<dir>/st)`. Then, for each slice:
