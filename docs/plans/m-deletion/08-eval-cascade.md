@@ -85,9 +85,12 @@ It is `insert_deletion` with `NewDeletion { id, org_id: parent.org_id, project_i
 ```rust
 /// Asks for the deletion of copies committed after `parent`'s cut-off (D-M-6): a judge trace
 /// and the target it scored. Stores the follow-up row, wakes the worker and writes the audit
-/// event `deletion requested` with `follow_up_of = parent`. `deletions` rows are never
-/// deleted, so a missing `parent`, or one without a project, is a bug: `warn!` with the id and
-/// return `Ok(())`.
+/// event `deletion requested` with `follow_up_of = parent`. A missing `parent` is waited for:
+/// the guard learns a deletion before `create_deletion` stores its row (`routes/deletions.rs`
+/// fills it before the insert), so `follow_up` reads the row up to 20 times, 50 ms apart (about
+/// one second), and only then gives up with `warn!` and `Ok(())`. That last case is an orphan
+/// entry from a `POST` that failed after filling the guard: no deletion was stored, so nothing
+/// needs erasing. A `parent` without a project is a bug: `warn!` and `Ok(())`.
 ///
 /// # Errors
 ///

@@ -64,6 +64,17 @@ pub(super) async fn resolve(
     scope.extend(evaluations);
     scope.sort();
     scope.dedup();
+    // D-M-6: the guard holds the scope from now on, so a judge run about one of its traces that
+    // starts or commits from here on is stopped (M3 registers the same entries again).
+    state
+        .deletions
+        .guard
+        .add_traces(project, &scope, row.id, row.created_at);
+    // The jobs are read on the reader pool, outside the write transaction; a job queued or started
+    // in between is stopped by the guard (D-M-6).
+    let jobs = crate::meta::eval_jobs::jobs_for_traces(state.meta.reader(), project, &scope)
+        .await
+        .map_err(|error| super::from_meta(&error))?;
 
     let id = row.id;
     let session_count = (row.kind == DeletionKind::User).then(|| count(sessions.len()));
@@ -74,7 +85,12 @@ pub(super) async fn resolve(
             Box::pin(async move {
                 insert_traces(conn, id, &scope).await?;
                 insert_sessions(conn, id, &sessions).await?;
-                store_counts(conn, id, trace_count, session_count).await
+                let stored = store_counts(conn, id, trace_count, session_count).await?;
+                if stored {
+                    // Running jobs are kept: the guard stops them (D-M-6).
+                    crate::meta::eval_jobs::delete_jobs(conn, &jobs).await?;
+                }
+                Ok(stored)
             })
         })
         .await

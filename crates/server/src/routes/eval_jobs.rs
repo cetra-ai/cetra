@@ -140,6 +140,16 @@ async fn run_evaluator(
         .ok_or(ApiError::NotFound)?;
     let subject = Subject::from_row(&row).map_err(internal)?;
     let checked = check_run(&body, &subject)?;
+    // D-M-6: a deleted trace is not found. The trace is not loaded here; the executor's check A
+    // covers its end users.
+    if state
+        .deletions
+        .guard
+        .blocking(project, checked.trace_id, &[], state.clock.now_ns())
+        .is_some()
+    {
+        return Err(ApiError::NotFound);
+    }
     let job_id = Uuid::now_v7();
     let job = NewJob {
         id: job_id,
@@ -490,6 +500,23 @@ mod tests {
             .fetch_one(app.state.meta.reader())
             .await
             .expect("count")
+    }
+
+    #[tokio::test]
+    async fn a_manual_run_on_a_deleted_trace_is_404() {
+        let (app, seeded) = test_app().await;
+        let evaluator = create_judge(&app, &seeded, fixture_judge_body()).await;
+        // D-M-6: the guard holds the trace from a deletion made just now.
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[TRACE.parse::<TraceId>().expect("trace id")],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+        let before = job_count(&app).await;
+        let response = run(&app, &seeded, evaluator, &run_body()).await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+        assert_eq!(job_count(&app).await, before, "no job is queued");
     }
 
     #[tokio::test]

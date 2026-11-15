@@ -119,7 +119,7 @@ pub(crate) async fn run(
         None => None,
     };
 
-    let (variables, target, truncated) = match source {
+    let (variables, target, truncated, users) = match source {
         Source::Literal(map) => (
             Variables::from_map(map),
             EvalTarget {
@@ -127,6 +127,7 @@ pub(crate) async fn run(
                 span_id: None,
             },
             false,
+            Vec::new(),
         ),
         Source::Trace {
             trace_id,
@@ -158,6 +159,22 @@ pub(crate) async fn run(
                         return Err(internal(error));
                     }
                 };
+            // D-M-6, check A: the target is loaded and nothing has run yet. A deleted trace is
+            // not found, as it is not for the caller any more.
+            let users = execute::users_of(&loaded.spans);
+            if state
+                .deletions
+                .guard
+                .blocking(
+                    project.id,
+                    trace_id,
+                    &execute::borrowed_users(&users),
+                    state.clock.now_ns(),
+                )
+                .is_some()
+            {
+                return Err(ApiError::NotFound);
+            }
             let data = TraceData::new(&loaded.spans, span_id);
             match llmobs_eval::resolve(&mapping, Some(&data), None) {
                 Ok(variables) => (
@@ -167,6 +184,7 @@ pub(crate) async fn run(
                         span_id,
                     },
                     loaded.truncated,
+                    users,
                 ),
                 // A mapping error is refused before the evaluator runs: no judge trace.
                 Err(error) => {
@@ -194,6 +212,9 @@ pub(crate) async fn run(
     };
 
     let judge_trace_id = judge_trace_id()?;
+    // The target of a trace run is guarded before the commit and after it (D-M-6).
+    let guarded = target.trace_id;
+    let guard_users = execute::borrowed_users(&users);
     let now = state.clock.now_ns();
     let signing_secret = prepared
         .secrets
@@ -227,8 +248,32 @@ pub(crate) async fn run(
         outcome,
         judge_trace,
     } = run;
+    // D-M-6: check B, right before the commit of the judge trace.
+    if let Some(target_trace) = guarded
+        && state
+            .deletions
+            .guard
+            .blocking(project.id, target_trace, &guard_users, state.clock.now_ns())
+            .is_some()
+    {
+        return Err(ApiError::NotFound);
+    }
     // The judge trace is committed on its own (D-I-16); its spans are not billable (D-I-31).
     execute::commit_judge_trace(state, project, now, judge_trace).await?;
+    // D-M-6: check C, after the commit. A block stores the follow-up deletion of the judge trace
+    // and the target (execute::after_commit).
+    if let Some(target_trace) = guarded
+        && execute::after_commit(
+            state,
+            project.id,
+            target_trace,
+            &guard_users,
+            judge_trace_id,
+        )
+        .await
+    {
+        return Err(ApiError::NotFound);
+    }
 
     let mut result = EvaluatorTestResult {
         ok: false,
@@ -602,4 +647,202 @@ fn load_error(error: EvaluatorError) -> ApiError {
 
 fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
     ApiError::Internal(Box::new(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use axum::http::{Method, header};
+    use llmobs_core::enums::PayloadFormat;
+    use llmobs_core::ids::{SpanId, TraceId};
+    use llmobs_core::span::Span;
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    use crate::test_support::mock_llm::{MockLlm, completion};
+    use crate::test_support::{Seeded, TestApp, TestResponse, dataset_span};
+
+    const TRACE: &str = "a1000000000000000000000000000001";
+    const QUESTION: &str = "What is the refund window?";
+    const ANSWER: &str = "30 days.";
+    const JUDGE_ANSWER: &str = r#"{"explanation": "Relevant.", "value": 0.9}"#;
+
+    /// A test app that may reach the mock on `127.0.0.1`, with the real time as its clock.
+    async fn test_app() -> (TestApp, Seeded) {
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let real_now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_nanos(),
+        )
+        .expect("fits i64");
+        app.state.clock.set(real_now);
+        let seeded = app.seed().await;
+        (app, seeded)
+    }
+
+    /// Stores the root span of `TRACE`: the question and its answer.
+    async fn commit_target(app: &TestApp, seeded: &Seeded) {
+        let now = app.state.clock.now_ns();
+        let mut row: Span = dataset_span(0);
+        row.trace_id = TRACE.parse::<TraceId>().expect("trace id");
+        row.span_id = "b100000000000001".parse::<SpanId>().expect("span id");
+        row.parent_span_id = None;
+        row.input = Some(QUESTION.to_owned());
+        row.input_format = Some(PayloadFormat::Text);
+        row.output = Some(ANSWER.to_owned());
+        row.output_format = Some(PayloadFormat::Text);
+        row.environment = Some("production".to_owned());
+        row.start_time = now - 30_000_000_000;
+        row.end_time = now - 20_000_000_000;
+        row.ingest_time = now;
+        app.commit_spans(&seeded.project, vec![row]).await;
+    }
+
+    /// A connection of `acme` that reaches `mock`, with the default model `gpt-test`.
+    async fn connection(app: &TestApp, seeded: &Seeded, mock: &MockLlm) -> Uuid {
+        let response = app
+            .request(Method::POST, "/api/v1/orgs/acme/llm-connections")
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": "Mocked",
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": mock.base_url(),
+                "default_model": "gpt-test"
+            }))
+            .send()
+            .await;
+        assert_eq!(response.status, 201, "{}", text(&response));
+        let value: Value = response.json();
+        Uuid::parse_str(value["id"].as_str().expect("id")).expect("uuid")
+    }
+
+    /// A trace-mode test body with a judge on `connection`.
+    fn trace_body(connection: Uuid) -> Value {
+        json!({
+            "evaluator": {
+                "kind": "llm_judge",
+                "config": {
+                    "connection_id": connection,
+                    "model": "gpt-test",
+                    "prompt": "Question: {{ input }}\nAnswer: {{ output }}",
+                    "output": {"type": "numeric", "min": 0.0, "max": 1.0},
+                    "include_reason": true,
+                    "temperature": null,
+                    "max_output_tokens": 1024,
+                    "timeout_ms": 60000
+                },
+                "output_score": {"name": "relevance", "data_type": "numeric"}
+            },
+            "trace_id": TRACE,
+            "variable_mapping": {"input": "trace.input", "output": "trace.output"}
+        })
+    }
+
+    /// `POST …/evaluators/test` with the seeded cookie.
+    async fn test_run(app: &TestApp, seeded: &Seeded, body: &Value) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("/api/v1/projects/{}/evaluators/test", seeded.project.id),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .json(body)
+        .send()
+        .await
+    }
+
+    /// The trace ids `GET /traces?include_eval=true` lists: the target and every judge trace.
+    async fn listed_traces(app: &TestApp, seeded: &Seeded) -> Vec<String> {
+        let response = app
+            .request(
+                Method::GET,
+                &format!(
+                    "/api/v1/projects/{}/traces?include_eval=true",
+                    seeded.project.id
+                ),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let page: Value = response.json();
+        let mut ids: Vec<String> = page["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .map(|trace| trace["trace_id"].as_str().expect("trace_id").to_owned())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn text(response: &TestResponse) -> String {
+        String::from_utf8_lossy(&response.body).into_owned()
+    }
+
+    /// Waits until the mock has seen one request (the judge call is in flight).
+    async fn judge_called(mock: &MockLlm) {
+        for _ in 0..500 {
+            if !mock.requests().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the judge was not called");
+    }
+
+    #[tokio::test]
+    async fn test_run_on_a_deleted_trace_is_404() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let connection = connection(&app, &seeded, &mock).await;
+        commit_target(&app, &seeded).await;
+        // D-M-6: the guard holds the trace from a deletion made just now.
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[TRACE.parse().expect("trace id")],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+
+        let response = test_run(&app, &seeded, &trace_body(connection)).await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+        assert!(
+            mock.requests().is_empty(),
+            "no request reaches the provider"
+        );
+        assert_eq!(listed_traces(&app, &seeded).await, vec![TRACE.to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn test_run_deleted_during_the_call_commits_nothing() {
+        let mock =
+            MockLlm::start_with_delay(vec![completion(JUDGE_ANSWER)], Duration::from_millis(1500))
+                .await;
+        let (app, seeded) = test_app().await;
+        let connection = connection(&app, &seeded, &mock).await;
+        commit_target(&app, &seeded).await;
+        let body = trace_body(connection);
+        let request = test_run(&app, &seeded, &body);
+        let deletion = async {
+            judge_called(&mock).await;
+            // D-M-6: the deletion lands while the provider is answering.
+            app.state.deletions.guard.add_traces(
+                seeded.project.id,
+                &[TRACE.parse().expect("trace id")],
+                Uuid::now_v7(),
+                app.state.clock.now_ns(),
+            );
+        };
+        let (response, ()) = tokio::join!(request, deletion);
+        assert_eq!(response.status, 404, "{}", text(&response));
+        // Only the target is stored: the judge trace was not committed.
+        assert_eq!(listed_traces(&app, &seeded).await, vec![TRACE.to_owned()]);
+    }
 }
