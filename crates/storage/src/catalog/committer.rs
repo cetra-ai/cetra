@@ -25,7 +25,9 @@ use super::db::{
 use super::{Catalog, FileId, FileMeta, FileState, FileTable, table_index};
 use crate::RetentionReport;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus, PendingDeletion, Tombstones};
-use crate::error::{CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError};
+use crate::error::{
+    CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError, OrphanError,
+};
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
 use crate::projects::ProjectStates;
@@ -94,6 +96,9 @@ struct CommitterInner {
 /// The single writer of `catalog.db`.
 pub(crate) struct Committer {
     inner: Mutex<CommitterInner>,
+    /// Held for read by every media deletion and for write by a catalog snapshot
+    /// (N M2, D-N-18). Take it before `inner`, never while holding `inner`.
+    pub(crate) object_gc_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl std::fmt::Debug for Committer {
@@ -118,6 +123,7 @@ impl Committer {
                 hooks,
                 retired: HashMap::new(),
             }),
+            object_gc_gate: Arc::new(tokio::sync::RwLock::new(())),
         })
     }
 
@@ -126,9 +132,31 @@ impl Committer {
         Arc::clone(&self.inner.lock().await.catalog)
     }
 
+    /// Closes the catalog connection. The committer is not used afterwards.
+    pub(crate) async fn close(self) -> Result<(), CatalogError> {
+        let inner = self.inner.into_inner();
+        inner
+            .connection
+            .close()
+            .await
+            .map_err(|source| CatalogError::Db { source })
+    }
+
     /// Highest flushed WAL sequence for `table`. Missing row is `0`.
     pub(crate) async fn flushed_seq(&self, table: Table) -> u64 {
         self.inner.lock().await.flushed[table_index(table)]
+    }
+
+    /// `VACUUM INTO path` on the catalog connection and a clone of the in-memory
+    /// catalog, in one critical section: the copy and the clone describe the same
+    /// commit. `path` must not exist and must be UTF-8 (the caller checks both).
+    pub(crate) async fn snapshot_into(&self, path: &str) -> Result<Arc<Catalog>, sqlx::Error> {
+        let mut inner = self.inner.lock().await;
+        sqlx::query("VACUUM INTO ?")
+            .bind(path)
+            .execute(&mut inner.connection)
+            .await?;
+        Ok(Arc::clone(&inner.catalog))
     }
 
     /// The pending deletions as last committed.
@@ -1042,6 +1070,52 @@ impl Committer {
             .map_err(CatalogError::db)
     }
 
+    // ---- Orphan collection (N M2, D-N-21) ----
+
+    /// Store keys the catalog needs: active data files, and media of projects
+    /// that are not dropping or dropped. Read before the store is listed.
+    pub(crate) async fn needed_keys(&self) -> Result<HashSet<String>, OrphanError> {
+        let mut inner = self.inner.lock().await;
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT path FROM data_files WHERE state = 'active'")
+                .fetch_all(&mut inner.connection)
+                .await?;
+        let mut keys: HashSet<String> = paths.into_iter().collect();
+        let media: Vec<(String, String)> = sqlx::query_as(
+            "SELECT m.project_id, m.sha256 FROM media m
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM projects p
+                 WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))",
+        )
+        .fetch_all(&mut inner.connection)
+        .await?;
+        for (project, sha) in media {
+            keys.insert(media_key(&project, &sha)?);
+        }
+        Ok(keys)
+    }
+
+    /// Store keys the catalog knows in any state: every data file, every media
+    /// blob of every project, and every staged path. Read after the store is
+    /// listed, so an object published during the listing is found here.
+    pub(crate) async fn known_keys(&self) -> Result<HashSet<String>, OrphanError> {
+        let mut inner = self.inner.lock().await;
+        let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM data_files")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let staged: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_objects")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let media: Vec<(String, String)> = sqlx::query_as("SELECT project_id, sha256 FROM media")
+            .fetch_all(&mut inner.connection)
+            .await?;
+        let mut keys: HashSet<String> = paths.into_iter().chain(staged).collect();
+        for (project, sha) in media {
+            keys.insert(media_key(&project, &sha)?);
+        }
+        Ok(keys)
+    }
+
     /// Delete one staged object that is not a catalog file or a stored media
     /// blob, then its row.
     ///
@@ -1275,6 +1349,13 @@ pub(crate) fn now_ns() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// The store key of a `media` row, through [`Objects::media_path`] so the layout
+/// has one formatter. A project id that does not parse is [`OrphanError::BadProjectId`].
+fn media_key(project: &str, sha256: &str) -> Result<String, OrphanError> {
+    let project: ProjectId = project.parse().map_err(|_| OrphanError::BadProjectId)?;
+    Ok(Objects::media_path(project, sha256))
 }
 
 /// `(project_id, sha256)` when `path` is a media path, `media/<project>/<64

@@ -16,6 +16,13 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   (UI, API, SQL, MCP, alerts, evaluators); the time-range picker shows the limit.
 - Control-plane org deletion (`DELETE /api/internal/v1/orgs/{org_id}`) and an applied-drops feed
   (`GET /api/internal/v1/deletions`) for cloud cells.
+- `llmobs admin backup` takes a consistent backup of a running server (local mode: hard-linked
+  objects; S3 mode: metadata, restorable for `storage.gc.grace`, which may now be up to 30 days).
+- `llmobs admin gc-orphans` cleans the object store after a restore and reports missing objects.
+- `llmobs admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
+  restore's deletions are re-applied.
+- The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
+- Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
 
 ### Fixed
 
