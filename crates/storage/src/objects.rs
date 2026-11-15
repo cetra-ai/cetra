@@ -997,6 +997,11 @@ fn create_dir_chain(path: &Path, data_dir: &Path) -> Result<(), ObjectError> {
     let Ok(relative) = path.strip_prefix(&base) else {
         return Err(ObjectError::InvalidPath);
     };
+    if !inside {
+        // `base` may have been created by a process killed before its sync,
+        // and the walk below never syncs `base`'s own entry in its parent.
+        sync_parent(&base)?;
+    }
     let mut current = base;
     for segment in relative.components() {
         current.push(segment);
@@ -1013,12 +1018,6 @@ fn create_dir_chain(path: &Path, data_dir: &Path) -> Result<(), ObjectError> {
         }
         sync_parent(&current)?;
     }
-    if !inside {
-        // The walk above syncs the parent of each directory it creates or
-        // walks. When `path` already exists, nothing is walked: its own entry
-        // in its parent is synced here.
-        sync_parent(path)?;
-    }
     Ok(())
 }
 
@@ -1032,6 +1031,7 @@ fn sync_parent(path: &Path) -> Result<(), ObjectError> {
 }
 
 /// The nearest ancestor of `path` (or `path` itself) that exists. It must be a directory.
+/// A one-component relative path climbs to `.`, not to the empty path.
 fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ObjectError> {
     let mut cursor = path;
     loop {
@@ -1045,7 +1045,7 @@ fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ObjectError> {
             }
             return Ok(cursor.to_path_buf());
         }
-        cursor = cursor.parent().ok_or_else(|| {
+        cursor = fs::parent_dir(cursor).ok_or_else(|| {
             ObjectError::io(
                 "creating object directory",
                 path,
@@ -1685,6 +1685,43 @@ mod tests {
         assert!(
             root.is_dir(),
             "the object root's entry in its parent was lost after a lossy crash"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_outside_object_root_under_an_unsynced_ancestor_survives_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let shadow = tempfile::tempdir().unwrap();
+        let lossy = Lossy::enable(dir.path(), &shadow.path().join("shadow"));
+        let data = dir.path().join("data");
+        // A killed process created `outside` and never synced its entry in
+        // `dir`. The object root does not exist yet, so `create_dir_chain`
+        // creates it below `outside`, the nearest existing ancestor.
+        let outside = dir.path().join("outside");
+        crate::fs::create_dir(&outside).unwrap();
+        let root = outside.join("obj");
+        let mut config = local_config(&data);
+        config.object_store = Some(ObjectStoreUrl::Local(root.clone()));
+
+        let objects = Objects::new(&config, Hooks::default()).await.unwrap();
+        drop(objects);
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert!(
+            root.is_dir(),
+            "the object root was lost after a lossy crash: its unsynced ancestor's entry was never synced"
+        );
+    }
+
+    #[test]
+    fn a_one_component_relative_object_root_is_found_under_the_current_directory() {
+        // Only the path is looked up: the process's current directory is
+        // never changed. The missing component's parent is `""`, which must
+        // map to `.`, and `.` exists.
+        let relative = std::path::Path::new("no-such-object-root-for-r2-3");
+        assert_eq!(
+            super::nearest_existing_ancestor(relative).unwrap(),
+            std::path::PathBuf::from(".")
         );
     }
 

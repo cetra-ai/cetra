@@ -320,6 +320,10 @@ pub(crate) fn sync_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// relative one-component path has the parent `""`, which `open` rejects; its
 /// entry is in the current directory, so that is returned instead. `None` when
 /// `path` has no parent.
+///
+/// `..` maps to `.` as well, because its parent is `""`. That is not the real
+/// parent of `..`, which is the current directory's parent. The crate never
+/// syncs `..` on its own, and an fsync of `.` is harmless either way.
 #[inline]
 pub(crate) fn parent_dir(path: &Path) -> Option<&Path> {
     path.parent().map(|parent| {
