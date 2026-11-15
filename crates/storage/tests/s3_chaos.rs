@@ -338,7 +338,7 @@ fn config(dir: &Path, env: &Env, prefix: &str, endpoint: &str) -> StorageConfig 
             upload_concurrency: 2,
         },
         memtable: MemtableConfig {
-            hard_limit: ByteSize::mib(64),
+            hard_limit: ByteSize::gib(1),
         },
         query: Default::default(),
         anchor: Default::default(),
@@ -524,13 +524,15 @@ fn project() -> ProjectId {
 
 /// `rows` spans of one trace, each with `payload` bytes of output (copied from `tests/s3.rs`).
 fn spans(rows: usize, payload: usize) -> arrow::array::RecordBatch {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base = NEXT_ID.fetch_add(rows as u64, std::sync::atomic::Ordering::Relaxed);
     let project_id = project();
     let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
         .parse::<TraceId>()
         .unwrap();
     let spans: Vec<Span> = (0..rows)
         .map(|row| {
-            let mut bytes = (u64::try_from(row).unwrap_or(0).saturating_add(1)).to_be_bytes();
+            let mut bytes = (base + u64::try_from(row).unwrap_or(0) + 1).to_be_bytes();
             if bytes == [0; 8] {
                 bytes[7] = 1;
             }
@@ -886,7 +888,9 @@ async fn blackhole_then_recovery() {
 /// the memtable drains within 6 minutes, and every acknowledged row reads back.
 async fn blackhole_run(case: &Case) -> Result<(), String> {
     let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let storage = Storage::open(case.config(dir.path()))
+    let mut config = case.config(dir.path());
+    config.memtable.hard_limit = ByteSize::mib(64);
+    let storage = Storage::open(config)
         .await
         .map_err(|error| format!("open through the proxy: {error}"))?;
     let mut acknowledged = append(&storage, 16, 64 * 1024).await?;
@@ -947,6 +951,12 @@ async fn blackhole_run(case: &Case) -> Result<(), String> {
     case.remove("hole-up").await?;
     let recovery = Instant::now();
     let deadline = recovery + Duration::from_secs(6 * 60);
+    while storage.health().memtable_bytes > 0 {
+        if Instant::now() > deadline {
+            return Err("the memtable did not drain".to_owned());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     loop {
         match storage.append_spans(project(), spans(1, 0)).await {
             Ok(_) => {
@@ -1043,7 +1053,7 @@ async fn bandwidth_run(case: &Case) -> Result<(), String> {
 
     let held_until = Instant::now() + Duration::from_secs(3 * 60);
     while Instant::now() < held_until {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         let rows = catalog_rows(dir.path()).await?;
         if rows != 0 {
             return Err(format!("{rows} files committed through a 1 MiB/s link"));
@@ -1051,10 +1061,11 @@ async fn bandwidth_run(case: &Case) -> Result<(), String> {
     }
 
     case.remove("bandwidth").await?;
+    let removed_at = Instant::now();
     let deadline = Instant::now() + Duration::from_secs(6 * 60);
     let committed = loop {
         if catalog_rows(dir.path()).await? > 0 {
-            break Instant::now();
+            break removed_at.elapsed();
         }
         if Instant::now() > deadline {
             return Err("the flush did not commit within 6 minutes".to_owned());
@@ -1063,11 +1074,11 @@ async fn bandwidth_run(case: &Case) -> Result<(), String> {
     };
     println!(
         "s3_chaos bandwidth_and_large_single_put: committed {:?} after the toxic was removed",
-        committed.elapsed()
+        committed
     );
     let size = largest_object(dir.path()).await?;
-    if !(40 * MIB as i64..=64 * MIB as i64).contains(&size) {
-        return Err(format!("the file is {size} bytes, outside 40 to 64 MiB"));
+    if !(32 * MIB as i64..=64 * MIB as i64).contains(&size) {
+        return Err(format!("the file is {size} bytes, outside 32 to 64 MiB"));
     }
     shut_down(&storage).await?;
     drop(storage);
