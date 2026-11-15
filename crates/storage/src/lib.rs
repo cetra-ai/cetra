@@ -115,6 +115,8 @@ mod quarantine_tests;
 #[cfg(test)]
 mod retention;
 #[cfg(test)]
+mod s3_fault_tests;
+#[cfg(test)]
 mod test_support;
 
 /// One acknowledged append.
