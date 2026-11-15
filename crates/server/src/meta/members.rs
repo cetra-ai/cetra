@@ -181,6 +181,30 @@ pub(crate) async fn count_active_owners(
     .map_err(MetaError::from)
 }
 
+/// Whether `user_id` owns an org that `other_id` is not a member of (D-P-68).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn owns_org_without(
+    pool: &SqlitePool,
+    user_id: Uuid,
+    other_id: Uuid,
+) -> Result<bool, MetaError> {
+    let found: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_members owned \
+         WHERE owned.user_id = ? AND owned.role = ? \
+           AND NOT EXISTS(SELECT 1 FROM org_members other \
+                          WHERE other.org_id = owned.org_id AND other.user_id = ?))",
+    )
+    .bind(user_id.to_string())
+    .bind(org_role_str(OrgRole::Owner))
+    .bind(other_id.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(found != 0)
+}
+
 /// Members whose role is owner, admin or member (viewers take no seat, D176).
 ///
 /// # Errors
