@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::http::AppState;
 use crate::meta::MetaError;
+use crate::meta::backfills;
 use crate::meta::eval_jobs;
 
 /// Extra time `EvalTasks::shutdown` allows the loops after their drain, before it aborts them.
@@ -160,6 +161,8 @@ pub(crate) struct EvalTiming {
     pub(crate) flush_every: Duration,
     /// Online-rule sweeper (D-I-9).
     pub(crate) sweep_every: Duration,
+    /// Backfill runner tick; a created backfill also wakes it (D-I-39).
+    pub(crate) backfill_every: Duration,
     /// How long the dispatcher gives its workers at shutdown before it aborts them.
     pub(crate) drain: Duration,
 }
@@ -173,6 +176,7 @@ impl EvalTiming {
         budget_every: Duration::from_secs(30),
         flush_every: Duration::from_secs(5),
         sweep_every: Duration::from_secs(2),
+        backfill_every: Duration::from_secs(5),
         drain: Duration::from_secs(3),
     };
 
@@ -185,24 +189,38 @@ impl EvalTiming {
         budget_every: Duration::from_millis(100),
         flush_every: Duration::from_millis(100),
         sweep_every: Duration::from_millis(50),
+        backfill_every: Duration::from_millis(50),
         drain: Duration::from_secs(3),
     };
 }
 
 /// Startup recovery (D-I-12): `running` jobs go back to `queued` with one more interruption,
-/// except those already interrupted 3 times, which fail.
+/// except those already interrupted 3 times, which fail. `running` backfills fail as
+/// `interrupted` (D-I-39).
 ///
 /// # Errors
 ///
 /// Returns [`MetaError`] when the write fails.
 pub(crate) async fn recover(state: &AppState) -> Result<(), MetaError> {
     let now = state.clock.now_ns();
-    let (requeued, failed) = state
+    let (requeued, failed, interrupted) = state
         .meta
-        .write(move |conn| Box::pin(async move { eval_jobs::recover(conn, now).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let (requeued, failed) = eval_jobs::recover(conn, now).await?;
+                let interrupted = backfills::fail_running(conn, now).await?;
+                Ok((requeued, failed, interrupted))
+            })
+        })
         .await?;
     if requeued + failed > 0 {
         tracing::info!(requeued, failed, "eval jobs recovered at startup");
+    }
+    if interrupted > 0 {
+        tracing::info!(
+            backfills = interrupted,
+            "running backfills marked interrupted at startup"
+        );
     }
     Ok(())
 }
@@ -213,8 +231,8 @@ pub(crate) struct EvalTasks {
     timing: EvalTiming,
 }
 
-/// Starts the dispatcher, janitor, pruner, budget ticker, pending-traces flusher and online-rule
-/// sweeper. Each runs one
+/// Starts the dispatcher, janitor, pruner, budget ticker, pending-traces flusher, online-rule
+/// sweeper and backfill runner. Each runs one
 /// pass as soon as it starts (the first tick of its interval is not skipped), so a restart prunes
 /// and clears at once.
 pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
@@ -229,6 +247,11 @@ pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
         tokio::spawn(run_prune(state.clone(), stop.clone(), timing.prune_every)),
         tokio::spawn(run_flusher(state.clone(), stop.clone(), timing.flush_every)),
         tokio::spawn(run_sweeper(state.clone(), stop.clone(), timing.sweep_every)),
+        tokio::spawn(run_backfills(
+            state.clone(),
+            stop.clone(),
+            timing.backfill_every,
+        )),
         tokio::spawn(run_budget(state.clone(), stop, timing.budget_every)),
     ];
     EvalTasks { handles, timing }
@@ -384,6 +407,25 @@ async fn run_sweeper(state: AppState, mut stop: watch::Receiver<bool>, every: Du
             }
             Ok(_) => {}
             Err(error) => tracing::error!(error = %error, "online-rule sweep failed"),
+        }
+    }
+}
+
+/// The backfill runner (D-I-39). A pass runs to its end before the next; it stops between pages
+/// when the server stops.
+async fn run_backfills(state: AppState, mut stop: watch::Receiver<bool>, every: Duration) {
+    let mut interval = ticker(every);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stopped| *stopped) => return,
+            _ = interval.tick() => {}
+            () = state.eval.backfill_wake.notified() => {}
+        }
+        match backfill::backfill_once(&state).await {
+            Ok(finished) if finished > 0 => tracing::debug!(finished, "backfill pass"),
+            Ok(_) => {}
+            Err(error) => tracing::error!(error = %error, "backfill pass failed"),
         }
     }
 }
