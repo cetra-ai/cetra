@@ -231,11 +231,20 @@ fn canonical_provider(value: &str, from_vercel: bool) -> String {
     lower
 }
 
+/// Provider names that instrumentations write for a semconv name. Checked before the
+/// well-known list. `google` is `gcp.gen_ai` (any Google GenAI endpoint), not one platform.
 fn exact_alias(value: &str) -> Option<&'static str> {
     Some(match value {
         "openai.chat" | "openai.responses" => "openai",
         "anthropic.messages" => "anthropic",
         "xai" => "x_ai",
+        "gemini" => "gcp.gemini",
+        "google" => "gcp.gen_ai",
+        "vertexai" | "vertex_ai" => "gcp.vertex_ai",
+        "azure" | "az.ai.openai" => "azure.ai.openai",
+        "az.ai.inference" => "azure.ai.inference",
+        "mistralai" => "mistral_ai",
+        "aws" => "aws.bedrock",
         _ => return None,
     })
 }
@@ -664,6 +673,22 @@ mod tests {
             ("ai.model.provider", "mistral.small", "mistral_ai"),
             ("ai.model.provider", "groq", "groq"),
             ("gen_ai.system", "OpenAI", "openai"),
+            // Names that instrumentations write (Google ADK, OpenInference, Azure, AWS).
+            ("gen_ai.provider.name", "gemini", "gcp.gemini"),
+            ("gen_ai.provider.name", "google", "gcp.gen_ai"),
+            ("gen_ai.provider.name", "vertexai", "gcp.vertex_ai"),
+            ("gen_ai.provider.name", "vertex_ai", "gcp.vertex_ai"),
+            ("gen_ai.provider.name", "azure", "azure.ai.openai"),
+            ("gen_ai.provider.name", "az.ai.openai", "azure.ai.openai"),
+            (
+                "gen_ai.provider.name",
+                "az.ai.inference",
+                "azure.ai.inference",
+            ),
+            ("gen_ai.provider.name", "mistralai", "mistral_ai"),
+            ("gen_ai.provider.name", "aws", "aws.bedrock"),
+            ("ai.model.provider", "gemini", "gcp.gemini"),
+            ("ai.model.provider", "azure", "azure.ai.openai"),
         ];
         for (key, raw, expected) in cases {
             let (fields, _) = filled(&[string_attr(key, raw)], &[]);

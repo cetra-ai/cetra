@@ -12,3 +12,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
+
+### Fixed
+
+- The built-in price table prices Gemini (Google AI and Vertex AI), Azure OpenAI, Azure AI Inference, xAI and Mistral spans. It keeps one row per model and provider, and the Google GenAI and OpenInference provider names are recognised (D-B1-11).

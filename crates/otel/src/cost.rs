@@ -26,6 +26,8 @@ const TOTAL_KEYS: &[&str] = &[
 const INPUT_KEYS: &[&str] = &["llm.cost.prompt", "gen_ai.usage.input_cost"];
 const OUTPUT_KEYS: &[&str] = &["llm.cost.completion", "gen_ai.usage.output_cost"];
 const COST_DETAILS: &str = "langfuse.observation.cost_details";
+/// Semconv provider for any Google GenAI endpoint. See [`same_provider`].
+const GCP_GEN_AI: &str = "gcp.gen_ai";
 
 /// Who owns a price row. Project beats org, which beats built-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
@@ -357,9 +359,16 @@ fn row_matches(row: &PriceRow, provider: Option<&str>, start_time: i64) -> bool 
         return false;
     }
     match (&row.provider, provider) {
-        (Some(row_provider), Some(span_provider)) => row_provider == span_provider,
+        (Some(row_provider), Some(span_provider)) => same_provider(row_provider, span_provider),
         (Some(_), None) | (None, _) => true,
     }
+}
+
+/// `gcp.gen_ai` is any Google GenAI endpoint (Gemini API or Vertex AI), so it prices with
+/// either platform's rows. Every other provider must match exactly, with no fallback.
+fn same_provider(row_provider: &str, span_provider: &str) -> bool {
+    row_provider == span_provider
+        || (span_provider == GCP_GEN_AI && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
 }
 
 /// Scope, then latest `valid_from`, then the longest pattern, then the lowest index.
@@ -530,6 +539,44 @@ mod tests {
         assert!(lookup(&prices, "GPT-4O", None, 0).is_some());
         assert!(lookup(&prices, "gpt-4o-mini", None, 0).is_none());
         assert!(lookup(&prices, "xgpt-4o", None, 0).is_none());
+    }
+
+    #[test]
+    fn a_gen_ai_span_prices_with_either_google_platform_and_nothing_else() {
+        let prices = table(vec![
+            row(
+                "gemini-2.5-flash",
+                PriceScope::Builtin,
+                Some("gcp.gemini"),
+                0,
+                1.0,
+            ),
+            row(
+                "gemini-2.5-flash",
+                PriceScope::Builtin,
+                Some("gcp.vertex_ai"),
+                0,
+                2.0,
+            ),
+            row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 3.0),
+        ]);
+        // Both platform rows match; the lower row index (gcp.gemini) wins.
+        let matched = lookup(&prices, "gemini-2.5-flash", Some("gcp.gen_ai"), 0).expect("row");
+        assert_eq!(matched.provider.as_deref(), Some("gcp.gemini"));
+        let vertex_only = table(vec![row(
+            "gemini-2.5-flash",
+            PriceScope::Builtin,
+            Some("gcp.vertex_ai"),
+            0,
+            2.0,
+        )]);
+        let matched = lookup(&vertex_only, "gemini-2.5-flash", Some("gcp.gen_ai"), 0);
+        assert_eq!(matched.and_then(|row| row.price_input), Some(2.0));
+        // No fallback: other providers and a no-row model stay unmatched.
+        assert!(lookup(&prices, "gpt-4o", Some("gcp.gen_ai"), 0).is_none());
+        assert!(lookup(&prices, "gpt-4o", Some("azure.ai.openai"), 0).is_none());
+        assert!(lookup(&prices, "gemini-2.5-flash", Some("aws.bedrock"), 0).is_none());
+        assert!(lookup(&prices, "gemini-2.5-flash", Some("gcp.gemini"), 0).is_some());
     }
 
     #[test]

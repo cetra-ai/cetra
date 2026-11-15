@@ -166,7 +166,7 @@ impl PriceTable { pub fn new(rows: Vec<PriceRow>) -> Result<Self, PriceError>; }
 1. **Reported cost** (N1 § 5 keys), on `llm`/`embedding` spans only. Rule 3 keeps cost columns null on other kinds, so a reported cost there stays in `attributes` (pinned by a fixture). On an `llm`/`embedding` span, any reported key gives `cost_source = reported`, and D109 fills the columns.
 2. **Lookup**, only on `llm`/`embedding` spans that have a model (`coalesce(response_model, request_model)`).
    - Candidates are the rows whose regex matches the model, whose `valid_from ≤ start_time`, and whose provider matches the span's.
-   - **Clarification A, added to spec 02:** a row with a `provider` matches when the span's provider equals it, **or the span has no provider**.
+   - **Clarification A, added to spec 02:** a row with a `provider` matches when the span's provider equals it, **or the span has no provider**. Changed by D-B1-11: a `gcp.gen_ai` span also matches `gcp.gemini` and `gcp.vertex_ai` rows, and there is no other cross-provider fallback.
    - Pick by scope priority, then the latest `valid_from`, then the longest `match_pattern`, then the lowest row index for determinism.
 3. **Tier:** the tier with the greatest `min_input_tokens ≤ input_tokens` (input including cache). A tier's null prices fall back to the row's base price, not to null.
    - **Clarification B, added to spec 02:** which tier applies, and the fallback to base prices.
@@ -222,12 +222,12 @@ Unit tests:
 Conversion rules (also written as a comment at the top of the test):
 - Keep entries whose `mode` is `chat`, `completion`, `responses` or `embedding`, with at least one of `input_cost_per_token` / `output_cost_per_token`.
 - The model name is the LiteLLM key with a leading `<litellm_provider>/` removed. A key that still contains `/` after that is skipped (proxy routes such as `openrouter/…`).
-- When two kept entries give the same model name, keep the entry whose key has no `/`. Otherwise keep the first in key order. Report the count of collisions.
+- One row per `(model_name, provider)`. When two kept entries give the same pair, keep the entry whose key has no `/`. Otherwise keep the first in key order. Report the count of collisions. (Changed by D-B1-11: the key was the model name alone, which dropped every provider but one.)
 - `match_pattern` = `regex::escape(model_name)`.
-- `provider` = the canonical provider when `litellm_provider` maps to one of `openai`, `anthropic`, `gcp.gemini` (`gemini`), `gcp.vertex_ai` (`vertex_ai*`), `aws.bedrock` (`bedrock*`), `azure.ai.openai` (`azure*`), `mistral_ai` (`mistral`), `x_ai` (`xai`), `groq`, `deepseek`, `cohere`. Anything else gets `None`.
+- `provider` = the semconv name for `litellm_provider` (`openai`, `anthropic`, `gcp.gemini` (`gemini`), `gcp.vertex_ai` (`vertex_ai*`), `aws.bedrock` (`bedrock*`), `azure.ai.openai` (`azure`, `azure_text`), `azure.ai.inference` (`azure_ai`), `mistral_ai` (`mistral`, `codestral`), `x_ai` (`xai`), `groq`, `deepseek`, `cohere`, `perplexity`, `ibm.watsonx.ai` (`watsonx`)). A name with no mapping keeps its LiteLLM name, lowercased; a missing `litellm_provider` gives `None`. (Changed by D-B1-11: the old rule gave `None` to every unmapped name, and mapped `azure_ai` to `azure.ai.openai`.)
 - Prices: `input_cost_per_token` → `price_input` × 1e6, `output_cost_per_token` → `price_output` × 1e6, `cache_read_input_token_cost` → `price_cache_read`, `cache_creation_input_token_cost` → `price_cache_write`, `output_cost_per_reasoning_token` → `price_reasoning`.
 - Tiers: `*_above_<N>k_tokens` → `min_input_tokens = N·1000`, with the matching prices.
-- Rows are sorted by `(model_name, provider)`.
+- Rows are sorted by `(model_name, provider_rank, provider)`: rank 0 the publisher's own API, 1 a cloud platform, 2 another named provider, 3 `None` (D-B1-11). The first matching row wins a tie, so a span with no provider infers the publisher.
 
 `justfile`:
 
