@@ -30,7 +30,8 @@ impl DailyEmailCount {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.0 != day {
+        // Only a later day starts the count again: a stale `now` never wipes today's sends.
+        if day > state.0 {
             *state = (day, HashMap::new());
         }
         let count = state.1.entry(org_id).or_insert(0);
@@ -105,6 +106,17 @@ mod tests {
         assert!(count.reserve(other, DAILY_EMAIL_LIMIT, noon));
         // The next UTC day starts again.
         assert!(count.reserve(acme, DAILY_EMAIL_LIMIT, 2 * DAY));
+    }
+
+    #[test]
+    fn an_earlier_day_does_not_reset_the_count() {
+        const DAY: i64 = 86_400_000_000_000;
+        let count = DailyEmailCount::default();
+        let acme = OrgId::new_v7();
+        assert!(count.reserve(acme, DAILY_EMAIL_LIMIT, 2 * DAY));
+        // A clock that reads an earlier day keeps the later day's count.
+        assert!(!count.reserve(acme, 1, DAY));
+        assert!(!count.reserve(acme, 1, 2 * DAY));
     }
 
     #[test]

@@ -252,7 +252,8 @@ async fn test_channel(
     let user_id = principal::session_user(&principal)?.id;
     let project = &access.project;
     let now = state.clock.now_ns();
-    // Five sends a minute per user and five per channel (D-K-19), checked before any work.
+    // Five sends a minute per user and five per channel (D-K-19). The channel is looked up in
+    // this project first, so a channel of another project (a 404) spends no budget of its own.
     let limited = |retry: crate::auth::limits::RetryAfter| ApiError::RateLimited {
         retry_after_s: retry.0.as_secs().max(1),
     };
@@ -261,14 +262,14 @@ async fn test_channel(
         .alert_tests_by_user
         .check(&user_id, now)
         .map_err(limited)?;
-    state
-        .limits
-        .alert_tests_by_channel
-        .check(&id, now)
-        .map_err(limited)?;
     let Some(channel) = alerts::channel_by_id(state.meta.reader(), project.id, id).await? else {
         return Err(ApiError::NotFound);
     };
+    state
+        .limits
+        .alert_tests_by_channel
+        .check(&channel.id, now)
+        .map_err(limited)?;
     let config = match open_config(&state.secrets, &channel.id, &channel.config_enc) {
         Ok(config) => config,
         Err(_) => {
@@ -1243,6 +1244,69 @@ mod tests {
         assert!(limited.headers.get("retry-after").is_some());
         // The app sent exactly the accepted ones.
         assert_eq!(app.sent().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn the_daily_cap_is_spent_one_message_at_a_time() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let channel = create_ok(
+            &app,
+            &seeded,
+            email_body("Two", &["oncall@example.com", "backup@example.com"]),
+        )
+        .await;
+        let now = app.state.clock.now_ns();
+        assert!(
+            app.state
+                .alert_email_count
+                .reserve(seeded.org_id, DAILY_EMAIL_LIMIT - 1, now)
+        );
+
+        // One message is left: the first recipient gets it, the second is refused at its own
+        // reservation rather than the whole send being refused up front.
+        let partial = test_send(&app, channel.id, &seeded, &seeded.cookie).await;
+        assert_eq!(
+            partial.json::<Value>(),
+            json!({"ok": false, "error": "daily alert email limit reached"})
+        );
+        assert_eq!(app.sent().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_channel_of_another_project_is_not_found_and_spends_no_budget() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let admin = app
+            .add_member(&seeded, "admin@example.com", OrgRole::Admin)
+            .await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let theirs = send(
+            &app,
+            Method::POST,
+            &format!("/api/v1/projects/{}/channels", other.id),
+            &seeded.cookie,
+            Some(email_body("Theirs", &["oncall@example.com"])),
+        )
+        .await;
+        assert_eq!(theirs.status, 201);
+        let theirs = theirs.json::<NotificationChannel>();
+
+        // The admin asks for the other project's channel through this project, five times (the
+        // user's own budget): each is a 404, and none uses that channel's five sends.
+        for _ in 0..5 {
+            let missing = test_send(&app, theirs.id, &seeded, &admin.cookie).await;
+            assert_eq!(missing.status, 404);
+        }
+        // The owner of that channel still has its full budget: five sends go, the sixth is 429.
+        let owner_path = format!("/api/v1/projects/{}/channels/{}/test", other.id, theirs.id);
+        for _ in 0..5 {
+            let sent = send(&app, Method::POST, &owner_path, &seeded.cookie, None).await;
+            assert_eq!(sent.status, 200);
+        }
+        let refused = send(&app, Method::POST, &owner_path, &seeded.cookie, None).await;
+        assert_eq!(refused.status, 429);
+        assert_eq!(app.sent().len(), 5);
     }
 
     #[tokio::test]

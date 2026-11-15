@@ -212,6 +212,7 @@ pub(crate) async fn verified_member_emails(
     let emails: Vec<String> = sqlx::query_scalar(
         "SELECT users.email FROM org_members JOIN users ON users.id = org_members.user_id \
          WHERE org_members.org_id = ? AND users.email_verified_at IS NOT NULL \
+         AND users.disabled_at IS NULL \
          ORDER BY users.email",
     )
     .bind(org_id.to_string())
@@ -374,7 +375,7 @@ mod tests {
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::test_db;
-    use crate::meta::users::{NewUser, insert_user, normalize_email};
+    use crate::meta::users::{NewUser, insert_user, normalize_email, set_disabled};
 
     #[tokio::test]
     async fn memberships_roles_and_override_removal() {
@@ -542,5 +543,36 @@ mod tests {
             email_verified_at: None,
             is_instance_admin: false,
         }
+    }
+
+    #[tokio::test]
+    async fn verified_member_emails_skip_unverified_and_disabled_users() {
+        let (_dir, db) = test_db().await;
+        let org_id = OrgId::new_v7();
+        db.write(|conn| {
+            Box::pin(async move {
+                let org = insert_org(conn, org_id, "Alpha", "alpha", 1).await?;
+                let verified = |email: &str| NewUser {
+                    email_verified_at: Some(1),
+                    ..user(email)
+                };
+                let ada = insert_user(conn, verified("ada@example.com"), 1).await?;
+                let bob = insert_user(conn, verified("bob@example.com"), 1).await?;
+                let cy = insert_user(conn, verified("cy@example.com"), 1).await?;
+                let unverified = insert_user(conn, user("dee@example.com"), 1).await?;
+                for member in [ada.id, bob.id, cy.id, unverified.id] {
+                    add_org_member(conn, org.id, member, OrgRole::Member, 1).await?;
+                }
+                set_disabled(conn, cy.id, Some(2), 2).await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            verified_member_emails(db.reader(), org_id).await.unwrap(),
+            vec!["ada@example.com".to_owned(), "bob@example.com".to_owned()]
+        );
     }
 }

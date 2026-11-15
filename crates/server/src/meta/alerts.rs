@@ -1176,7 +1176,7 @@ fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
         org_id: record
             .org_id
             .parse()
-            .map_err(|_| corrupt(DELIVERIES, "id"))?,
+            .map_err(|_| corrupt(DELIVERIES, "org_id"))?,
         org_slug: record.org_slug,
     })
 }

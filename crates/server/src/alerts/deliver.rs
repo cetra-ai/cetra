@@ -179,7 +179,7 @@ fn egress_error(error: &EgressError) -> SendError {
 ///
 /// Under open signup only verified members of the org get mail (D-K-19): the other recipients
 /// are skipped, and the delivery then fails with a count. Every message counts against the
-/// org's daily cap, which is reserved before the first send.
+/// org's daily cap, reserved just before its send.
 async fn send_email(
     state: &AppState,
     org_id: OrgId,
@@ -206,13 +206,16 @@ async fn send_email(
             "no recipient is a verified member of the organization",
         ));
     }
-    let messages = u64::try_from(sendable.len()).unwrap_or(u64::MAX);
-    if !state.alert_email_count.reserve(org_id, messages, now) {
-        return Err(permanent("daily alert email limit reached"));
-    }
+    // Each message reserves one unit of the daily cap just before it is sent, so a retry of a
+    // failed send does not count mail that was never sent (D-K-19).
     let email = message::email(notice);
+    let mut capped = false;
     let sent = tokio::time::timeout(SEND_TIMEOUT, async {
         for recipient in &sendable {
+            if !state.alert_email_count.reserve(org_id, 1, now) {
+                capped = true;
+                break;
+            }
             mailer.send_now(recipient, &email).await?;
         }
         Ok::<(), MailError>(())
@@ -220,6 +223,7 @@ async fn send_email(
     .await;
     match sent {
         Err(_elapsed) => Err(retryable("the request timed out")),
+        Ok(Ok(())) if capped => Err(permanent("daily alert email limit reached")),
         Ok(Ok(())) if skipped > 0 => Err(permanent(&format!(
             "{skipped} recipient(s) skipped: not verified members of the organization"
         ))),
