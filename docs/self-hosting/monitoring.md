@@ -101,7 +101,7 @@ Counter names end in `_total`. Durations are histograms in seconds.
 | `llmobs_storage_flush_seconds_total` | counter | `table` | wall time of committed flushes; divide the rate by the flush rate for the mean |
 | `llmobs_storage_compactions_total` | counter | `outcome` (`ok`, `failed`, `deferred`, `conflict`) | compaction jobs |
 | `llmobs_storage_compaction_bytes_written_total` | counter | | Parquet bytes written by committed compactions |
-| `llmobs_storage_gc_objects_deleted_total` | counter | | data files and staged objects deleted by GC (media blobs not counted) |
+| `llmobs_storage_gc_objects_deleted_total` | counter | | obsolete data files and staged objects (including staged media uploads); media blobs collected by media GC are not counted |
 | `llmobs_storage_read_cache_hits_total`, `llmobs_storage_read_cache_misses_total` | counter | | S3 read cache blocks served from disk or fetched; stay at 0 in local mode |
 | `llmobs_storage_read_cache_bytes` | gauge | | bytes of the read cache on disk |
 | `llmobs_eval_jobs` | gauge | `status` (`queued`, `running`) | evaluation jobs in `meta.db`, refreshed at most every 10 s |

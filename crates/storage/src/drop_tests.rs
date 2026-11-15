@@ -20,7 +20,7 @@ use crate::compaction::job::tests::{at, config_in, project, quiet_compaction, wa
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::{AppendError, MediaError, StorageError};
 use crate::hooks::HookPoint;
-use crate::media::MediaBlob;
+use crate::media::{MediaBlob, MediaReport};
 use crate::objects::Objects;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
@@ -691,6 +691,26 @@ async fn drop_stays_dropping_when_delete_objects_is_off() {
     );
     assert!(object_file(dir.path(), project(), &p_sha).is_file());
     assert_eq!(media_rows(dir.path(), project()).await, 1);
+    storage.shutdown().await.unwrap();
+}
+
+// N M3 (D-N-34): with object deletion off, media collection of a stale, unreferenced blob
+// changes nothing: the row stays, nothing is staged and the blob stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn media_is_not_collected_when_delete_objects_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+    config.delete_objects = false;
+    let storage = two_projects(&config).await;
+    let p_sha = p_blob().sha256;
+    // Two hours after the blobs were stored: both are stale and unreferenced.
+    let now = crate::catalog::now_ns() + 2 * 3_600 * 1_000_000_000;
+
+    let report = storage.collect_media(now).await.unwrap();
+    assert_eq!(report, MediaReport::default());
+    assert_eq!(media_rows(dir.path(), project()).await, 1);
+    assert!(storage.staged_paths().await.unwrap().is_empty());
+    assert!(object_file(dir.path(), project(), &p_sha).is_file());
     storage.shutdown().await.unwrap();
 }
 

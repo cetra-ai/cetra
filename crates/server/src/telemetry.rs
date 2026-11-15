@@ -287,7 +287,7 @@ impl Telemetry {
         let storage_gc_objects_deleted = Counter::default();
         sub.register(
             "storage_gc_objects_deleted",
-            "Obsolete data files and staged objects deleted by GC; media blobs are not counted",
+            "Obsolete data files and staged objects (including staged media uploads); media blobs collected by media GC are not counted",
             storage_gc_objects_deleted.clone(),
         );
         let eval_jobs = Family::<EvalStatusLabel, Gauge>::default();

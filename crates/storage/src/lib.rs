@@ -204,7 +204,7 @@ pub struct StorageStats {
     pub compactions_conflict: u64,
     /// Bytes of Parquet objects written by compaction jobs.
     pub compaction_bytes_written: u64,
-    /// Obsolete data files and staged objects deleted by GC. Media blobs are not counted.
+    /// Obsolete data files and staged objects (including staged media uploads); media blobs collected by media GC are not counted.
     pub gc_objects_deleted: u64,
 }
 

@@ -337,6 +337,11 @@ impl Objects {
         Some((Arc::clone(cache), name))
     }
 
+    /// `false` in restore mode (D-N-34): every deletion is refused.
+    pub(crate) fn deletes_enabled(&self) -> bool {
+        self.delete_objects
+    }
+
     /// Deletes one object. A missing object is success. Used by GC.
     pub(crate) async fn delete(&self, path: &str) -> Result<(), ObjectError> {
         if !self.delete_objects {
