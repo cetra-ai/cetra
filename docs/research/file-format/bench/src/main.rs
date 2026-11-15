@@ -16,6 +16,7 @@ use std::time::Instant;
 use arrow::array::{Array, ArrayRef, RecordBatch};
 use arrow::compute::{SortColumn, cast, concat_batches, lexsort_to_indices, take_record_batch};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
+use cpu_time::ProcessTime;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -88,6 +89,7 @@ async fn main() -> R<()> {
             })
             .await
         }
+        Some("merge") => merge_cmd(&args[2]).await,
         Some("swe") => {
             let budget: usize = args[2].parse()?;
             swe_cmd(budget, &args[3..])
@@ -100,7 +102,7 @@ async fn main() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs]\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -766,18 +768,22 @@ async fn measure(loc: &Location, label: &str, r: &Runner, queries: &[Query], ids
         let mut times = Vec::new();
         let mut rows = 0;
         let mut io = None;
+        let mut cpus = Vec::new();
         let mut failed = None;
         for run in 0..runs {
             if run == 0 {
                 reset_io(loc, r);
             }
+            let c0 = ProcessTime::now();
             let t = Instant::now();
             let res = run_query(r, q, ids).await;
             let el = t.elapsed().as_secs_f64() * 1e3 / per;
+            let cpu = c0.elapsed().as_secs_f64() * 1e3 / per;
             match res {
                 Ok(Some(n)) => {
                     rows = n;
                     times.push(el);
+                    cpus.push(cpu);
                 }
                 Ok(None) => {
                     failed = Some("unsupported".to_owned());
@@ -798,11 +804,13 @@ async fn measure(loc: &Location, label: &str, r: &Runner, queries: &[Query], ids
         }
         let Some(io) = io else { continue };
         times.sort_by(f64::total_cmp);
+        cpus.sort_by(f64::total_cmp);
         println!(
-            "{label:16} {:20} median {:>9.2} ms  min {:>9.2} ms  rows {rows:>6}  reqs {:>8.1}  KiB {:>10.1}  waves_max {:>6}  waves_sum {:>6}",
+            "{label:16} {:20} median {:>9.2} ms  min {:>9.2} ms  cpu med {:>9.2} ms  rows {rows:>6}  reqs {:>8.1}  KiB {:>10.1}  waves_max {:>6}  waves_sum {:>6}",
             q.name,
             times[times.len() / 2],
             times[0],
+            cpus[cpus.len() / 2],
             io.reqs,
             io.kib,
             fmt_wave(io.wmax),
@@ -859,6 +867,7 @@ async fn substring_needles(loc: &Location, variants: &[&str], needles: &[String]
 
 async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     let loc = location(dir)?;
+    println!("loadavg before: {}", profile::loadavg());
     let ids: Vec<[u8; 16]> = read_text(&loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().take(20).map(parse_id).collect::<R<_>>()?;
     let t0 = datagen::DAY_START;
     let h = 3_600 * datagen::NS;
@@ -879,8 +888,8 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     ];
     let only = only.as_deref();
     let needle_runs: usize = std::env::var("FMT_NEEDLE_RUNS").ok().map(|s| s.parse()).transpose()?.unwrap_or(runs);
-    println!("{:16} {:20} {:>9} {:>9} {:>6}  {:>8} {:>10}  {:>10} {:>10}", "variant", "query", "median", "min", "rows", "reqs", "KiB", "waves_max", "waves_sum");
-    println!("(trace queries: reqs, KiB and waves per id; waves are for st and st_fast only; rows are totals)");
+    println!("{:16} {:20} {:>9} {:>9} {:>12} {:>6}  {:>8} {:>10}  {:>10} {:>10}", "variant", "query", "median", "min", "cpu med", "rows", "reqs", "KiB", "waves_max", "waves_sum");
+    println!("(times are per query, or per id for trace queries; cpu is process CPU time; trace queries: reqs, KiB and waves per id; waves are for st and st_fast only; rows are totals)");
 
     let variants: Vec<&str> = PQ_VARIANTS.iter().chain(VX_VARIANTS).chain(&["st"]).copied().collect();
     let mut dirs: Vec<&str> = Vec::new();
@@ -914,6 +923,176 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
             }
         }
     }
+    if only.is_none_or(|o| o == "trace_lookup_cold") {
+        trace_lookup_cold(&loc, &ids, runs).await?;
+    }
+    println!("loadavg after: {}", profile::loadavg());
+    Ok(())
+}
+
+// ------------------------------------------------------------------ cold lookups
+
+/// Max over files of the waves each has run so far (0 with no files).
+fn max_waves(files: &[Arc<StrataFile>]) -> u64 {
+    files.iter().map(|f| f.io_stats().waves).max().unwrap_or(0)
+}
+
+/// Waves of a Strata open: 1 when it issued one request per file, else 2.
+fn open_waves(open_reqs: u64, files: usize) -> u64 {
+    if open_reqs == files as u64 { 1 } else { 2 }
+}
+
+/// One lookup of `id` from nothing: a fresh context and fresh files, then the lookup. Returns
+/// the row count and, for Strata, the waves of the open plus the lookup.
+async fn cold_one(loc: &Location, label: &str, id: &[u8; 16]) -> R<(usize, Option<u64>)> {
+    if label == "st_fast" {
+        let files = open_strata(loc, "st").await?;
+        let open = open_waves(loc.store.stats().0, files.len());
+        let schema = files.first().ok_or("no strata files")?.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let rows = trace_detail(&files, *id, &names).await?.num_rows();
+        return Ok((rows, Some(open + max_waves(&files))));
+    }
+    if let Some(v) = label.strip_prefix("pq_fast/") {
+        let files = open_pq_fast(loc, v).await?;
+        let width = files.first().ok_or("no parquet files")?.meta.schema().fields().len();
+        let proj: Vec<usize> = (0..width).collect();
+        let mut rows = 0;
+        for batches in try_join_all(files.iter().map(|f| pqfast::lookup(f, id, &proj))).await? {
+            rows += batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+        }
+        return Ok((rows, None));
+    }
+    let ctx = new_ctx(loc, None)?;
+    let files = table(&ctx, loc, label).await?;
+    let open_reqs = loc.store.stats().0;
+    let sql = format!("SELECT * FROM t WHERE trace_id = X'{}'", hex(id));
+    let rows = ctx.sql(&sql).await?.collect().await?.iter().map(RecordBatch::num_rows).sum::<usize>();
+    let waves = matches!(Format::of(label)?, Format::Strata).then(|| open_waves(open_reqs, files.len()) + max_waves(&files));
+    Ok((rows, waves))
+}
+
+/// G1b: every id looked up from nothing, one pass per run. There is no in-process cache: each
+/// lookup builds a new context (SQL) or opens new files (Strata, pq_fast). On local disk the OS
+/// page cache stays warm. Bytes and requests come from `Counting` after each lookup, so they
+/// include the open; HEAD and LIST requests are not counted. Time, bytes, requests and waves are
+/// means per id; rows are the sum over the ids of one pass.
+async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<()> {
+    let n = (runs * ids.len()) as f64;
+    let mut base = Vec::new();
+    for _ in 0..runs * ids.len() {
+        let t = Instant::now();
+        let ctx = new_ctx(loc, None)?;
+        ctx.sql("SELECT 1").await?.collect().await?;
+        base.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    println!("SELECT 1 in a fresh context: mean {:.2} ms over {} runs", base.iter().sum::<f64>() / n, base.len());
+    println!("trace_lookup_cold: {} ids, {runs} passes; reqs exclude HEAD and LIST; waves = open + lookup (st, st_fast); local disk: OS page cache warm", ids.len());
+    println!("{:16} {:>10} {:>10} {:>10} {:>8} {:>8}", "variant", "mean ms", "KiB", "reqs", "waves", "rows");
+    let mut plan: Vec<(String, String)> = PQ_VARIANTS.iter().chain(VX_VARIANTS).map(|v| (v.to_string(), v.to_string())).collect();
+    plan.push(("st".into(), "st".into()));
+    plan.push(("st_fast".into(), "st".into()));
+    plan.extend(PQ_VARIANTS.iter().map(|v| (format!("pq_fast/{v}"), v.to_string())));
+    for (label, dir) in &plan {
+        if !has_files(loc, dir).await? {
+            continue;
+        }
+        let (mut ms, mut kib, mut reqs, mut waves, mut rows) = (0.0, 0.0, 0.0, None::<u64>, 0usize);
+        let mut failed = None;
+        'passes: for _ in 0..runs {
+            for id in ids {
+                loc.store.reset();
+                let t = Instant::now();
+                match cold_one(loc, label, id).await {
+                    Ok((r, w)) => {
+                        ms += t.elapsed().as_secs_f64() * 1e3;
+                        let (q, b) = loc.store.stats();
+                        reqs += q as f64;
+                        kib += b as f64 / 1024.0;
+                        rows += r;
+                        if let Some(w) = w {
+                            waves = Some(waves.unwrap_or(0) + w);
+                        }
+                    }
+                    Err(e) => {
+                        failed = Some(first_line(&e));
+                        break 'passes;
+                    }
+                }
+            }
+        }
+        if let Some(e) = failed {
+            println!("{label:16} ERROR {e}");
+            continue;
+        }
+        let w = waves.map_or("-".to_owned(), |w| format!("{:.1}", w as f64 / n));
+        println!("{label:16} {:>10.2} {:>10.1} {:>10.1} {w:>8} {:>8}", ms / n, kib / n, reqs / n, rows / runs);
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ merge
+
+/// The Parquet side of G9: reads the `pq_default` files fully, sorts the rows by (trace_id,
+/// start_time) with Arrow kernels and writes one file. Returns the row count.
+fn merge_pq(dir: &Path, paths: &[PathBuf]) -> R<usize> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut batches = Vec::new();
+    for p in paths {
+        let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(p)?)?.with_batch_size(65536).build()?;
+        for b in reader {
+            batches.push(b?);
+        }
+    }
+    let schema = batches.first().ok_or("no pq_default files")?.schema();
+    let b = concat_batches(&schema, &batches)?;
+    drop(batches);
+    let idx = lexsort_to_indices(
+        &[
+            SortColumn { values: b.column_by_name("trace_id").ok_or("no trace_id column")?.clone(), options: None },
+            SortColumn { values: b.column_by_name("start_time").ok_or("no start_time column")?.clone(), options: None },
+        ],
+        None,
+    )?;
+    let b = take_record_batch(&b, &idx)?;
+    let f = std::fs::File::create(dir.join("merged.parquet"))?;
+    let mut w = ArrowWriter::try_new(f, b.schema(), Some(parquet_props("pq_default", &b.schema(), b.num_rows())))?;
+    for off in (0..b.num_rows()).step_by(8192) {
+        w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+    }
+    w.close()?;
+    Ok(b.num_rows())
+}
+
+/// G9: merges the 4 `st` files with `strata::merge` and the 4 `pq_default` files with Arrow
+/// (`merge_pq`), each timed once for wall and process CPU time. Local only.
+async fn merge_cmd(dir: &str) -> R<()> {
+    if dir.starts_with("s3://") {
+        return Err("merge is local-only: give a local directory".into());
+    }
+    let dir = std::fs::canonicalize(dir)?;
+    let loc = location(&dir.to_string_lossy())?;
+    println!("loadavg before: {}", profile::loadavg());
+    let files = open_strata(&loc, "st").await?;
+    println!("strata: {} input files; the object store's I/O runs on blocking threads, inside the timed merge", files.len());
+    let (w0, c0) = (Instant::now(), ProcessTime::now());
+    let (bytes, _) = strata::merge(&files, &["trace_id", "start_time"], Config::default()).await?;
+    std::fs::write(dir.join("merged.strata"), &bytes)?;
+    let (st_wall, st_cpu) = (w0.elapsed().as_secs_f64() * 1e3, c0.elapsed().as_secs_f64() * 1e3);
+    println!("strata  merge {st_wall:>10.1} ms wall  {st_cpu:>10.1} ms cpu  {:>8} KiB out", bytes.len() >> 10);
+
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("pq_default"))?.map(|e| e.map(|e| e.path())).collect::<Result<_, _>>()?;
+    paths.sort();
+    let (w0, c0) = (Instant::now(), ProcessTime::now());
+    match merge_pq(&dir, &paths) {
+        Ok(rows) => {
+            let (pq_wall, pq_cpu) = (w0.elapsed().as_secs_f64() * 1e3, c0.elapsed().as_secs_f64() * 1e3);
+            println!("parquet merge {pq_wall:>10.1} ms wall  {pq_cpu:>10.1} ms cpu  {rows} rows");
+            println!("ratio strata / parquet: wall {:.2}  cpu {:.2}", st_wall / pq_wall, st_cpu / pq_cpu);
+        }
+        Err(e) => println!("parquet merge ERROR {}", first_line(&e)),
+    }
+    println!("loadavg after: {}", profile::loadavg());
     Ok(())
 }
 
