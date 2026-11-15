@@ -374,10 +374,48 @@ async fn maps_usage_including_cache_and_thinking() {
 }
 
 #[tokio::test]
+async fn a_low_credit_balance_pauses_the_rule() {
+    let mock = Mock::start().await;
+    let conn = connection(mock.origin(), Vec::new());
+    let http = client();
+    let output = numeric();
+    let request = judge("claude-sonnet-4-5", &output, None, Duration::from_secs(2));
+    for (status, kind, message, class) in [
+        (
+            400,
+            "invalid_request_error",
+            "Your credit balance is too low to access the Anthropic API.",
+            ErrorClass::Pause,
+        ),
+        (
+            400,
+            "invalid_request_error",
+            "messages: field required",
+            ErrorClass::Permanent,
+        ),
+        (
+            429,
+            "rate_limit_error",
+            "Your credit balance is too low",
+            ErrorClass::Pause,
+        ),
+    ] {
+        mock.enqueue(MockReply {
+            status,
+            body: json!({"type": "error", "error": {"type": kind, "message": message}}),
+            delay: Duration::ZERO,
+        });
+        let err = call_err(&http, &conn, &request).await;
+        assert_eq!(err.class(), class, "{message}");
+    }
+}
+
+#[tokio::test]
 async fn classifies_provider_statuses() {
     let cases = [
         (429, "rate_limit_error", ErrorClass::Retryable),
-        (429, "insufficient_quota", ErrorClass::Pause),
+        (402, "billing_error", ErrorClass::Pause),
+        (400, "billing_error", ErrorClass::Pause),
         (401, "authentication_error", ErrorClass::Pause),
         (403, "permission_error", ErrorClass::Pause),
         (404, "not_found_error", ErrorClass::Pause),
@@ -564,4 +602,35 @@ fn assert_hidden(err: &JudgeError) {
     let debug = format!("{err:?}");
     assert!(!debug.contains(PROMPT), "{debug}");
     assert!(!debug.contains("SECRET-PAYLOAD"), "{debug}");
+}
+
+#[tokio::test]
+async fn extra_headers_cannot_override_the_content_type_or_the_auth_header() {
+    let mock = Mock::start().await;
+    let conn = connection(
+        mock.origin(),
+        vec![
+            ("Content-Type", "text/plain"),
+            ("X-Api-Key", "forged"),
+            ("X-Trace", "kept"),
+        ],
+    );
+    let http = client();
+    let output = numeric();
+    mock.enqueue(MockReply {
+        status: 500,
+        body: json!({"error": {"message": "overloaded"}}),
+        delay: Duration::ZERO,
+    });
+    call(
+        &http,
+        &conn,
+        &judge("claude-sonnet-4-5", &output, None, Duration::from_secs(2)),
+    )
+    .await
+    .expect_err("status");
+    let request = &mock.requests()[0];
+    assert_eq!(request.header("content-type"), Some("application/json"));
+    assert_eq!(request.header("x-api-key"), Some(KEY.to_owned().as_str()));
+    assert_eq!(request.header("x-trace"), Some("kept"));
 }
