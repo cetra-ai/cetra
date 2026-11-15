@@ -246,7 +246,7 @@ pub(crate) async fn collect_obsolete(
     Ok(report)
 }
 
-/// What [`crate::Storage::collect_orphans`] found.
+/// What [`crate::Maintenance::collect_orphans`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OrphanReport {
     /// Unknown objects older than `min_age` (deleted unless `dry_run`).
@@ -1021,6 +1021,15 @@ mod tests {
         .unwrap();
     }
 
+    /// Runs [`crate::Maintenance::collect_orphans`] on a data directory whose server has
+    /// stopped, as the admin commands do.
+    async fn orphans(dir: &Path, min_age: Duration, dry_run: bool) -> OrphanReport {
+        let maintenance = crate::Maintenance::open(config_in(dir)).await.unwrap();
+        let report = maintenance.collect_orphans(min_age, dry_run).await.unwrap();
+        maintenance.close().await.unwrap();
+        report
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn collect_orphans_deletes_unknown_old_objects() {
         let dir = tempfile::tempdir().unwrap();
@@ -1032,11 +1041,15 @@ mod tests {
         storage.flush_now(Duration::from_secs(10)).await.unwrap();
         let orphan = unknown_spans_key("2026-01-01");
         put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        let spans: Vec<String> = storage
+            .catalog_files(Table::Spans)
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert!(!spans.is_empty());
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(
             report,
@@ -1047,12 +1060,9 @@ mod tests {
             }
         );
         assert!(!object_exists(dir.path(), &orphan));
-        let spans = storage.catalog_files(Table::Spans);
-        assert!(!spans.is_empty());
-        for file in spans {
-            assert!(object_exists(dir.path(), &file.path));
+        for path in spans {
+            assert!(object_exists(dir.path(), &path));
         }
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1061,8 +1071,9 @@ mod tests {
         let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
         let orphan = unknown_spans_key("2026-01-01");
         put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
 
-        let report = storage.collect_orphans(Duration::ZERO, true).await.unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, true).await;
 
         assert_eq!(
             report,
@@ -1074,7 +1085,6 @@ mod tests {
             }
         );
         assert!(object_exists(dir.path(), &orphan));
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1083,11 +1093,9 @@ mod tests {
         let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
         let recent = unknown_spans_key("2026-01-01");
         put_raw(&storage, &recent, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::from_secs(3_600), false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::from_secs(3_600), false).await;
 
         assert_eq!(
             report,
@@ -1097,7 +1105,6 @@ mod tests {
             }
         );
         assert!(object_exists(dir.path(), &recent));
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1113,12 +1120,10 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() + Duration::from_secs(3_600))
             .unwrap();
+        storage.shutdown().await.unwrap();
 
         // `min_age` is zero: only the future mtime keeps the object.
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(
             report,
@@ -1128,7 +1133,6 @@ mod tests {
             }
         );
         assert!(object_exists(dir.path(), &future));
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1142,11 +1146,9 @@ mod tests {
         storage.flush_now(Duration::from_secs(10)).await.unwrap();
         let path = storage.catalog_files(Table::Spans)[0].path.clone();
         delete_raw(&storage, &path).await;
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(
             report,
@@ -1155,7 +1157,6 @@ mod tests {
                 ..OrphanReport::default()
             }
         );
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1193,11 +1194,10 @@ mod tests {
             quarantine: Vec::new(),
         };
         storage.committer.commit(&remove, |_| {}).await.unwrap();
+        assert_eq!(storage.staged_paths().await.unwrap(), vec![staged.clone()]);
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(report, OrphanReport::default());
         for file in &files {
@@ -1212,8 +1212,6 @@ mod tests {
             .await,
             i64::try_from(files.len()).unwrap()
         );
-        assert_eq!(storage.staged_paths().await.unwrap(), vec![staged]);
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1223,11 +1221,9 @@ mod tests {
         storage.put_media(project(), media_blob()).await.unwrap();
         let key = only_key(&storage, "media").await;
         delete_raw(&storage, &key).await;
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(
             report,
@@ -1236,7 +1232,6 @@ mod tests {
                 ..OrphanReport::default()
             }
         );
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1247,15 +1242,12 @@ mod tests {
         let key = only_key(&storage, "media").await;
         delete_raw(&storage, &key).await;
         set_project_state(dir.path(), "dropping").await;
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         // Known but not needed: the missing blob is not counted.
         assert_eq!(report, OrphanReport::default());
-        storage.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1271,14 +1263,11 @@ mod tests {
         put_raw(&storage, &temp, ORPHAN_BYTES).await;
         // The store lists it, so the skip is what keeps it.
         assert!(listed(&storage, "tables").await.contains(&temp));
+        storage.shutdown().await.unwrap();
 
-        let report = storage
-            .collect_orphans(Duration::ZERO, false)
-            .await
-            .unwrap();
+        let report = orphans(dir.path(), Duration::ZERO, false).await;
 
         assert_eq!(report, OrphanReport::default());
         assert!(object_exists(dir.path(), &temp));
-        storage.shutdown().await.unwrap();
     }
 }

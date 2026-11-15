@@ -6,8 +6,11 @@
 //!
 //! The socket is bound as `admin.tmp`, made `0600`, then renamed, so it never
 //! exists under its real name with a wider mode. A connecting process is accepted
-//! only when its uid is the data directory's owner or root (`SO_PEERCRED`): macOS
+//! only when its uid is the server's own uid or root (`SO_PEERCRED`): macOS
 //! ignores socket file permissions on `connect`, so this check is the authentication.
+//! The server's uid is the owner of the socket file it binds. It is not the owner of
+//! the data directory, which on Kubernetes is usually root while the server runs as
+//! a non-root uid.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -79,19 +82,15 @@ impl AdminResponse {
 /// A bind failure, for example a path longer than the 108-byte Unix socket limit,
 /// is logged and returns `None`: the server runs without the socket.
 pub(crate) fn spawn(state: AppState, data_dir: &Path) -> Option<JoinHandle<()>> {
-    let listener = match bind_socket(data_dir) {
-        Ok(listener) => listener,
+    let (listener, server_uid) = match bind_socket(data_dir) {
+        Ok(bound) => bound,
         Err(error) => {
             tracing::warn!(error = %error, "admin socket unavailable; online backups cannot run");
             return None;
         }
     };
     tracing::info!("admin socket listening");
-    Some(tokio::spawn(accept_loop(
-        listener,
-        state,
-        data_dir.to_path_buf(),
-    )))
+    Some(tokio::spawn(accept_loop(listener, state, server_uid)))
 }
 
 /// Removes `<data_dir>/admin.sock` and a leftover `<data_dir>/admin.tmp`. A missing
@@ -101,20 +100,26 @@ pub(crate) fn remove_socket_file(data_dir: &Path) -> io::Result<()> {
     remove_file_if_exists(&data_dir.join(ADMIN_SOCKET_TMP))
 }
 
-fn bind_socket(data_dir: &Path) -> io::Result<UnixListener> {
+/// Binds the socket and returns it with the server's uid: the owner of the file this
+/// process just created, read before the rename so it is the bound file.
+fn bind_socket(data_dir: &Path) -> io::Result<(UnixListener, u32)> {
     let socket = data_dir.join(ADMIN_SOCKET);
     let temporary = data_dir.join(ADMIN_SOCKET_TMP);
     remove_socket_file(data_dir)?;
     let listener = UnixListener::bind(&temporary)?;
-    let secured =
-        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(SOCKET_MODE))
-            .and_then(|()| std::fs::rename(&temporary, &socket));
-    if let Err(error) = secured {
-        // Best effort: the temporary name is the only thing left to remove.
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
+    let secured = std::fs::metadata(&temporary).and_then(|metadata| {
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(SOCKET_MODE))?;
+        std::fs::rename(&temporary, &socket)?;
+        Ok(metadata.uid())
+    });
+    match secured {
+        Ok(server_uid) => Ok((listener, server_uid)),
+        Err(error) => {
+            // Best effort: the temporary name is the only thing left to remove.
+            let _ = std::fs::remove_file(&temporary);
+            Err(error)
+        }
     }
-    Ok(listener)
 }
 
 fn remove_file_if_exists(path: &Path) -> io::Result<()> {
@@ -127,13 +132,13 @@ fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 
 /// Accepts connections until aborted. Aborting drops `connections`, which aborts
 /// every connection still running, and the backup it runs.
-async fn accept_loop(listener: UnixListener, state: AppState, data_dir: PathBuf) {
+async fn accept_loop(listener: UnixListener, state: AppState, server_uid: u32) {
     let mut connections = JoinSet::new();
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 while connections.try_join_next().is_some() {}
-                connections.spawn(serve_connection(stream, state.clone(), data_dir.clone()));
+                connections.spawn(serve_connection(stream, state.clone(), server_uid));
             }
             Err(error) => {
                 tracing::warn!(error = %error, "admin socket accept failed");
@@ -143,14 +148,14 @@ async fn accept_loop(listener: UnixListener, state: AppState, data_dir: PathBuf)
     }
 }
 
-async fn serve_connection(mut stream: UnixStream, state: AppState, data_dir: PathBuf) {
-    if !peer_is_allowed(&stream, &data_dir) {
+async fn serve_connection(mut stream: UnixStream, state: AppState, server_uid: u32) {
+    if !peer_is_allowed(&stream, server_uid) {
         tracing::warn!("admin socket refused a connection from another user");
         write_response(
             &mut stream,
             &AdminResponse::failed(
                 "forbidden",
-                "only the data directory's owner or root may use the socket",
+                "only the server's user or root may use the socket",
             ),
         )
         .await;
@@ -193,15 +198,17 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Accepts the owner of `data_dir` and root. Any failure to learn either uid refuses.
-fn peer_is_allowed(stream: &UnixStream, data_dir: &Path) -> bool {
+/// Accepts the server's own uid and root. A peer whose uid cannot be read is refused.
+fn peer_is_allowed(stream: &UnixStream, server_uid: u32) -> bool {
     let Ok(cred) = stream.peer_cred() else {
         return false;
     };
-    let Ok(metadata) = std::fs::metadata(data_dir) else {
-        return false;
-    };
-    cred.uid() == 0 || cred.uid() == metadata.uid()
+    allowed(cred.uid(), server_uid)
+}
+
+/// The uid rule: root, or the same uid as the server.
+fn allowed(peer_uid: u32, server_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == server_uid
 }
 
 /// Reads up to the first newline, or to end of input. It reads one byte past the
@@ -407,5 +414,17 @@ mod tests {
         // Checked after shutdown returns, which is the latest point it must hold.
         assert!(!socket.exists());
         assert!(UnixStream::connect(&socket).await.is_err());
+    }
+
+    #[test]
+    fn the_server_uid_and_root_are_allowed_and_no_other_uid_is() {
+        // The server's own uid, even when the data directory belongs to someone else
+        // (root on a PVC): the data directory's owner is not consulted.
+        assert!(allowed(65532, 65532));
+        assert!(allowed(0, 65532));
+        assert!(!allowed(1000, 65532));
+        // The server does not run as root, so a root peer is only ever an extra allow.
+        assert!(allowed(0, 1000));
+        assert!(!allowed(65532, 1000));
     }
 }

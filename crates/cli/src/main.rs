@@ -134,7 +134,7 @@ enum AdminCommand {
         config: Option<PathBuf>,
     },
     /// Re-open the deletions of another data directory that this one lacks (after a backup restore).
-    /// Both `meta.db` files must be at this binary's schema; run `llmobs serve` once on a restored older backup first.
+    /// Both `meta.db` files must be at this binary's schema; run `llmobs admin migrate` on a restored older backup first.
     ReapplyDeletions {
         /// The data directory whose `meta.db` holds the deletions to re-apply (for example the
         /// directory as it was before the restore).
@@ -1399,6 +1399,8 @@ mod tests {
     #[tokio::test]
     async fn migrate_while_the_server_runs_is_refused() {
         let server = TestServer::start().await;
+        let meta = server.data_dir().join("meta.db");
+        let meta_before = std::fs::read(&meta).unwrap();
         let error = run_cli([
             "llmobs",
             "admin",
@@ -1413,6 +1415,28 @@ mod tests {
             text.contains("the server is running: stop it first"),
             "{text}"
         );
+        // The lock is taken before meta.db is opened, so a refused migrate writes nothing.
+        assert_eq!(std::fs::read(&meta).unwrap(), meta_before);
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn migrate_without_a_data_dir_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config = config_file(dir.path(), &data);
+        let error = run_cli([
+            "llmobs",
+            "admin",
+            "migrate",
+            "--config",
+            config.to_str().unwrap(),
+        ])
+        .await
+        .unwrap_err();
+        let text = format!("{error:#}");
+        assert!(text.contains("no catalog.db"), "{text}");
+        assert!(!data.join("meta.db").exists());
+        assert!(!data.join("catalog.db").exists());
     }
 }

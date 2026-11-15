@@ -96,7 +96,7 @@ intended.
 5. On `Failed`, bail with `backup failed (<code>): <message>`.
 
 **`GcOrphans`:** call `llmobs_server::admin::gc_orphans(&config, min_age, dry_run)`. That function
-opens `Storage::open(config.storage_config())`.
+opens `Maintenance::open(config.storage_config())`.
 - In S3 mode, without `--dry-run`, `--rollback-bucket` must be given, else a new
   `AdminError::RollbackNeedsConfirmation` (`in S3 mode this deletes every object written after the
   backup from the live bucket; run with --dry-run first, then add --rollback-bucket`).

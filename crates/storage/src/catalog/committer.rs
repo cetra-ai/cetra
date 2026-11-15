@@ -132,6 +132,16 @@ impl Committer {
         Arc::clone(&self.inner.lock().await.catalog)
     }
 
+    /// Closes the catalog connection. The committer is not used afterwards.
+    pub(crate) async fn close(self) -> Result<(), CatalogError> {
+        let inner = self.inner.into_inner();
+        inner
+            .connection
+            .close()
+            .await
+            .map_err(|source| CatalogError::Db { source })
+    }
+
     /// Highest flushed WAL sequence for `table`. Missing row is `0`.
     pub(crate) async fn flushed_seq(&self, table: Table) -> u64 {
         self.inner.lock().await.flushed[table_index(table)]

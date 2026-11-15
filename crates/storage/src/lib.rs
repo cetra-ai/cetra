@@ -55,6 +55,7 @@ pub mod error;
 mod filter;
 pub(crate) mod flush;
 pub(crate) mod gc;
+mod maintenance;
 pub(crate) mod media;
 pub(crate) mod memory;
 pub(crate) mod objects;
@@ -78,6 +79,7 @@ pub use crate::error::{
     CompactionError, CopyObjectsError, FlushNowError, OrphanError, SnapshotError,
 };
 pub use crate::gc::{ObsoleteReport, OrphanReport};
+pub use crate::maintenance::Maintenance;
 
 /// The cancel flag of [`Storage::copy_objects`]. A `Mutex` rather than an
 /// `AtomicBool`: the copy checks the flag and creates each object's directory and
@@ -261,7 +263,6 @@ impl Storage {
         config: StorageConfig,
         remote: Option<Arc<dyn object_store::ObjectStore>>,
     ) -> Result<Self, OpenError> {
-        config.validate()?;
         let data_dir = config.data_dir.clone();
         let hard_limit = config.memtable.hard_limit.0;
         // `validate` rejects 0. A missed check still yields one partition.
@@ -283,18 +284,8 @@ impl Storage {
         let window_ns = i64::try_from(window.as_nanos()).unwrap_or(i64::MAX);
         #[allow(clippy::default_constructed_unit_structs)]
         let hooks = Hooks::default();
-        let layout_dir = data_dir.clone();
-        let lock = tokio::task::spawn_blocking(move || prepare_layout(&layout_dir))
-            .await
-            .map_err(|_| {
-                open_io(
-                    "opening data directory",
-                    &data_dir,
-                    io::Error::other("open task panicked"),
-                )
-            })??;
-        let committer = Arc::new(Committer::open(&data_dir, share_hooks(&hooks)).await?);
-        let mut objects = open_objects(&config, &hooks, remote).await?;
+        let (lock, committer, mut objects) = open_shared(&config, &hooks, remote).await?;
+        let committer = Arc::new(committer);
         let mut disk_paths = vec![data_dir.clone()];
         disk_paths.extend(objects.local_root().map(Path::to_path_buf));
         let disk = Arc::new(disk::Disk::open(disk_paths, config.min_free_bytes.0)?);
@@ -905,25 +896,6 @@ impl Storage {
             grace,
         )
         .await
-    }
-
-    /// Lists the object store under `tables/` and `media/`. Deletes the objects the
-    /// catalog does not know that are older than `min_age` (unless `dry_run`), and
-    /// counts the objects the catalog needs that are missing (N M2, D-N-21).
-    ///
-    /// For an operator after a restore or a crash, with the server stopped: the
-    /// periodic GC never lists the store. Holds `object_gc_gate` for write while it
-    /// runs, so no object deletion runs concurrently.
-    ///
-    /// # Errors
-    ///
-    /// [`OrphanError`] when listing, deleting or reading the catalog fails.
-    pub async fn collect_orphans(
-        &self,
-        min_age: std::time::Duration,
-        dry_run: bool,
-    ) -> Result<OrphanReport, OrphanError> {
-        gc::collect_orphans(&self.committer, &self.objects, min_age, dry_run).await
     }
 
     /// Writes a consistent copy of `catalog.db` to `path` and pins every object it
@@ -1548,6 +1520,31 @@ fn recover_table(
             next_seq: outcome.next_seq,
         },
     })
+}
+
+/// The steps [`Storage::open`] and [`Maintenance::open`] share: validates `config`,
+/// takes `LOCK`, migrates `catalog.db` (after its pre-migration copy) and opens the
+/// object store. Nothing is replayed, collected or started here.
+async fn open_shared(
+    config: &StorageConfig,
+    hooks: &Hooks,
+    remote: Option<Arc<dyn object_store::ObjectStore>>,
+) -> Result<(File, Committer, Objects), OpenError> {
+    config.validate()?;
+    let data_dir = config.data_dir.clone();
+    let layout_dir = data_dir.clone();
+    let lock = tokio::task::spawn_blocking(move || prepare_layout(&layout_dir))
+        .await
+        .map_err(|_| {
+            open_io(
+                "opening data directory",
+                &data_dir,
+                io::Error::other("open task panicked"),
+            )
+        })??;
+    let committer = Committer::open(&data_dir, share_hooks(hooks)).await?;
+    let objects = open_objects(config, hooks, remote).await?;
+    Ok((lock, committer, objects))
 }
 
 async fn open_objects(

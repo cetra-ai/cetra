@@ -3,13 +3,13 @@
 //! These open the database without migrating and without the data-dir lock, so
 //! they work while `llmobs serve` is running (D136). `rotate_encryption_key`,
 //! `gc_orphans` and `migrate` are the exceptions: they take the lock (through
-//! `Storage::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
+//! `Maintenance::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
 
 use std::path::Path;
 use std::time::Duration;
 
 use llmobs_core::ids::OrgId;
-use llmobs_storage::Storage;
+use llmobs_storage::Maintenance;
 use llmobs_storage::config::ObjectStoreUrl;
 use llmobs_storage::error::{OpenError, OrphanError, StorageError};
 use serde::Serialize;
@@ -122,10 +122,14 @@ pub enum AdminError {
     /// Another process holds `<data_dir>/LOCK`: the server is running.
     #[error("the server is running: stop it first")]
     Locked,
-    /// `catalog.db` is missing. `Storage::open` would create an empty one, and every
+    /// `catalog.db` is missing. Opening the storage would create an empty one, and every
     /// object would then look like an orphan.
-    #[error("no catalog.db in the data directory: restore it before running gc-orphans")]
+    #[error("no catalog.db in the data directory: check the data directory setting")]
     NoCatalog,
+    /// `meta.db` is missing. Opening the database would create an empty one, so a wrong
+    /// data directory would look like a fresh instance.
+    #[error("no meta.db in the data directory: check the data directory setting")]
+    NoMetaDb,
     /// A real `gc-orphans` run in S3 mode needs `--rollback-bucket`.
     #[error(
         "in S3 mode this deletes every object written after the backup from the live bucket; run with --dry-run first, then add --rollback-bucket"
@@ -151,7 +155,7 @@ pub enum AdminError {
     SourceNotInitialized,
     /// The `--from` database is at another schema version.
     #[error(
-        "the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs serve` on a copy of it first"
+        "the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs admin migrate` on a copy of it first"
     )]
     SourceSchema {
         /// Migration version embedded in this binary.
@@ -415,7 +419,7 @@ pub struct GcOrphansReport {
 /// [`AdminError::NoCatalog`] without `catalog.db`, [`AdminError::RollbackNeedsConfirmation`]
 /// in S3 mode without `rollback_bucket`, [`AdminError::Locked`] while the server runs,
 /// [`AdminError::Storage`] when the storage does not open, and [`AdminError::Orphans`] or
-/// [`AdminError::Close`] when the listing, a deletion or the shutdown fails.
+/// [`AdminError::Close`] when the listing, a deletion or the close fails.
 pub async fn gc_orphans(
     config: &ServerConfig,
     min_age: Duration,
@@ -429,11 +433,11 @@ pub async fn gc_orphans(
     if s3 && !dry_run && !rollback_bucket {
         return Err(AdminError::RollbackNeedsConfirmation);
     }
-    let storage = Storage::open(config.storage_config())
+    let maintenance = Maintenance::open(config.storage_config())
         .await
         .map_err(map_open)?;
-    let outcome = storage.collect_orphans(min_age, dry_run).await;
-    let closed = storage.shutdown().await;
+    let outcome = maintenance.collect_orphans(min_age, dry_run).await;
+    let closed = maintenance.close().await;
     let report = outcome.map_err(AdminError::Orphans)?;
     closed.map_err(AdminError::Close)?;
     Ok(GcOrphansReport {
@@ -450,19 +454,27 @@ pub async fn gc_orphans(
 /// closes them (N M2, D-N-22: the pre-migration copies are taken on the way). A restore of an
 /// older backup runs it before `reapply_deletions`.
 ///
-/// The storage opens first: its `LOCK` keeps a running server's `meta.db` from being migrated
-/// under it.
+/// Both files must already exist, so a wrong data directory never creates an empty instance.
+/// The maintenance open comes next: its `LOCK` refuses a running server before `meta.db` is
+/// touched.
 ///
 /// # Errors
 ///
+/// [`AdminError::NoCatalog`] or [`AdminError::NoMetaDb`] without the file,
 /// [`AdminError::Locked`] while the server runs, [`AdminError::Storage`] when the storage
 /// does not open, [`AdminError::Database`] or [`AdminError::Schema`] for `meta.db`.
 pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError> {
-    let storage = Storage::open(config.storage_config())
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    if !config.data_dir.join("meta.db").is_file() {
+        return Err(AdminError::NoMetaDb);
+    }
+    let maintenance = Maintenance::open(config.storage_config())
         .await
         .map_err(map_open)?;
     let opened = MetaDb::open(&config.data_dir).await;
-    let closed = storage.shutdown().await;
+    let closed = maintenance.close().await;
     let meta = opened.map_err(map_meta)?;
     meta.close().await;
     closed.map_err(AdminError::Close)
@@ -802,6 +814,22 @@ mod tests {
         let mut config = app.state.config.clone();
         config.data_dir = dir.path().to_path_buf();
         (dir, config)
+    }
+
+    #[tokio::test]
+    async fn migrate_without_a_meta_db_refuses_and_creates_nothing() {
+        let app = TestApp::new().await;
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("catalog.db"), b"").unwrap();
+        let mut config = app.state.config.clone();
+        config.data_dir = empty.path().to_path_buf();
+
+        let error = migrate(&config).await.unwrap_err();
+
+        assert!(matches!(error, AdminError::NoMetaDb), "{error}");
+        assert!(error.to_string().contains("data directory setting"));
+        assert!(!empty.path().join("meta.db").exists());
+        assert!(!empty.path().join("LOCK").exists());
     }
 
     #[tokio::test]

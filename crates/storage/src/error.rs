@@ -741,7 +741,7 @@ pub enum CopyObjectsError {
     Cancelled,
 }
 
-/// Why [`crate::Storage::collect_orphans`] failed.
+/// Why [`crate::Maintenance::collect_orphans`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum OrphanError {
     /// Listing the object store failed.
