@@ -9,8 +9,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Upgrade notes
 
-- With `auth.signup = open`, an email alert channel that lists an address which is not a verified
-  member of its org is refused on its next edit, and its deliveries skip that address and are
+- With `auth.signup = open`, an email alert channel that lists an address which is not a verified,
+  enabled member of its org is refused on its next edit, and its deliveries skip that address and are
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
@@ -42,7 +42,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 - OTLP/gRPC checks the credential, the project and the units cap before decoding a message, and
   reserves the in-flight budget for the largest message before the body is read. The gRPC listener
-  allows 100 concurrent streams and 32 in-flight requests per connection.
+  allows 100 concurrent streams and 32 in-flight requests per connection, and cuts a request
+  after 30 s, so a stalled stream releases its reservation.
 - Score alerts count scores created after their trace ended (judge, feedback and annotation scores),
   for traces that started up to 7 days before the window (D-K-17).
 - Usage counts are no longer lost when shutdown cuts a usage flush short.

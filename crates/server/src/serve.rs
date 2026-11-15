@@ -4,12 +4,11 @@
 //! `meta.db`. A second process fails on the lock before `meta.db`.
 //!
 //! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
-//! most [`DRAIN`], stops the usage loop (it finishes any flush in progress),
-//! aborts background tasks, waits at most [`COMMIT_WAIT`] for detached commits
-//! (D-G-38), and gives storage [`STORAGE_SHUTDOWN`] (spec 12's 30 s flush budget;
-//! `Storage::shutdown` also caps each flush at 30 s). The drain, the commit wait
-//! and the storage flush add up to 55 s, inside the 60 s grace period the
-//! packaging sets. The `last_used` and usage flushes and the `meta.db` close are
+//! most [`DRAIN`], waits at most [`USAGE_STOP_WAIT`] for the usage loop to finish
+//! any flush in progress, aborts background tasks, waits at most [`COMMIT_WAIT`]
+//! for detached commits (D-G-38), and gives storage [`STORAGE_SHUTDOWN`] (spec
+//! 12's 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s). These
+//! bounded steps add up to 57 s, inside the 60 s grace period the packaging sets. The `last_used` and usage flushes and the `meta.db` close are
 //! short meta writes outside that bound.
 
 use std::future::Future;
@@ -38,6 +37,9 @@ use tonic::transport::server::TcpIncoming;
 
 /// How long in-flight HTTP may finish after stop-accepting (spec 12).
 const DRAIN: Duration = Duration::from_secs(20);
+
+/// How long shutdown waits for the usage loop to finish an in-flight flush.
+const USAGE_STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// How long shutdown waits for detached commits (D-G-38, spec 12).
 const COMMIT_WAIT: Duration = Duration::from_secs(5);
@@ -678,10 +680,17 @@ impl Running {
         if let Some(sender) = self.usage_stop_tx.take() {
             let _ = sender.send(());
         }
-        if let Some(task) = self.usage_task.take() {
-            let joined = task.await;
-            if let Err(error) = joined {
-                tracing::error!(error = %error, "usage task failed");
+        // Bounded so a stuck `meta.db` cannot hold shutdown past the grace period. On expiry the
+        // task is aborted, and an aborted flush keeps its counts for the final flush.
+        if let Some(mut task) = self.usage_task.take() {
+            match tokio::time::timeout(USAGE_STOP_WAIT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::error!(error = %error, "usage task failed"),
+                Err(_elapsed) => {
+                    tracing::error!("usage task did not stop before shutdown");
+                    task.abort();
+                    let _ = task.await;
+                }
             }
         }
         for task in self.tasks.drain(..) {

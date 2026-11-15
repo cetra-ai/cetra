@@ -206,8 +206,9 @@ async fn send_email(
             "no recipient is a verified member of the organization",
         ));
     }
-    // Each message reserves one unit of the daily cap just before it is sent, so a retry of a
-    // failed send does not count mail that was never sent (D-K-19).
+    // Each message reserves one unit of the daily cap just before it is sent, so a retry counts
+    // only the messages it attempts: recipients a failed send never reached are not counted twice
+    // (D-K-19).
     let email = message::email(notice);
     let mut capped = false;
     let sent = tokio::time::timeout(SEND_TIMEOUT, async {
