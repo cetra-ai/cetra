@@ -106,6 +106,20 @@ const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_traj
 
 // ------------------------------------------------------------------ generate
 
+/// Drops a span's payloads for the light dataset: no input, output, system instructions,
+/// tool definitions or event attributes, and previews cut to 64 chars.
+fn strip_payloads(s: &mut Span) {
+    s.input = None;
+    s.output = None;
+    s.system_instructions = None;
+    s.tool_definitions = None;
+    s.input_preview = s.input_preview.take().map(|p| p.chars().take(64).collect());
+    s.output_preview = s.output_preview.take().map(|p| p.chars().take(64).collect());
+    for e in &mut s.events {
+        e.attributes = None;
+    }
+}
+
 /// `swe` = (maximum trajectories, shard paths): spans come from the SWE-agent
 /// shards instead of synthetic traces, and `traces` is ignored.
 async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &[String])>) -> R<()> {
@@ -121,25 +135,21 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(usize, &
             (spans, needles)
         }
         None => {
+            let light = std::env::var_os("FMT_LIGHT").is_some();
             let mut spans = Vec::new();
             for _ in 0..traces {
+                let start = spans.len();
                 world.trace(&mut rng, &mut spans);
+                // Strip each trace as it is made, so the light dataset never holds full payloads.
+                if light {
+                    spans[start..].iter_mut().for_each(strip_payloads);
+                }
             }
             (spans, Vec::new())
         }
     };
-    if std::env::var_os("FMT_LIGHT").is_some() {
-        for s in &mut spans {
-            s.input = None;
-            s.output = None;
-            s.system_instructions = None;
-            s.tool_definitions = None;
-            s.input_preview = s.input_preview.take().map(|p| p.chars().take(64).collect());
-            s.output_preview = s.output_preview.take().map(|p| p.chars().take(64).collect());
-            for e in &mut s.events {
-                e.attributes = None;
-            }
-        }
+    if swe.is_some() && std::env::var_os("FMT_LIGHT").is_some() {
+        spans.iter_mut().for_each(strip_payloads);
     }
     // Plant a rare needle in ~20 LLM inputs for the substring query (synthetic traces only).
     if swe.is_none() {
