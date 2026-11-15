@@ -596,4 +596,56 @@ mod tests {
         let page: Json = response.json();
         assert_eq!(page["data"], serde_json::json!([]));
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_while_the_query_pool_is_full_is_503_busy() {
+        let app = TestApp::with_config(|config| {
+            // The export takes the whole pool; a trace list needs more than 64 MiB.
+            config.storage.query.max_memory_total = Some(bytesize::ByteSize::mib(256));
+            config.storage.query.max_memory = bytesize::ByteSize::mib(256);
+            config.storage.query.initial_memory = bytesize::ByteSize::mib(256);
+            config.storage.query.admission_wait = std::time::Duration::from_millis(200);
+        })
+        .await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let project = seeded.project.id;
+        let path = format!("/api/v1/projects/{project}/traces");
+        // An open SQL export holds the whole query pool until its stream is dropped.
+        let mut export = app
+            .request(Method::POST, &format!("/api/v1/projects/{project}/sql"))
+            .header("cookie", &seeded.cookie)
+            .header("accept", "text/csv")
+            .json(
+                &serde_json::from_str::<Json>(include_str!(
+                    "../../../../fixtures/api/requests/sql-query.json"
+                ))
+                .unwrap(),
+            )
+            .send_stream()
+            .await;
+        assert_eq!(export.status, StatusCode::OK);
+        assert!(
+            export
+                .next_frame(std::time::Duration::from_secs(10))
+                .await
+                .is_some()
+        );
+
+        let busy = app
+            .request(Method::GET, &path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(busy.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(busy.problem().code, crate::api::common::ProblemCode::Busy);
+
+        drop(export);
+        let free = app
+            .request(Method::GET, &path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(free.status, StatusCode::OK);
+    }
 }
