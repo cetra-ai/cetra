@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { parseJsonField, payloadJson, prettyJson, previewJson } from "./datasets";
+import {
+  parseDatasetSearch,
+  parseJsonField,
+  payloadJson,
+  prettyJson,
+  previewJson,
+  sameJson,
+} from "./datasets";
 
 describe("parseJsonField", () => {
   it("accepts an empty field when it is not required", () => {
@@ -75,5 +82,32 @@ describe("prettyJson", () => {
 
   it("indents two spaces", () => {
     expect(prettyJson({ a: 1 })).toBe('{\n  "a": 1\n}');
+  });
+});
+
+describe("sameJson", () => {
+  it("compares the JSON text of two values", () => {
+    expect(sameJson({ a: 1 }, { a: 1 })).toBe(true);
+    expect(sameJson({ a: 1 }, { a: 2 })).toBe(false);
+    expect(sameJson(undefined, undefined)).toBe(true);
+    expect(sameJson(undefined, {})).toBe(false);
+  });
+});
+
+describe("parseDatasetSearch", () => {
+  it("keeps a known tab and drops an unknown one", () => {
+    expect(parseDatasetSearch({ tab: "versions" })).toEqual({ tab: "versions" });
+    expect(parseDatasetSearch({ tab: "x" })).toEqual({});
+  });
+
+  it("parses a version given as a string or a number", () => {
+    expect(parseDatasetSearch({ version: "3" })).toEqual({ version: 3 });
+    expect(parseDatasetSearch({ version: 3 })).toEqual({ version: 3 });
+  });
+
+  it("drops a version that is not a non-negative integer", () => {
+    expect(parseDatasetSearch({ version: "-1" })).toEqual({});
+    expect(parseDatasetSearch({ version: "1.5" })).toEqual({});
+    expect(parseDatasetSearch({ version: "a" })).toEqual({});
   });
 });

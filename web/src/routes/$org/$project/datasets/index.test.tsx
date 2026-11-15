@@ -24,6 +24,10 @@ it("lists the datasets with their items, version and experiments", async () => {
   if (!row) {
     throw new Error(`no row named ${dataset.name}`);
   }
+  expect(within(row).getByRole("link", { name: dataset.name })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/datasets/${dataset.id}`,
+  );
   expect(within(row).getByText(String(dataset.item_count))).toBeInTheDocument();
   expect(within(row).getByText(`v${dataset.current_version}`)).toBeInTheDocument();
   expect(within(row).getByText(String(dataset.experiment_count))).toBeInTheDocument();
@@ -60,6 +64,25 @@ it("searches by name, sending the query after a pause", async () => {
   await user.type(screen.getByRole("textbox", { name: "Search datasets" }), "faq");
 
   await waitFor(() => expect(queries).toContain("faq"));
+});
+
+it("opens a new dataset after creating it", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.post("/api/v1/projects/:project/datasets", () =>
+      HttpResponse.json({ ...firstDataset(), name: "golden" }, { status: 201 }),
+    ),
+  );
+
+  const { router } = await renderApp("/acme/support-bot/datasets");
+  await screen.findByRole("table", { name: "Datasets" });
+  await user.click(screen.getByRole("button", { name: "New dataset" }));
+  await user.type(screen.getByLabelText("Name"), "golden");
+  await user.click(screen.getByRole("button", { name: "Create dataset" }));
+
+  await waitFor(() =>
+    expect(router.state.location.pathname).toBe(`/acme/support-bot/datasets/${firstDataset().id}`),
+  );
 });
 
 it("disables New dataset for viewers, with the reason", async () => {

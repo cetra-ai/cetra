@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { parseJsonField, prettyJson } from "@/lib/datasets";
+import { parseJsonField, prettyJson, sameJson } from "@/lib/datasets";
 
 /** The API's detail for a name that is already taken in the project. */
 const NAME_TAKEN_DETAIL = "a dataset with this name already exists";
@@ -36,10 +36,6 @@ type SchemaValue = Schema<"CreateDatasetRequest">["input_schema"];
  */
 function asSchema(value: unknown): SchemaValue {
   return value as SchemaValue;
-}
-
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function useCreateDataset() {

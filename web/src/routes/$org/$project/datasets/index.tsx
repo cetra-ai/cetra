@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { Loader2, Table2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
@@ -131,8 +131,15 @@ function DatasetsPage() {
           <TableBody>
             {rows.map((dataset) => (
               <TableRow key={dataset.id}>
-                {/* J5.3 adds the link to the dataset page, which this sub-phase does not create. */}
-                <TableCell>{dataset.name}</TableCell>
+                <TableCell>
+                  <Link
+                    to="/$org/$project/datasets/$datasetId"
+                    params={{ org, project, datasetId: dataset.id }}
+                    className="rounded-sm underline-offset-4 outline-none hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-offset-2 focus-visible:outline-solid"
+                  >
+                    {dataset.name}
+                  </Link>
+                </TableCell>
                 <TableCell>{dataset.item_count}</TableCell>
                 <TableCell>v{dataset.current_version}</TableCell>
                 <TableCell>{dataset.experiment_count}</TableCell>
@@ -161,8 +168,13 @@ function DatasetsPage() {
       <DatasetDialog
         open={creating}
         onOpenChange={setCreating}
-        // The dialog invalidates the list itself; the new dataset's page is J5.3's to open.
-        onSaved={() => undefined}
+        // The dialog invalidates the list itself; the new dataset opens on its own page.
+        onSaved={(saved) => {
+          void navigate({
+            to: "/$org/$project/datasets/$datasetId",
+            params: { org, project, datasetId: saved.id },
+          });
+        }}
       />
     </div>
   );
