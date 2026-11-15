@@ -3413,6 +3413,7 @@ dependencies = [
  "crc32c",
  "datafusion",
  "datafusion-datasource",
+ "flate2",
  "futures",
  "hex",
  "humantime-serde",

@@ -27,6 +27,13 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
 
+# Download the pinned text corpus of the storage benchmarks and soak (OpenAssistant oasst2, Apache-2.0; track R M7)
+fetch-corpus:
+    mkdir -p target/bench-corpus
+    curl -fL --retry 3 -o target/bench-corpus/oasst2-ready-messages.jsonl.gz.part https://huggingface.co/datasets/OpenAssistant/oasst2/resolve/179dd21fc55192153d94adb0e0ce8f69e222bf75/2023-11-05_oasst2_ready.messages.jsonl.gz
+    echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
+    mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1
