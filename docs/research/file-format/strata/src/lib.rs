@@ -9,11 +9,9 @@
 //! `docs/research/file-format/prototype-plan.md` (one level up from this crate).
 //!
 //! The current limits are:
-//! - sort-key lookup and key filters (M3.1); no map shredding yet;
+//! - sort-key lookup and key filters (M3.1); maps are shredded (M3.2);
 //! - there is no `scan`, no predicates, no pruning and no coalescing (M4);
 //! - there is no DataFusion integration (M5).
-//!
-//! Hot-tail section 5 (shredded map keys) is empty until map shredding lands.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -30,7 +28,6 @@ mod index;
 mod narrow;
 mod payload;
 mod segment;
-#[allow(dead_code)] // used by the writer from M3.2b on
 mod shred;
 
 mod config;

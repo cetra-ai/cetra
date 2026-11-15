@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, RecordBatch, new_empty_array};
+use arrow::array::{Array, ArrayRef, AsArray, RecordBatch, new_empty_array};
 use arrow::compute::concat;
 use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::row::{OwnedRow, RowConverter, SortField};
@@ -11,13 +11,25 @@ use arrow::row::{OwnedRow, RowConverter, SortField};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, Out, VERSION, checksum32};
-use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_file_header};
+use crate::hot::{
+    DirectoryRecord, HotTail, Layer, MapKey, MapLayout, PageRef, Postscript, write_file_header,
+};
 use crate::index::{KeyFilter, key_bytes};
 use crate::narrow::{
-    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, numeric_of,
+    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, is_utf8_map,
+    numeric_of,
 };
 use crate::payload::{self, FRAME_ZSTD_LEVEL, PayloadStats};
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment};
+use crate::shred::{Shredded, shred};
+
+/// A shredded map column waiting for its children and residual to be written. `summary` is the
+/// index of the map's row in the summaries.
+struct PendingMap {
+    column_id: u32,
+    summary: usize,
+    shredded: Shredded,
+}
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
 /// [`StrataWriter::finish`].
@@ -47,6 +59,8 @@ pub struct ColumnSummary {
     pub filter_bytes: u64,
     /// Payload-layer statistics; `None` for narrow columns.
     pub payload: Option<PayloadStats>,
+    /// Number of promoted keys of a shredded map; 0 otherwise.
+    pub shredded_keys: u32,
 }
 
 /// What the writer stored for the whole file.
@@ -184,6 +198,7 @@ impl StrataWriter {
         let mut summaries = Vec::with_capacity(self.schema.fields().len());
         let mut sort_key_filter = Vec::new();
         let mut key_filters: Vec<(u32, SegmentRef)> = Vec::new();
+        let mut pending_maps: Vec<PendingMap> = Vec::new();
         let first_sort_column = self.sort_key.first().copied();
         for (index, field) in self.schema.fields().iter().enumerate() {
             let array = self.column(index)?;
@@ -223,6 +238,48 @@ impl StrataWriter {
                     chunks: 0,
                     filter_bytes: 0,
                     payload: Some(stats),
+                    shredded_keys: 0,
+                });
+                continue;
+            }
+            // A `Map<Utf8, Utf8>` column is shredded: its parent is written here, and its
+            // children and residual after the loop, once every top-level column has its record.
+            if is_utf8_map(field.data_type()) {
+                let map = array.as_map_opt().ok_or_else(|| StrataError::Schema {
+                    reason: format!("column {} is not a map array", field.name()),
+                })?;
+                let shredded = shred(map)?;
+                let pages_offset =
+                    u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
+                        what: "more than 4 GiB of block-table page references".to_string(),
+                    })?;
+                directory.push(DirectoryRecord {
+                    column_id,
+                    parent: u32::MAX,
+                    layer: Layer::MapParent,
+                    flags: 0,
+                    pages_offset,
+                    n_pages: 0,
+                    n_chunks: 0,
+                    dict_offset: 0,
+                    dict_len: 0,
+                    payload_offset: 0,
+                    payload_len: 0,
+                    null_count: array.null_count() as u64,
+                });
+                summaries.push(ColumnSummary {
+                    name: field.name().clone(),
+                    encoding_counts: [0; 12],
+                    bytes: 0,
+                    chunks: 0,
+                    filter_bytes: 0,
+                    payload: None,
+                    shredded_keys: u32::try_from(shredded.keys.len()).unwrap_or(u32::MAX),
+                });
+                pending_maps.push(PendingMap {
+                    column_id,
+                    summary: summaries.len() - 1,
+                    shredded,
                 });
                 continue;
             }
@@ -242,105 +299,8 @@ impl StrataWriter {
                 None
             };
             let filter = filter_values.as_deref().map(filter_body);
-            let dict = for_column(array.as_ref(), &self.config);
-            let (dict_offset, dict_len) = match &dict {
-                Some(dict) => {
-                    let mut body = Out(Vec::new());
-                    dict.encode(&mut body)?;
-                    let seg = encode_segment(
-                        Kind::Dictionary,
-                        &body.0,
-                        Codec::Zstd,
-                        &mut codec,
-                        &mut out,
-                    )?;
-                    (seg.offset, seg.len)
-                }
-                None => (0, 0),
-            };
-            let ranges = chunk_ranges(
-                array.as_ref(),
-                self.config.chunk_max_rows,
-                self.config.chunk_max_bytes,
-                dict.is_some(),
-            )?;
-            let mut entries = Vec::with_capacity(ranges.len());
-            let mut counts = [0u32; 12];
-            let mut bytes = u64::from(dict_len);
-            for range in ranges {
-                let slice = array.slice(range.start, range.len());
-                let EncodedChunk {
-                    encoding,
-                    flags,
-                    const_len,
-                    min,
-                    max,
-                    body,
-                } = encode_chunk(&slice, dict.as_ref(), &self.config)?;
-                let (segment_offset, segment_len) = match body {
-                    Some(body) => {
-                        let seg = encode_segment(
-                            Kind::NarrowChunk,
-                            &body,
-                            Codec::Zstd,
-                            &mut codec,
-                            &mut out,
-                        )?;
-                        (seg.offset, seg.len)
-                    }
-                    None => (0, 0),
-                };
-                bytes += u64::from(segment_len);
-                if let Some(count) = counts.get_mut(encoding as usize) {
-                    *count += 1;
-                }
-                entries.push(BlockEntry {
-                    first_row: u32::try_from(range.start).map_err(|_| {
-                        StrataError::TooManyRows {
-                            rows: range.start as u64,
-                        }
-                    })?,
-                    n_rows: u32::try_from(range.len()).map_err(|_| StrataError::TooManyRows {
-                        rows: range.len() as u64,
-                    })?,
-                    segment_offset,
-                    segment_len,
-                    encoding,
-                    flags,
-                    const_len,
-                    min,
-                    max,
-                });
-            }
-
-            let pages_offset =
-                u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
-                    what: "more than 4 GiB of block-table page references".to_string(),
-                })?;
-            let mut n_pages = 0u32;
-            for page in entries.chunks(self.config.page_max_entries) {
-                let mut body = Out(Vec::with_capacity(page.len() * 56));
-                for entry in page {
-                    entry.encode(&mut body);
-                }
-                let seg = encode_segment(
-                    Kind::BlockTablePage,
-                    &body.0,
-                    Codec::Raw,
-                    &mut codec,
-                    &mut out,
-                )?;
-                let first_row = page.first().map_or(0, |entry| entry.first_row);
-                PageRef {
-                    first_row,
-                    offset: seg.offset,
-                    len: seg.len,
-                }
-                .encode(&mut pages);
-                bytes += u64::from(seg.len);
-                n_pages += 1;
-            }
-
+            let (record, summary, entries) =
+                self.write_narrow(&array, column_id, &mut codec, &mut out, &mut pages)?;
             let mut filter_bytes = 0u64;
             if is_sort_key {
                 sort_key_filter = filter.unwrap_or_default();
@@ -357,41 +317,70 @@ impl StrataWriter {
                     entry.encode(&mut sort_entries);
                 }
             }
-            let n_chunks = u32::try_from(entries.len()).map_err(|_| StrataError::Unsupported {
-                what: "more than 4 billion chunks".to_string(),
-            })?;
-            directory.push(DirectoryRecord {
-                column_id,
-                parent: u32::MAX,
-                layer: Layer::Narrow,
-                // Bit 0 says the column has a dictionary.
-                flags: u8::from(dict.is_some()),
-                pages_offset,
-                n_pages,
-                n_chunks,
-                dict_offset,
-                dict_len,
-                payload_offset: 0,
-                payload_len: 0,
-                null_count: array.null_count() as u64,
-            });
+            directory.push(record);
             summaries.push(ColumnSummary {
                 name: field.name().clone(),
-                encoding_counts: counts,
-                bytes,
-                chunks: n_chunks,
                 filter_bytes,
-                payload: None,
+                ..summary
             });
         }
 
+        // The children and the residual of each shredded map, in schema order: the children in
+        // key order, then the residual. Each takes the next directory id.
+        let mut layouts = Vec::with_capacity(pending_maps.len());
+        for pending in pending_maps {
+            let PendingMap {
+                column_id: map,
+                summary,
+                shredded,
+            } = pending;
+            let mut keys = Vec::with_capacity(shredded.keys.len());
+            for ((key, child), hits) in shredded
+                .keys
+                .iter()
+                .zip(&shredded.children)
+                .zip(&shredded.residual_hits)
+            {
+                let child_id = next_column_id(&directory)?;
+                let (mut record, part, _) =
+                    self.write_narrow(child, child_id, &mut codec, &mut out, &mut pages)?;
+                record.layer = Layer::MapChild;
+                record.parent = map;
+                add_part(&mut summaries, summary, &part);
+                directory.push(record);
+                keys.push(MapKey {
+                    child: child_id,
+                    residual_hits: *hits,
+                    key: key.clone(),
+                });
+            }
+            let residual_id = next_column_id(&directory)?;
+            let (mut record, part, _) = self.write_narrow(
+                &shredded.residual,
+                residual_id,
+                &mut codec,
+                &mut out,
+                &mut pages,
+            )?;
+            record.layer = Layer::Residual;
+            record.parent = map;
+            add_part(&mut summaries, summary, &part);
+            directory.push(record);
+            layouts.push(MapLayout {
+                map,
+                residual: residual_id,
+                keys,
+            });
+        }
+
+        let n_columns = next_column_id(&directory)?;
         let hot_start = out.len();
         let hot = HotTail {
             schema: Arc::clone(&self.schema),
             directory,
             sort_key_entries: sort_entries.0,
             sort_key_filter,
-            map_keys: Vec::new(),
+            maps: layouts,
             key_filters,
             pages: pages.0,
         };
@@ -412,11 +401,7 @@ impl StrataWriter {
             hot_len,
             hot_checksum,
             row_count: self.rows,
-            n_columns: u32::try_from(self.schema.fields().len()).map_err(|_| {
-                StrataError::Unsupported {
-                    what: "more than 4 billion columns".to_string(),
-                }
-            })?,
+            n_columns,
             version: VERSION,
             flags: 0,
             sort_key_column,
@@ -430,6 +415,126 @@ impl StrataWriter {
             columns: summaries,
         };
         Ok((out.0, summary))
+    }
+
+    /// Writes a narrow column: its dictionary, its chunks and its block-table pages, in that
+    /// order. The record has `layer = Narrow` and `parent = u32::MAX`; a caller that stores the
+    /// column as a map child or residual sets both. The summary's name is empty, for the caller
+    /// to set.
+    fn write_narrow(
+        &self,
+        array: &ArrayRef,
+        column_id: u32,
+        codec: &mut SegmentCodec,
+        out: &mut Out,
+        pages: &mut Out,
+    ) -> Result<(DirectoryRecord, ColumnSummary, Vec<BlockEntry>)> {
+        let dict = for_column(array.as_ref(), &self.config);
+        let (dict_offset, dict_len) = match &dict {
+            Some(dict) => {
+                let mut body = Out(Vec::new());
+                dict.encode(&mut body)?;
+                let seg = encode_segment(Kind::Dictionary, &body.0, Codec::Zstd, codec, out)?;
+                (seg.offset, seg.len)
+            }
+            None => (0, 0),
+        };
+        let ranges = chunk_ranges(
+            array.as_ref(),
+            self.config.chunk_max_rows,
+            self.config.chunk_max_bytes,
+            dict.is_some(),
+        )?;
+        let mut entries = Vec::with_capacity(ranges.len());
+        let mut counts = [0u32; 12];
+        let mut bytes = u64::from(dict_len);
+        for range in ranges {
+            let slice = array.slice(range.start, range.len());
+            let EncodedChunk {
+                encoding,
+                flags,
+                const_len,
+                min,
+                max,
+                body,
+            } = encode_chunk(&slice, dict.as_ref(), &self.config)?;
+            let (segment_offset, segment_len) = match body {
+                Some(body) => {
+                    let seg = encode_segment(Kind::NarrowChunk, &body, Codec::Zstd, codec, out)?;
+                    (seg.offset, seg.len)
+                }
+                None => (0, 0),
+            };
+            bytes += u64::from(segment_len);
+            if let Some(count) = counts.get_mut(encoding as usize) {
+                *count += 1;
+            }
+            entries.push(BlockEntry {
+                first_row: u32::try_from(range.start).map_err(|_| StrataError::TooManyRows {
+                    rows: range.start as u64,
+                })?,
+                n_rows: u32::try_from(range.len()).map_err(|_| StrataError::TooManyRows {
+                    rows: range.len() as u64,
+                })?,
+                segment_offset,
+                segment_len,
+                encoding,
+                flags,
+                const_len,
+                min,
+                max,
+            });
+        }
+
+        let pages_offset = u32::try_from(pages.len()).map_err(|_| StrataError::Unsupported {
+            what: "more than 4 GiB of block-table page references".to_string(),
+        })?;
+        let mut n_pages = 0u32;
+        for page in entries.chunks(self.config.page_max_entries) {
+            let mut body = Out(Vec::with_capacity(page.len() * 56));
+            for entry in page {
+                entry.encode(&mut body);
+            }
+            let seg = encode_segment(Kind::BlockTablePage, &body.0, Codec::Raw, codec, out)?;
+            let first_row = page.first().map_or(0, |entry| entry.first_row);
+            PageRef {
+                first_row,
+                offset: seg.offset,
+                len: seg.len,
+            }
+            .encode(pages);
+            bytes += u64::from(seg.len);
+            n_pages += 1;
+        }
+
+        let n_chunks = u32::try_from(entries.len()).map_err(|_| StrataError::Unsupported {
+            what: "more than 4 billion chunks".to_string(),
+        })?;
+        let record = DirectoryRecord {
+            column_id,
+            parent: u32::MAX,
+            layer: Layer::Narrow,
+            // Bit 0 says the column has a dictionary.
+            flags: u8::from(dict.is_some()),
+            pages_offset,
+            n_pages,
+            n_chunks,
+            dict_offset,
+            dict_len,
+            payload_offset: 0,
+            payload_len: 0,
+            null_count: array.null_count() as u64,
+        };
+        let summary = ColumnSummary {
+            name: String::new(),
+            encoding_counts: counts,
+            bytes,
+            chunks: n_chunks,
+            filter_bytes: 0,
+            payload: None,
+            shredded_keys: 0,
+        };
+        Ok((record, summary, entries))
     }
 
     /// The rows of one column, all batches concatenated.
@@ -451,6 +556,24 @@ fn filter_body(values: &[Vec<u8>]) -> Vec<u8> {
     let mut body = Vec::new();
     KeyFilter::build(values).encode(&mut body);
     body
+}
+
+/// The id of the next directory record, which is also its column id.
+fn next_column_id(directory: &[DirectoryRecord]) -> Result<u32> {
+    u32::try_from(directory.len()).map_err(|_| StrataError::Unsupported {
+        what: "more than 4 billion columns".to_string(),
+    })
+}
+
+/// Adds the rows and chunks of a map's child or residual to the map's summary, at `index`.
+fn add_part(summaries: &mut [ColumnSummary], index: usize, part: &ColumnSummary) {
+    if let Some(parent) = summaries.get_mut(index) {
+        for (total, count) in parent.encoding_counts.iter_mut().zip(part.encoding_counts) {
+            *total = total.saturating_add(count);
+        }
+        parent.bytes = parent.bytes.saturating_add(part.bytes);
+        parent.chunks = parent.chunks.saturating_add(part.chunks);
+    }
 }
 
 /// Whether a first sort-key column of type `dt` is allowed in M1.
@@ -560,15 +683,16 @@ mod tests {
     }
 
     #[test]
-    fn map_column_counts_its_map_chunks() {
+    fn map_column_is_shredded() {
         let rows = wide_batch(10_000);
         let mut w = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
         w.write(&rows).unwrap();
         let (_, summary) = w.finish().unwrap();
         let attrs = &summary.columns[6];
         assert_eq!(attrs.name, "attrs");
+        assert_eq!(attrs.shredded_keys, 3);
         assert!(attrs.chunks > 0);
-        assert_eq!(attrs.encoding_counts[Encoding::Map as usize], attrs.chunks);
+        assert!(attrs.encoding_counts[Encoding::Map as usize] > 0);
     }
 
     #[tokio::test]
@@ -618,8 +742,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded on the M1F.2 code. A change to this value means the output changed.
-    const GOLDEN: u64 = 0xa4e6_c90d_86e4_b6fb;
+    /// Recorded on the M3.2b code, where the `attrs` map is shredded. A change to this value
+    /// means the output changed.
+    const GOLDEN: u64 = 0xfd4f_9db0_9179_db82;
 
     #[test]
     fn golden_output_hash() {

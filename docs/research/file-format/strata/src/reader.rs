@@ -2,6 +2,7 @@
 
 use arrow::array::{Array, ArrayRef, new_empty_array};
 use arrow::compute::concat;
+use arrow::datatypes::Field;
 use futures::future::try_join_all;
 
 use crate::error::{Result, StrataError};
@@ -10,11 +11,13 @@ use crate::hot::Layer;
 use crate::narrow::{Dictionary, decode_chunk};
 use crate::payload::read_payload_column;
 use crate::segment::{Kind, SegmentRef};
+use crate::shred::unshred;
 
 /// Decodes every row of column `column` (its schema index).
 ///
 /// Chunk segments are fetched concurrently, decoded in row order and concatenated. A file
-/// with no rows gives an empty array of the column's type.
+/// with no rows gives an empty array of the column's type. A shredded map is rebuilt from its
+/// children and residual, with each row's entries sorted bytewise by key.
 pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
     let schema = file.schema();
     let field = schema
@@ -30,14 +33,54 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
             reason: format!("no column {column}"),
         })?;
     match record.layer {
-        Layer::Payload => return read_payload_column(file, record, field).await,
-        Layer::Narrow => {}
-        _ => {
-            return Err(StrataError::Unsupported {
-                what: format!("layer of column {column}"),
-            });
-        }
+        Layer::Payload => read_payload_column(file, record, field).await,
+        Layer::Narrow => read_narrow(file, column, field).await,
+        Layer::MapParent => read_shredded(file, column, field).await,
+        Layer::MapChild | Layer::Residual => Err(StrataError::Unsupported {
+            what: format!("layer of column {column}"),
+        }),
     }
+}
+
+/// Reads a map child or residual, by its directory index, as the field [`StrataFile::field_of`]
+/// gives it.
+async fn read_part(file: &StrataFile, id: u32) -> Result<ArrayRef> {
+    let corrupt = || StrataError::Corrupt {
+        what: "map layout",
+        offset: 0,
+    };
+    let column = usize::try_from(id).map_err(|_| corrupt())?;
+    let field = file.field_of(column)?;
+    read_narrow(file, column, &field).await
+}
+
+/// Rebuilds a shredded map: its children and residual are read concurrently, then merged by
+/// [`unshred`]. The layout comes from hot-tail section 5, which open has checked.
+async fn read_shredded(file: &StrataFile, column: usize, field: &Field) -> Result<ArrayRef> {
+    let layout = file
+        .hot
+        .maps
+        .iter()
+        .find(|layout| usize::try_from(layout.map).ok() == Some(column))
+        .ok_or_else(|| StrataError::Corrupt {
+            what: "map layout",
+            offset: 0,
+        })?;
+    let keys: Vec<Vec<u8>> = layout.keys.iter().map(|key| key.key.clone()).collect();
+    let children = try_join_all(layout.keys.iter().map(|key| read_part(file, key.child)));
+    let (children, residual) = futures::try_join!(children, read_part(file, layout.residual))?;
+    unshred(field.data_type(), &keys, &children, &residual)
+}
+
+/// Reads the narrow column at directory index `column`, which may be a schema column, a map
+/// child or a residual. `field` gives its type.
+async fn read_narrow(file: &StrataFile, column: usize, field: &Field) -> Result<ArrayRef> {
+    let record = file
+        .directory()
+        .get(column)
+        .ok_or_else(|| StrataError::Schema {
+            reason: format!("no column {column}"),
+        })?;
     let entries = file.block_entries(column).await?;
     if entries.is_empty() {
         return Ok(new_empty_array(field.data_type()));
@@ -301,5 +344,117 @@ mod tests {
         let file = open(bytes).await;
         let decoded = read_column(&file, 1).await.unwrap();
         assert_eq!(decoded.null_count(), 4);
+    }
+
+    /// The entries of one row: keys and optional values, or `None` for a null map.
+    type MapRows = Vec<Option<Vec<(String, Option<String>)>>>;
+
+    /// Each row of a `Map<Utf8, Utf8>` array as its entries in stored order.
+    fn map_rows(array: &dyn Array) -> MapRows {
+        use arrow::array::AsArray;
+        let map = array.as_map();
+        let keys = map.keys().as_string::<i32>();
+        let values = map.values().as_string::<i32>();
+        let offsets = map.value_offsets();
+        (0..map.len())
+            .map(|row| {
+                if map.is_null(row) {
+                    return None;
+                }
+                let (lo, hi) = (offsets[row] as usize, offsets[row + 1] as usize);
+                Some(
+                    (lo..hi)
+                        .map(|i| {
+                            let value = values.is_valid(i).then(|| values.value(i).to_string());
+                            (keys.value(i).to_string(), value)
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Shredding round trip. Forty rows: `b` is in the even rows once with a value, so it is
+    /// promoted. `a` is in every non-empty row once, with a null value in some rows and twice
+    /// in others, so it is promoted and its residual rows keep their entries. `d` occurs once,
+    /// so it is not promoted. Some maps are null and some are empty, and each row's entries are
+    /// written unsorted. Every row reads back with its entries stably sorted by key.
+    #[tokio::test]
+    async fn shredded_map_round_trips_with_residual_entries() {
+        use arrow::array::{MapBuilder, StringBuilder};
+        let entries = DataType::Struct(
+            vec![
+                Field::new("keys", DataType::Utf8, false),
+                Field::new("values", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let map_type = DataType::Map(Arc::new(Field::new("entries", entries, false)), false);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("attrs", map_type, true),
+        ]));
+
+        let mut builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+        let mut expected: MapRows = Vec::new();
+        for i in 0..40usize {
+            if i % 7 == 0 {
+                builder.append(false).unwrap();
+                expected.push(None);
+                continue;
+            }
+            if i % 5 == 0 {
+                builder.append(true).unwrap();
+                expected.push(Some(Vec::new()));
+                continue;
+            }
+            let mut entries: Vec<(&str, Option<String>)> = Vec::new();
+            if i % 2 == 0 {
+                entries.push(("b", Some(format!("b{i}"))));
+            }
+            entries.push(("a", (i % 3 != 0).then(|| format!("a{i}"))));
+            if i % 4 == 1 {
+                entries.push(("a", Some("again".to_string())));
+            }
+            if i == 9 {
+                entries.push(("d", Some("once".to_string())));
+            }
+            for (key, value) in &entries {
+                builder.keys().append_value(key);
+                match value {
+                    Some(value) => builder.values().append_value(value),
+                    None => builder.values().append_null(),
+                }
+            }
+            builder.append(true).unwrap();
+            let mut sorted: Vec<(String, Option<String>)> = entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect();
+            sorted.sort_by(|x, y| x.0.cmp(&y.0));
+            expected.push(Some(sorted));
+        }
+
+        let ids: Vec<u8> = (0..40u128).flat_map(|i| i.to_be_bytes()).collect();
+        let ids =
+            FixedSizeBinaryArray::try_new(16, arrow::buffer::Buffer::from_vec(ids), None).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(ids), Arc::new(builder.finish())],
+        )
+        .unwrap();
+        let mut w = StrataWriter::new(schema, &["trace_id"], Config::default()).unwrap();
+        w.write(&batch).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+
+        let file = open(bytes).await;
+        let children = file
+            .directory()
+            .iter()
+            .filter(|r| r.layer == Layer::MapChild)
+            .count();
+        assert_eq!(children, 2, "keys a and b are promoted, d is not");
+        let decoded = read_column(&file, 1).await.unwrap();
+        assert_eq!(map_rows(decoded.as_ref()), expected);
     }
 }

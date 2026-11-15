@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Field, SchemaRef};
 use futures::future::try_join_all;
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
@@ -17,7 +17,7 @@ use crate::format::{
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
-use crate::narrow::{BlockEntry, decode_chunk};
+use crate::narrow::{BlockEntry, decode_chunk, is_utf8_map};
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
@@ -75,6 +75,54 @@ fn read_sort_key_entries(
         return Err(corrupt());
     }
     Ok(entries)
+}
+
+/// Checks the map records and section 5 against each other. Every `MapParent` is named once,
+/// every record past the schema is named once, and every name is a parent, a child or a
+/// residual of the map that names it. Records of the schema that are not maps are named by
+/// nothing.
+fn check_map_layout(hot: &HotTail, hot_offset: u64) -> Result<()> {
+    let corrupt = || StrataError::Corrupt {
+        what: "map layout",
+        offset: hot_offset,
+    };
+    let records = &hot.directory;
+    let n_fields = hot.schema.fields().len();
+    let index = |id: u32| usize::try_from(id).ok().filter(|i| *i < records.len());
+    // Whether the record at `at` has `layer` and names `parent`.
+    let has_parent = |at: usize, layer: Layer, parent: u32| {
+        records
+            .get(at)
+            .is_some_and(|r| r.layer == layer && r.parent == parent)
+    };
+
+    let mut named = vec![0usize; records.len()];
+    for layout in &hot.maps {
+        let map_at = index(layout.map).ok_or_else(corrupt)?;
+        if records.get(map_at).map(|r| r.layer) != Some(Layer::MapParent) {
+            return Err(corrupt());
+        }
+        let residual_at = index(layout.residual).ok_or_else(corrupt)?;
+        if !has_parent(residual_at, Layer::Residual, layout.map) {
+            return Err(corrupt());
+        }
+        *named.get_mut(map_at).ok_or_else(corrupt)? += 1;
+        *named.get_mut(residual_at).ok_or_else(corrupt)? += 1;
+        for key in &layout.keys {
+            let child_at = index(key.child).ok_or_else(corrupt)?;
+            if !has_parent(child_at, Layer::MapChild, layout.map) {
+                return Err(corrupt());
+            }
+            *named.get_mut(child_at).ok_or_else(corrupt)? += 1;
+        }
+    }
+    for (i, record) in records.iter().enumerate() {
+        let expected = usize::from(record.layer == Layer::MapParent || i >= n_fields);
+        if named.get(i) != Some(&expected) {
+            return Err(corrupt());
+        }
+    }
+    Ok(())
 }
 
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
@@ -209,13 +257,29 @@ impl StrataFile {
                     offset: postscript.hot_offset,
                 });
             }
-            if i < n_fields && !matches!(record.layer, Layer::Narrow | Layer::Payload) {
+            // A schema column is narrow, a payload or a map parent; a map parent must be a
+            // shredded-map type. Past the schema are map children and residuals only.
+            let layer_ok = if i < n_fields {
+                matches!(
+                    record.layer,
+                    Layer::Narrow | Layer::Payload | Layer::MapParent
+                ) && (record.layer != Layer::MapParent
+                    || hot
+                        .schema
+                        .fields()
+                        .get(i)
+                        .is_some_and(|field| is_utf8_map(field.data_type())))
+            } else {
+                matches!(record.layer, Layer::MapChild | Layer::Residual)
+            };
+            if !layer_ok {
                 return Err(StrataError::Corrupt {
                     what: "directory layer",
                     offset: postscript.hot_offset,
                 });
             }
         }
+        check_map_layout(&hot, postscript.hot_offset)?;
         // Checked after the directory loop, so the id and layer errors above come first.
         let bad_sort_key = || StrataError::Corrupt {
             what: "sort key column",
@@ -290,6 +354,35 @@ impl StrataFile {
     /// The column directory.
     pub fn directory(&self) -> &[DirectoryRecord] {
         &self.hot.directory
+    }
+
+    /// The field that directory record `column` is read as: the schema field of a schema
+    /// column, a nullable unnamed Utf8 for a map child, and the parent's field for a residual.
+    pub(crate) fn field_of(&self, column: usize) -> Result<Field> {
+        let schema = &self.hot.schema;
+        if let Some(field) = schema.fields().get(column) {
+            return Ok(field.as_ref().clone());
+        }
+        let record = self
+            .hot
+            .directory
+            .get(column)
+            .ok_or_else(|| StrataError::Schema {
+                reason: format!("no column {column}"),
+            })?;
+        let corrupt = || StrataError::Corrupt {
+            what: "map layout",
+            offset: self.postscript.hot_offset,
+        };
+        match record.layer {
+            Layer::MapChild => Ok(Field::new("", DataType::Utf8, true)),
+            Layer::Residual => usize::try_from(record.parent)
+                .ok()
+                .and_then(|parent| schema.fields().get(parent))
+                .map(|field| field.as_ref().clone())
+                .ok_or_else(corrupt),
+            _ => Err(corrupt()),
+        }
     }
 
     /// Reads and checks one segment of the given kind.
@@ -528,7 +621,7 @@ impl StrataFile {
 mod tests {
     use super::*;
     use crate::format::{PAGE_REF_LEN, SEGMENT_HEADER_LEN};
-    use crate::testgen::{assert_same, batch, schema as batch_schema};
+    use crate::testgen::{assert_same, batch, schema as batch_schema, wide_batch, wide_schema};
     use crate::writer::StrataWriter;
     use arrow::array::{AsArray, FixedSizeBinaryArray, RecordBatch, StringArray};
     use arrow::buffer::Buffer;
@@ -578,8 +671,9 @@ mod tests {
                 .unwrap();
             assert_eq!(file.row_count(), 0);
             assert_eq!(file.schema().as_ref(), spans_schema().as_ref());
-            // Every column has a directory record, even with no chunks.
-            assert_eq!(file.directory().len(), spans_schema().fields().len());
+            // Every column has a directory record, even with no chunks. The three
+            // `Map<Utf8, Utf8>` columns of the spans schema each add a residual, and no key.
+            assert_eq!(file.directory().len(), spans_schema().fields().len() + 3);
             assert!(file.directory().iter().all(|r| r.n_chunks == 0));
         });
     }
@@ -818,7 +912,7 @@ mod tests {
                 })
             ));
 
-            // Record 0 has the Residual layer, which a schema column may not have in M1.
+            // Record 0 has the Residual layer, which a schema column may not have.
             let mut bytes = good.clone();
             bytes[dir + 8] = 4;
             refresh_hot_checksum(&mut bytes);
@@ -842,6 +936,92 @@ mod tests {
                     ..
                 })
             ));
+        });
+    }
+
+    /// `wide_batch(20_000)`, written with the default configuration.
+    fn wide_file() -> Vec<u8> {
+        let mut w = StrataWriter::new(
+            wide_schema(),
+            &["trace_id", "start_time"],
+            Config::default(),
+        )
+        .unwrap();
+        w.write(&wide_batch(20_000)).unwrap();
+        w.finish().unwrap().0
+    }
+
+    #[test]
+    fn shredded_map_layout_is_written_and_read_back() {
+        runtime().block_on(async {
+            let file = open_patched(wide_file()).await.unwrap();
+            // `attrs` is column 6. Its children are 15 to 17 (`k0`, `k1`, `k2`), its residual 18.
+            assert_eq!(file.directory().len(), 19);
+            assert_eq!(file.directory()[6].layer, Layer::MapParent);
+            for at in 15..18 {
+                let child = &file.directory()[at];
+                assert_eq!((child.layer, child.parent), (Layer::MapChild, 6));
+            }
+            assert_eq!(file.directory()[18].layer, Layer::Residual);
+            assert_eq!(file.directory()[18].parent, 6);
+            assert_eq!(file.hot.maps.len(), 1);
+            let layout = &file.hot.maps[0];
+            assert_eq!((layout.map, layout.residual), (6, 18));
+            let children: Vec<u32> = layout.keys.iter().map(|key| key.child).collect();
+            assert_eq!(children, vec![15, 16, 17]);
+            let keys: Vec<&[u8]> = layout.keys.iter().map(|key| key.key.as_slice()).collect();
+            assert_eq!(keys, vec![&b"k0"[..], &b"k1"[..], &b"k2"[..]]);
+
+            let rows = wide_batch(20_000);
+            let decoded = crate::reader::read_column(&file, 6).await.unwrap();
+            assert_same(decoded.as_ref(), rows.column(6).as_ref());
+            assert!(matches!(
+                crate::reader::read_column(&file, 15).await,
+                Err(StrataError::Schema { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn map_layout_patches_are_corrupt() {
+        runtime().block_on(async {
+            let good = wide_file();
+            let hot = hot_offset_of(&good) as usize;
+            let sections = section_bounds(&good[hot..good.len() - 64]);
+            // Section 5 is the fifth section; its body starts at `map_section`.
+            let map_section = hot + sections[4].start;
+            let dir = directory_at(&good);
+            let mut patches = Vec::new();
+
+            // Section 5 names column 0 as a map, and column 0 is not a map parent.
+            let mut bytes = good.clone();
+            let at = map_section + 4;
+            bytes[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+            patches.push(bytes);
+
+            // Child 15 names column 0 as its parent, not map 6.
+            let mut bytes = good.clone();
+            let at = dir + 64 * 15 + 4;
+            bytes[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+            patches.push(bytes);
+
+            // The last byte of key `k0` becomes `9`, so the keys are no longer increasing.
+            let mut bytes = good.clone();
+            let section = &good[map_section..map_section + sections[4].len()];
+            let pos = section.windows(4).position(|w| w == b"\x02\x00k0").unwrap();
+            bytes[map_section + pos + 3] = b'9';
+            patches.push(bytes);
+
+            for mut bytes in patches {
+                refresh_hot_checksum(&mut bytes);
+                assert!(matches!(
+                    open_patched(bytes).await,
+                    Err(StrataError::Corrupt {
+                        what: "map layout",
+                        ..
+                    })
+                ));
+            }
         });
     }
 

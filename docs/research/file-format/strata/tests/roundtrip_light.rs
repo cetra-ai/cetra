@@ -132,8 +132,8 @@ async fn roundtrip_light() {
         summary.columns.iter().map(|c| c.chunks).sum::<u32>()
     );
     println!(
-        "{:<22} {:>12} {:>10} {:>12} {:>7}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc, Map)",
-        "column", "strata B", "filter B", "pq_default B", "ratio"
+        "{:<22} {:>12} {:>10} {:>12} {:>7} {:>5}  encodings (Const, ConstNull, ForBitpack, Plain, FsbRaw, FsbRle, Dict, Varbin, ListDict, Bool, Ipc, Map)",
+        "column", "strata B", "filter B", "pq_default B", "ratio", "keys"
     );
     for column in &summary.columns {
         let pq = parquet_columns.get(&column.name).copied().unwrap_or(0);
@@ -144,12 +144,13 @@ async fn roundtrip_light() {
             .map(|c| c.to_string())
             .collect();
         println!(
-            "{:<22} {:>12} {:>10} {:>12} {:>7.2}  {}",
+            "{:<22} {:>12} {:>10} {:>12} {:>7.2} {:>5}  {}",
             column.name,
             column.bytes,
             column.filter_bytes,
             pq,
             ratio,
+            column.shredded_keys,
             counts.join(" ")
         );
     }

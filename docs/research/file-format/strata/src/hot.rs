@@ -13,8 +13,8 @@ use arrow::ipc::writer::StreamWriter;
 
 use crate::error::{Result, StrataError};
 use crate::format::{
-    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, Out, PAGE_REF_LEN,
-    VERSION,
+    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, MAX_PROMOTED_KEYS,
+    Out, PAGE_REF_LEN, VERSION,
 };
 use crate::segment::SegmentRef;
 
@@ -121,7 +121,7 @@ pub enum Layer {
     MapParent = 2,
     /// A shredded map child, with narrow rules.
     MapChild = 3,
-    /// A residual map, with narrow rules and `IPC` encoding.
+    /// A residual map, with narrow rules and `MAP` encoding.
     Residual = 4,
 }
 
@@ -263,6 +263,128 @@ impl PageRef {
     }
 }
 
+/// One shredded map, as hot-tail section 5 names it: its parent column, its residual column
+/// and its promoted keys, sorted bytewise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapLayout {
+    /// The parent column (a schema index, layer `MapParent`).
+    pub map: u32,
+    /// The residual column (layer `Residual`).
+    pub residual: u32,
+    /// The promoted keys, sorted bytewise by key.
+    pub keys: Vec<MapKey>,
+}
+
+/// One promoted key of a shredded map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapKey {
+    /// The child column (layer `MapChild`).
+    pub child: u32,
+    /// The rows in which the key was present but stayed in the residual.
+    pub residual_hits: u32,
+    /// The key, valid UTF-8 of at most `MAX_MAP_KEY_LEN` bytes.
+    pub key: Vec<u8>,
+}
+
+/// Longest promoted key in bytes. The same limit as the shredder's (`shred.rs`), checked here
+/// because the file is read without the shredder.
+const MAX_MAP_KEY_LEN: usize = 1024;
+
+/// Fewest bytes of one map in section 5: `u32 map · u32 residual · u32 n_keys`.
+const MAP_ENTRY_MIN_LEN: usize = 12;
+
+/// Fewest bytes of one key in section 5: `u32 child · u32 residual_hits · u16 key_len`.
+const MAP_KEY_MIN_LEN: usize = 10;
+
+/// Encodes section 5. No map gives an empty section; otherwise `u32 n_maps`, then per map
+/// `u32 map · u32 residual · u32 n_keys` and per key `u32 child · u32 residual_hits · u16 key_len ·
+/// key bytes`.
+fn encode_map_layout(maps: &[MapLayout]) -> Result<Vec<u8>> {
+    if maps.is_empty() {
+        return Ok(Vec::new());
+    }
+    let unsupported = |what: &str| StrataError::Unsupported {
+        what: format!("map layout with {what}"),
+    };
+    let mut out = Out(Vec::new());
+    out.u32(u32::try_from(maps.len()).map_err(|_| unsupported("more than 4 billion maps"))?);
+    for map in maps {
+        out.u32(map.map);
+        out.u32(map.residual);
+        out.u32(u32::try_from(map.keys.len()).map_err(|_| unsupported("too many keys"))?);
+        for key in &map.keys {
+            let key_len = u16::try_from(key.key.len()).map_err(|_| unsupported("a long key"))?;
+            out.u32(key.child);
+            out.u32(key.residual_hits);
+            out.u16(key_len);
+            out.bytes(&key.key);
+        }
+    }
+    Ok(out.0)
+}
+
+/// Decodes section 5 whose bytes start at file offset `base`. Length 0 is no map. Otherwise
+/// the counts must fit in the bytes that remain before any allocation, each key must be valid
+/// UTF-8 of at most `MAX_MAP_KEY_LEN` bytes, the keys of a map must be strictly increasing, and
+/// the section must be consumed exactly. Ids are checked later, in `file.rs`.
+fn decode_map_layout(bytes: &[u8], base: u64) -> Result<Vec<MapLayout>> {
+    let corrupt = || StrataError::Corrupt {
+        what: "map layout",
+        offset: base,
+    };
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut c = Cursor::new(bytes, base);
+    let n_maps = c.u32("map layout")? as usize;
+    if n_maps
+        .checked_mul(MAP_ENTRY_MIN_LEN)
+        .is_none_or(|min| min > c.remaining())
+    {
+        return Err(corrupt());
+    }
+    let mut maps = Vec::with_capacity(n_maps);
+    for _ in 0..n_maps {
+        let map = c.u32("map layout")?;
+        let residual = c.u32("map layout")?;
+        let n_keys = c.u32("map layout")? as usize;
+        if n_keys > MAX_PROMOTED_KEYS
+            || n_keys
+                .checked_mul(MAP_KEY_MIN_LEN)
+                .is_none_or(|min| min > c.remaining())
+        {
+            return Err(corrupt());
+        }
+        let mut keys: Vec<MapKey> = Vec::with_capacity(n_keys);
+        for _ in 0..n_keys {
+            let child = c.u32("map layout")?;
+            let residual_hits = c.u32("map layout")?;
+            let key_len = usize::from(c.u16("map layout")?);
+            let key = c.bytes(key_len, "map layout")?;
+            if key_len > MAX_MAP_KEY_LEN || std::str::from_utf8(key).is_err() {
+                return Err(corrupt());
+            }
+            if keys.last().is_some_and(|prev| prev.key.as_slice() >= key) {
+                return Err(corrupt());
+            }
+            keys.push(MapKey {
+                child,
+                residual_hits,
+                key: key.to_vec(),
+            });
+        }
+        maps.push(MapLayout {
+            map,
+            residual,
+            keys,
+        });
+    }
+    if c.remaining() != 0 {
+        return Err(corrupt());
+    }
+    Ok(maps)
+}
+
 /// The hot tail: the seven sections, decoded.
 pub struct HotTail {
     /// The table schema (section 1).
@@ -274,8 +396,8 @@ pub struct HotTail {
     /// Section 4: the body of the sort-key filter. Empty when the first sort-key column has no
     /// filter type.
     pub sort_key_filter: Vec<u8>,
-    /// Section 5: shredded map keys, empty until map shredding (M3.2b).
-    pub map_keys: Vec<u8>,
+    /// Section 5: the shredded maps, in schema order. Empty when no map is shredded.
+    pub(crate) maps: Vec<MapLayout>,
     /// Section 6: the key-filter segments of the other filtered columns, by column id.
     pub key_filters: Vec<(u32, SegmentRef)>,
     /// Section 7: block-table page references, raw (16-byte entries).
@@ -362,12 +484,14 @@ impl HotTail {
             key_filter_index.u32(segment.len);
         }
 
+        let map_layout = encode_map_layout(&self.maps)?;
+
         let sections: [&[u8]; HOT_SECTIONS] = [
             schema_stream.as_slice(),
             directory.0.as_slice(),
             self.sort_key_entries.as_slice(),
             self.sort_key_filter.as_slice(),
-            self.map_keys.as_slice(),
+            map_layout.as_slice(),
             key_filter_index.0.as_slice(),
             self.pages.as_slice(),
         ];
@@ -416,7 +540,8 @@ impl HotTail {
             });
         }
         let (_, sort_key_filter) = read_section(&mut c)?;
-        let (_, map_keys) = read_section(&mut c)?;
+        let (maps_base, map_layout) = read_section(&mut c)?;
+        let maps = decode_map_layout(map_layout, maps_base)?;
         let (index_base, key_filter_index) = read_section(&mut c)?;
         let key_filters =
             decode_key_filter_index(key_filter_index, index_base, schema.fields().len())?;
@@ -440,7 +565,7 @@ impl HotTail {
             directory,
             sort_key_entries: sort_key_entries.to_vec(),
             sort_key_filter: sort_key_filter.to_vec(),
-            map_keys: map_keys.to_vec(),
+            maps,
             key_filters,
             pages: pages.to_vec(),
         })
@@ -619,7 +744,7 @@ mod tests {
             directory: vec![record(0, 0), record(1, 32), record(2, 64)],
             sort_key_entries: vec![0xAB; 2 * BLOCK_ENTRY_LEN],
             sort_key_filter: Vec::new(),
-            map_keys: Vec::new(),
+            maps: Vec::new(),
             key_filters: Vec::new(),
             pages: vec![0xCD; 4 * PAGE_REF_LEN],
         };
@@ -630,7 +755,7 @@ mod tests {
         assert_eq!(decoded.directory, hot.directory);
         assert_eq!(decoded.sort_key_entries, hot.sort_key_entries);
         assert_eq!(decoded.sort_key_filter, hot.sort_key_filter);
-        assert_eq!(decoded.map_keys, hot.map_keys);
+        assert_eq!(decoded.maps, hot.maps);
         assert_eq!(decoded.key_filters, hot.key_filters);
         assert_eq!(decoded.pages, hot.pages);
         assert_eq!(decoded.pages_of(&hot.directory[1]).unwrap().len(), 2);
@@ -726,13 +851,62 @@ mod tests {
     }
 
     #[test]
+    fn map_layout_round_trips_and_rejects_bad_sections() {
+        let layout = vec![
+            MapLayout {
+                map: 6,
+                residual: 18,
+                keys: vec![
+                    MapKey {
+                        child: 15,
+                        residual_hits: 2,
+                        key: b"k0".to_vec(),
+                    },
+                    MapKey {
+                        child: 16,
+                        residual_hits: 0,
+                        key: b"k1".to_vec(),
+                    },
+                ],
+            },
+            MapLayout {
+                map: 7,
+                residual: 19,
+                keys: Vec::new(),
+            },
+        ];
+        let bytes = encode_map_layout(&layout).unwrap();
+        assert_eq!(decode_map_layout(&bytes, 0).unwrap(), layout);
+        assert!(decode_map_layout(&[], 0).unwrap().is_empty());
+
+        // A count of maps that cannot fit in the section is rejected before any allocation.
+        let mut huge = u32::MAX.to_le_bytes().to_vec();
+        huge.extend([0u8; 12]);
+        assert!(decode_map_layout(&huge, 0).is_err());
+
+        // The last byte of `k0` becomes `9`, so the keys are no longer increasing.
+        let mut unsorted = bytes.clone();
+        let pos = unsorted
+            .windows(4)
+            .position(|w| w == b"\x02\x00k0")
+            .unwrap();
+        unsorted[pos + 3] = b'9';
+        assert!(decode_map_layout(&unsorted, 0).is_err());
+
+        // Bytes after the last map are rejected.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_map_layout(&trailing, 0).is_err());
+    }
+
+    #[test]
     fn hot_tail_rejects_misaligned_sections_and_trailing_bytes() {
         let mut hot = HotTail {
             schema: spans_schema(),
             directory: vec![record(0, 0)],
             sort_key_entries: vec![0; BLOCK_ENTRY_LEN],
             sort_key_filter: Vec::new(),
-            map_keys: Vec::new(),
+            maps: Vec::new(),
             key_filters: Vec::new(),
             pages: vec![0; PAGE_REF_LEN],
         };
@@ -794,7 +968,7 @@ mod tests {
                 directory: vec![record(0, pages_offset)],
                 sort_key_entries: Vec::new(),
                 sort_key_filter: Vec::new(),
-                map_keys: Vec::new(),
+                maps: Vec::new(),
                 key_filters: Vec::new(),
                 pages,
             };
