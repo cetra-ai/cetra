@@ -9,12 +9,13 @@ mod observe;
 mod ops;
 mod shape;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use proptest::prelude::*;
 
 use check::{check_deletions, check_dropped, check_full, check_quick};
-use harness::Harness;
+use harness::{Harness, MODEL_PUT_SIZES};
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
@@ -25,6 +26,8 @@ use crate::config::{StorageConfig, WalSync};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::fs::lossy::CrashMode;
 use crate::reads::MAX_PAGE;
+use crate::test_support::{Call, Rates};
+use object_store::memory::InMemory;
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
 fn cases() -> u32 {
@@ -37,6 +40,14 @@ fn cases() -> u32 {
 /// Cases of the interval variant: half of `cases()`, at least 2 (R2.9).
 fn interval_cases() -> u32 {
     (cases() / 2).max(2)
+}
+
+/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 4 (R4.4).
+fn s3_cases() -> u32 {
+    std::env::var("LLMOBS_MODEL_S3_CASES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(4)
 }
 
 proptest! {
@@ -59,6 +70,16 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(s3_cases()))]
+
+    /// The model test on a remote store behind the read cache (R4.4).
+    #[test]
+    fn storage_matches_the_model_on_s3(ops in ops::ops_s3()) {
+        run_case_s3(&ops, None);
+    }
+}
+
 /// `wal.sync` one hour: the writer syncs only when it must (rotation, shutdown, open), which
 /// maximizes what a lossy crash may drop.
 fn interval_mode(config: &mut StorageConfig) {
@@ -72,7 +93,25 @@ fn run_case(ops: &[Op]) {
 /// Runs `ops` and checks every read. Returns the harness, so a test can read what its lossy
 /// crashes did.
 fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness {
-    let mut harness = Harness::with_config(change);
+    run_with(Harness::with_config(change), ops)
+}
+
+/// Runs `ops` in S3 mode (R4.4): the store is an in-memory bucket behind a chaos store, with
+/// `MODEL_PUT_SIZES`. `faults`: `Some((seed, rates))` sets the fault schedule (`set_schedule`),
+/// left inactive, so no fault fires until R4.5 activates it. Returns the harness.
+fn run_case_s3(ops: &[Op], faults: Option<(u64, Rates)>) -> Harness {
+    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    if let Some((seed, rates)) = faults {
+        harness
+            .chaos()
+            .expect("an S3-mode harness has a chaos store")
+            .set_schedule(seed, rates);
+    }
+    run_with(harness, ops)
+}
+
+/// The loop shared by both modes: each op, then the checks its kind needs, then `settle`.
+fn run_with(mut harness: Harness, ops: &[Op]) -> Harness {
     let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for (index, op) in ops.iter().enumerate() {
@@ -543,4 +582,59 @@ fn regression_lossy_crash_tears_the_wal_tail() {
     };
     assert_eq!(crash.mode, CrashMode::TearLast);
     assert!(crash.torn_writes > 0, "the crash tore no write: {crash:?}");
+}
+
+/// S3 mode without faults (R4.4): a schedule that is set but never activated changes nothing.
+#[test]
+fn a_schedule_without_activation_changes_nothing() {
+    let harness = run_case_s3(
+        &[
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 4,
+                split: true,
+            },
+            Op::Restart,
+            Op::Compact { hours: 60 },
+            Op::Score {
+                project: P::A,
+                target: 0,
+                name: 0,
+            },
+            Op::Crash,
+            Op::Settle,
+        ],
+        Some((1, Rates::MODEL)),
+    );
+    let chaos = harness
+        .chaos()
+        .expect("an S3-mode harness has a chaos store");
+    assert_eq!(chaos.injected(), 0, "an inactive schedule injected a fault");
+    assert!(!chaos.is_active(), "the schedule was activated");
+}
+
+/// S3 mode uploads both ways (R4.4): a file of more than `single_max` is multipart, and a
+/// smaller one is a single put. Twelve spans of six traces make files of both sizes after the
+/// restart and compaction.
+#[test]
+fn s3_mode_uses_both_upload_paths() {
+    let mut ops: Vec<Op> = (0..6)
+        .map(|trace| Op::Append {
+            project: P::A,
+            trace,
+            count: 12,
+            split: false,
+        })
+        .collect();
+    ops.extend([Op::Restart, Op::Compact { hours: 60 }, Op::Settle]);
+    let harness = run_case_s3(&ops, None);
+    let chaos = harness
+        .chaos()
+        .expect("an S3-mode harness has a chaos store");
+    assert!(chaos.count(Call::Put) > 0, "no single put was made");
+    assert!(
+        chaos.count(Call::Complete) > 0,
+        "no multipart upload was completed"
+    );
 }

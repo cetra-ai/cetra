@@ -4,16 +4,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use bytesize::ByteSize;
 use datafusion::execution::context::{SessionConfig, SessionContext};
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use super::shape::{HOUR_NS, P, day, midnight};
 use crate::Storage;
+use crate::catalog::FileMeta;
 use crate::config::{
     CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
 use crate::fs::lossy::{CrashReport, Lossy};
-use crate::test_support::{span_row, span_rows};
+use crate::objects::PutSizes;
+use crate::test_support::{ChaosStore, span_row, span_rows};
 use crate::wal::Table;
 
 /// The storage config every model case uses.
@@ -41,6 +46,33 @@ pub(super) fn model_config(dir: &std::path::Path) -> StorageConfig {
     }
 }
 
+/// The sizes that make the model's files take both upload paths (R4.4): a file of
+/// more than 16 KiB is multipart, in parts of 8 KiB.
+pub(super) const MODEL_PUT_SIZES: PutSizes = PutSizes {
+    single_max: 16 * 1024,
+    part: 8 * 1024,
+};
+
+/// `model_config` for S3 mode (R4.4): the read cache is on, so every data-file read goes through
+/// it, and uploads and compaction run one at a time, so most calls are sequential and a seed
+/// usually replays. The data directory keeps the WAL and the catalog.
+pub(super) fn model_config_s3(dir: &std::path::Path) -> StorageConfig {
+    let mut config = model_config(dir);
+    config.query.read_cache_bytes = Some(ByteSize::mib(64));
+    config.query.target_partitions = 1;
+    config.flush.upload_concurrency = 1;
+    config.compaction.threads = 1;
+    config
+}
+
+/// The remote store of an S3-mode harness.
+pub(super) struct Remote {
+    /// What storage writes to: faults are injected here.
+    pub(super) chaos: ChaosStore,
+    /// Passed to `Storage::open_with_store` at every open.
+    pub(super) put_sizes: PutSizes,
+}
+
 /// Field order matters only for an implicit drop; `restart` and `crash`
 /// always drop `storage` explicitly before shutting `runtime` down.
 pub(super) struct Life {
@@ -60,17 +92,37 @@ pub(super) struct Harness {
     life: Option<Life>,
     /// What each `lossy_crash` of this case did, in order.
     crashes: Vec<CrashReport>,
+    /// `None` in local mode.
+    remote: Option<Remote>,
+    /// The `list` calls the orphan audits made (S3 mode). `check_full` expects exactly these
+    /// and no others: storage never lists the bucket (spec 03 §5).
+    pub(super) audit_lists: u64,
 }
 
-fn open_life(config: &StorageConfig) -> Life {
+/// Opens storage on `config`. In S3 mode the store is `remote`'s chaos store. Opening runs calm:
+/// the schedule is off while the open runs, and the previous setting is restored after it (a
+/// store error during the open fails it by design, R4.6).
+fn open_life(config: &StorageConfig, remote: Option<&Remote>) -> Life {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .expect("tokio runtime for a new life");
-    let storage = runtime
-        .block_on(Storage::open(config.clone()))
-        .expect("open storage for a new life");
+    let opened = match remote {
+        None => runtime.block_on(Storage::open(config.clone())),
+        Some(remote) => {
+            let was_active = remote.chaos.is_active();
+            remote.chaos.set_active(false);
+            let opened = runtime.block_on(Storage::open_with_store(
+                config.clone(),
+                Arc::new(remote.chaos.clone()),
+                remote.put_sizes,
+            ));
+            remote.chaos.set_active(was_active);
+            opened
+        }
+    };
+    let storage = opened.expect("open storage for a new life");
     Life { storage, runtime }
 }
 
@@ -79,8 +131,31 @@ impl Harness {
     /// applied, opened.
     pub(super) fn with_config(change: impl FnOnce(&mut StorageConfig)) -> Self {
         let dir = tempfile::TempDir::new().expect("temp dir for a model case");
-        let mut harness =
-            Self::open_in(&dir.path().join("data"), &dir.path().join("shadow"), change);
+        let mut harness = Self::open_in(
+            &dir.path().join("data"),
+            &dir.path().join("shadow"),
+            None,
+            change,
+        );
+        harness._dir = Some(dir);
+        harness
+    }
+
+    /// S3 mode (R4.4): a fresh temp dir and `model_config_s3`, with `inner` behind a
+    /// [`ChaosStore`] as the object store. The read cache is on. `put_sizes` decides which
+    /// uploads are multipart.
+    pub(super) fn new_s3(inner: Arc<dyn ObjectStore>, put_sizes: PutSizes) -> Self {
+        let dir = tempfile::TempDir::new().expect("temp dir for a model case");
+        let remote = Remote {
+            chaos: ChaosStore::new(inner),
+            put_sizes,
+        };
+        let mut harness = Self::open_in(
+            &dir.path().join("data"),
+            &dir.path().join("shadow"),
+            Some(remote),
+            |_| {},
+        );
         harness._dir = Some(dir);
         harness
     }
@@ -98,7 +173,7 @@ impl Harness {
         shadow: &std::path::Path,
         seed: Option<u64>,
     ) -> Self {
-        let harness = Self::open_in(data, shadow, |_| {});
+        let harness = Self::open_in(data, shadow, None, |_| {});
         if let Some(seed) = seed {
             harness.lossy.crash_on_abort(seed);
         }
@@ -106,16 +181,22 @@ impl Harness {
     }
 
     /// Registers `data` as a lossy root with the shadow at `shadow`, and opens it under
-    /// `model_config(data)` with `change` applied. The caller sets `_dir` when it owns the paths.
+    /// `model_config(data)` (`model_config_s3(data)` with a `remote`) with `change` applied. The
+    /// caller sets `_dir` when it owns the paths.
     fn open_in(
         data: &std::path::Path,
         shadow: &std::path::Path,
+        remote: Option<Remote>,
         change: impl FnOnce(&mut StorageConfig),
     ) -> Self {
         let lossy = Lossy::enable(data, shadow);
-        let mut config = model_config(data);
+        let mut config = if remote.is_some() {
+            model_config_s3(data)
+        } else {
+            model_config(data)
+        };
         change(&mut config);
-        let life = Some(open_life(&config));
+        let life = Some(open_life(&config, remote.as_ref()));
         Self {
             _dir: None,
             data: data.to_path_buf(),
@@ -123,6 +204,8 @@ impl Harness {
             lossy,
             life,
             crashes: Vec::new(),
+            remote,
+            audit_lists: 0,
         }
     }
 
@@ -143,45 +226,94 @@ impl Harness {
         self.life.as_ref().expect("a life").runtime.block_on(future)
     }
 
+    /// Marks the window in which a life ends (S3 mode): an upload cancelled there is abandoned,
+    /// not leaked (R4.2). Called just before the old storage ends, and cleared once its runtime
+    /// has shut down.
+    fn set_ending(&self, on: bool) {
+        if let Some(remote) = &self.remote {
+            remote.chaos.set_ending(on);
+        }
+    }
+
     /// Clean shutdown, then a new life.
     pub(super) fn restart(&mut self) {
         let Life { storage, runtime } = self.life.take().expect("a life");
+        self.set_ending(true);
         runtime
             .block_on(storage.shutdown())
             .expect("clean shutdown");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
-        self.life = Some(open_life(&self.config));
+        self.set_ending(false);
+        self.life = Some(open_life(&self.config, self.remote.as_ref()));
     }
 
     /// Drop without shutdown, then a new life.
     pub(super) fn crash(&mut self) {
         let Life { storage, runtime } = self.life.take().expect("a life");
+        self.set_ending(true);
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
-        self.life = Some(open_life(&self.config));
+        self.set_ending(false);
+        self.life = Some(open_life(&self.config, self.remote.as_ref()));
     }
 
     /// Drop without shutdown, apply a lossy crash with `seed` to the data directory, then a new
     /// life. The storage is closed before the crash, as `Lossy::crash_with` requires. The report
-    /// is kept for [`Self::crashes`].
+    /// is kept for [`Self::crashes`]. Lossy crashes cover local files only, so this is local mode
+    /// only (R4.4).
     pub(super) fn lossy_crash(&mut self, seed: u64) {
+        assert!(
+            self.remote.is_none(),
+            "a lossy crash covers local files only, not an S3-mode harness"
+        );
         let Life { storage, runtime } = self.life.take().expect("a life");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.crashes.push(self.lossy.crash(seed));
-        self.life = Some(open_life(&self.config));
+        self.life = Some(open_life(&self.config, self.remote.as_ref()));
     }
 
     /// The reports of this case's lossy crashes, oldest first.
     pub(super) fn crashes(&self) -> &[CrashReport] {
         &self.crashes
     }
+
+    /// The remote store's chaos store; `None` in local mode.
+    pub(super) fn chaos(&self) -> Option<&ChaosStore> {
+        self.remote.as_ref().map(|remote| &remote.chaos)
+    }
+
+    /// The bytes of `file`, read past the chaos store and the read cache: from
+    /// `<dir>/objects/<path>` in local mode, from the inner store in S3 mode (R4.4).
+    pub(super) fn object_bytes(&self, file: &FileMeta) -> Bytes {
+        match &self.remote {
+            None => Bytes::from(
+                std::fs::read(self.data.join("objects").join(&file.path))
+                    .expect("read a catalogued object from disk"),
+            ),
+            Some(remote) => {
+                let key = ObjectPath::parse(&file.path).expect("a catalogued object path");
+                self.block_on(async {
+                    remote
+                        .chaos
+                        .inner()
+                        .get(&key)
+                        .await
+                        .expect("get a catalogued object from the store")
+                        .bytes()
+                        .await
+                        .expect("read the body of a catalogued object")
+                })
+            }
+        }
+    }
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
         if let Some(Life { storage, runtime }) = self.life.take() {
+            self.set_ending(true);
             let _ = runtime.block_on(storage.shutdown());
             drop(storage);
             runtime.shutdown_timeout(Duration::from_secs(10));

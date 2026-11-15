@@ -57,9 +57,13 @@ fn read_text(name: &str) -> String {
 /// The rows stored in one catalogued file's Parquet object, under `objects/`.
 pub(crate) fn object_rows(dir: &Path, file: &crate::catalog::FileMeta) -> RecordBatch {
     let bytes = fs::read(dir.join("objects").join(&file.path)).unwrap();
+    parquet_rows(Bytes::from(bytes))
+}
+
+/// The rows of one Parquet object, given its bytes (R4.4: the model reads objects of a store too).
+pub(crate) fn parquet_rows(bytes: Bytes) -> RecordBatch {
     let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
-            .unwrap();
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let schema = Arc::clone(builder.schema());
     let batches: Vec<RecordBatch> = builder
         .build()
@@ -721,16 +725,34 @@ fn life_runtime() -> tokio::runtime::Runtime {
 
 /// Object keys under `objects/tables` and `objects/media` (temp names
 /// excluded) that no `data_files`, `staged_objects` or `media` row names.
-/// Opens `catalog.db` read-only, on a connection of its own.
 pub(crate) async fn orphan_objects(data_dir: &Path) -> Vec<String> {
+    let known = known_names(data_dir).await;
+    let objects = data_dir.join("objects");
+    let mut keys = Vec::new();
+    for table_dir in ["tables", "media"] {
+        collect_object_keys(&objects.join(table_dir), &objects, &mut keys);
+    }
+    keys.sort();
+    keys.retain(|key| !known.contains(key));
+    keys
+}
+
+/// Opens `catalog.db` read-only, on a connection of its own.
+async fn open_catalog(data_dir: &Path) -> sqlx::SqliteConnection {
     use sqlx::ConnectOptions;
-    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+    sqlx::sqlite::SqliteConnectOptions::new()
         .filename(data_dir.join("catalog.db"))
         .read_only(true)
         .connect()
         .await
-        .expect("open catalog.db read-only");
-    let named: BTreeSet<String> = sqlx::query_scalar::<_, String>(
+        .expect("open catalog.db read-only")
+}
+
+/// Every object name the catalog knows, in any state: `data_files` paths, `staged_objects` paths
+/// and every media key (N's B5 "known").
+async fn known_names(data_dir: &Path) -> BTreeSet<String> {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, String>(
         "SELECT path FROM data_files
          UNION SELECT path FROM staged_objects
          UNION SELECT 'media/' || project_id || '/' || sha256 FROM media",
@@ -739,15 +761,91 @@ pub(crate) async fn orphan_objects(data_dir: &Path) -> Vec<String> {
     .await
     .expect("read the object names of the catalog")
     .into_iter()
-    .collect();
-    let objects = data_dir.join("objects");
-    let mut keys = Vec::new();
-    for table_dir in ["tables", "media"] {
-        collect_object_keys(&objects.join(table_dir), &objects, &mut keys);
+    .collect()
+}
+
+/// The names the catalog needs in the store: active data files, and the media of projects that
+/// are not dropping or dropped (N's B5 "needed").
+async fn needed_names(data_dir: &Path) -> BTreeSet<String> {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, String>(
+        "SELECT path FROM data_files WHERE state = 'active'
+         UNION SELECT 'media/' || m.project_id || '/' || m.sha256 FROM media m
+         WHERE NOT EXISTS (
+             SELECT 1 FROM projects p
+             WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("read the needed object names of the catalog")
+    .into_iter()
+    .collect()
+}
+
+/// What [`collect_orphans_dry_run`] counts: the fields of N's B5 `OrphanReport` with the same
+/// names.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct OrphanCounts {
+    pub(crate) orphans: u64,
+    pub(crate) recent_unknown: u64,
+    pub(crate) missing: u64,
+    pub(crate) missing_media: u64,
+}
+
+/// Stand-in for N's B5 `Storage::collect_orphans(ZERO, dry_run = true)` until B5 merges (R4.4).
+/// It lists `tables/` and `media/` on `store`, and compares the keys with the catalog in
+/// `data_dir`. The minimum age is zero, so every unknown object is an orphan and `recent_unknown`
+/// stays 0. Like B5, it reads the needed names before listing and the known names after.
+pub(crate) async fn collect_orphans_dry_run(
+    data_dir: &Path,
+    store: &dyn object_store::ObjectStore,
+) -> OrphanCounts {
+    use futures::TryStreamExt;
+    let mut missing = needed_names(data_dir).await;
+    let mut listed = Vec::new();
+    for prefix in ["tables", "media"] {
+        let objects: Vec<object_store::ObjectMeta> = store
+            .list(Some(&object_store::path::Path::from(prefix)))
+            .try_collect()
+            .await
+            .expect("list the object store");
+        listed.extend(objects.into_iter().map(|meta| meta.location.to_string()));
     }
-    keys.sort();
-    keys.retain(|key| !named.contains(key));
-    keys
+    let known = known_names(data_dir).await;
+    let mut counts = OrphanCounts::default();
+    for key in listed {
+        if is_temp_key(&key) {
+            continue;
+        }
+        missing.remove(&key);
+        if !known.contains(&key) {
+            counts.orphans += 1;
+        }
+    }
+    for key in missing {
+        if key.starts_with("tables/") {
+            counts.missing += 1;
+        } else {
+            counts.missing_media += 1;
+        }
+    }
+    counts
+}
+
+/// Rows of `data_files` in state `obsolete`. A settled store has none: GC deletes each such file
+/// and its row together.
+pub(crate) async fn obsolete_rows(data_dir: &Path) -> i64 {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'")
+        .fetch_one(&mut connection)
+        .await
+        .expect("count the obsolete rows of the catalog")
+}
+
+/// A temp name, as `Objects` writes them: a dot-name with `.tmp-` in it.
+fn is_temp_key(key: &str) -> bool {
+    let name = key.rsplit('/').next().unwrap_or(key);
+    name.starts_with('.') && name.contains(".tmp-")
 }
 
 /// Adds the key of every non-temp file under `dir`, relative to `objects`.
@@ -763,17 +861,16 @@ fn collect_object_keys(dir: &Path, objects: &Path, keys: &mut Vec<String>) {
         if kind.is_dir() {
             collect_object_keys(&path, objects, keys);
         } else if kind.is_file() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') && name.contains(".tmp-") {
+            let Ok(key) = path.strip_prefix(objects) else {
                 continue;
-            }
-            if let Ok(key) = path.strip_prefix(objects) {
-                keys.push(key.to_string_lossy().into_owned());
+            };
+            let key = key.to_string_lossy().into_owned();
+            if !is_temp_key(&key) {
+                keys.push(key);
             }
         }
     }
 }
 
 mod chaos;
-pub(crate) use chaos::{Call, ChaosStore, Fault, Status, UploadState};
+pub(crate) use chaos::{Call, ChaosStore, Fault, Rates, Status, UploadState};

@@ -10,7 +10,7 @@ use std::time::Duration;
 use proptest::prelude::*;
 use proptest::strategy::Union;
 
-use super::check::check_settled_files;
+use super::check::{check_s3_audit, check_settled_files};
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
 use super::observe::{observe_eval_trace_ids, observe_user_scope};
@@ -158,12 +158,19 @@ impl Op {
 
 /// A sequence of 1 to 24 ops.
 pub(super) fn ops() -> impl Strategy<Value = Vec<Op>> {
-    proptest::collection::vec(op(), 1..=24)
+    proptest::collection::vec(op(true), 1..=24)
+}
+
+/// A sequence of 1 to 24 ops for S3 mode: no `LossyCrash`, since a lossy crash covers local files
+/// only (R4.4).
+pub(super) fn ops_s3() -> impl Strategy<Value = Vec<Op>> {
+    proptest::collection::vec(op(false), 1..=24)
 }
 
 /// Every op with its weight. One weighted union, since `prop_oneof!` takes at most ten arms.
-fn op() -> impl Strategy<Value = Op> {
-    Union::new_weighted(vec![
+/// `lossy` adds `LossyCrash`.
+fn op(lossy: bool) -> impl Strategy<Value = Op> {
+    let mut arms = vec![
         (
             30,
             (project(), 0..TRACES, 1..=6_u8, any::<bool>())
@@ -244,13 +251,16 @@ fn op() -> impl Strategy<Value = Op> {
                 .boxed(),
         ),
         (1, Just(Op::DropB).boxed()),
-        (
+    ];
+    if lossy {
+        arms.push((
             3,
             any::<u64>()
                 .prop_map(|seed| Op::LossyCrash { seed })
                 .boxed(),
-        ),
-    ])
+        ));
+    }
+    Union::new_weighted(arms)
 }
 
 /// Project A with weight 3, project B with weight 1.
@@ -889,11 +899,12 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
         "compaction still has jobs after {SETTLE_PASSES} passes"
     );
 
-    // 5. Nothing obsolete, nothing staged: the outputs of failed jobs stay staged until GC.
-    collect_obsolete(harness);
+    // 5. Nothing staged, nothing obsolete: the outputs of failed jobs stay staged until GC. Staged
+    //    names go first, so the obsolete pass starts from none (R4.4).
     harness
         .block_on(harness.storage().collect_staged(Duration::ZERO))
         .expect("collect_staged while settling");
+    collect_obsolete(harness);
 
     // 6. Compaction collapsed every key to one copy, and day-closed the scores whose tombstone won.
     keep_newest_copies(&mut model.a);
@@ -902,6 +913,7 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
     drop_day_closed_scores(&mut model.b);
 
     check_settled_files(harness, model);
+    check_s3_audit(harness);
 }
 
 /// A model for a fresh case on `harness`: its WALs start with the segments the open found.

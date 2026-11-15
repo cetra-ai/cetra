@@ -23,7 +23,9 @@ use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, t
 use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
 use crate::reads::{AlertMeasure, Kpi, KpiName, ListScope, MAX_PAGE};
-use crate::test_support::{object_rows, orphan_objects, trace_ids_of};
+use crate::test_support::{
+    Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, parquet_rows, trace_ids_of,
+};
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
@@ -41,7 +43,10 @@ pub(super) fn check_quick(h: &Harness, model: &Model, project: P, index: usize) 
 /// statuses, and the physical audit of the object store.
 pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
     check_deletions(h, model, index);
-    check_no_orphans(h, index);
+    match h.chaos() {
+        None => check_no_orphans(h, index),
+        Some(_) => check_never_listed(h, index),
+    }
     let model: &Model = model;
     for project in [P::A, P::B] {
         let state = model.project(project);
@@ -60,6 +65,24 @@ fn check_no_orphans(h: &Harness, index: usize) {
     assert!(
         orphans.is_empty(),
         "op {index}: objects with no catalog row: {orphans:?}"
+    );
+}
+
+/// S3 mode: storage lists the bucket only in the audits, and never copies in it (spec 03 §5).
+/// The audits' own lists are counted in `Harness::audit_lists`.
+fn check_never_listed(h: &Harness, index: usize) {
+    let Some(chaos) = h.chaos() else {
+        return;
+    };
+    assert_eq!(
+        chaos.count(Call::List),
+        h.audit_lists,
+        "op {index}: the store was listed outside the audit"
+    );
+    assert_eq!(
+        chaos.count(Call::Copy),
+        0,
+        "op {index}: the store was copied"
     );
 }
 
@@ -1018,7 +1041,7 @@ fn check_settled_spans(
                 file.day
             );
         }
-        let batch = object_rows(h.dir(), &file);
+        let batch = parquet_rows(h.object_bytes(&file));
         let trace_bytes = trace_ids_of(&batch);
         let span_bytes = batch
             .column_by_name(spans::SPAN_ID)
@@ -1061,7 +1084,7 @@ fn check_settled_scores(
             "scores file {} is not fully merged after settle",
             file.path
         );
-        let batch = object_rows(h.dir(), &file);
+        let batch = parquet_rows(h.object_bytes(&file));
         let ids = batch
             .column_by_name(scores::SCORE_ID)
             .expect("a scores file has a score_id column")
@@ -1091,6 +1114,59 @@ fn check_settled_scores(
             assert!(
                 !state.covers_score(key, ingests.value(row)),
                 "project {project:?}: scores file {} keeps a score a deletion covers",
+                file.path
+            );
+        }
+    }
+}
+
+/// After `settle`, in S3 mode (R4.4): the store holds exactly the objects the catalog names (no
+/// leak, no lost file), no catalog row is obsolete, and the read cache serves what the store
+/// holds. The orphan audit is a dry run of N's `collect_orphans`, through the inner store, so it
+/// sees neither faults nor the cache.
+pub(super) fn check_s3_audit(h: &mut Harness) {
+    let Some(chaos) = h.chaos().cloned() else {
+        return;
+    };
+    let lists_before = chaos.count(Call::List);
+    let counts = h.block_on(collect_orphans_dry_run(h.dir(), chaos.inner().as_ref()));
+    h.audit_lists += chaos.count(Call::List) - lists_before;
+    assert_eq!(
+        counts.orphans, 0,
+        "the store holds objects no catalog row names: a leak"
+    );
+    assert_eq!(
+        counts.recent_unknown, 0,
+        "an object is unknown to the catalog younger than the minimum age"
+    );
+    assert_eq!(
+        counts.missing, 0,
+        "the catalog names data files the store does not have: lost data"
+    );
+    assert_eq!(
+        counts.missing_media, 0,
+        "the catalog names media the store does not have"
+    );
+    let obsolete = h.block_on(obsolete_rows(h.dir()));
+    assert_eq!(obsolete, 0, "the catalog has obsolete rows after settle");
+
+    assert!(
+        h.storage().objects.read_cache().is_some(),
+        "S3 mode runs with the read cache on"
+    );
+    for table in [FileTable::Spans, FileTable::Traces, FileTable::Scores] {
+        for file in h.storage().catalog_files(table) {
+            // Bounded, with the catalog's size: an unbounded read bypasses the cache (read_cache.rs).
+            let cached = h
+                .block_on(
+                    h.storage()
+                        .objects
+                        .get_range(&file.path, Some(0..file.size)),
+                )
+                .expect("read a file through the read cache");
+            assert!(
+                cached == h.object_bytes(&file),
+                "the read cache serves other bytes than the store for {}",
                 file.path
             );
         }
