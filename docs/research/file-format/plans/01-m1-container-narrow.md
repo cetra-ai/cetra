@@ -32,7 +32,7 @@ Take each version from this table. These are the versions `bench/Cargo.toml` or 
 
 | Crate | Spec | Where | Why |
 |---|---|---|---|
-| `arrow` | `{ version = "59.2", default-features = false, features = ["ipc"] }` | dep | arrays, row format, IPC: `arrow::ipc::convert::{IpcSchemaEncoder, try_schema_from_flatbuffer_bytes}`, `arrow::ipc::{reader::StreamReader, writer::StreamWriter}` |
+| `arrow` | `{ version = "59.2", default-features = false, features = ["ipc"] }` | dep | arrays, row format, IPC: `arrow::ipc::{reader::StreamReader, writer::StreamWriter}` |
 | `object_store` | `"0.13"` | dep | storage abstraction |
 | `bytes` | `"1.12"` | dep | `Bytes` buffers |
 | `futures` | `"0.3.34"` | dep | `BoxFuture` in the counting store |
@@ -265,10 +265,12 @@ pub const HOT_SECTIONS: usize = 7;
      ```
 
      - `encode(&self, out) -> Result<()>` writes the 7 sections, each as a `u32` length followed by the bytes. The length is `u32::try_from(len)`, and an overflow is `Unsupported`.
-       - Section 1 is `arrow::ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema)`; take its `finished_data()`.
+       - Section 1 is an Arrow IPC stream with the schema and no batch: `let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &schema)?; w.finish()?;`. (`IpcSchemaEncoder` produces a bare `Schema` flatbuffer that `try_schema_from_flatbuffer_bytes` cannot read, so it is not used.)
        - Section 2 is the directory records back to back.
      - `decode(bytes, offset) -> Result<HotTail>`:
-       - Section 1 goes through `arrow::ipc::convert::try_schema_from_flatbuffer_bytes`; an error becomes `Corrupt { what: "hot schema" }`.
+       - Section 1 is decoded with `arrow::ipc::reader::StreamReader::try_new(section1, None)` and its `.schema()`; an error becomes `Corrupt { what: "hot schema" }`. The stream must hold no batch: `reader.next()` must be `None`, otherwise `Corrupt`.
+       - `HotTail::decode` is only ever called after `file.rs` has verified the hot-tail checksum (step 5.6). arrow-ipc can panic on a forged flatbuffer (`convert.rs:198`), and the checksum makes that unreachable for random corruption.
+       - The never-panic proptests of `hot.rs` therefore exercise `HotTail::decode` with valid schema bytes and random bytes in the other sections only. The open-level proptests go through the checksum as usual.
        - Section 2's length must be a multiple of 64.
        - Section 3's length must be a multiple of 56.
        - Section 7's length must be a multiple of 16.

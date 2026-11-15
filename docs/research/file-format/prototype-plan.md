@@ -158,7 +158,7 @@ bytes[stored_len]
 
 **Hot tail.** Seven sections in this order, each prefixed by a `u32` length. A section may be empty (length 0); every section exists from phase 1 on and is empty until its phase fills it.
 
-1. Arrow schema: `arrow::ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema).finished_data()`, read back with `arrow::ipc::convert::try_schema_from_flatbuffer_bytes`. These are the arrow-ipc 59.3 names; if they differ, use the equivalent pair and record it in the commit message.
+1. Arrow schema: an Arrow IPC **stream** holding only the schema message and the end-of-stream marker (`arrow::ipc::writer::StreamWriter::try_new(&mut buf, &schema)?` then `finish()`, with no batch). It is read back with `arrow::ipc::reader::StreamReader::try_new(bytes, None)?.schema()`.
 2. Column directory (S2).
 3. Sort-key block table: a copy of the block table of the first sort-key column (S3, 56 B entries).
 4. Sort-key filter: the binary fuse filter over the first sort-key column (S5).
@@ -171,6 +171,10 @@ Only these sections go into the hot tail. Block-table pages, dictionaries, filte
 `n_columns × 64 B` (directory) `+ n_sort_key_chunks × 56 B` (section 3) `+ 1.13 B × distinct sort keys` (section 4) `+ n_columns × ceil(n_chunks / 64) × 16 B` (section 7).
 
 The writer reports it in `FileSummary::hot_len`.
+
+**Arrow IPC decoding and panics.** arrow-ipc 59.3.2 can panic on a structurally invalid flatbuffer (for example `convert.rs:198`, `fields().unwrap()`, and the `type_as_*().unwrap()` calls). Strata therefore decodes Arrow IPC bytes (hot-tail section 1, `IPC` chunks) **only after** their checksum has been verified.
+- Random corruption cannot reach those panics; only a deliberately forged file with a correct checksum can.
+- That residual risk is accepted for the prototype and noted as a v1 item. A production format would carry its own schema encoding.
 
 **Postscript** (64 B):
 
