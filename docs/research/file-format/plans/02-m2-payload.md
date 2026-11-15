@@ -292,24 +292,32 @@ cargo +1.99.1 fmt --check
 
 No search structures yet (M2.3): the header's `n_edge_groups`, `filters_offset` and `filters_len` are 0.
 
-**Edit:** `strata/src/config.rs`, `strata/src/lib.rs`, `strata/src/writer.rs`, `strata/src/reader.rs`, `strata/src/payload/{mod.rs,chunk.rs,varint.rs,frames.rs,refs.rs,header.rs,write.rs,read.rs}`, and `strata/tests/roundtrip_payload.rs` (new; the second integration test target).
+**Edit:**
+- `strata/src/{config.rs,lib.rs,writer.rs,reader.rs,file.rs}`;
+- `strata/src/payload/{mod.rs,varint.rs,frames.rs,refs.rs,header.rs,write.rs,read.rs}`;
+- `strata/tests/roundtrip_payload.rs` (new; the second integration test target);
+- M1 test files only where step 11 requires it.
+
+`Cargo.toml` is unchanged: every dependency is already present after M1.4.
 
 ### Config
 
-Add one field to `Config`, with its doc comment and its default:
+- Add one field to `Config`, with this doc comment and default:
 
-```rust
-/// A Utf8 or Binary column whose average non-null value is at least this many bytes is
-/// stored with the payload layer. Default 256.
-pub payload_min_avg: usize,
-```
+  ```rust
+  /// A Utf8 or Binary column whose average non-null value is at least this many bytes is
+  /// stored with the payload layer. Default 256.
+  pub payload_min_avg: usize,
+  ```
+
+- Replace the doc of `zstd_level` with: "zstd level for narrow, refs, header and table segments. Default 1." Payload frames use the fixed `FRAME_ZSTD_LEVEL`.
 
 ### Constants (`payload/mod.rs`)
 
 Format constants, version 0:
 
 ```rust
-pub(crate) const FRAME_MAX_RAW: usize = 64 * 1024;        // close a frame at this raw size …
+pub(crate) const FRAME_MAX_RAW: usize = 64 * 1024;        // close a frame at this raw data size …
 pub(crate) const FRAME_MAX_EST: f64 = 16.0 * 1024.0;      // … or at this estimated compressed size
 pub(crate) const FRAME_INITIAL_RATIO: f64 = 4.0;          // compression ratio assumed for the first frame
 pub(crate) const FRAME_ZSTD_LEVEL: i32 = 3;
@@ -319,17 +327,43 @@ pub(crate) const REFS_MAX_DEPTH: u8 = 15;                 // keyframe depth 0; b
 pub(crate) const HEADER_FIXED_LEN: usize = 32;
 ```
 
+"Raw data size" of a frame means the bytes of its chunks: `raw_len − 4 − 4 × n_chunks`.
+
+### Rules for every step
+
+- **Errors.** Every `Corrupt` carries `offset`: the file offset of the segment being decoded, which is the `offset` argument of the decode function. In `get_uvarint` use `c.position()` (`Cursor::corrupt` is private). In `read.rs`, errors not tied to one segment use `record.payload_offset`.
+- **No indexing** (M1 § Conventions). Use `starts_with`, `.get(..)`, iterators and `checked_*`.
+- **Test modules** start with `#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]`.
+
 ### Steps
 
-1. **`payload/mod.rs`.**
-   - `mod chunk; mod varint; mod frames; mod refs; mod header; mod write; mod read;`
-   - `pub(crate) use write::write_payload_column; pub(crate) use read::read_payload_column;`
-   - The constants above.
-   - Remove the `#[allow(dead_code)]` M2.1 put on `mod payload;` in `lib.rs`; clippy with `-D warnings` then proves everything is used.
+1. **`lib.rs` and `payload/mod.rs`.**
+   - In `lib.rs`, delete the two lines M2.1 added above `mod payload;` (the `#[allow(dead_code)]` attribute and its comment), and keep `mod payload;`. Add `pub use payload::PayloadStats;`.
+   - In the crate docs, replace the sentence saying the payload layer is not implemented with "payload columns have no search filters yet (M2.3)".
+   - `payload/mod.rs` keeps `mod chunk;` and becomes:
 
-2. **`payload/varint.rs`.** Unsigned LEB128 and zigzag, per the design's § Conventions:
-   - `pub(crate) fn put_uvarint(out: &mut Vec<u8>, v: u64)`;
-   - `pub(crate) fn get_uvarint(c: &mut Cursor<'_>, what: &'static str) -> Result<u64>`. It rejects encodings longer than 10 bytes, and a 10th byte with value above 1, as `Corrupt { what }`.
+     ```rust
+     mod chunk;
+     mod frames;
+     mod header;
+     mod read;
+     mod refs;
+     mod varint;
+     mod write;
+
+     pub(crate) use read::read_payload_column;
+     pub(crate) use write::{is_payload, write_payload_column};
+     pub use write::PayloadStats;
+     ```
+
+     followed by the constants. Clippy with `-D warnings` then proves everything is used.
+
+2. **`payload/varint.rs`.** Unsigned LEB128 and zigzag:
+   - `pub(crate) fn put_uvarint(out: &mut Vec<u8>, v: u64)`.
+   - `pub(crate) fn get_uvarint(c: &mut Cursor<'_>, what: &'static str) -> Result<u64>`. Read up to 10 bytes, 7 bits each, least significant first; a byte with bit 7 clear ends the value.
+     - If the 10th byte has bit 7 set, or a value above 1, return `Corrupt { what, offset: c.position() }`.
+     - Running out of bytes is `Corrupt`.
+     - Non-canonical encodings such as `0x80 0x00` are accepted.
    - `pub(crate) fn zigzag(d: i64) -> u64 { ((d << 1) ^ (d >> 63)) as u64 }` and `pub(crate) fn unzigzag(z: u64) -> i64 { ((z >> 1) as i64) ^ -((z & 1) as i64) }`.
 
 3. **`payload/frames.rs`: frame building and dedup.**
@@ -343,9 +377,11 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
        cur: Vec<u8>,                // chunk bytes of the open frame
        cur_ends: Vec<u32>,          // end offsets within `cur`
        cur_first: u32,              // id of the open frame's first chunk
-       ratio: f64,                  // running raw/compressed ratio; FRAME_INITIAL_RATIO at start
-       raw_total: u64, stored_total: u64,
+       ratio: f64,                  // running raw/stored ratio; FRAME_INITIAL_RATIO at start
+       raw_total: u64,
+       stored_total: u64,
        pub frames: Vec<FrameEntry>,
+       pub stored_bytes: u64,       // sum of the frame segments' `len`
    }
    impl FrameBuilder {
        pub fn new() -> Self;
@@ -353,68 +389,77 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
        pub fn add(&mut self, chunk: &[u8], out: &mut Out) -> Result<u32>;
        /// Closes the open frame if it has any chunk.
        pub fn finish(&mut self, out: &mut Out) -> Result<()>;
+       /// Number of unique chunks so far.
+       pub fn n_chunks(&self) -> u32;
    }
    ```
 
    **`add`:**
    1. Compute `h = xxhash_rust::xxh3::xxh3_128(chunk)`. If `h` is in `ids`, return its id.
-   2. Otherwise `id = next_id`, `next_id += 1` (overflow is `Unsupported`), insert into `ids`, append the chunk to `cur`, and push `cur.len()` as `u32` to `cur_ends`.
+   2. Otherwise `id = next_id`, then `next_id = next_id.checked_add(1).ok_or(Unsupported { what: "more than 4 billion chunks" })?`. Insert into `ids`, append the chunk to `cur`, and push `u32::try_from(cur.len())` (`Unsupported` on overflow) to `cur_ends`.
    3. Then, if `cur.len() >= FRAME_MAX_RAW` or `cur.len() as f64 / ratio >= FRAME_MAX_EST`, close the frame.
    4. Return `id`.
 
    **Closing a frame:**
-   1. Build the raw frame: `u32 n_chunks`, then `u32 end_offset[n]` (the `cur_ends`), then `cur`.
+   1. Build the raw frame: `u32 n_chunks`, `u32 end_offset[n]` (the `cur_ends`), then `cur`.
    2. `encode_segment(Kind::PayloadFrame, &raw, Codec::Zstd, FRAME_ZSTD_LEVEL, out)`.
-   3. Push `FrameEntry { offset, len, raw_len: raw.len(), first_chunk: cur_first, n_chunks }`.
-   4. Update the ratio: `raw_total += raw.len()`, `stored_total += seg.len - 16`, `ratio = raw_total / stored_total` (as `f64`; keep the old ratio if `stored_total == 0`).
+   3. Push `FrameEntry { offset: seg.offset, len: seg.len, raw_len: raw.len(), first_chunk: cur_first, n_chunks }`, using `u32::try_from` for the lengths.
+   4. `stored_bytes += u64::from(seg.len)`, `raw_total += raw.len() as u64`, `stored_total += u64::from(seg.len) - 16` (`seg.len ≥ 16` always), and `ratio = raw_total as f64 / stored_total as f64` when `stored_total > 0`.
    5. Clear `cur` and `cur_ends`, and set `cur_first = next_id`.
 
    A chunk never spans two frames, so the ids of frame *f* are `first_chunk .. first_chunk + n_chunks`, consecutive, in frame order (the S4 invariant).
 
-   **Decoding:** `pub(crate) fn decode_frame(raw: &[u8], offset: u64, n_chunks: u32) -> Result<Vec<Range<usize>>>`.
-   - It returns the chunk ranges within the data area, as offsets into `raw` itself.
-   - It checks that the stored `n_chunks` equals the argument, that the end offsets are non-decreasing, and that the last one equals the data length.
+   **Decoding:** `pub(crate) fn decode_frame(raw: &[u8], offset: u64, expect_chunks: u32) -> Result<Vec<Range<usize>>>`.
+   - Read `n = u32` through `Cursor`, and require `n == expect_chunks`.
+   - Compute `data_start = 4 + 4·n` with checked arithmetic, and require `data_start ≤ raw.len()` **before** allocating.
+   - Read the `n` end offsets. They must be non-decreasing, and the last must equal `raw.len() − data_start` (or `n == 0` with `raw.len() == 4`).
+   - Return the ranges as offsets into `raw` itself: `data_start + start .. data_start + end`.
 
 4. **`payload/refs.rs`: refs pages.**
 
    ```rust
    pub(crate) enum RowRefs<'a> { Null, Ids(&'a [u32]) }
-   pub(crate) fn encode_page(rows: &[RowRefs<'_>], out: &mut Vec<u8>) -> Result<()>;
-   pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u32>>>>;   // None = null row
+   /// Encodes a page. Returns, per row, `Some((back, depth))` for based records, `None` otherwise.
+   pub(crate) fn encode_page_with(rows: &[RowRefs<'_>], max_back: usize, out: &mut Vec<u8>) -> Result<Vec<Option<(usize, u8)>>>;
+   pub(crate) fn encode_page(rows: &[RowRefs<'_>], out: &mut Vec<u8>) -> Result<()>;    // calls encode_page_with(rows, REFS_MAX_BACK, out) and drops the result
+   pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u32>>>>;  // None = null row
    ```
 
    **Page layout:** `u32 n_rows` · `u32 row_offset[n_rows + 1]` (relative to the record area; `row_offset[0] = 0`) · records.
+   - `u32` values go into a `Vec<u8>` with `extend_from_slice(&x.to_le_bytes())`.
+   - Every offset is a `u32::try_from(..)`, and an overflow is `Unsupported`.
 
    **Records:**
    - `0` (null): no further bytes.
-   - `1` (keyframe): `uvarint n`, then the ids. The first id is a `uvarint`; each later id is `zigzag(id − previous)` as a uvarint.
-   - `2` (based): `uvarint back` (1..=32) · `uvarint n_new` · the new ids. The first new id is `zigzag(id − last id of the base's full list)`; each later one is `zigzag(id − previous)`.
+   - `1` (keyframe): `uvarint n`, then the ids. The first id is a `uvarint`; each later id is `zigzag(i64::from(id) − i64::from(previous))` as a uvarint.
+   - `2` (based): `uvarint back` · `uvarint n_new` · the new ids. The first new id is `zigzag(i64::from(id) − i64::from(last id of the base's full list))`; each later one is the zigzag of its difference from the previous id.
 
-   **Encoder.** Keep, for each row of the page, its full list and its depth. For row *r* with a non-empty list `L`:
-   1. Candidates are rows `r − k` for k = 1..=`REFS_MAX_BACK` (within the page), that are non-null, have depth ≤ `REFS_MAX_DEPTH − 1`, and whose full list `B` is non-empty with `B.len() ≤ L.len()` and `L[..B.len()] == B`.
-   2. Choose the candidate with the longest `B`; on ties, the smallest k.
-   3. If a candidate exists, write a based record with `back = k` and the new ids `L[B.len()..]`, and depth = depth(base) + 1. Otherwise write a keyframe with depth 0.
+   **Encoder.** Track, for each row of the page, its full list and its depth. For row *r* with a non-empty list `l`:
+   1. Candidates are rows `r − k` for `k` in `1..=max_back` with `k ≤ r` (fetch them with `.get(r - k)`), that are non-null, have depth ≤ `REFS_MAX_DEPTH − 1`, and whose full list `b` is non-empty with `l.starts_with(b)`.
+   2. Choose the candidate with the longest `b`; on ties, the smallest `k`.
+   3. If there is one, write a based record with `back = k` and the new ids `l.get(b.len()..).unwrap_or_default()`, and set depth = depth(base) + 1. Otherwise write a keyframe, depth 0.
 
-   An empty list (an empty value) is a keyframe with n = 0. A null value is tag 0, never a base.
+   An empty list (an empty value) is a keyframe with n = 0. A null value is tag 0, and is never a base.
 
    **Decoder:**
-   - Checks every offset: `row_offset` non-decreasing, the last equals the record area length, and each record consumes exactly its bytes.
-   - Rejects:
-     - a `back` of 0, greater than 32, or reaching before row 0;
-     - a base that is a null row;
-     - a chain depth above 15;
-     - an id that leaves the `u32` range;
-     - an unknown tag.
-
-     Each rejection is `Corrupt`.
+   - Checks every offset: `n_rows` is bounded by the byte length before allocating, `row_offset` is non-decreasing, the last equals the record area length, and each record consumes exactly its bytes.
+   - Rejects, each as `Corrupt`:
+     - a `back` of 0, above 32, or greater than the row index;
+     - a base that is a null row, or whose full list is empty;
+     - depth(base) + 1 > 15, where depth is 0 for keyframes;
+     - an unknown tag;
+     - an id outside the `u32` range.
+   - Id arithmetic:
+     - a keyframe's first id is `u32::try_from(uvarint)`;
+     - every delta is `prev_i64.checked_add(unzigzag(z))`, then `u32::try_from`.
+   - Caps `n` and `n_new` at the remaining byte count before allocating, since each id takes at least one byte.
    - Builds full lists in row order, so a base is always already built (no recursion).
-   - Caps `n` and `n_new` at `bytes.len()` before allocating, since each id takes at least one byte.
 
 5. **`payload/header.rs`: the payload header.**
 
    ```rust
    pub(crate) struct RefPage { pub offset: u64, pub len: u32, pub first_row: u32 }
-   pub(crate) struct EdgeGroup { pub offset: u64, pub len: u32, pub first_chunk: u32 }       // empty in M2.2
+   pub(crate) struct EdgeGroup { pub offset: u64, pub len: u32, pub first_chunk: u32 }       // none in M2.2
    pub(crate) struct PayloadHeader {
        pub n_rows: u32, pub n_chunks: u32,
        pub filters_offset: u64, pub filters_len: u32,                                           // 0 in M2.2
@@ -422,109 +467,170 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
    }
    ```
 
-   **`encode(&self, out: &mut Out)`** writes the design's S4 layout exactly:
-   - `u32 n_rows` · `u32 n_frames` · `u32 n_chunks` · `u32 n_ref_pages` · `u32 n_edge_groups` · `u64 filters_offset` · `u32 filters_len` (the 32-byte fixed part);
+   **`encode(&self, out: &mut Out) -> Result<()>`** writes the design's S4 layout exactly:
+   - `u32 n_rows` · `u32 n_frames` · `u32 n_chunks` · `u32 n_ref_pages` · `u32 n_edge_groups` · `u64 filters_offset` · `u32 filters_len` (5 × 4 + 8 + 4 = 32 bytes);
    - the ref page table (16 B each: `u64 offset · u32 len · u32 first_row`);
    - the edge group table (16 B each);
    - the frame table (24 B each: `u64 offset · u32 len · u32 raw_len · u32 first_chunk · u32 n_chunks`).
 
+   Counts use `u32::try_from`.
+
    **`decode(bytes, offset) -> Result<PayloadHeader>`** checks that:
-   - the length is exactly `32 + 16·n_ref_pages + 16·n_edge_groups + 24·n_frames`, with checked arithmetic, counts bounded by the byte length before allocating;
-   - frames are contiguous: `first_chunk` of frame 0 is 0, each next one is the previous `first_chunk + n_chunks`, and the total equals `n_chunks`;
-   - ref pages start at row 0 and are increasing.
+   - the length is exactly `32 + 16·n_ref_pages + 16·n_edge_groups + 24·n_frames`, with checked arithmetic, before allocating;
+   - frames are contiguous and non-empty: `first_chunk` of frame 0 is 0, each frame has `n_chunks ≥ 1`, each next `first_chunk` equals the previous `first_chunk + n_chunks`, and the total equals `n_chunks`;
+   - ref pages: the first has `first_row = 0`, `first_row` is strictly increasing and below `n_rows`, and there is at least one page when `n_rows > 0`.
 
    The header is stored as a `Kind::PayloadHeader` segment with `Codec::Zstd` at `config.zstd_level`.
 
 6. **`payload/write.rs`.**
-   - `pub(crate) fn is_payload(array: &dyn Array, config: &Config) -> bool` is true when the type is Utf8 or Binary, at least one value is non-null, and (sum of non-null value lengths) ÷ (number of non-null values) ≥ `config.payload_min_avg`, compared in integers as `sum >= min_avg × count`.
-   - `pub(crate) fn write_payload_column(array: &dyn Array, config: &Config, out: &mut Out) -> Result<(SegmentRef, PayloadStats)>`, where `PayloadStats { pub unique_chunks: u32, pub frames: u32, pub chunk_refs: u64, pub bytes: u64 }` (`bytes` = the sum of the segment lengths it wrote).
 
-   `write_payload_column` steps:
-   1. For each row: null becomes `RowRefs::Null`. Otherwise get the value bytes (`StringArray::value(i).as_bytes()` or `BinaryArray::value(i)`), compute `chunk_value`, and map each range through `FrameBuilder::add` (slice with `.get(range)`), giving the row's id list.
-   2. After the last row, call `FrameBuilder::finish`.
-   3. Group the rows by `REFS_PAGE_ROWS`. Encode each group with `encode_page`, write it as a `Kind::PayloadRefs` segment (`Codec::Zstd`, `config.zstd_level`), and record its `RefPage`.
-   4. Build the `PayloadHeader`, write it, and return its `SegmentRef` and the stats.
+   ```rust
+   /// Statistics of one payload column.
+   #[derive(Debug, Clone, PartialEq, Eq)]
+   pub struct PayloadStats {
+       /// Number of unique chunks stored.
+       pub unique_chunks: u32,
+       /// Number of frames written.
+       pub frames: u32,
+       /// Total number of chunk references over all rows.
+       pub chunk_refs: u64,
+       /// Bytes written for the column: frames, refs pages and the header.
+       pub bytes: u64,
+   }
+   pub(crate) fn is_payload(array: &dyn Array, config: &Config) -> bool;
+   pub(crate) fn write_payload_column(array: &dyn Array, config: &Config, out: &mut Out) -> Result<(SegmentRef, PayloadStats)>;
+   ```
+
+   **`is_payload`** is true when the type is Utf8 or Binary and at least one value is non-null. Then take `sum` (the non-null value lengths) and `count` (the non-null values) as `u64`, and require `sum >= (config.payload_min_avg as u64).saturating_mul(count)`.
+
+   **`write_payload_column`:**
+   1. Downcast with `array.as_any().downcast_ref::<StringArray>()` or `::<BinaryArray>()`. Any other type is `Schema`; never use `as_string()`, which panics.
+   2. For each row: null becomes `RowRefs::Null`. Otherwise take the value bytes, compute `chunk_value`, and pass each range's bytes (`value.get(range)`) to `FrameBuilder::add`, giving the row's id list. `chunk_refs` counts the ids.
+   3. After the last row, call `FrameBuilder::finish`.
+   4. Group the rows by `REFS_PAGE_ROWS`. Encode each group with `encode_page`, write it as a `Kind::PayloadRefs` segment (`Codec::Zstd`, `config.zstd_level`), and record its `RefPage`.
+   5. Build the `PayloadHeader` and write it.
+   6. `bytes` = `frame_builder.stored_bytes` + the refs segments' `len` + the header's `len`.
+   7. Return the header `SegmentRef` and the stats.
 
    Frames, refs pages and the header are written in that order, so all of a column's frames are contiguous in the file.
 
-7. **`payload/read.rs`.** `pub(crate) async fn read_payload_column(file: &StrataFile, record: &DirectoryRecord, field: &Field) -> Result<ArrayRef>`:
-   1. Read the header segment (`record.payload_offset`, `record.payload_len`) and decode it.
-   2. Concurrently (`try_join_all`), read and decompress every refs page and every frame.
-   3. Decode the frames into a `Vec<(Vec<u8>, Vec<Range<usize>>)>` indexed by frame number.
-   4. For each row's list, look up each id: the frame is found by `partition_point` on `first_chunk`, and the chunk within it is `id − first_chunk`. An id ≥ `n_chunks` is `Corrupt`. Append the chunk bytes to a value buffer.
-   5. Build a `StringArray` (validating UTF-8: `String::from_utf8`, error → `Corrupt { what: "payload utf8" }`) or a `BinaryArray`, with nulls, using `GenericByteBuilder`.
-   6. The row count must equal `header.n_rows` and the file's `row_count`.
-
-   This whole-column read is what `read_column` needs. Point lookups come with `scan` in M4.
-
-8. **`writer.rs`.** In `finish`, before the narrow path of each column:
+7. **`payload/read.rs`.**
 
    ```rust
-   if payload::write::is_payload(array.as_ref(), &self.config) { … payload path …; continue; }
+   pub(crate) async fn read_payload_column(file: &StrataFile, record: &DirectoryRecord, field: &Field) -> Result<ArrayRef>;
    ```
 
-   The payload path calls `write_payload_column` and pushes a `DirectoryRecord` with:
-   - `layer: Layer::Payload`, `parent: u32::MAX`, `flags: 0`;
-   - `pages_offset` = the current section-7 byte length, `n_pages: 0`, `n_chunks: 0`;
-   - `dict_offset: 0`, `dict_len: 0`;
-   - `payload_offset` and `payload_len` from the header `SegmentRef`;
-   - `null_count`.
+   It uses only `file.read_segment`, `file.row_count()` and the record.
+   1. Read the header segment (`SegmentRef { offset: record.payload_offset, len: record.payload_len }`, `Kind::PayloadHeader`) and decode it.
+   2. Concurrently (`futures::future::try_join_all`, unbounded), read every refs page and every frame.
 
-   Its `ColumnSummary` has all-zero `encoding_counts`, `chunks: 0`, and `bytes = stats.bytes`. Add `pub payload: Option<PayloadStats>` to `ColumnSummary`: `None` for narrow columns.
+      Unbounded concurrency and whole-column memory are intended here; M4 adds point lookups.
+   3. Check each frame's decoded length against `FrameEntry.raw_len`, then run `decode_frame` with `FrameEntry.n_chunks`. A mismatch is `Corrupt`.
+   4. Page *i* must decode to exactly `ref_pages[i + 1].first_row − ref_pages[i].first_row` rows (the last page: `n_rows − first_row`). The total must equal `header.n_rows`, which must equal `file.row_count()`.
+   5. Build each non-null row in a scratch `Vec<u8>`. For each id:
 
-   A payload column can never be the first sort-key column; `new` already restricts the sort key's type.
+      ```rust
+      let f = frames.partition_point(|fr| fr.first_chunk <= id).checked_sub(1).ok_or(corrupt)?;
+      let entry = frames.get(f).ok_or(corrupt)?;
+      let local = id - entry.first_chunk;            // ≥ 0 by partition_point
+      if local >= entry.n_chunks { return Err(corrupt) }
+      let range = decoded_ranges_of_frame_f.get(local as usize).ok_or(corrupt)?;
+      scratch.extend_from_slice(raw_of_frame_f.get(range.clone()).ok_or(corrupt)?);
+      ```
 
-9. **`reader.rs`.** `read_column` checks `record.layer`:
-   - `Layer::Payload`: call `read_payload_column`;
-   - `Layer::Narrow`: the existing path;
-   - anything else: `Unsupported`.
+      Keep a running `total: u64` of appended value bytes. If it exceeds `i32::MAX as u64`, return `Corrupt { what: "payload size", offset: record.payload_offset }` **before** appending, since Arrow's builders panic beyond that.
+   6. Builders by `field.data_type()`:
+      - Utf8: `StringBuilder`, each value checked with `std::str::from_utf8(&scratch)` (error → `Corrupt { what: "payload utf8" }`);
+      - Binary: `BinaryBuilder`;
+      - any other type: `Corrupt { what: "payload column type" }`;
+      - nulls via `append_null`.
 
-10. **`file.rs`.**
-    - `block_entries` returns an empty list for a payload column without reading anything (its `n_pages` is 0).
-    - `pub(crate) fn directory_record(&self, column: usize) -> Result<&DirectoryRecord>` is added if not already present.
+8. **`writer.rs`.**
+   - `use crate::payload::{self, PayloadStats};`.
+   - In `finish`, for each column, **before** computing the dictionary:
+
+     ```rust
+     if payload::is_payload(array.as_ref(), &self.config) {
+         let (header, stats) = payload::write_payload_column(array.as_ref(), &self.config, &mut out)?;
+         // push DirectoryRecord and ColumnSummary as below
+         continue;
+     }
+     ```
+
+   - The `DirectoryRecord` has:
+     - `layer: Layer::Payload`, `parent: u32::MAX`, `flags: 0`;
+     - `pages_offset` = the current section-7 byte length, `n_pages: 0`, `n_chunks: 0`;
+     - `dict_offset: 0`, `dict_len: 0`;
+     - `payload_offset: header.offset`, `payload_len: header.len`;
+     - `null_count`.
+   - The `ColumnSummary` has all-zero `encoding_counts`, `chunks: 0`, `bytes: stats.bytes` and `payload: Some(stats)`.
+   - Add the field `/// Payload-layer statistics; `None` for narrow columns.` `pub payload: Option<PayloadStats>` to `ColumnSummary`, set to `None` on the narrow path.
+
+   A payload column can never be the first sort-key column, since `new` already restricts the sort key's type.
+
+9. **`reader.rs`.** In `read_column`, right after `field` is resolved and **before** `block_entries` is called:
+
+   ```rust
+   let record = file.directory().get(column).ok_or_else(|| StrataError::Schema { reason: format!("no column {column}") })?;
+   match record.layer {
+       Layer::Payload => return read_payload_column(file, record, field).await,
+       Layer::Narrow => {}
+       _ => return Err(StrataError::Unsupported { what: format!("layer of column {column}") }),
+   }
+   ```
+
+   Reuse that `record` for the dictionary read below, and remove the later duplicate lookup.
+
+10. **`file.rs`.** In `block_entries`, after the directory record is fetched, add `if record.layer == Layer::Payload { return Ok(Arc::new(Vec::new())); }` (with `use crate::hot::Layer`).
+
+11. **Existing M1 tests.**
+    - Run `cargo +1.99.1 test`.
+    - Every M1 test that writes a Utf8 or Binary column through `StrataWriter` with an average non-null value length ≥ 256 B, and expects the narrow layer, must build its writer with `Config { payload_min_avg: usize::MAX, ..Config::default() }`.
+    - Do not change what those tests assert, and list them in the commit body.
 
 ### Tests
 
 **`varint.rs`:**
-- Round trip of `0`, `1`, `127`, `128`, `u32::MAX`, `u64::MAX`, and 1,000 random values.
+- Round trip of `0`, `1`, `127`, `128`, `u32::MAX`, `u64::MAX`, and 1,000 random values (proptest).
 - Zigzag of `i64::MIN`, −1, 0, 1 and `i64::MAX`.
-- 11-byte encodings, and 10-byte encodings with a 10th byte > 1, are rejected.
+- 11-byte encodings, and 10-byte encodings whose 10th byte is above 1, are `Corrupt`.
 
 **`frames.rs`:**
-- Adding the same chunk twice returns the same id, and it is stored once.
-- 200 distinct 1 KiB chunks give frames each ≤ 64 KiB + 1 KiB of raw data; ids are consecutive per frame; `first_chunk` values are contiguous.
-- **Frame closing:**
-  - Add 400 distinct incompressible 1 KiB chunks: random bytes from a seeded xorshift, distinct by construction.
-  - The first frame closes at its first chunk boundary where raw ≥ 64 KiB (the 4.0 initial ratio gives the same 16 KiB estimate there).
-  - After that the measured ratio is about 1.0, so later frames close on the estimate. Assert that every frame after the first has a raw data size between 15 KiB and 18 KiB, excluding the last frame, which `finish` may close early.
-  - Then add 400 distinct **compressible** 1 KiB chunks, each `format!("{k:08}")` followed by 1,016 `b'a'`, to a fresh builder. Every frame except the last closes on the 64 KiB raw limit (raw ≥ 64 KiB, and < 65 KiB).
-- `decode_frame` round trips. Wrong `n_chunks`, decreasing offsets and short data are `Corrupt`.
+- Adding the same chunk twice returns the same id, and the chunk is stored once.
+- **Incompressible chunks.** Add 400 distinct 1 KiB chunks of random bytes from a seeded xorshift.
+  - The first frame closes at its first chunk boundary where the raw data size is ≥ 64 KiB, which is 64 chunks.
+  - Every later frame except the last has a raw data size between 15 KiB and 18 KiB. The measured ratio is about 1.0, so the 16 KiB estimate closes them.
+  - Ids are consecutive per frame, and `first_chunk` values are contiguous.
+- **Compressible chunks.** In a fresh builder, add 400 distinct 1 KiB chunks, each `format!("{k:08}")` followed by 1,016 `b'a'`. Every frame except the last has a raw data size ≥ 64 KiB and < 65 KiB.
+- `decode_frame` round trips. A wrong `n_chunks`, decreasing offsets, short data, or a huge `n` with a 4-byte input are `Corrupt`, and none allocate.
 
 **`refs.rs`:**
-- A proptest (`with_cases(300)`) over pages of 1..600 rows, where each row is null (10%), empty (5%), or an id list built as a random prefix of the previous non-null row's list extended with 0..5 random ids (60%), or a fresh random list (25%). It checks that `decode_page(encode_page(rows)) == rows`, that every based record has `back ≤ 32`, and that the depth never exceeds 15 (expose a `#[cfg(test)]` helper returning the chosen depth per row).
-- A conversation-like page (row *k*'s list = row *k − 1*'s list + 2 new ids, for 100 rows) is ≤ 25% of the size of the same page with only keyframes. Compute the keyframe-only size by encoding with `REFS_MAX_BACK = 0` through a `#[cfg(test)]` variant `encode_page_with(rows, max_back)`.
+- **Property** (`with_cases(300)`). Pages of 1..600 rows, where each row is:
+  - null (10%);
+  - empty (5%);
+  - a random prefix (length ≥ 1) of the previous non-null, non-empty row's list, extended with 0..5 random ids (60%; a keyframe-like fresh list when there is no such row);
+  - a fresh random list of 1..20 ids (25%).
+
+  Check that `decode_page(encode_page(rows)) == rows`, and, from `encode_page_with(rows, REFS_MAX_BACK, ..)`, that every based record has `back ≤ 32` and `depth ≤ 15`.
+- **Conversation page.** Row *k*'s list is row *k − 1*'s list plus 2 new ids, for 100 rows. Its encoding is **< 35%** of the size of `encode_page_with(rows, 0, ..)` (keyframes only). The measured ratio is about 29.5%.
+- A based record whose base row is empty, a `back` beyond the row index, and a depth-16 chain (hand-built bytes) are each `Corrupt`.
 - **Never panic:** random bytes passed to `decode_page`.
 
 **`header.rs`:**
-- Round trip; exact encoded length.
-- Non-contiguous `first_chunk` → `Corrupt`; truncated → `Corrupt`; never-panic proptest.
+- Round trip, and the exact encoded length.
+- Non-contiguous `first_chunk`, a frame with `n_chunks = 0`, and a truncated header are each `Corrupt`.
+- **Never panic:** random bytes passed to `decode`.
+
+**Edge cases** (unit tests in `payload/write.rs`). Each builds a schema `[trace_id FixedSizeBinary(16) non-null, v Utf8 nullable]` with all-zero trace ids, writes with `StrataWriter` (sort key `["trace_id"]`, `Config::default()` unless stated), `finish()`es, puts the bytes into `InMemory`, opens with `StrataFile::open`, and calls `read_column(&file, 1)`. Copy the `open` helper from `reader.rs`'s tests.
+- **Mixed column:** null, `""`, 1 B, 255 B, 256 B and 1 MiB values, `[1,2` (invalid JSON), a JSON array with one 100 KiB string element, and a string containing `]` and `\"`. It round trips, and `file.directory()[1].layer == Layer::Payload`.
+- **Dedup:** 500 identical 10 KiB values, as a separate file. It round trips; from `FileSummary.columns[1].payload`, `unique_chunks ≤ 8` and `chunk_refs ≥ 500`.
+- **Empty values:** `payload_min_avg: 0` with every value an empty string. It round trips, with 0 frames and 0 unique chunks.
 
 **`tests/roundtrip_payload.rs`** (integration target, `#[ignore]`d, run in release as part of Done when):
-- Generate 3,000 traces exactly as `roundtrip_light.rs` does, **without** clearing the payload fields.
+- Copy the generation, sorting and batch-building code of M1.4's `tests/roundtrip_light.rs` (3,000 traces instead of 10,000) **without** its payload-clearing block. Use the same dev-dependencies (`fmt_testdata`, `llmobs-core`, `parquet`).
 - Write with sort key `["trace_id", "start_time"]`, open from `InMemory`, and `read_column` every column; each equals the input.
-- Assert that `input`, `output`, `system_instructions` and `tool_definitions` are payload columns (directory `layer` = Payload). For every other column, print its layer; do not assert it. Whether a column is payload depends on the data's average value length, which is what S4 specifies.
-- Print, per payload column: raw value bytes, stored bytes, unique chunks, frames, chunk refs. Also print the total file size against `pq_default` (as in `roundtrip_light`).
-
-**Edge cases** (unit test in `payload/write.rs`, through `write_payload_column` then `read_payload_column` on an in-memory file built by `StrataWriter`). A Utf8 column whose values include:
-- null, `""`, 1 B, 255 B, 256 B and 1 MiB;
-- invalid JSON (`[1,2`);
-- a JSON array with a 100 KiB element;
-- a string containing `]` and `\"`;
-- 500 identical 10 KiB values (dedup: unique chunks ≈ one value's worth).
-
-It round trips, and `is_payload` is true for it.
-
-**Never panic:** random bytes passed to `decode_frame` and `PayloadHeader::decode`.
+- Assert only that `input` is a payload column. Print the layer of every other column.
+- Print, per payload column: raw value bytes, stored bytes, unique chunks, frames and chunk refs. Print the total file size against `pq_default` as `roundtrip_light` does.
 
 ### Done when
 
@@ -535,6 +641,6 @@ cargo +1.99.1 fmt --check
 cargo +1.99.1 test --release -- --ignored roundtrip_payload roundtrip_light
 ```
 
-The commit body holds the `roundtrip_payload` table.
+The commit body holds the `roundtrip_payload` table and the list of M1 tests changed in step 11.
 
 **Commit:** `strata: add payload storage: dedup, frames and refs (M2.2)`
