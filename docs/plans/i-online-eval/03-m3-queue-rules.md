@@ -3,8 +3,8 @@
 Implementation plan for milestone M3 of track I. It has 12 sub-phases, I3.1 to I3.12. **Haiku** implements each one in one go, with no context beyond this plan and the files it names. Sub-phases that do not depend on each other run in parallel worktrees (§ Parallel waves). Each sub-phase ends with `just check` green and one commit. Sonnet reviews the code after every three or four sub-phases.
 
 **Prerequisites** (checked when this plan was written, 2026-11-14):
-- M2 is implemented on branch `claude/i-m2-impl` (migration `0006_evaluators.sql`, `eval/test_run.rs`, `eval/trace_load.rs`, the evaluators pages). Start from `main` once M2 has merged, otherwise from `claude/i-m2-impl` with `main` merged in. Check that `crates/server/src/eval/test_run.rs` exists.
-- This plan lives on branch `claude/i-m3-plan`. Check with `git log --oneline -1 -- docs/plans/i-online-eval/03-m3-queue-rules.md` that it is there.
+- M2 is merged (migration `0006_evaluators.sql`, `eval/test_run.rs`, `eval/trace_load.rs`, the evaluators pages). Start from `main` once the previous milestone has merged. Check that `crates/server/src/eval/test_run.rs` exists.
+- Check that this plan file, `docs/plans/i-online-eval/03-m3-queue-rules.md`, exists.
 - Node `26.13.0` is installed at `$HOME/.local/share/nvm/v26.13.0/bin`. It is not on the non-interactive `PATH`.
 
 **Read first** (every sub-phase):
@@ -284,13 +284,13 @@ The limits (checks 1, 4, 5, 13, 16 and the 500 rules of a project) are D-I-30's.
 | 7 | `llmobs_eval::resolve(&mapping, Some(&TraceData::new(&spans, span_id)), None)` | `Failed { Permanent, <MappingError display> }` |
 | 8 | the live score definition of `output.name` (`state.definitions.live`), checked with `fits_definition` | `Failed { Permanent, "score definition mismatch" }` |
 | 9 | a levenshtein check with `output` or `expected` over 64 KiB | `Failed { Permanent, "levenshtein inputs must be at most 64 KiB each" }` |
-| 10 | rule or backfill job, judge evaluator, rule with a budget: render the prompt, `budget::model_price`, estimate, reserve (§ I3.6). The reservation is a guard (`budget::Reservation`, § I3.3) | no price → `Failed { Permanent, "model has no price" }` and pause the rule (`errors`, detail `model has no price`); over budget → `Skipped { error: "budget" }`, pause the rule (`budget`), skip the rule's other queued jobs |
+| 10 | first, for a judge or a webhook evaluator (not a check): `entitlements::units::check_cap(state, project.org_id)`; at the cap → `Skipped { error: "quota" }`, no call (D-I-35). Then, for a rule or backfill job, judge evaluator, rule with a budget: render the prompt, `budget::model_price`, estimate, reserve (§ I3.6). The reservation is a guard (`budget::Reservation`, § I3.3) | no price → `Failed { Permanent, "model has no price" }` and pause the rule (`errors`, detail `model has no price`); over budget → `Skipped { error: "budget" }`, pause the rule (`budget`), skip the rule's other queued jobs |
 | 11 | `start_attempt`: one write, `attempts += 1`, fenced by `claims` | no row → return (re-claimed or deleted; dropping the guard releases the reservation) |
 | 12 | `job_judge_trace_id(job id, claims)`; `execute::run_evaluator` with origin `Rule(rule_id)` for rule and backfill jobs, `Test` for manual runs | — (the run returns an outcome either way) |
 | 13 | `execute::judge_usage`; `state.usage.add_judge` | — |
 | 14 | commit the judge trace, up to 3 tries 5 s apart (`execute::commit_judge_trace`) | the retryable path (below), error `could not store the result` |
-| 15 | success only: `scores::write` with `Writer::Evaluator`, up to 3 tries 5 s apart; a `BadRequest` answer is not retried | `BadRequest` → `Failed { Permanent, "score definition mismatch" }`; other errors → the retryable path, error `could not store the result` |
-| 16 | `finish` (§ I3.6): `rule_spend`, the job row, pauses and the connection status in one write | — |
+| 15 | success only: `scores::write` with `Writer::Evaluator`, up to 3 tries 5 s apart; a `BadRequest` or `QuotaExceeded` answer is not retried | `BadRequest` → `Failed { Permanent, "score definition mismatch" }`; `QuotaExceeded` → `Failed { Permanent, "monthly units cap reached" }`, not retried (D-I-35); other errors → the retryable path, error `could not store the result` |
+| 16 | `finish` (§ I3.6): `rule_spend`, the job row, pauses and the connection status in one write. A budget pause's `skip_queued_of_rule` runs after that write, in chunks of 1 000 rows (I-3) | — |
 
 The reservation guard releases the reservation when it is dropped without being settled: on every early exit, on a panic (unwinding drops it) and when the worker task is aborted at shutdown. Step 16 settles it with the actual cost.
 
@@ -300,6 +300,7 @@ The reservation guard releases the reservation when it is dropped without being 
 |---|---|---|
 | `Ok` and the score was written | `Done` | `Done` |
 | `Err`, class `Retryable` | `Retry { not_before: now + retry::backoff_ns(job id, attempts) }` while `attempts < 6`, else `Failed { Retryable, … }` | same |
+| `Err`, class `Pause`, judge, a 404 or `model_not_found` on a judge whose model differs from the connection's `default_model` (I-2) | pause every enabled, unpaused rule of the evaluator (`errors`, detail = the error text); `PauseRequeue { not_before: now }`; connection untouched | `Failed { Pause, … }`; connection untouched |
 | `Err`, class `Pause`, judge | connection `failing` (error text); pause every enabled, unpaused rule whose evaluator uses the connection (`connection`); `PauseRequeue { not_before: now }` (the attempt is given back, D-I-14) | `Failed { Pause, … }`; connection `failing` |
 | `Err`, class `Pause`, judge, and the connection's stored `updated_at` is no longer `job.connection_updated_at` (the key changed during the call) | `PauseRequeue { not_before: now }` only: no pause, no status change (D-I-14) | `Failed { Pause, … }` only |
 | `Err`, class `Pause`, webhook | pause every enabled, unpaused rule of the evaluator (`errors`, detail = the error text); `PauseRequeue { not_before: now }` | `Failed { Pause, … }` |
@@ -699,7 +700,7 @@ Box the big variants' fields if clippy reports `large_enum_variant` (§ Conventi
 | `claim(conn, id, now) -> Option<u32>` | `UPDATE eval_jobs SET status = 'running', claims = claims + 1, updated_at = ? WHERE id = ? AND status = 'queued' RETURNING claims` |
 | `start_attempt(conn, id, claims, now) -> Option<u32>` | `UPDATE … SET attempts = attempts + 1, updated_at = ? WHERE id = ? AND status = 'running' AND claims = ? RETURNING attempts` |
 | `finish(conn, id, claims, finish: Finish, now) -> bool` | one `UPDATE … WHERE id = ? AND status = 'running' AND claims = ?` per variant (columns as in the enum docs); false when no row matched (D-I-12: drop the result) |
-| `skip_queued_of_rule(conn, rule_id, error: &'static str, now) -> u64` | queued jobs of the rule → `skipped` with `error`, `finished_at = now` |
+| `skip_queued_of_rule(meta: &MetaDb, rule_id, error: &'static str, now) -> u64` | queued jobs of the rule → `skipped` with `error`, `finished_at = now`. Each write changes at most 1 000 rows (`skip_queued_chunk`, `UPDATE … WHERE id IN (SELECT id … LIMIT 1000)`); the function loops until a write changes fewer. Called after the finish write, never inside it (I-3) |
 | `requeue_stale(conn, older_than, now) -> (u64, u64)` | the janitor: the interruption rule below for `running` jobs with `updated_at < older_than`. Returns `(requeued, failed)` |
 | `recover(conn, now) -> (u64, u64)` | startup: the interruption rule for every `running` job. Returns `(requeued, failed)` |
 
@@ -728,11 +729,11 @@ SELECT * FROM (
     AND COALESCE(e.connection_id, e.id) NOT IN (SELECT value FROM json_each(?2))
 )
 WHERE rn <= 20
-ORDER BY priority, rn, not_before, id
+ORDER BY priority, rn, project_id, not_before, id
 LIMIT ?3
 ```
 
-The order is priority, then the job's rank within its project (`rn`), then `not_before` and `id`. The rank makes every project's first candidates come before any project's second ones, so a small `LIMIT` reaches every project and the round-robin in `pick` (D-I-6) sees each project.
+The order is priority, then the job's rank within its project (`rn`), then `project_id`, `not_before` and `id`. `project_id` only breaks ties between projects of the same rank. The rank makes every project's first candidates come before any project's second ones, so a small `LIMIT` reaches every project and the round-robin in `pick` (D-I-6) sees each project.
 
 `orgs.state` and `projects.state` are both `'active'` or `'deleting'` (`0001_identity.sql`).
 
@@ -1111,6 +1112,8 @@ The test-run tests in `routes/evaluators.rs` pass unchanged.
 ## I3.5 — API contract: rule and job types, OpenAPI, fixtures, mocks
 
 **Goal:** every M3 API type, its OpenAPI operations, the example fixtures, the web mocks and query helpers. The routes come in I3.8 and I3.9; the web pages build on this contract in parallel with them.
+
+**Existing helper:** `crates/server/src/api_examples.rs` already has `example_accepted(operation_id, path_params, file)` (used for the `202` answers of the deletion routes). The M3 `202` examples (the manual run) use it too, rather than a new helper.
 
 **Edit only:** `crates/server/src/api/online_rules.rs`, `crates/server/src/api/eval_jobs.rs` (new), `crates/server/src/api/mod.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, `crates/server/openapi.json`, `fixtures/api/static/{online-rules,online-rule,eval-jobs,eval-job,eval-job-queued}.json` (new), `fixtures/api/requests/{online-rule-create,evaluator-run}.json` (new), `fixtures/api/manifest.json`, `fixtures/api/README.md`, `web/src/api/schema.gen.ts`, `web/src/api/queries-online-rules.ts` (new), `web/src/mocks/writes.ts`, `web/src/mocks/writes.test.ts`.
 

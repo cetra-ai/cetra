@@ -781,7 +781,7 @@ mod tests {
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
-    use crate::test_support::{Seeded, TestApp, TestResponse};
+    use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
     /// The judge's prompt maps `input` and `output`.
     const PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
@@ -1512,6 +1512,31 @@ mod tests {
         assert!(
             matches!(error, MetaError::Conflict("online rule changed, retry")),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_with_one_active_rule_refuses_a_second_enabled_rule_with_403() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &json!({"max_active_online_rules": 1}),
+        );
+        let evaluator = judge(&app, &seeded).await;
+        create_ok(&app, &seeded, &rule_body(evaluator)).await;
+
+        let mut second = rule_body(evaluator);
+        second["name"] = json!("the second rule");
+        let refused = create(&app, &seeded, &second).await;
+        assert_eq!(refused.status, 403, "{}", text(&refused));
+        let problem = refused.problem();
+        assert_eq!(problem.code, crate::api::common::ProblemCode::PlanLimit);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("Your plan allows 1 active online rule.")
         );
     }
 

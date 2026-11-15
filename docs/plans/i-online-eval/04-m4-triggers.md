@@ -3,9 +3,9 @@
 Implementation plan for milestone M4 of track I. It has 8 sub-phases, I4.1 to I4.8. **Haiku** implements each one in one go, with no context beyond this plan and the files it names. Sub-phases that do not depend on each other run in parallel worktrees (§ Parallel waves). Each sub-phase ends with `just check` green and one commit. Sonnet reviews the code after every three or four sub-phases.
 
 **Prerequisites** (check them before you start):
-- M3 is implemented: `crates/server/src/eval/dispatch.rs`, `eval/hourly.rs`, `meta/online_rules.rs`, `meta/eval_jobs.rs` and `routes/online_rules.rs` exist. Start from `main` once M3 has merged, otherwise from M3's integration branch with `main` merged in.
+- M3 is implemented: `crates/server/src/eval/dispatch.rs`, `eval/hourly.rs`, `meta/online_rules.rs`, `meta/eval_jobs.rs` and `routes/online_rules.rs` exist. Start from `main` once the previous milestone has merged.
 - G's fix F4 is on `main`: `crates/server/src/ingest/mod.rs` has `commit_in_task` and `wait_for_commits`. It had landed when this plan was written.
-- This plan lives on branch `claude/i-m3-impl` (M3's integration branch). Check with `git log --oneline -1 -- docs/plans/i-online-eval/04-m4-triggers.md` that it is there.
+- Check that this plan file, `docs/plans/i-online-eval/04-m4-triggers.md`, exists.
 - Node `26.13.0` is installed at `$HOME/.local/share/nvm/v26.13.0/bin`. It is not on the non-interactive `PATH`.
 
 **Read first** (every sub-phase):
