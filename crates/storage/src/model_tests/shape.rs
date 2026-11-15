@@ -53,6 +53,12 @@ impl P {
     pub(super) const A: P = P(0);
     pub(super) const B: P = P(1);
 
+    /// The two projects of lane `lane`: `P(2 * lane)` and `P(2 * lane + 1)` (R6.7). At most 15.
+    pub(super) fn pair(lane: u8) -> (P, P) {
+        debug_assert!(lane < 16, "lane {lane} has no project pair under 32");
+        (P(2 * lane), P(2 * lane + 1))
+    }
+
     /// `PROJECT_A` for 0, `PROJECT_B` for 1, else a UUID of the same shape with the number in
     /// its last field.
     pub(super) fn id(self) -> ProjectId {

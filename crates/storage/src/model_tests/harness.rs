@@ -8,6 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use bytesize::ByteSize;
 use datafusion::execution::context::{SessionConfig, SessionContext};
+use object_store::memory::InMemory;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt};
 
@@ -56,6 +57,11 @@ pub(super) const MODEL_PUT_SIZES: PutSizes = PutSizes {
     single_max: 16 * 1024,
     part: 8 * 1024,
 };
+
+/// An in-memory object store with the model's sizes: a harness's `store` for a remote case.
+pub(super) fn memory_store() -> (Arc<dyn ObjectStore>, PutSizes) {
+    (Arc::new(InMemory::new()), MODEL_PUT_SIZES)
+}
 
 /// The sizes of a run against a real bucket (R4.8). Every part but the last must be at least 5 MiB
 /// (`EntityTooSmall` otherwise), so the parts are 5 MiB; a file above 16 KiB is still multipart, as

@@ -69,6 +69,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Normalization uses golden fixtures in `fixtures/otlp/`.
 - Storage needs crash-recovery and concurrency tests.
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
+- `LLMOBS_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `LLMOBS_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings).
 - `LLMOBS_LOSSY_SEEDS=N just test` runs each lossy crash point with N seeds (default 1).
 - `just lazyfs` runs the crash children and a short ingest on a LazyFS mount, and drops unsynced data at each crash (D-R-5). It needs FUSE 3 and `user_allow_other` (`tools/lazyfs/README.md`).
 - `LLMOBS_HOOK_CRASH_CASES=N just test` runs N model cases that crash inside their last operation (default 25; the last of the 26 pairs is not in the default run).
@@ -153,6 +154,7 @@ Run everything through `just`:
 | `just s3-chaos` | the S3 fault tests through toxiproxy in front of an S3 endpoint (R M4) |
 | `just lazyfs` | the storage crash tests and a short ingest on a LazyFS mount, which drops unsynced data at each crash (R2.12, D-R-5); needs FUSE 3 (`tools/lazyfs/README.md`) |
 | `just eval-live` | opt-in live provider tests; ignored by `just check` (D167) |
+| `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
 | `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |
 | `just deny-advisories` | RustSec advisories only |
