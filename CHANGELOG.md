@@ -16,8 +16,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
-- SQL console answers and exports are bounded in bytes: a JSON answer over 32 MiB of encoded
-  output, or a query whose encoding does not fit the query memory pool, is `422 query_too_large`
+- SQL console answers and exports are bounded in bytes. A JSON answer stops at the last row that
+  fits 32 MiB of encoded output and is marked `truncated` like a row-limit cut; only a first row
+  over the cap, or an encoding that does not fit the query memory pool, is `422 query_too_large`
   (D98). Aliasing a heavy column or cross-joining heavy rows could previously multiply the output
   past any memory limit.
 - CSV exports prefix a string cell or header name that starts with `=`, `+`, `-`, `@`, tab or CR

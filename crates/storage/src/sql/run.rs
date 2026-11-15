@@ -13,7 +13,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::stream::{BoxStream, Stream, StreamExt};
 use serde_json::{Map, Value};
 
-use super::encode::{self, Budget, encoded_estimate, json_rows};
+use super::encode::{self, Budget, batch_row_sizes, exceeds, json_rows};
 use super::prepare_sql;
 use crate::query_error::{RunError, classify};
 use crate::verify::Suspects;
@@ -36,6 +36,12 @@ pub struct SqlRequest<'a> {
     pub timeout: Duration,
 }
 
+/// The brackets of the JSON array of rows. The row estimates leave them out.
+const JSON_ARRAY_BYTES: u64 = 2;
+
+/// The comma after each row of the JSON array, which the row estimates leave out.
+const JSON_ROW_SEPARATOR_BYTES: u64 = 1;
+
 /// One output column. `data_type` is the Arrow type as DataFusion prints it.
 #[derive(Debug)]
 pub struct SqlColumn {
@@ -52,7 +58,8 @@ pub struct SqlJson {
     pub columns: Vec<SqlColumn>,
     /// One object per row. Keys follow [`Self::columns`].
     pub rows: Vec<Map<String, Value>>,
-    /// True when more than `limit` rows matched. `rows` then holds the first `limit`.
+    /// True when more rows matched than `rows` holds. That is because of `limit`,
+    /// or because the next row would pass the byte cap.
     pub truncated: bool,
 }
 
@@ -98,6 +105,9 @@ impl QueryContext {
     /// [`RunError::InvalidRequest`] for a limit outside `1..=SQL_MAX_ROWS` or a
     /// zero timeout. Planning and parameter errors pass through. Execution
     /// errors are classified. The time limit yields [`RunError::Timeout`].
+    /// [`RunError::TooLarge`] when the first row alone passes the byte cap, or
+    /// when the encoded output passes it anyway (escapes the estimate does not
+    /// count).
     pub async fn sql_json(&self, request: SqlRequest<'_>) -> Result<SqlJson, RunError> {
         self.sql_json_within(request, SQL_MAX_RESULT_BYTES).await
     }
@@ -153,11 +163,15 @@ impl QueryContext {
         let (batches, truncated) = self
             .take_rows(&mut stream, request.limit, max_bytes)
             .await?;
+        // Every row is kept, so the execution is done. Release it before encoding.
+        drop(stream);
         let budget = Budget {
             max_bytes,
             pool: self.session().runtime_env().memory_pool.clone(),
         };
-        let rows = json_rows(&batches, &schema, &budget)?;
+        // The reservation covers the parsed rows, so it lives until this
+        // function returns the rows.
+        let (rows, _reservation) = json_rows(&batches, &schema, &budget)?;
         Ok(SqlJson {
             columns,
             rows,
@@ -165,13 +179,14 @@ impl QueryContext {
         })
     }
 
-    /// Pull batches until `limit` rows are kept or the stream ends. `truncated`
-    /// is set when a row past `limit` arrives.
+    /// Pull batches until `limit` rows are kept, the stream ends, or the next row
+    /// would pass `max_bytes`. `truncated` is set when a matching row is left out,
+    /// either past `limit` or past the byte cap.
     ///
     /// # Errors
     ///
-    /// [`RunError::TooLarge`] as soon as the estimated size of the kept rows
-    /// passes `max_bytes`. Stream errors are classified as usual.
+    /// [`RunError::TooLarge`] when the first row alone passes `max_bytes`. Stream
+    /// errors are classified as usual.
     async fn take_rows(
         &self,
         stream: &mut SendableRecordBatchStream,
@@ -180,7 +195,7 @@ impl QueryContext {
     ) -> Result<(Vec<RecordBatch>, bool), RunError> {
         let mut kept = Vec::new();
         let mut rows = 0;
-        let mut bytes = 0usize;
+        let mut bytes = JSON_ARRAY_BYTES;
         let mut truncated = false;
         while let Some(item) = stream.next().await {
             let mut batch = item.map_err(|error| self.fail(error))?;
@@ -190,16 +205,21 @@ impl QueryContext {
             let room = limit - rows;
             if batch.num_rows() > room {
                 truncated = true;
-                if room == 0 {
-                    break;
-                }
                 batch = batch.slice(0, room);
             }
-            bytes = bytes.saturating_add(encoded_estimate(&batch)?);
-            if bytes > max_bytes {
-                return Err(RunError::TooLarge);
+            let fits = fitting_rows(&batch_row_sizes(&batch)?, &mut bytes, max_bytes);
+            if fits == 0 {
+                if rows == 0 {
+                    return Err(RunError::TooLarge);
+                }
+                truncated = true;
+                break;
             }
-            rows += batch.num_rows();
+            if fits < batch.num_rows() {
+                truncated = true;
+                batch = batch.slice(0, fits);
+            }
+            rows += fits;
             kept.push(batch);
             if truncated {
                 break;
@@ -303,6 +323,24 @@ impl QueryContext {
     }
 }
 
+/// How many leading rows of `sizes` fit within `max_bytes` on top of `bytes`.
+/// Each row counts its estimate and the separator after it. `bytes` grows by
+/// the rows that fit.
+fn fitting_rows(sizes: &[u64], bytes: &mut u64, max_bytes: usize) -> usize {
+    let mut count = 0;
+    for size in sizes {
+        let next = bytes
+            .saturating_add(*size)
+            .saturating_add(JSON_ROW_SEPARATOR_BYTES);
+        if exceeds(next, max_bytes) {
+            break;
+        }
+        *bytes = next;
+        count += 1;
+    }
+    count
+}
+
 fn timeout_stream() -> BoxStream<'static, Result<Bytes, RunError>> {
     futures::stream::once(async { Err(RunError::Timeout) }).boxed()
 }
@@ -330,10 +368,18 @@ struct ExportStream {
     piece_bytes: usize,
     /// Rows of a counted batch that the following polls still have to encode.
     /// Already counted against `remaining`.
-    pending: Option<RecordBatch>,
+    pending: Option<Pending>,
     buffered: Option<RecordBatch>,
     stashed_error: Option<RunError>,
     done: bool,
+}
+
+/// A batch whose rows are still to be encoded, with the estimated size of each
+/// row. Rows before `next` are already encoded.
+struct Pending {
+    batch: RecordBatch,
+    sizes: Vec<u64>,
+    next: usize,
 }
 
 impl Stream for ExportStream {
@@ -363,8 +409,8 @@ impl Stream for ExportStream {
             return Poll::Ready(Some(Err(error)));
         }
         loop {
-            if let Some(batch) = stream.pending.take() {
-                match stream.encode_next(&batch) {
+            if let Some(pending) = stream.pending.take() {
+                match stream.encode_next(pending) {
                     Err(error) => {
                         stream.stop();
                         return Poll::Ready(Some(Err(error)));
@@ -383,7 +429,7 @@ impl Stream for ExportStream {
                     stream.stop();
                     return Poll::Ready(Some(Err(error)));
                 }
-                Poll::Ready(Some(Ok(batch))) => match stream.encode_next(&batch) {
+                Poll::Ready(Some(Ok(batch))) => match stream.start(batch) {
                     Err(error) => {
                         stream.stop();
                         return Poll::Ready(Some(Err(error)));
@@ -457,10 +503,36 @@ impl ExportStream {
         }
     }
 
-    /// Encode the first piece of `batch` and keep the rest in `pending`.
-    fn encode_next(&mut self, batch: &RecordBatch) -> Result<Option<Bytes>, RunError> {
-        let (piece, rest) = split_piece(batch, self.piece_bytes, self.budget.max_bytes)?;
-        self.pending = rest;
+    /// Size `batch` and encode its first piece.
+    fn start(&mut self, batch: RecordBatch) -> Result<Option<Bytes>, RunError> {
+        let sizes = batch_row_sizes(&batch)?;
+        self.encode_next(Pending {
+            batch,
+            sizes,
+            next: 0,
+        })
+    }
+
+    /// Encode the first piece of the rows still to come in `pending`, and keep
+    /// the rest in `self.pending`.
+    fn encode_next(&mut self, pending: Pending) -> Result<Option<Bytes>, RunError> {
+        let Pending { batch, sizes, next } = pending;
+        let keep = piece_rows(&sizes[next..], self.piece_bytes);
+        let end = next + keep;
+        let piece_size = sizes[next..end]
+            .iter()
+            .fold(0u64, |sum, size| sum.saturating_add(*size));
+        if exceeds(piece_size, self.budget.max_bytes) {
+            return Err(RunError::TooLarge);
+        }
+        let piece = batch.slice(next, keep);
+        if end < batch.num_rows() {
+            self.pending = Some(Pending {
+                batch,
+                sizes,
+                next: end,
+            });
+        }
         let bytes = self.encode(&piece)?;
         if bytes
             .as_ref()
@@ -500,40 +572,20 @@ impl ExportStream {
     }
 }
 
-/// Split the first piece off `batch`: the longest prefix whose estimate is at
-/// most `piece_bytes`, and at least one row. Returns the piece and the rest.
-///
-/// # Errors
-///
-/// [`RunError::TooLarge`] when the piece's estimate passes `max_bytes`, which
-/// happens only when one row alone is that large.
-fn split_piece(
-    batch: &RecordBatch,
-    piece_bytes: usize,
-    max_bytes: usize,
-) -> Result<(RecordBatch, Option<RecordBatch>), RunError> {
-    let rows = batch.num_rows();
-    let mut keep = rows;
-    if encoded_estimate(batch)? > piece_bytes {
-        // The estimate grows with the prefix length, so bisect for the longest
-        // prefix that fits. One row is the fallback when even that is too big.
-        let (mut low, mut high) = (1, rows);
-        while low < high {
-            let mid = (low + high).div_ceil(2);
-            if encoded_estimate(&batch.slice(0, mid))? <= piece_bytes {
-                low = mid;
-            } else {
-                high = mid - 1;
-            }
+/// How many rows from the front of `sizes` make a piece: the longest prefix
+/// whose estimated sizes sum to at most `piece_bytes`, and at least one row
+/// when there is one. A single scan over the running total.
+fn piece_rows(sizes: &[u64], piece_bytes: usize) -> usize {
+    let mut total = 0u64;
+    let mut rows = 0;
+    for size in sizes {
+        total = total.saturating_add(*size);
+        if rows > 0 && exceeds(total, piece_bytes) {
+            break;
         }
-        keep = low;
+        rows += 1;
     }
-    let piece = batch.slice(0, keep);
-    if encoded_estimate(&piece)? > max_bytes {
-        return Err(RunError::TooLarge);
-    }
-    let rest = (keep < rows).then(|| batch.slice(keep, rows - keep));
-    Ok((piece, rest))
+    rows
 }
 
 #[cfg(test)]
@@ -545,7 +597,8 @@ mod tests {
     use crate::query_error::RunError;
     use crate::test_support::{dataset_spans, example_query};
     use crate::views::{QueryContext, SqliteView, TimeWindow};
-    use datafusion::arrow::array::{Int64Array, StringArray};
+    use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
+    use datafusion::arrow::buffer::OffsetBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
     use datafusion::common::Diagnostic;
@@ -968,7 +1021,9 @@ mod tests {
             return Vec::new();
         }
         let schema = batches[0].schema();
-        json_rows(batches, schema.as_ref(), &unbounded()).expect("json")
+        json_rows(batches, schema.as_ref(), &unbounded())
+            .expect("json")
+            .0
     }
 
     fn unbounded() -> Budget {
@@ -1196,17 +1251,6 @@ mod tests {
         );
     }
 
-    /// One Int64 column `v` holding `values`, as a registered view.
-    fn int_table(values: Vec<i64>) -> Arc<dyn TableProvider> {
-        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![Arc::new(Int64Array::from(values))],
-        )
-        .expect("batch");
-        Arc::new(MemTable::try_new(schema, vec![vec![batch]]).expect("table"))
-    }
-
     /// One Utf8 column `s`, as a registered view.
     fn string_table(values: &[Option<&str>]) -> Arc<dyn TableProvider> {
         let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
@@ -1219,30 +1263,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn many_aliases_of_one_column_are_too_large() {
+    async fn many_aliases_of_one_column_return_the_rows_that_fit() {
         let ctx = context();
         ctx.register_sqlite_view(SqliteView::ExperimentItems, integers(10_000))
             .expect("register");
-        // 4,000 aliases of an 8-byte column are 256 MiB for one 8,192-row batch,
-        // and the statement stays under 64 KiB. The pool sees none of it.
+        // 4,000 aliases of an 8-byte column are about 200 KB a row, so only the
+        // first rows of the 8,192-row batch fit under 32 MiB. The first row
+        // alone is far under the cap, so the answer is truncated, not refused.
         let aliases: Vec<String> = (1..=4_000).map(|i| format!("v AS c{i}")).collect();
         let query = format!("SELECT {} FROM experiment_items", aliases.join(", "));
-        let error = ctx
+        let result = ctx
             .sql_json(request(&query, &empty_params(), SQL_MAX_ROWS))
             .await
-            .expect_err("aliases");
-        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+            .expect("aliases");
+        assert!(result.truncated);
+        assert!(!result.rows.is_empty());
+        assert!(result.rows.len() < 1_000, "{}", result.rows.len());
+        let encoded = serde_json::to_vec(&result.rows).expect("encode");
+        assert!(encoded.len() <= SQL_MAX_RESULT_BYTES);
     }
 
     #[tokio::test]
-    async fn a_cross_join_of_wide_rows_is_too_large() {
+    async fn a_cross_join_of_wide_rows_is_truncated_at_the_byte_cap() {
         let ctx = context();
         let wide = "x".repeat(4_096);
         let values = vec![Some(wide.as_str()); 100];
         ctx.register_sqlite_view(SqliteView::ExperimentItems, string_table(&values))
             .expect("register");
-        // 10,000 pairs of 4 KiB strings are 40 MiB, past the 32 MiB cap.
-        let error = ctx
+        // 10,000 pairs of 4 KiB strings are 40 MiB, more than the 32 MiB cap.
+        let result = ctx
             .sql_json(request(
                 "SELECT a.s AS a_s, b.s AS b_s \
                  FROM experiment_items a CROSS JOIN experiment_items b",
@@ -1250,8 +1299,59 @@ mod tests {
                 SQL_MAX_ROWS,
             ))
             .await
-            .expect_err("cross join");
-        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+            .expect("cross join");
+        assert!(result.truncated);
+        assert!(result.rows.len() < 10_000);
+        assert!(result.rows.len() > 1_000, "{}", result.rows.len());
+        let encoded = serde_json::to_vec(&result.rows).expect("encode");
+        assert!(encoded.len() <= SQL_MAX_RESULT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn moderate_rows_past_the_byte_cap_are_truncated_within_it() {
+        let ctx = context();
+        // Each row is about 1 KB, so a 10 KB cap keeps about nine of the 100.
+        let text = "a".repeat(1_000);
+        ctx.register_sqlite_view(
+            SqliteView::ExperimentItems,
+            string_table(&[Some(text.as_str()); 100]),
+        )
+        .expect("register");
+        let result = ctx
+            .sql_json_within(
+                request("SELECT s FROM experiment_items", &empty_params(), 100),
+                10_000,
+            )
+            .await
+            .expect("moderate rows");
+        assert!(result.truncated);
+        assert!(
+            (8..100).contains(&result.rows.len()),
+            "{}",
+            result.rows.len()
+        );
+        let encoded = serde_json::to_vec(&result.rows).expect("encode");
+        assert!(encoded.len() <= 10_000, "{} bytes", encoded.len());
+    }
+
+    #[tokio::test]
+    async fn rows_that_fit_under_the_cap_are_not_truncated() {
+        let ctx = context();
+        let text = "a".repeat(1_000);
+        ctx.register_sqlite_view(
+            SqliteView::ExperimentItems,
+            string_table(&[Some(text.as_str()); 5]),
+        )
+        .expect("register");
+        let result = ctx
+            .sql_json_within(
+                request("SELECT s FROM experiment_items", &empty_params(), 100),
+                10_000,
+            )
+            .await
+            .expect("rows");
+        assert!(!result.truncated);
+        assert_eq!(result.rows.len(), 5);
     }
 
     #[tokio::test]
@@ -1274,14 +1374,19 @@ mod tests {
     #[tokio::test]
     async fn json_past_the_budget_is_refused_even_when_the_estimate_fits() {
         let ctx = context();
-        // The estimate counts 8 bytes a value. These values are about 21 bytes
-        // of JSON each, so only the writer sees the overflow.
-        let values: Vec<i64> = (0..1_000).map(|i| i * 1_000_000_000_000).collect();
-        ctx.register_sqlite_view(SqliteView::ExperimentItems, int_table(values))
-            .expect("register");
+        // The estimate counts a string's bytes, not its escapes. Each of these
+        // values is 1,000 control bytes that JSON writes as `\u0001`, six bytes
+        // each. The estimate of eight rows is about 8 KB, under the 10 KB budget,
+        // and the escaped output is about 48 KB, so only the writer sees the overflow.
+        let control = "\u{1}".repeat(1_000);
+        ctx.register_sqlite_view(
+            SqliteView::ExperimentItems,
+            string_table(&[Some(control.as_str()); 8]),
+        )
+        .expect("register");
         let error = ctx
             .sql_json_within(
-                request("SELECT v FROM experiment_items", &empty_params(), 1_000),
+                request("SELECT s FROM experiment_items", &empty_params(), 8),
                 10_000,
             )
             .await
@@ -1321,6 +1426,109 @@ mod tests {
             .expect("json");
         assert_eq!(result.rows.len(), 1_000);
         assert_eq!(runtime.memory_pool.reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_parsed_rows_count_against_the_pool() {
+        // 3,000 integers encode to about 31 KB, which fits a 64 KiB pool. Their
+        // parsed rows take about three times that, so the pool refuses them.
+        let ctx = context_with(runtime(64 * 1024));
+        ctx.register_sqlite_view(SqliteView::ExperimentItems, integers(3_000))
+            .expect("register");
+        let error = ctx
+            .sql_json(request(
+                "SELECT v FROM experiment_items",
+                &empty_params(),
+                SQL_MAX_ROWS,
+            ))
+            .await
+            .expect_err("parsed rows");
+        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn an_aliased_utf8_view_is_too_large_by_its_data() {
+        let ctx = context();
+        // One row of 8 MiB. As a view the column is 16 bytes, but each of the
+        // 4,000 aliases writes all 8 MiB, so the answer would be about 32 GB.
+        let big = "x".repeat(8 << 20);
+        ctx.register_sqlite_view(
+            SqliteView::ExperimentItems,
+            string_table(&[Some(big.as_str())]),
+        )
+        .expect("register");
+        let aliases: Vec<String> = (1..=4_000).map(|i| format!("c AS c{i}")).collect();
+        let query = format!(
+            "SELECT {} FROM (SELECT arrow_cast(s, 'Utf8View') AS c FROM experiment_items)",
+            aliases.join(", ")
+        );
+        let error = ctx
+            .sql_json(request(&query, &empty_params(), SQL_MAX_ROWS))
+            .await
+            .expect_err("aliases");
+        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+    }
+
+    /// `events`, a `List<Utf8>` column of `rows` rows with one 64 KiB string each.
+    fn events_table(rows: usize) -> Arc<dyn TableProvider> {
+        let text = "e".repeat(64 * 1024);
+        let item = Arc::new(Field::new("item", DataType::Utf8, true));
+        let child = StringArray::from(vec![text.as_str(); rows]);
+        let events = ListArray::new(
+            Arc::clone(&item),
+            OffsetBuffer::from_lengths(vec![1; rows]),
+            Arc::new(child),
+            None,
+        );
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "events",
+            DataType::List(item),
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(events)]).expect("batch");
+        Arc::new(MemTable::try_new(schema, vec![vec![batch]]).expect("table"))
+    }
+
+    #[tokio::test]
+    async fn a_sliced_list_is_sized_by_the_rows_it_keeps() {
+        // The child holds 64 MiB, past the 32 MiB cap, but the ten rows that the
+        // query keeps hold 640 KiB.
+        let ctx = context();
+        ctx.register_sqlite_view(SqliteView::ExperimentItems, events_table(1_000))
+            .expect("register");
+        let result = ctx
+            .sql_json(request(
+                "SELECT events FROM experiment_items LIMIT 10 OFFSET 990",
+                &empty_params(),
+                10,
+            ))
+            .await
+            .expect("json");
+        assert_eq!(result.rows.len(), 10);
+        assert!(!result.truncated);
+    }
+
+    #[tokio::test]
+    async fn a_sliced_list_exports_in_pieces_of_its_own_rows() {
+        let ctx = context();
+        ctx.register_sqlite_view(SqliteView::ExperimentItems, events_table(1_000))
+            .expect("register");
+        // A piece of 128 KiB holds one 64 KiB row, so the ten rows take ten pieces.
+        // Each chunk is well under the 1 MiB budget.
+        let items = export_items(
+            &ctx,
+            "SELECT events FROM experiment_items LIMIT 10 OFFSET 990",
+            ExportFormat::Ndjson,
+            128 * 1024,
+            1024 * 1024,
+        )
+        .await;
+        let chunks: Vec<Bytes> = items.into_iter().map(|item| item.expect("chunk")).collect();
+        assert!(chunks.len() >= 5, "{} chunks", chunks.len());
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 1024 * 1024));
+        let body: Vec<u8> = chunks.concat();
+        assert_eq!(ndjson_rows(&body).len(), 10);
     }
 
     /// Every item the export of `query` yields, in order.

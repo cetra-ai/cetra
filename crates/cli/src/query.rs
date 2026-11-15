@@ -169,7 +169,7 @@ pub(crate) async fn run(
                 return Ok(());
             }
             let more = result.truncated.then_some(
-                "more rows matched; raise --limit or export with --format csv, ndjson or parquet",
+                "more rows matched; --limit or the answer size cap left some out; raise --limit or export with --format csv, ndjson or parquet",
             );
             output::write_rows_note(&mut *streams.err, result.rows.len(), more)?;
         }
@@ -1349,7 +1349,7 @@ mod tests {
         assert_eq!(out, "x\n-\n1\n");
         assert_eq!(
             err,
-            "1 row; more rows matched; raise --limit or export with --format csv, ndjson or parquet\n"
+            "1 row; more rows matched; --limit or the answer size cap left some out; raise --limit or export with --format csv, ndjson or parquet\n"
         );
         server.stop().await;
     }
