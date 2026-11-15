@@ -112,6 +112,7 @@ pub(super) fn trace_shape(project: P, trace: u8) -> TraceShape {
 /// same ids. `ops::apply` raises the clock by at least a microsecond per op, so the ids of one data
 /// directory differ. The top two bits of the clock are zero, so the variant bits do not collide.
 pub(super) fn deletion_id(clock: i64) -> Uuid {
+    debug_assert!(clock >= 0, "a deletion id needs a non-negative clock");
     const FIXED_MILLIS: u64 = 1_700_000_000_000;
     let mut random = [0_u8; 10];
     random[2..].copy_from_slice(&clock.to_be_bytes());

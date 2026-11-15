@@ -345,8 +345,8 @@ async fn assert_no_orphans(dir: &Path, name: &str) {
     );
 }
 
-/// Spawns the `test` crash child with `dir`, `name` and `extra` env vars, and
-/// returns its exit status once it has ended, or fails after 60 s. The caller
+/// Spawns the `test` crash child with `dir`, `name` and `extra` env vars, its stderr going to
+/// `stderr`, and returns its exit status once it has ended, or fails after 60 s. The caller
 /// says what an end means: [`run_child`] wants an abort by signal.
 pub(crate) fn spawn_child(
     test: &str,
@@ -355,6 +355,7 @@ pub(crate) fn spawn_child(
     name: &str,
     dir: &Path,
     extra: &[(&str, &OsStr)],
+    stderr: Stdio,
 ) -> ExitStatus {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
@@ -366,7 +367,7 @@ pub(crate) fn spawn_child(
         .env(point_var, name)
         .envs(extra.iter().copied())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();
@@ -375,6 +376,7 @@ pub(crate) fn spawn_child(
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > Duration::from_secs(60) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 panic!("{name} did not abort within 60s");
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
@@ -393,7 +395,7 @@ fn run_child(
     dir: &Path,
     extra: &[(&str, &OsStr)],
 ) {
-    let status = spawn_child(test, dir_var, point_var, name, dir, extra);
+    let status = spawn_child(test, dir_var, point_var, name, dir, extra, Stdio::inherit());
     assert!(
         status.code().is_none(),
         "{name} exited {status} instead of aborting (point not reached?)"
