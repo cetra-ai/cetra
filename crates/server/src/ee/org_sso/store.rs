@@ -369,6 +369,31 @@ pub(crate) async fn domains(pool: &SqlitePool, org: OrgId) -> Result<Vec<DomainR
     records.into_iter().map(domain_row).collect()
 }
 
+/// Verified domains of active orgs whose proof was last checked before `cutoff` (or never
+/// since it was made), oldest check first, at most `limit`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value is corrupt.
+pub(crate) async fn stale_verified_domains(
+    pool: &SqlitePool,
+    cutoff: i64,
+    limit: u32,
+) -> Result<Vec<DomainRow>, MetaError> {
+    let records: Vec<DomainRecord> = sqlx::query_as(
+        "SELECT d.id, d.org_id, d.domain, d.token, d.verified_at, d.last_checked_at, \
+         d.created_at FROM org_sso_domains d JOIN orgs o ON o.id = d.org_id \
+         WHERE d.verified_at IS NOT NULL AND o.state = 'active' \
+           AND MAX(COALESCE(d.last_checked_at, 0), d.verified_at) < ? \
+         ORDER BY MAX(COALESCE(d.last_checked_at, 0), d.verified_at) LIMIT ?",
+    )
+    .bind(cutoff)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(domain_row).collect()
+}
+
 /// The org's domains in the write transaction, ordered by domain.
 ///
 /// # Errors

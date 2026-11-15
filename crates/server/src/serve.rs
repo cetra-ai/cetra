@@ -80,6 +80,8 @@ const USAGE_EVERY: Duration = Duration::from_secs(10);
 
 /// How often org SSO routing is reloaded from `meta.db` (D-P-62).
 const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
+/// How often verified domains due for their daily re-proof are checked (D-P-72).
+const ORG_SSO_RECHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 /// When dropped orgs' usage is first pruned, then how often (D-P-46).
 const USAGE_PRUNE_FIRST: Duration = Duration::from_secs(60);
 const USAGE_PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -488,6 +490,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     tasks.push(spawn_usage_prune(state.clone()));
     tasks.push(spawn_notices(state.clone()));
     tasks.push(spawn_org_sso(state.clone()));
+    tasks.push(spawn_org_sso_recheck(state.clone()));
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -692,6 +695,27 @@ fn spawn_org_sso(state: AppState) -> JoinHandle<()> {
         loop {
             interval.tick().await;
             crate::ee::org_sso::refresh(&state).await;
+        }
+    })
+}
+
+fn spawn_org_sso_recheck(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_RECHECK_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::ee::org_sso::recheck::recheck_once(&state, state.clock.now_ns()).await {
+                Ok(run) if run.lapsed > 0 || run.failed > 0 => tracing::info!(
+                    kept = run.kept,
+                    lapsed = run.lapsed,
+                    failed = run.failed,
+                    "org sso domain recheck"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error = %error, "org sso domain recheck failed"),
+            }
         }
     })
 }
