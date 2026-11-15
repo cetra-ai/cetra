@@ -113,6 +113,8 @@ Annotations: a member changes or deletes only their own `human` scores; a projec
 
 LLM connections belong to the org. Org admins and owners manage and test them, and every org member can list them without their keys (D-I-4, D-I-24).
 
+Model prices: project admins manage a project's prices (`ProjectPerm::ManageSettings`; API keys cannot); org admins and owners manage the org's prices (`OrgPerm::ManagePrices`); every member can read both, and a `read` key can read a project's (D-T-6).
+
 A resource outside the caller's reach answers **404**, never 403, so ids cannot be probed. A visible resource with too low a role answers **403** (D138).
 
 Enforced in one place: every route is declared with its access (public, any signed-in user, session-only, an org permission, a project permission, or instance admin). One middleware enforces it before the handler, resolves `{org}` and `{project}`, and hands the handler the resolved access. The principal is a session user, a PAT user, or an API key.
