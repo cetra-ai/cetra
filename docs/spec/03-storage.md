@@ -329,7 +329,7 @@ Scan, then `ROW_NUMBER() OVER (PARTITION BY score_id ORDER BY updated_at DESC) =
 ### S3 read cache
 
 With an S3 object store, every page read is a ranged GET. The S3 store is wrapped by a cache store, so queries, compaction and the media GC all read through it (D-A1-11):
-- data files (`tables/…`) are cached in 1 MiB blocks under `cache/<file name>/<block index>`, each ending with a CRC-32C of its bytes; a block that fails its check is fetched again. `cache/<file name>/size` holds the object size (one HEAD per file, the first time). Media blobs, writes and listings pass through;
+- data files (`tables/…`) are cached in 1 MiB blocks under `cache/<file name>/<block index>`, each ending with a CRC-32C of its bytes; a block that fails its check is fetched again. `cache/<file name>/size` holds the object size as 8 little-endian bytes and their CRC-32C (one HEAD per file, the first time); a `size` file that fails its check drops its directory at open. Media blobs, writes and listings pass through;
 - a range read serves the blocks it has and fetches the missing ones in one coalesced request;
 - files are immutable, so entries never go stale;
 - eviction is LRU by block, within `query.read_cache_bytes` (default 10% of the file system holding `data_dir`, at most 100 GiB; 0 turns it off);

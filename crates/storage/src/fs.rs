@@ -285,11 +285,6 @@ pub(crate) fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
 }
 
 #[inline]
-pub(crate) fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
-    std::fs::read_to_string(path)
-}
-
-#[inline]
 pub(crate) fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<std::fs::ReadDir> {
     std::fs::read_dir(path)
 }

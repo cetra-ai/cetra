@@ -2,11 +2,12 @@
 //!
 //! With an S3 object store, reads of data files (`tables/…`) go through
 //! [`CacheStore`], which serves byte ranges from 1 MiB blocks kept under
-//! `<data_dir>/cache/<file name>/`. Each block file ends with the CRC-32C of
-//! its bytes; a block that fails its check, or has the wrong length, is deleted
-//! and fetched again. Nothing is fsynced: a block lost or torn by a crash fails
-//! that check and is fetched again. Files are immutable, so entries never go
-//! stale.
+//! `<data_dir>/cache/<file name>/`. Each block file and the `size` file end with
+//! the CRC-32C of their bytes. A block that fails its check, or has the wrong
+//! length, is deleted and fetched again. A `size` file that fails its check
+//! drops its whole directory. Nothing is fsynced: a block or `size` file lost or
+//! torn by a crash fails its check and is handled the same way. Files are
+//! immutable, so entries never go stale.
 //!
 //! Blocks are written only while free disk is at least `2 × min_free`, and the
 //! disk monitor gives blocks back while it is below `min_free` (see `disk`).
@@ -45,8 +46,12 @@ const BLOCK_LEN: usize = 1 << 20;
 /// Bytes after a block's data: its CRC-32C, little-endian.
 const CRC_LEN: usize = 4;
 
-/// The file in an object's directory that holds the object's size.
+/// The file in an object's directory that holds the object's size: the size as a
+/// little-endian `u64`, then the CRC-32C of those 8 bytes, little-endian.
 const SIZE_FILE: &str = "size";
+
+/// Length of a `size` file: 8 bytes of size and its CRC.
+const SIZE_FILE_LEN: usize = 8 + CRC_LEN;
 
 /// Largest default capacity, in bytes (spec 03 §6).
 const MAX_DEFAULT_CAPACITY: u64 = 100 << 30;
@@ -164,9 +169,9 @@ impl ReadCache {
             if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 continue;
             }
-            let size = fs::read_to_string(path.join(SIZE_FILE))
+            let size = fs::read(path.join(SIZE_FILE))
                 .ok()
-                .and_then(|text| text.parse::<u64>().ok());
+                .and_then(|bytes| parse_size(&bytes));
             let Some(size) = size else {
                 // Without its size the blocks cannot be checked: drop them all.
                 remove_dir(&path);
@@ -250,7 +255,7 @@ impl ReadCache {
         }
         let dir = self.dir.join(name);
         fs::create_dir_all(&dir)?;
-        write_renamed(&dir, SIZE_FILE, size.to_string().as_bytes())?;
+        write_renamed(&dir, SIZE_FILE, &encode_size(size))?;
         self.lock().sizes.insert(name.to_owned(), size);
         Ok(())
     }
@@ -717,6 +722,30 @@ fn block_data(file: &[u8]) -> Option<&[u8]> {
     (crc32c::crc32c(data) == stored).then_some(data)
 }
 
+/// The contents of a `size` file for an object of `size` bytes.
+fn encode_size(size: u64) -> [u8; SIZE_FILE_LEN] {
+    let mut bytes = [0; SIZE_FILE_LEN];
+    let (value, crc) = bytes.split_at_mut(8);
+    value.copy_from_slice(&size.to_le_bytes());
+    crc.copy_from_slice(&crc32c::crc32c(value).to_le_bytes());
+    bytes
+}
+
+/// The size in a `size` file. `None` unless the file is exactly
+/// `SIZE_FILE_LEN` bytes with a matching CRC, so a torn file, or one in the
+/// old text format, is rejected.
+fn parse_size(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() != SIZE_FILE_LEN {
+        return None;
+    }
+    let (value, crc) = bytes.split_at(8);
+    let stored = u32::from_le_bytes(crc.try_into().ok()?);
+    if crc32c::crc32c(value) != stored {
+        return None;
+    }
+    <[u8; 8]>::try_from(value).ok().map(u64::from_le_bytes)
+}
+
 /// Reads and checks block `index` of `name`. `None` when the file is missing,
 /// has the wrong length, or fails its CRC.
 fn read_block(dir: &Path, name: &str, index: u64, size: u64) -> Option<Bytes> {
@@ -849,6 +878,7 @@ mod tests {
     use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
     use super::*;
+    use crate::fs::lossy::{CrashMode, Lossy};
     use crate::test_support::FaultStore;
 
     const MIB: u64 = 1 << 20;
@@ -1084,6 +1114,77 @@ mod tests {
         let cache = ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap();
         assert_eq!(cache.stats().blocks, 0);
         assert!(!cache_dir.join(NAME).exists());
+    }
+
+    #[tokio::test]
+    async fn a_torn_size_file_never_serves_short_ranges() {
+        // 1,048,579 bytes: a torn decimal prefix of this size is below the range.
+        const LEN: u64 = MIB + 3;
+        let range = 0..200_000_u64;
+        for seed in 0..16_u64 {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let cache_dir = data.join("cache");
+            let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+            let inner = Arc::new(InMemory::new());
+            put(&inner, DATA, content(LEN)).await;
+            let location = ObjectPath::parse(DATA).unwrap();
+            let open_store = || {
+                let disk = Arc::new(Disk::open(vec![data.clone()], 0).unwrap());
+                let cache =
+                    Arc::new(ReadCache::open(cache_dir.clone(), 64 * MIB, disk, 0).unwrap());
+                CacheStore {
+                    inner: Arc::clone(&inner) as Arc<dyn ObjectStore>,
+                    cache,
+                }
+            };
+
+            {
+                let store = open_store();
+                let first = store
+                    .get_ranges(&location, std::slice::from_ref(&range))
+                    .await
+                    .unwrap();
+                assert_eq!(first, vec![expected(LEN, range.clone())], "seed {seed}");
+            }
+            lossy.crash_with(CrashMode::TearLast, seed);
+
+            let store = open_store();
+            let again = store
+                .get_ranges(&location, std::slice::from_ref(&range))
+                .await
+                .unwrap();
+            let got: usize = again.iter().map(Bytes::len).sum();
+            assert_eq!(
+                got, 200_000,
+                "seed {seed}: a torn size file served a short range"
+            );
+            assert_eq!(again, vec![expected(LEN, range.clone())], "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn parse_size_accepts_only_a_checksummed_size() {
+        let encoded = encode_size(1_048_579);
+        assert_eq!(encoded.len(), 12);
+        assert_eq!(parse_size(&encoded), Some(1_048_579));
+        assert_eq!(parse_size(&encode_size(0)), Some(0));
+
+        assert_eq!(parse_size(&encoded[..11]), None, "11 bytes");
+        assert_eq!(
+            parse_size(&[encoded.as_slice(), &[0]].concat()),
+            None,
+            "13 bytes"
+        );
+        assert_eq!(parse_size(b"12"), None, "the old text format");
+        assert_eq!(parse_size(b""), None, "empty");
+
+        let mut flipped = encoded;
+        flipped[3] ^= 0x10;
+        assert_eq!(parse_size(&flipped), None, "a flipped bit in the size");
+        flipped[3] ^= 0x10;
+        flipped[11] ^= 0x01;
+        assert_eq!(parse_size(&flipped), None, "a flipped bit in the CRC");
     }
 
     #[tokio::test]
