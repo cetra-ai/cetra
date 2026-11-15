@@ -741,3 +741,78 @@ async fn a_media_put_racing_the_drop_never_lands_its_row() {
             .unwrap();
     }
 }
+
+// R6.8. A compaction started before the drop fails at its commit; the
+// dropped project's staged outputs are collected, and the other project's
+// rows read back unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_compaction_started_before_the_drop_fails_and_is_collected() {
+    for with_kept in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..2_u16 {
+            let time = at(10, 0, i64::from(index));
+            storage
+                .append_spans(project(), span_batch(project(), 1 + index, time))
+                .await
+                .unwrap();
+            if with_kept {
+                storage
+                    .append_spans(kept_project(), span_batch(kept_project(), 1 + index, time))
+                    .await
+                    .unwrap();
+            }
+            storage.shutdown().await.unwrap();
+            storage = Storage::open(config.clone()).await.unwrap();
+        }
+        let kept_before = scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await;
+        // Two spans files and their two traces files.
+        assert_eq!(active_files(&storage, project()).len(), 4);
+
+        let storage = Arc::new(storage);
+        let hooks = storage.hooks().clone();
+        hooks.hold(HookPoint::CompactionAfterWrite);
+        let racing = {
+            let storage = Arc::clone(&storage);
+            tokio::spawn(async move { storage.compact(at(11, 0, 0)).await })
+        };
+        wait_at(&storage, HookPoint::CompactionAfterWrite);
+
+        storage.drop_project(project()).await.unwrap();
+        hooks.release(HookPoint::CompactionAfterWrite);
+        let compacted = racing.await.unwrap().unwrap();
+        if !with_kept {
+            assert_eq!((compacted.jobs, compacted.failed), (0, 1), "{compacted:?}");
+        }
+        assert!(
+            active_files(&storage, project()).is_empty(),
+            "a file of the dropped project is still active"
+        );
+        assert_eq!(
+            scalar(&storage, project(), "SELECT count(*) FROM spans").await,
+            0,
+            "P's rows are visible"
+        );
+        assert_eq!(
+            scalar(&storage, kept_project(), "SELECT count(*) FROM spans").await,
+            kept_before,
+            "Q's rows changed"
+        );
+
+        storage.collect_staged(Duration::ZERO).await.unwrap();
+        let leftover: Vec<_> = storage
+            .staged_paths()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|path| path.contains(&format!("project={}", project())))
+            .collect();
+        assert!(leftover.is_empty(), "staged outputs of P: {leftover:?}");
+        Arc::try_unwrap(storage)
+            .unwrap_or_else(|_| panic!("storage still shared"))
+            .shutdown()
+            .await
+            .unwrap();
+    }
+}

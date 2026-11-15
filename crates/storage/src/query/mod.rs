@@ -696,7 +696,7 @@ fn file_plan(
         builder = builder.with_limit(limit);
     }
     let builder = builder.with_projection_indices(scan.projection.cloned())?;
-    Ok(DataSourceExec::from_data_source(builder.build()))
+    Ok(crate::unwind::guarded_scan(builder.build()))
 }
 
 /// Whole files, packed into at most `target` groups by object size.

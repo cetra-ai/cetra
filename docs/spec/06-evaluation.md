@@ -10,7 +10,9 @@ Data model in 01; written through:
 | `POST /api/v1/projects/{p}/scores` (batch ≤ 1000) with `sk` key or PAT | `api` (or `sdk` when the SDK sets it) |
 | UI annotation form on traces, spans and sessions (one control per live score definition; only the caller's own scores, D-I-37) | `human`, `author_user_id` set |
 | `POST /api/public/feedback` with `pk` key | `end_user` |
-| Online rules / experiment server evaluators | `llm_judge` \| `check` \| `webhook` |
+| Online rules and manual runs | `llm_judge` \| `check` \| `webhook` |
+
+A score may carry `experiment_id` and `dataset_item_id` (both, on a trace target, of an experiment of the project; D-J-12).
 
 Evaluator scores (`llm_judge`, `check`, `webhook`) are written by the eval queue with `evaluator_id` set, and `rule_id` set for rule jobs; their derived id's author is the rule, or the evaluator for a manual run (D-I-18).
 
@@ -20,7 +22,7 @@ The caller decides `source` (D-G-27): a session on the project route writes `hum
 
 **Ownership** (D-I-26, D-I-36). A `human` score belongs to its `author_user_id`. Through a session or a personal access token, a write whose `score_id` names the live `human` score of another user, or a `DELETE` of one, is `403 forbidden` unless the caller is a project admin. Validation errors (`400`) and the units cap (`402`) come first. An admin who replaces another user's score becomes its author. A member may replace another user's non-`human` score (`api`, `sdk`, `end_user` or an evaluator's) by its id, deliberately: the stored version becomes their own `human` score (D-I-26). `sk` keys, public feedback and evaluators keep the rules above: they can replace a `human` score whose id they know. A person's write without `score_id` derives the id from their own user, so it never replaces anyone else's score. A person's write that supplies UUIDv7 ids looks them up in storage first, so it can answer `503` when storage is unavailable. The check and the append are not atomic; a concurrent race is accepted.
 
-**Deterministic score IDs** (one row per annotator, as Opik's `authored_feedback_scores`): when the client does not provide `score_id`, the server derives it as a UUIDv8 (the first 16 bytes of SHA-256 over the ASCII tag `llmobs.score.v1` followed by the project id, target kind, trace id, span id or session id, name, source and author, each as a big-endian `u32` byte length then its UTF-8 bytes; D-G-28) where `author` = `author_user_id` for `human`, `rule_id` for online judges, `experiment_id + dataset_item_id` for experiments, the key or PAT id for `api`/`sdk`/`end_user`. The SDKs always send a `score_id` (a UUIDv7 per `score()` call, D-F-2), so this applies to other clients that omit it. Consequences: re-annotating replaces your own score instead of adding a duplicate; two reviewers scoring the same trace keep two rows; a backfill re-run overwrites instead of duplicating. Aggregations (`score()` in the DSL, dashboards) average across authors.
+**Deterministic score IDs** (one row per annotator, as Opik's `authored_feedback_scores`): when the client does not provide `score_id`, the server derives it as a UUIDv8 (the first 16 bytes of SHA-256 over the ASCII tag `llmobs.score.v1` followed by the project id, target kind, trace id, span id or session id, name, source and author, each as a big-endian `u32` byte length then its UTF-8 bytes; D-G-28) where `author` = `author_user_id` for `human`, `rule_id` for online judges, `experiment_id` for experiment scores (the trace identifies the item and repetition, D-J-12), the key or PAT id for `api`/`sdk`/`end_user`. The SDKs always send a `score_id` (a UUIDv7 per `score()` call, D-F-2), so this applies to other clients that omit it. Consequences: re-annotating replaces your own score instead of adding a duplicate; two reviewers scoring the same trace keep two rows; a backfill re-run overwrites instead of duplicating. Aggregations (`score()` in the DSL, dashboards) average across authors.
 
 Validation: `data_type` ∈ {numeric, boolean, categorical, text}; numeric must be finite; boolean must be 0/1/true/false; categorical requires `value_str`; target must have the matching ID fields; `name`, a session target's id and a categorical label are 1–255 bytes. A batch is all-or-nothing. If a score definition with the same name exists, values are validated against it (range, categories) — otherwise accepted as is. Only live (non-archived) definitions count; definitions are cached 10 s per project (D-I-26).
 
@@ -90,7 +92,7 @@ Request: `POST url` with `Content-Type: application/json`, the configured header
 
 ## Variable mapping
 
-Online rules and experiment evaluators map template variables to data:
+Online rules and manual runs map template variables to data (`expected` and `item.*` are parsed by `llmobs-eval` but refused by every server entry point, since experiments have no server evaluators, D-J-11):
 
 | Source expression | Meaning |
 |---|---|
@@ -156,30 +158,33 @@ A backfill runner, one of the eval loops, runs each backfill to its end, oldest 
 
 ## Datasets
 
-- Create (name, description, optional input/expected JSON Schemas).
-- Items: `input` (any JSON), `expected_output` (optional JSON), `metadata`, optional `source_trace_id/source_span_id`.
-- **Versions:** every mutation batch (add / edit / delete / import) creates version `current_version + 1` with a description. Reads default to the latest version; `?version=n` reads a past one.
-- **Import:** CSV or JSONL upload (≤ 100 MiB), with a column mapping step: each column → `input.<key>` | `expected.<key>` | `metadata.<key>` | ignore; a single column can map to the whole `input`/`expected`. JSONL rows with `input`/`expected_output`/`metadata` keys import directly. Invalid rows are reported, valid ones imported (one version).
-- **From traces:** "Add to dataset" on a trace or span copies `input` → item input and `output` → `expected_output` (editable before saving); records `source_*` (GDPR cascade, 03 §7).
-- Export: JSONL / CSV of a version.
+Track J (D-J-2–D-J-9).
+
+- Create (name, description, optional input/expected JSON Schemas, Draft 2020-12). With a schema set, every write is validated: add, patch, import rows, add-from-trace; setting a schema first validates every live item (D-J-2). Names are 1–200 characters, unique in the project, and never UUID-shaped, so `{dataset}` is an id or a name (D-J-4).
+- Items: `input` (any JSON), `expected_output` (optional JSON), `metadata` (an object), optional `source_trace_id/source_span_id`. At most 50,000 live items; an item is at most 1 MiB serialized (D-J-4).
+- **Versions:** every mutating request (add a batch, edit, delete, import, add-from-trace) creates version `current_version + 1` with a generated description. Reads default to the latest version; `?version=n` reads a past one. An edit that changes nothing creates no version. No named tags (D-J-3).
+- **Import:** a preview of the file's head (≤ 1 MiB: columns and 20 rows), then the CSV or JSONL upload (multipart, ≤ 100 MiB, ≤ 50,000 rows) with a column mapping: each column → `input` | `input.<key>` | `expected` | `expected.<key>` | `metadata.<key>` | `ignore`. A cell that parses as a JSON object or array becomes that JSON, an empty cell leaves its key out. JSONL rows with `input`/`expected_output`/`metadata` keys import directly; other keys are row errors. Invalid rows are reported (at most 100 listed), valid ones imported in one version; no valid row is a 400 (D-J-6).
+- **From traces:** "Add to dataset" on a trace or span copies `input` → item input and `output` → `expected_output` (editable before saving); records `source_*` (GDPR cascade, 03 §7, D-J-9). The plan window and the deletion guard apply (D-J-8).
+- Export: JSONL / CSV of a version, streamed (D-J-7).
 
 ## Experiments
 
-Client-side execution with the SDK (10); the server stores results and runs optional server evaluators.
+Client-side execution with the SDK (10, D18); the server stores results. There are no server evaluators on experiments: scorers run in the SDK (D-J-11).
 
 ### Protocol
 
-1. `POST /experiments` `{name, dataset: name|id, dataset_version?, metadata, server_evaluators: [evaluator names]}` → `{id, dataset_version, items: [...]}` (items paginated if large).
-2. SDK runs `task(item.input)` per item (and per repetition) under a root span named after the experiment, with `metadata['llmobs.experiment_id']`, `metadata['llmobs.dataset_item_id']`, `environment = "experiment"` (unless set). The trace is exported over OTLP as usual.
-3. SDK runs local scorers → `POST /scores` with `experiment_id`, `dataset_item_id`, `trace_id`.
-4. SDK `POST /experiments/{id}/items` (batches) `{dataset_item_id, repetition, trace_id, output, error, latency_ns}`.
-5. SDK `POST /experiments/{id}/finish`. The server enqueues one `eval_job` per (item × server evaluator) with `not_before = now + 10 s` (lets the trace flush), variables resolved with `expected`/`item.*` available. Status becomes `completed` when all jobs are done or failed.
+1. `POST /experiments` `{name, dataset: name|id, dataset_version?, description?, metadata?, repetitions?}` pins the version (default the latest) and answers `{experiment, items}` with the first 1,000 items; the SDK pages the rest with `GET /datasets/{dataset}/items?version=`. Items × repetitions ≤ 20,000 (D-J-10).
+2. SDK runs `task(item.input)` per item and repetition under a root span named after the experiment; every span of the run carries `llmobs.experiment.id`, `llmobs.dataset_item.id` (stored as `metadata['llmobs.experiment_id']`, `metadata['llmobs.dataset_item_id']`) and `environment = "experiment"` (D-J-16). The trace is exported over OTLP as usual.
+3. SDK runs local scorers → `POST /api/v1/scores` with `experiment_id`, `dataset_item_id` and a trace target (D-J-12).
+4. SDK `POST /experiments/{id}/items` (batches of ≤ 500) `{dataset_item_id, repetition, trace_id, output, error, latency_ns}`; the server copies the item's input and expected output from the pinned version, and a repost replaces the row (D-J-10).
+5. SDK flushes its spans and scores, then `POST /experiments/{id}/finish` `{error?}`: the status becomes `completed` (or `failed`).
 
 ### Results & comparison
 
-- Experiment page: table of items (input, expected, output, per-score values, latency, cost from the trace, link to trace); aggregates per score (mean, median, pass rate for booleans, distribution for categoricals); errors count.
-- Compare 2–4 experiments on the same dataset: aggregate deltas, per-item side by side with regressions highlighted (score dropped by > threshold or boolean flipped to fail).
-- API returns the same data for CI gating; the SDK exposes `result.summary()` and `result.assert_min("correctness", 0.8)` style helpers (10).
+- Experiment page: table of items (input, expected, output, per-score values, latency, cost from the trace, link to trace); aggregates per score (mean, median, min, max for numerics, pass rate for booleans, counts per label for categoricals); error count; latency mean, p50, p95; total cost (D-J-13).
+- Compare 2–4 experiments on the same dataset, the first being the baseline: aggregate deltas, per-item side by side with regressions highlighted (a score mean lower than the baseline's by more than `threshold`, default 0.1, or a new error); a warning when they pinned different versions (D-J-13).
+- The API returns the same data for CI gating; the SDK exposes `result.summary()` and `result.assert_min("correctness", 0.8)` (10).
+- Experiments created before the org's data-access window are hidden (D-J-14).
 
 ## Library
 
