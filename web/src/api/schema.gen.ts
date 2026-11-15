@@ -854,6 +854,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/sso": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the org's identity provider and domains
+         * @description The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).
+         */
+        get: operations["get_org_sso"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/provider": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the org's identity provider
+         * @description Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).
+         */
+        put: operations["put_org_sso_provider"];
+        post?: never;
+        /**
+         * Remove the org's identity provider
+         * @description Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).
+         */
+        delete: operations["delete_org_sso_provider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/usage": {
         parameters: {
             query?: never;
@@ -2542,6 +2586,11 @@ export interface components {
          */
         DeliveryStatus: "pending" | "sent" | "failed";
         /**
+         * @description Whether the org has proved the domain.
+         * @enum {string}
+         */
+        DomainStatus: "pending" | "verified";
+        /**
          * @description User summary plus the most recent sessions.
          *
          *     Spec 09 § Response shapes.
@@ -2962,6 +3011,11 @@ export interface components {
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
         };
+        /**
+         * @description Role given to people who join through the org's provider (D-P-56).
+         * @enum {string}
+         */
+        JitRole: "viewer" | "member";
         /**
          * @description One headline number.
          *
@@ -3479,6 +3533,76 @@ export interface components {
          * @enum {string}
          */
         OrgRole: "owner" | "admin" | "member" | "viewer";
+        /** @description `GET /api/v1/orgs/{org}/sso` and every settings write. */
+        OrgSso: {
+            /** @description The redirect URI to register at the identity provider. */
+            callback_url: string;
+            /** @description Ordered by domain. */
+            domains: components["schemas"]["OrgSsoDomain"][];
+            /** @description The provider, when the org has one. */
+            provider?: components["schemas"]["OrgSsoProvider"];
+        };
+        /** @description One email domain of the org and how to prove it. */
+        OrgSsoDomain: {
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Lowercase domain name. */
+            domain: string;
+            /**
+             * Format: uuid
+             * @description The domain row id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last lookup, found or not. Omitted before the first one.
+             */
+            last_checked_at?: string;
+            /** @description Pending or verified. */
+            status: components["schemas"]["DomainStatus"];
+            /** @description TXT record name, `_llmobs-verify.<domain>`. */
+            txt_name: string;
+            /** @description TXT record value, `llmobs-verify=<token>`. */
+            txt_value: string;
+            /**
+             * Format: date-time
+             * @description When the TXT record was found. Omitted while pending.
+             */
+            verified_at?: string;
+        };
+        /** @description The org's identity provider. The client secret is write-only. */
+        OrgSsoProvider: {
+            /** @description The OAuth client id. */
+            client_id: string;
+            /**
+             * Format: date-time
+             * @description Creation time.
+             */
+            created_at: string;
+            /** @description Shown on the login page. */
+            display_name: string;
+            /** @description Discovery sends users to this provider (D-P-57). */
+            enabled: boolean;
+            /** @description Password and other sign-ins are refused for the org's domains (D-P-58). */
+            enforced: boolean;
+            /** @description The OIDC issuer URL. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+            /**
+             * Format: date-time
+             * @description The last successful sign-in through the provider. Absent before the first one.
+             */
+            last_login_at?: string;
+            /**
+             * Format: date-time
+             * @description Last change to the settings.
+             */
+            updated_at: string;
+        };
         /** @description `GET /api/v1/orgs/{org}/usage`. */
         OrgUsage: {
             /** @description Days with usage, oldest first. Days without usage are absent. */
@@ -3672,6 +3796,19 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
+        PutOrgSsoProvider: {
+            /** @description The OAuth client id; 1 to 255 characters. */
+            client_id: string;
+            /** @description Required when creating, and when the issuer or client id changes; omit to keep it. */
+            client_secret?: string;
+            /** @description Shown on the login page; 1 to 100 characters. */
+            display_name: string;
+            /** @description The OIDC issuer URL; `https`, or `http` on a loopback host. */
+            issuer: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+        };
         /** @description `PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential. */
         PutOrgTokenRequest: {
             /** @description A signed `kind: org` token. Never logged. */
@@ -8597,6 +8734,212 @@ export interface operations {
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_sso: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgSsoProvider"];
+            };
+        };
+        responses: {
+            /** @description The saved SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_sso_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The provider is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {

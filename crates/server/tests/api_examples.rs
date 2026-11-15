@@ -31,6 +31,7 @@ use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, Pers
 use llmobs_server::api::members::{OrgMember, ProjectMember};
 use llmobs_server::api::metrics::MetricsResponse;
 use llmobs_server::api::openapi::openapi;
+use llmobs_server::api::org_sso::OrgSso;
 use llmobs_server::api::payload::Payload;
 use llmobs_server::api::saved_views::SavedView;
 use llmobs_server::api::schema::SchemaResponse;
@@ -538,6 +539,7 @@ fn generated_files_roundtrip() {
             | "post_admin_user"
             | "get_admin_settings"
             | "get_admin_license" => {}
+            "get_org_sso" => roundtrip::<OrgSso>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);

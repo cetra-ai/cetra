@@ -546,34 +546,7 @@ impl TestApp {
     /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
     /// session cookie for them.
     pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
-        let now = self.state.clock.now_ns();
-        let org_id = seeded.org_id;
-        let email = email.to_owned();
-        let id = self
-            .state
-            .meta
-            .write(move |conn| {
-                Box::pin(async move {
-                    let user = insert_user(
-                        conn,
-                        NewUser {
-                            email,
-                            name: None,
-                            password_hash: None,
-                            email_verified_at: None,
-                            is_instance_admin: false,
-                        },
-                        now,
-                    )
-                    .await?;
-                    add_org_member(conn, org_id, user.id, role, now).await?;
-                    Ok(user.id)
-                })
-            })
-            .await
-            .unwrap();
-        let cookie = session_cookie_via(self, id, None).await;
-        Member { id, cookie }
+        member_in_org(self, seeded.org_id, email, role).await
     }
 
     /// A personal access token for `user_id`, returned as its plaintext: scope `read`, plus
@@ -1158,4 +1131,78 @@ impl Write for LogBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// A new user `email` with org role `role` in `org`, and a session cookie for them.
+pub(crate) async fn member_in_org(app: &TestApp, org: OrgId, email: &str, role: OrgRole) -> Member {
+    let now = app.state.clock.now_ns();
+    let email = email.to_owned();
+    let id = app
+        .state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let user = insert_user(
+                    conn,
+                    NewUser {
+                        email,
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: None,
+                        is_instance_admin: false,
+                    },
+                    now,
+                )
+                .await?;
+                add_org_member(conn, org, user.id, role, now).await?;
+                Ok(user.id)
+            })
+        })
+        .await
+        .unwrap();
+    let cookie = session_cookie_via(app, id, None).await;
+    Member { id, cookie }
+}
+
+/// A second org `slug` (name = slug) with a new non-admin owner `owner_email` and that owner's
+/// session.
+pub(crate) async fn second_org(app: &TestApp, slug: &str, owner_email: &str) -> (OrgId, Member) {
+    let org = OrgId::new_v7();
+    let now = app.state.clock.now_ns();
+    let slug = slug.to_owned();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                insert_org(conn, org, &slug, &slug, now).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    let owner = member_in_org(app, org, owner_email, OrgRole::Owner).await;
+    (org, owner)
+}
+
+/// An org SSO test app: private egress allowed, a licence listing `org_sso`, `seed()`, and a
+/// non-admin owner `owner@acme.test` of the seeded org `acme`.
+pub(crate) async fn org_sso_app() -> (TestApp, Seeded, Member) {
+    org_sso_app_with(|_| {}).await
+}
+
+/// [`org_sso_app`] with `tweak` applied after its settings.
+pub(crate) async fn org_sso_app_with(
+    tweak: impl FnOnce(&mut ServerConfig),
+) -> (TestApp, Seeded, Member) {
+    let app = TestApp::with_config(move |config| {
+        config.security.allow_private_network_egress = true;
+        config.license_key = Some(crate::config::Secret::new(license_key(&["org_sso"])));
+        tweak(config);
+    })
+    .await;
+    let seeded = app.seed().await;
+    let owner = app
+        .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+        .await;
+    (app, seeded, owner)
 }

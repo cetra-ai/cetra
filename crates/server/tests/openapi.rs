@@ -70,6 +70,17 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_org_entitlements",
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
+    ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    (
+        "put",
+        "/api/v1/orgs/{org}/sso/provider",
+        "put_org_sso_provider",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/sso/provider",
+        "delete_org_sso_provider",
+    ),
     (
         "put",
         "/api/internal/v1/orgs/{org_id}/entitlements",
@@ -580,6 +591,9 @@ fn document_lint() {
                 | "get_admin_settings"
                 | "get_admin_license"
                 | "post_admin_settings_test_email"
+                | "get_org_sso"
+                | "put_org_sso_provider"
+                | "delete_org_sso_provider"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -684,8 +698,11 @@ fn document_lint() {
             || *id == "update_channel"
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
+            || *id == "put_org_sso_provider"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "delete_org_sso_provider" {
+            expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {

@@ -4521,6 +4521,271 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/sso": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's identity provider and domains",
+        "description": "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+        "operationId": "get_org_sso",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/provider": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Save the org's identity provider",
+        "description": "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+        "operationId": "put_org_sso_provider",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOrgSsoProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The saved SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Remove the org's identity provider",
+        "description": "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+        "operationId": "delete_org_sso_provider",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The provider is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/usage": {
       "get": {
         "tags": [
@@ -12804,6 +13069,14 @@
           "failed"
         ]
       },
+      "DomainStatus": {
+        "type": "string",
+        "description": "Whether the org has proved the domain.",
+        "enum": [
+          "pending",
+          "verified"
+        ]
+      },
       "EndUserDetail": {
         "type": "object",
         "description": "User summary plus the most recent sessions.\n\nSpec 09 § Response shapes.",
@@ -13655,6 +13928,14 @@
             "description": "Role granted on accept."
           }
         }
+      },
+      "JitRole": {
+        "type": "string",
+        "description": "Role given to people who join through the org's provider (D-P-56).",
+        "enum": [
+          "viewer",
+          "member"
+        ]
       },
       "Kpi": {
         "type": "object",
@@ -14588,6 +14869,136 @@
           "viewer"
         ]
       },
+      "OrgSso": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/sso` and every settings write.",
+        "required": [
+          "callback_url",
+          "domains"
+        ],
+        "properties": {
+          "callback_url": {
+            "type": "string",
+            "description": "The redirect URI to register at the identity provider."
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgSsoDomain"
+            },
+            "description": "Ordered by domain."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/OrgSsoProvider",
+            "description": "The provider, when the org has one."
+          }
+        }
+      },
+      "OrgSsoDomain": {
+        "type": "object",
+        "description": "One email domain of the org and how to prove it.",
+        "required": [
+          "id",
+          "domain",
+          "status",
+          "txt_name",
+          "txt_value",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "domain": {
+            "type": "string",
+            "description": "Lowercase domain name."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The domain row id."
+          },
+          "last_checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last lookup, found or not. Omitted before the first one."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DomainStatus",
+            "description": "Pending or verified."
+          },
+          "txt_name": {
+            "type": "string",
+            "description": "TXT record name, `_llmobs-verify.<domain>`."
+          },
+          "txt_value": {
+            "type": "string",
+            "description": "TXT record value, `llmobs-verify=<token>`."
+          },
+          "verified_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the TXT record was found. Omitted while pending."
+          }
+        }
+      },
+      "OrgSsoProvider": {
+        "type": "object",
+        "description": "The org's identity provider. The client secret is write-only.",
+        "required": [
+          "display_name",
+          "issuer",
+          "client_id",
+          "enabled",
+          "enforced",
+          "jit_role",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The OAuth client id."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Shown on the login page."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Discovery sends users to this provider (D-P-57)."
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "Password and other sign-ins are refused for the org's domains (D-P-58)."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OIDC issuer URL."
+          },
+          "jit_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "description": "Role of people who join through the provider."
+          },
+          "last_login_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The last successful sign-in through the provider. Absent before the first one."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last change to the settings."
+          }
+        }
+      },
       "OrgUsage": {
         "type": "object",
         "description": "`GET /api/v1/orgs/{org}/usage`.",
@@ -15031,6 +15442,39 @@
           "viewer",
           "none"
         ]
+      },
+      "PutOrgSsoProvider": {
+        "type": "object",
+        "description": "`PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.",
+        "required": [
+          "display_name",
+          "issuer",
+          "client_id",
+          "jit_role"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The OAuth client id; 1 to 255 characters."
+          },
+          "client_secret": {
+            "type": "string",
+            "description": "Required when creating, and when the issuer or client id changes; omit to keep it."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Shown on the login page; 1 to 100 characters."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OIDC issuer URL; `https`, or `http` on a loopback host."
+          },
+          "jit_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "description": "Role of people who join through the provider."
+          }
+        },
+        "additionalProperties": false
       },
       "PutOrgTokenRequest": {
         "type": "object",

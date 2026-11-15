@@ -69,6 +69,9 @@ use super::keys::{
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::org_sso::{
+    DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -165,6 +168,12 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<JitRole>();
+    set.insert::<OrgSsoProvider>();
+    set.insert::<DomainStatus>();
+    set.insert::<OrgSsoDomain>();
+    set.insert::<OrgSso>();
+    set.insert::<PutOrgSsoProvider>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -656,6 +665,7 @@ fn paths() -> Paths {
     let paths = auth_paths(paths);
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
+    let paths = org_sso_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -1049,6 +1059,70 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             "/api/v1/me/password",
             PathItem::new(HttpMethod::Post, password),
         )
+}
+
+fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let org_param = path_string("org", "Org UUID or slug.");
+    let get = operation(
+        "get_org_sso",
+        "orgs",
+        "Read the org's identity provider and domains",
+    )
+    .description(Some(
+        "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The org's SSO settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put = operation(
+        "put_org_sso_provider",
+        "orgs",
+        "Save the org's identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_sso_provider",
+        "orgs",
+        "Remove the org's identity provider",
+    )
+    .description(Some(
+        "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![org_param]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The provider is removed.")
+            .build(),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let mut provider = PathItem::new(HttpMethod::Put, put);
+    provider.delete = Some(delete);
+    paths
+        .path(
+            "/api/v1/orgs/{org}/sso",
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path("/api/v1/orgs/{org}/sso/provider", provider)
 }
 
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {

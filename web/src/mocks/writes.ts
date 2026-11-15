@@ -16,6 +16,7 @@ import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connecti
 import meDocument from "../../../fixtures/api/static/me.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
+import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
@@ -61,6 +62,12 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "delete_org_member", method: "delete", path: "/api/v1/orgs/{org}/members/{user}" },
   { operationId: "post_org_invite", method: "post", path: "/api/v1/orgs/{org}/invites" },
   { operationId: "delete_org_invite", method: "delete", path: "/api/v1/orgs/{org}/invites/{id}" },
+  { operationId: "put_org_sso_provider", method: "put", path: "/api/v1/orgs/{org}/sso/provider" },
+  {
+    operationId: "delete_org_sso_provider",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/provider",
+  },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -261,6 +268,8 @@ const RESPONSES: Record<string, Respond> = {
   },
   delete_org_member: () => noContent(),
   delete_org_invite: () => noContent(),
+  put_org_sso_provider: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_provider: () => noContent(),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {

@@ -18,6 +18,7 @@ use crate::http::AppState;
 use crate::meta::{MetaDb, MetaError};
 
 pub(crate) mod dns;
+pub(crate) mod settings;
 pub(crate) mod store;
 
 /// A verified domain's org and its provider's flags.
