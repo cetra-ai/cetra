@@ -49,7 +49,7 @@
               "name": "invocation",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590099000000",
+              "endTimeUnixNano": "1767225590174000000",
               "attributes": [],
               "droppedAttributesCount": 0,
               "events": [],
@@ -66,8 +66,8 @@
               "flags": 256,
               "name": "invoke_agent weather_agent",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590099000000",
+              "startTimeUnixNano": "1767225590019000000",
+              "endTimeUnixNano": "1767225590173000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -109,8 +109,8 @@
               "flags": 256,
               "name": "call_llm",
               "kind": 1,
-              "startTimeUnixNano": "1767225590020000000",
-              "endTimeUnixNano": "1767225590098000000",
+              "startTimeUnixNano": "1767225590083000000",
+              "endTimeUnixNano": "1767225590172000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",
@@ -206,8 +206,8 @@
               "flags": 256,
               "name": "generate_content gemini-2.5-flash",
               "kind": 1,
-              "startTimeUnixNano": "1767225590020000000",
-              "endTimeUnixNano": "1767225590096000000",
+              "startTimeUnixNano": "1767225590084000000",
+              "endTimeUnixNano": "1767225590170000000",
               "attributes": [
                 {
                   "key": "gen_ai.system",

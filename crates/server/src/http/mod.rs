@@ -84,6 +84,10 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// The eval queue's in-memory state (D-I-6).
+    pub(crate) eval: crate::eval::EvalQueue,
+    /// Traces the online-rule trigger waits on (D-I-8).
+    pub(crate) pending: crate::eval::pending::PendingTraces,
     /// Per-org span rate (D-P-19, D-P-35).
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
 }

@@ -190,19 +190,19 @@ pub(crate) struct TestApp {
 impl TestApp {
     /// Defaults, `data_dir` in a temp directory, `public_url` `http://localhost:8080`.
     pub(crate) async fn new() -> Self {
-        Self::open(|_| {}, None, None, false, None, None).await
+        Self::open(|_| {}, None, None, false, None, None, None).await
     }
 
     /// `tweak` runs before storage and `meta.db` open.
     ///
     /// `storage.data_dir` is then copied from the top-level `data_dir`.
     pub(crate) async fn with_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, None).await
+        Self::open(tweak, None, None, false, None, None, None).await
     }
 
     /// Same as [`Self::new`] with extra routes inside the shared layers.
     pub(crate) async fn with_routes(routes: Router<AppState>) -> Self {
-        Self::open(|_| {}, Some(routes), None, false, None, None).await
+        Self::open(|_| {}, Some(routes), None, false, None, None, None).await
     }
 
     /// [`Self::with_config`] and [`Self::with_routes`] together.
@@ -210,7 +210,7 @@ impl TestApp {
         tweak: impl FnOnce(&mut ServerConfig),
         routes: Router<AppState>,
     ) -> Self {
-        Self::open(tweak, Some(routes), None, false, None, None).await
+        Self::open(tweak, Some(routes), None, false, None, None, None).await
     }
 
     /// Serves this app's router on `127.0.0.1` at an ephemeral port, in a background task that
@@ -234,17 +234,23 @@ impl TestApp {
 
     /// The given route table instead of the server's, with the same layers.
     pub(crate) async fn with_route_table(routes: Vec<RouteDef>) -> Self {
-        Self::open(|_| {}, None, Some(routes), false, None, None).await
+        Self::open(|_| {}, None, Some(routes), false, None, None, None).await
+    }
+
+    /// [`Self::new`] with a trace load waiting `permit_wait` for a permit (a job's `Saturated`
+    /// requeue, § I3.6), so a test does not wait 30 s.
+    pub(crate) async fn with_permit_wait(permit_wait: Duration) -> Self {
+        Self::open(|_| {}, None, None, false, None, None, Some(permit_wait)).await
     }
 
     /// The stub mailer. [`Self::sent`] reads what it accepted.
     pub(crate) async fn with_mailer() -> Self {
-        Self::open(|_| {}, None, None, true, None, None).await
+        Self::open(|_| {}, None, None, true, None, None, None).await
     }
 
     /// [`Self::with_config`] with the stub mailer.
     pub(crate) async fn with_mailer_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, true, None, None).await
+        Self::open(tweak, None, None, true, None, None, None).await
     }
 
     /// An app whose licence lists `features`.
@@ -258,12 +264,12 @@ impl TestApp {
 
     /// [`Self::with_config`] with GitHub's endpoints pointed at `base`.
     pub(crate) async fn with_github(base: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, Some(base), None).await
+        Self::open(tweak, None, None, false, Some(base), None, None).await
     }
 
     /// [`Self::with_config`] with Google's issuer pointed at `issuer`.
     pub(crate) async fn with_google(issuer: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, Some(issuer)).await
+        Self::open(tweak, None, None, false, None, Some(issuer), None).await
     }
 
     /// Messages the stub mailer accepted. Empty when the stub is not installed.
@@ -282,6 +288,7 @@ impl TestApp {
         stub_mailer: bool,
         github_base: Option<&str>,
         google_issuer: Option<&str>,
+        permit_wait: Option<Duration>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = default_config(dir.path());
@@ -339,6 +346,7 @@ impl TestApp {
         )
         .await
         .expect("stored org tokens load");
+        let eval = crate::eval::EvalQueue::new(config.eval.workers);
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -365,8 +373,12 @@ impl TestApp {
             connections: crate::eval::connection::ConnectionCache::default(),
             entitlements,
             ingest_rate: crate::entitlements::rate::IngestRate::default(),
-            trace_loads: crate::eval::trace_load::TraceLoads::default(),
+            trace_loads: crate::eval::trace_load::TraceLoads::new(
+                permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
+            ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
+            eval,
+            pending: crate::eval::pending::PendingTraces::default(),
         });
         let router = if let Some(table) = table {
             serve_router(state.clone(), table)
@@ -679,6 +691,7 @@ impl TestApp {
                 &self.state.storage,
                 &self.state.usage,
                 &self.state.live,
+                &self.state.pending,
                 crate::ingest::CommitTarget {
                     org_id: project.org_id,
                     project_id: project.id,

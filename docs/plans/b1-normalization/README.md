@@ -118,7 +118,8 @@ pub struct PriceTier { /* min_input_tokens + prices */ }
 impl PriceTable { pub fn new(rows: Vec<PriceRow>) -> Result<Self, PriceError>; }
 pub fn builtin_price_rows() -> Vec<PriceRow>;
 
-pub enum DecodeError { /* thiserror */ }
+pub enum DecodeError { /* thiserror; Json { line, column, category: JsonErrorCategory } */ }
+pub enum JsonErrorCategory { Syntax, Data, Eof }
 pub enum PriceError { /* thiserror */ }
 ```
 

@@ -139,8 +139,9 @@ export function scoresQuery(
   org: string,
   project: string,
   query: {
-    trace_id: string;
+    trace_id?: string;
     span_id?: string;
+    rule_id?: string;
     target?: Schema<"ScoreTargetKind">;
     limit?: number;
   },

@@ -97,6 +97,7 @@ async fn list_traces(
         storage::TraceListRequest {
             filter: params.filter.as_deref(),
             search: params.search.as_deref(),
+            strict_exclusions: false,
             scope,
             sort: trace_sort(params.sort),
             order: sort_order(params.order),
@@ -132,6 +133,7 @@ async fn list_spans(
         storage::SpanListRequest {
             filter: params.filter.as_deref(),
             search: params.search.as_deref(),
+            strict_exclusions: false,
             scope,
             sort: span_sort(params.sort),
             order: sort_order(params.order),

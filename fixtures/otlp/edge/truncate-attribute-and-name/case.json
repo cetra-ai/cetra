@@ -1,5 +1,5 @@
 {
-  "description": "Cuts the span name, status message, one attribute, one resource attribute, and one event's attributes. A long link attribute and a long event name stay whole.",
+  "description": "Cuts the span name, status message, one attribute, one resource attribute, one event's name and attributes, and one link's attributes.",
   "origin": "hand_written",
   "spec_refs": [
     "02 § Truncation"

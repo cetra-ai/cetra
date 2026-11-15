@@ -394,6 +394,32 @@ def test_http_date_retry_after_uses_the_default(score_runtime: ScoreSetup) -> No
     assert waited == [1.0]
 
 
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("5", 5.0),
+        (" 5 ", 5.0),  # surrounding whitespace is ignored, as in the TypeScript SDK
+        ("+5", 1.0),  # not ASCII digits: the default backoff
+        ("1_0", 1.0),
+        ("\uff15", 1.0),  # fullwidth digit five
+        ("-1", 1.0),
+        ("", 1.0),
+        ("9" * 400, 30.0),  # a huge integer converts, then is capped
+        ("9" * 5000, 30.0),  # more digits than int() converts: capped, not the default
+    ],
+)
+def test_retry_after_accepts_only_ascii_digits(
+    score_runtime: ScoreSetup, header: str, expected: float
+) -> None:
+    recorder, runtime = score_runtime
+    waited: list[float] = []
+    runtime.scores.wait = record_waits(waited)
+    recorder.queue_response(429, {"Retry-After": header}, b"")
+    assert llmobs.score(name="ra", value=1, session_id="s") is not None
+    llmobs.flush()
+    assert waited == [expected]
+
+
 def test_400_drops_the_batch_at_once(
     score_runtime: ScoreSetup, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -151,7 +151,7 @@ Fixtures (hand-written, D113):
 - `genai/cache-write-semconv` (`gen_ai.usage.cache_write.input_tokens` plus `cache_read`);
 - `genai/underscore-cache-keys` (OpenLLMetry-style `gen_ai.usage.cache_read_input_tokens`);
 - `vercel/v6-token-details` (`inputTokenDetails`, `outputTokenDetails`);
-- `vercel/v5-anthropic-exclusive-input`: `notes` says "pinned by hand from LangWatch's finding; re-check against a B2 capture";
+- `vercel/v5-anthropic-exclusive-input`: `notes` says it was pinned by hand from LangWatch's finding and confirmed by the capture `vercel/v5-anthropic-cache`;
 - `edge/input-excludes-cache-safety-net`;
 - `edge/modality-tokens-not-summed`;
 - `genai/ttft-time-to-first-chunk`;

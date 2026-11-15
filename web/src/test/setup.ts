@@ -7,6 +7,7 @@ import { savedViewHandlers, seedSavedViews } from "../mocks/saved-views";
 import { installTestEventSource } from "./event-source";
 import { installLayout, restoreLayout } from "./layout";
 import { installMatchMedia, resetMatchMedia } from "./match-media";
+import { onlineRulePreviewHandler } from "./online-rule-preview";
 
 // Under CPU load the first render of a file can take several seconds.
 configure({ asyncUtilTimeout: 5_000 });
@@ -55,7 +56,7 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 }
 
 beforeEach(() => {
-  server.use(...savedViewHandlers(seedSavedViews()));
+  server.use(...savedViewHandlers(seedSavedViews()), onlineRulePreviewHandler());
 });
 
 afterEach(() => {
