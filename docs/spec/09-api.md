@@ -181,7 +181,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `llmobs admin create-user / reset-password / list-users / rotate-encryption-key / check` | local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3) |
 | `llmobs admin reapply-deletions --from <data_dir>` | after a backup restore: copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`; the server redoes them (D-M-9, 12 § Backups) |
 | `llmobs admin compact --project … --day …` · `llmobs admin wal-inspect` · `llmobs admin gc-orphans` | maintenance; `gc-orphans` lists the object store and deletes objects the catalog doesn't know (after a restore, 12 § Backups) |
-| `llmobs login --url …` · `llmobs logout` | PAT login |
+| `llmobs login --url …` · `llmobs logout` | PAT login; the token expires after 90 days, so run `llmobs login` again then (08 § CLI login) |
 | `llmobs query "<sql>" \| --file <path> --project … [--param k=v]… [--from … --to … \| --since 24h] [--limit n] [--timeout-ms n] [--format table\|csv\|json\|ndjson\|parquet] [-o <path>]` | SQL console from the terminal; CSV, NDJSON and Parquet stream through the export path (D-H-12) |
 | `llmobs traces list [--filter …] [--search …] [--from …] [--to …] [--since 24h] [--sort …] [--order …] [--limit n] [--cursor …] [--include-eval] [--include-experiments] [--format table\|json]` · `llmobs traces get <id> [--around <time>] [--format tree\|json]` | inspect traces |
 | `llmobs projects list [--format table\|json]` | projects the token can read |

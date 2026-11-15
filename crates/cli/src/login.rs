@@ -1,9 +1,10 @@
 //! `llmobs login` and `llmobs logout` (spec 08, D140).
 //!
-//! The callback server accepts `GET /callback` with a matching `state`. Either the
-//! `token` parses as a personal access token, or `error=access_denied` says the user
-//! cancelled in the browser. The token is checked with `GET /api/auth/me` and stored in
-//! the credentials file. It is never logged.
+//! The callback server accepts two requests with a matching `state`. The first is the
+//! browser's form POST to `/callback`, whose body carries the `token`. The second is the
+//! `GET /callback?error=access_denied` the browser sends when the user cancels. A GET
+//! that carries a token is refused, so the token never travels in a URL. The token is
+//! checked with `GET /api/auth/me` and stored in the credentials file. It is never logged.
 
 use std::fs;
 use std::io::{self, Write};
@@ -21,9 +22,13 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::credentials::{SavedToken, chosen_server, load, save, server_url};
 
 const WAIT: Duration = Duration::from_secs(5 * 60);
-const READ_LIMIT: usize = 8192;
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// The largest request head (request line and headers) the callback reads.
+const HEAD_LIMIT: usize = 8192;
+/// The largest form body the callback accepts. A token form is far smaller.
+const BODY_LIMIT: usize = 8192;
 
-const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>You can close this window.</p></body></html>";
+const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>You're signed in. Return to the terminal.</p></body></html>";
 const CANCELLED_PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>llmobs</title></head><body><p>Sign-in cancelled. You can close this window.</p></body></html>";
 
 /// What one callback request means for the wait.
@@ -34,7 +39,18 @@ enum Callback {
     Refused,
 }
 
+/// The parts of a callback request head that the wait needs.
+struct Head {
+    method: String,
+    target: String,
+    content_type: Option<String>,
+    content_length: Option<usize>,
+}
+
 /// `llmobs login`. `output` receives the browser URL, one line.
+///
+/// The token the browser creates expires after 90 days. When it does, run
+/// `llmobs login` again.
 ///
 /// # Errors
 ///
@@ -163,11 +179,10 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> anyho
 }
 
 async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Callback {
-    let Some(line) = read_request_line(&mut socket).await else {
-        return Callback::Refused;
+    let callback = match read_head(&mut socket).await.as_deref().and_then(parse_head) {
+        Some(head) => callback_for(&mut socket, &head, expected_state).await,
+        None => Callback::Refused,
     };
-    drain_headers(&mut socket).await;
-    let callback = callback_from_request_line(&line, expected_state);
     match &callback {
         Callback::Token(_) => {
             let _ = respond(&mut socket, 200, "OK", "text/html; charset=utf-8", PAGE).await;
@@ -196,12 +211,13 @@ async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Callbac
     callback
 }
 
-async fn read_request_line(socket: &mut TcpStream) -> Option<String> {
+/// Reads the request head up to the blank line. The body, if any, is left unread.
+async fn read_head(socket: &mut TcpStream) -> Option<String> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if buf.len() >= READ_LIMIT {
+    let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
+    while !buf.ends_with(b"\r\n\r\n") {
+        if buf.len() >= HEAD_LIMIT {
             return None;
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -209,44 +225,104 @@ async fn read_request_line(socket: &mut TcpStream) -> Option<String> {
             return None;
         }
         match tokio::time::timeout(remaining, socket.read(&mut byte)).await {
-            Ok(Ok(1)) => {
-                buf.push(byte[0]);
-                if byte[0] == b'\n' {
-                    return String::from_utf8(buf).ok();
-                }
-            }
+            Ok(Ok(1)) => buf.push(byte[0]),
             _ => return None,
         }
     }
+    String::from_utf8(buf).ok()
 }
 
-async fn drain_headers(socket: &mut TcpStream) {
-    let mut seen_cr = false;
-    let mut blank = 0;
-    let mut byte = [0u8; 1];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    for _ in 0..READ_LIMIT {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return;
+fn parse_head(text: &str) -> Option<Head> {
+    let mut lines = text.split("\r\n");
+    let mut parts = lines.next()?.split_whitespace();
+    let method = parts.next()?.to_owned();
+    let target = parts.next()?.to_owned();
+    let mut content_type = None;
+    let mut content_length = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-type" => content_type = Some(value.to_owned()),
+            "content-length" => content_length = Some(value.parse::<usize>().ok()?),
+            _ => {}
         }
-        match tokio::time::timeout(remaining, socket.read(&mut byte)).await {
-            Ok(Ok(1)) => match byte[0] {
-                b'\r' => seen_cr = true,
-                b'\n' if seen_cr => {
-                    blank += 1;
-                    seen_cr = false;
-                    if blank == 2 {
-                        return;
-                    }
-                }
-                _ => {
-                    seen_cr = false;
-                    blank = 0;
-                }
-            },
-            _ => return,
+    }
+    Some(Head {
+        method,
+        target,
+        content_type,
+        content_length,
+    })
+}
+
+async fn callback_for(socket: &mut TcpStream, head: &Head, expected_state: &str) -> Callback {
+    let (path, query) = match head.target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (head.target.as_str(), None),
+    };
+    if path != "/callback" {
+        return Callback::Refused;
+    }
+    if head.method.eq_ignore_ascii_case("GET") {
+        // A GET only ever carries the cancel. A token in a URL is refused.
+        let Some(fields) = query.and_then(form_fields) else {
+            return Callback::Refused;
+        };
+        if first_field(&fields, "state") == Some(expected_state)
+            && first_field(&fields, "error") == Some("access_denied")
+        {
+            return Callback::Cancelled;
         }
+        return Callback::Refused;
+    }
+    if !head.method.eq_ignore_ascii_case("POST")
+        || query.is_some()
+        || !is_form(head.content_type.as_deref())
+    {
+        return Callback::Refused;
+    }
+    // The length is checked before anything is read, so an oversized body is never buffered.
+    let Some(length) = head.content_length.filter(|length| *length <= BODY_LIMIT) else {
+        return Callback::Refused;
+    };
+    let Some(body) = read_body(socket, length).await else {
+        return Callback::Refused;
+    };
+    let Some(fields) = std::str::from_utf8(&body).ok().and_then(form_fields) else {
+        return Callback::Refused;
+    };
+    token_callback(&fields, expected_state)
+}
+
+async fn read_body(socket: &mut TcpStream, length: usize) -> Option<Vec<u8>> {
+    let mut body = vec![0u8; length];
+    tokio::time::timeout(READ_TIMEOUT, socket.read_exact(&mut body))
+        .await
+        .ok()?
+        .ok()?;
+    Some(body)
+}
+
+fn is_form(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|value| {
+        value.split(';').next().is_some_and(|media| {
+            media
+                .trim()
+                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        })
+    })
+}
+
+fn token_callback(fields: &[(String, String)], expected_state: &str) -> Callback {
+    if first_field(fields, "state") != Some(expected_state) {
+        return Callback::Refused;
+    }
+    match first_field(fields, "token") {
+        Some(token) if is_personal_token(token) => Callback::Token(token.to_owned()),
+        _ => Callback::Refused,
     }
 }
 
@@ -264,32 +340,6 @@ async fn respond(
     socket.write_all(header.as_bytes()).await?;
     socket.write_all(body.as_bytes()).await?;
     socket.shutdown().await
-}
-
-fn callback_from_request_line(line: &str, expected_state: &str) -> Callback {
-    let mut parts = line.split_whitespace();
-    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
-        return Callback::Refused;
-    };
-    let Some((path, query)) = target.split_once('?') else {
-        return Callback::Refused;
-    };
-    if !method.eq_ignore_ascii_case("GET") || path != "/callback" {
-        return Callback::Refused;
-    }
-    let Some(fields) = form_fields(query) else {
-        return Callback::Refused;
-    };
-    if first_field(&fields, "state") != Some(expected_state) {
-        return Callback::Refused;
-    }
-    if first_field(&fields, "error") == Some("access_denied") {
-        return Callback::Cancelled;
-    }
-    match first_field(&fields, "token") {
-        Some(token) if is_personal_token(token) => Callback::Token(token.to_owned()),
-        _ => Callback::Refused,
-    }
 }
 
 fn first_field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -408,6 +458,40 @@ fn browser_command(url: &str) -> Command {
 mod tests {
     use super::*;
     use crate::credentials::normalize_server_url;
+    use tokio::task::JoinHandle;
+
+    fn example_token() -> String {
+        format!(
+            "pat-{}-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+            llmobs_core::names::PRODUCT
+        )
+    }
+
+    /// Starts one callback wait on a free port and returns the port and the wait.
+    async fn start_wait(state: &'static str) -> (u16, JoinHandle<anyhow::Result<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (
+            port,
+            tokio::spawn(async move { wait_for_callback(listener, state).await }),
+        )
+    }
+
+    /// Writes one raw request to the callback and returns the whole response.
+    async fn send_raw(port: u16, request: &str) -> String {
+        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).into_owned()
+    }
+
+    fn form_post(body: &str) -> String {
+        format!(
+            "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
 
     #[test]
     fn a_personal_token_has_the_pat_shape() {
@@ -459,24 +543,13 @@ mod tests {
         assert!(!credentials.exists());
     }
 
-    /// Writes one raw request to the callback and returns the whole response.
-    async fn send_raw(port: u16, request: &[u8]) -> String {
-        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        socket.write_all(request).await.unwrap();
-        let mut response = Vec::new();
-        socket.read_to_end(&mut response).await.unwrap();
-        String::from_utf8_lossy(&response).into_owned()
-    }
-
     #[tokio::test]
     async fn access_denied_ends_the_wait_with_the_cancel_error() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let waiter = tokio::spawn(async move { wait_for_callback(listener, "state-a").await });
+        let (port, waiter) = start_wait("state-a").await;
 
         let response = send_raw(
             port,
-            b"GET /callback?error=access_denied&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /callback?error=access_denied&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -488,26 +561,92 @@ mod tests {
 
     #[tokio::test]
     async fn access_denied_with_a_wrong_state_keeps_waiting() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let token = format!(
-            "pat-{}-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
-            llmobs_core::names::PRODUCT
-        );
-        let waiter = tokio::spawn(async move { wait_for_callback(listener, "state-a").await });
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
 
         let refused = send_raw(
             port,
-            b"GET /callback?error=access_denied&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /callback?error=access_denied&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
         )
         .await;
         assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
         assert!(!refused.contains("Sign-in cancelled"));
 
-        let request = format!(
-            "GET /callback?token={token}&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[tokio::test]
+    async fn a_form_post_with_the_token_is_accepted() {
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
+
+        let response = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("You're signed in. Return to the terminal."));
+        assert!(!response.contains(&token));
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[tokio::test]
+    async fn a_get_carrying_a_token_is_refused_and_the_wait_continues() {
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
+
+        let refused = send_raw(
+            port,
+            &format!(
+                "GET /callback?token={token}&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            ),
+        )
+        .await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+        assert!(!refused.contains(&token));
+
+        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[tokio::test]
+    async fn a_form_post_with_a_wrong_state_is_refused_and_the_wait_continues() {
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
+
+        let refused = send_raw(port, &form_post(&format!("token={token}&state=wrong"))).await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+        assert!(!refused.contains(&token));
+
+        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
+        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_or_unframed_post_is_refused_without_reading_it() {
+        let (port, waiter) = start_wait("state-a").await;
+        let token = example_token();
+
+        // The length is over the cap. Only the head is sent, so nothing is read.
+        let oversized = format!(
+            "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
+            BODY_LIMIT + 1
         );
-        let accepted = send_raw(port, request.as_bytes()).await;
+        let refused = send_raw(port, &oversized).await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+
+        // No Content-Length at all.
+        let unframed = "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n";
+        let refused = send_raw(port, unframed).await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+
+        // Not a form.
+        let wrong_type = "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n";
+        let refused = send_raw(port, wrong_type).await;
+        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
+
+        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
         assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
         assert_eq!(waiter.await.unwrap().unwrap(), token);
     }
@@ -620,11 +759,24 @@ mod tests {
         assert_eq!(created.status(), 201, "{}", created.status());
         let created: serde_json::Value = created.json().await.unwrap();
         let secret = created["secret"].as_str().unwrap().to_owned();
+        let callback = format!("http://127.0.0.1:{callback_port}/callback");
+
+        // A token in a GET is refused and the wait goes on.
+        let in_url = client
+            .get(format!("{callback}?token={secret}&state={state}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(in_url.status(), 400);
+        assert!(!in_url.text().await.unwrap().contains(&secret));
 
         let wrong = client
-            .get(format!(
-                "http://127.0.0.1:{callback_port}/callback?token={secret}&state=wrong"
-            ))
+            .post(&callback)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(format!("token={secret}&state=wrong"))
             .send()
             .await
             .unwrap();
@@ -633,9 +785,12 @@ mod tests {
         assert!(!wrong_body.contains(&secret));
 
         let ok = client
-            .get(format!(
-                "http://127.0.0.1:{callback_port}/callback?token={secret}&state={state}"
-            ))
+            .post(&callback)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .body(format!("token={secret}&state={state}"))
             .send()
             .await
             .unwrap();

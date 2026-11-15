@@ -52,6 +52,8 @@ enum Command {
         url: String,
     },
     /// Save a personal access token for a server.
+    ///
+    /// The token expires after 90 days. Run `llmobs login` again when it does.
     Login {
         /// Server URL, for example `http://127.0.0.1:8080`.
         #[arg(long)]

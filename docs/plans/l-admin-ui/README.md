@@ -356,5 +356,5 @@ Then open `http://localhost:5173/acme/support-bot/settings/general` (port from V
 ## Notes for other tracks
 
 - **G (coordinator):** D-L-2 amends D-G-19. G's M5 no longer builds `/login` or the 401 handling; it checks L's pages against the real server. If G's M5 lands before L5, it must not add a second login page; it waits for L or uses L's branch.
-- **H (CLI):** send `host` to `/cli-auth` (D-L-9), and handle `error=access_denied` on the callback.
+- **H (CLI):** done. `llmobs login` sends `host` to `/cli-auth`, handles `error=access_denied` on the callback, and receives the token by form POST (D-L-9, spec 08). The token expires after 90 days.
 - **D owners (contract):** CG1–CG4 above.

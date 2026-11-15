@@ -13,6 +13,12 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
 
+### Changed
+
+- `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
+  the token stays out of browser history. A token created by the sign-in page expires after 90
+  days; run `llmobs login` again when it does.
+
 ### Fixed
 
 - `llmobs login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
