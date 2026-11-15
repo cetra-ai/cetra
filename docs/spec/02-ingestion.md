@@ -148,11 +148,11 @@ Every usage source declares whether its input count includes cache tokens and wh
 | GenAI `gen_ai.usage.*` | yes (semconv) | yes |
 | OpenInference `llm.token_count.*` | yes | yes |
 | Vercel v6 (`inputTokenDetails` present) | yes (`noCacheTokens` + cache) | yes |
-| Vercel ≤ v5 + provider `anthropic` | **no** (pinned by a captured fixture, D113) | yes |
+| Vercel ≤ v5 + provider `anthropic` | **no** (`vercel/v5-anthropic-cache`, D113) | yes |
 | Vercel other | yes | yes |
-| OpenLLMetry Anthropic | unverified (D113); treat as yes and rely on the safety net | yes |
+| OpenLLMetry Anthropic | yes (`openllmetry/anthropic-cache-tokens`: input 2100 = raw 100 + cache 1800 + 200, D113) | yes |
 | Gemini-native `usage_metadata` (`thoughts_token_count`) | yes | **no**: thoughts are outside the output, so add `reasoning` to the output |
-| `gen_ai.usage.*` on an ADK span | unverified (D113); treat as yes | unverified (D113); treat as yes |
+| `gen_ai.usage.*` on an ADK span | unverified (D113): no ADK capture has cache tokens; treat as yes | yes (`google_adk/agent-thoughts`: output 20 = candidates 14 + thoughts 6) |
 | Langfuse `usage_details` | the `input` key excludes `input_cached_tokens` / `cache_read_input_tokens`; the OpenAI `prompt_tokens` key includes cache (D-B1-1) | yes |
 
 The Vercel ≤ v5 + Anthropic rule keys on the span's `ai.*` attributes plus the normalized provider. It applies even when the count was read from `gen_ai.usage.input_tokens` on that same span, because Vercel mirrors its own count there.
