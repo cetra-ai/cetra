@@ -379,12 +379,16 @@ class ScoreQueue:
         if response is not None:
             header = response.headers.get("Retry-After")
             if header is not None:
-                try:
-                    seconds = int(header)
-                except ValueError:
-                    seconds = None  # an HTTP-date or any other value uses the default
-                if seconds is not None and seconds >= 0:
-                    return min(float(seconds), _RETRY_AFTER_CAP_S)
+                # Spec 10 (Score delivery): ASCII digits, surrounding whitespace ignored. "+5",
+                # "1_0" and fullwidth digits are not integers here, so they use the default.
+                value = header.strip()
+                if value.isascii() and value.isdigit():
+                    try:
+                        seconds = int(value)
+                    except ValueError:  # more digits than int() converts: far above the cap
+                        return _RETRY_AFTER_CAP_S
+                    # Cap before float(): a very long digit string must not overflow the conversion.
+                    return float(min(seconds, _RETRY_AFTER_CAP_S))
         return _RETRY_BACKOFF_S[attempt]
 
     def _post(self, batch: list[ScoreItem]) -> requests.Response | None:

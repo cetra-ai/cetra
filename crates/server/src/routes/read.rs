@@ -234,6 +234,7 @@ mod tests {
             TraceListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope,
                 sort: TraceSort::StartTime,
                 order: StorageSortOrder::Desc,

@@ -70,8 +70,8 @@ just check
 | P11 | `Show the month's units in admin entitlements` | `EntitlementsReport::month_units`, CLI line (D-P-32) | P10 |
 | P12 | `Lock time ranges beyond the data window` | `beyondWindow`, the picker lock (D-P-48) | P1 |
 | P13 | `Show the data window on the retention settings` | retention lock line, window note, Upgrade on 403 | P1 |
-| P14 | `Limit active online rules by the plan` (**pending**: waits for I's M3, PR #100) | **after I's M3**: `eval::rule_limit::limit` body | P11 and I's M3 |
-| P15 | `Show the online-rule limit upgrade state` (**pending**: waits for I's M3, PR #100) | **after I's M3**: Upgrade button on the rule form's `403 plan_limit` | P14 |
+| P14 | `Limit active online rules by the plan` (**done** by track I's M3) | **after I's M3**: `eval::rule_limit::limit` body | P11 and I's M3 |
+| P15 | `Show the online-rule limit upgrade state` (**done**) | **after I's M3**: Upgrade button on the rule form's `403 plan_limit` | P14 |
 | P16 | `Close out M4` (**done**) | dead-code attributes, specs check, roadmap row | all |
 
 P1–P11 run in order, one at a time (they edit the same server files and the generated contract). P12 and P13 touch only `web/` files that no server phase regenerates, plus spec 11 in two different bullets (P12 the Traces Header bullet, P13 the Settings Project bullet), so they do not conflict (`time-range-picker.tsx`, `lib/time-range.ts`, `settings/general.tsx`); each can run in parallel with P2–P11 in its own worktree, after P1. P14 and P15 start only once I's M3 is merged into `main`. P16 runs last.
@@ -760,7 +760,7 @@ Also check that P3/P4 reached I's code: `grep -rn "load_trace(\|open_query(" cra
 
 ## P14 — Active online-rule limit (D-P-23, D-I-32)
 
-**Pending: not done in this pass.** Track I's M3 (PR #100) is not merged; M4 is implemented except the online-rule limit, P14–P15, which waits for I's M3.
+**Done by track I's M3.** `rule_limit::limit` reads `max_active_online_rules`, and `routes::online_rules` tests the 403 with `set_limits`. Once I's M3 and M4 merged, the sweeper's read (`eval/trigger.rs`, now on the allow-list) and the preview and filter check in `routes/online_rules.rs` read through the org's window.
 
 - `eval/rule_limit.rs` `limit`: body `crate::entitlements::of(state, org).limits.max_active_online_rules`; parameters lose the `_`; doc: "The org's active-rule limit (D-I-32, D-P-23); `None` means no limit." Remove any dead-code attribute I left on it.
 - Test (`routes::online_rules::tests`): replace the M3 test that had to call the write helper with `Some(1)` (`the_active_rule_limit_refuses_create_and_enable`) by a route test: `set_limits({"max_active_online_rules": 1})`; create an enabled rule → 201; a second enabled → 403 `plan_limit`, detail "Your plan allows 1 active online rule."; created disabled → 201; enabling it → 403. Keep the unit tests of `check`.
@@ -769,7 +769,7 @@ Also check that P3/P4 reached I's code: `grep -rn "load_trace(\|open_query(" cra
 
 ## P15 — Online-rule upgrade state (D-P-15)
 
-**Pending: not done in this pass.** Waits for I's M3 (PR #100), like P14.
+**Done.**
 
 In the rule form's `403 plan_limit` branch, render `<UpgradeButton url={useOrgEntitlements(org).upgradeUrl} />` after the existing alert text. Its existing `plan_limit` test also expects the "Upgrade" link to the fixture's `upgrade_url`.
 

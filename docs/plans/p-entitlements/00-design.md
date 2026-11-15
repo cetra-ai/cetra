@@ -15,7 +15,7 @@ This document holds the decisions, the architecture, the interfaces and the mile
 - [`01-m1-open-core-license.md`](01-m1-open-core-license.md): written.
 - [`02-m2-org-entitlements.md`](02-m2-org-entitlements.md): written.
 - [`03-m3-units-and-limits.md`](03-m3-units-and-limits.md): written.
-- [`04-m4-window-and-gates.md`](04-m4-window-and-gates.md): written; implemented except the online-rule limit, P14–P15, which waits for I's M3.
+- [`04-m4-window-and-gates.md`](04-m4-window-and-gates.md): written; implemented.
 - [`05-m5-org-sso.md`](05-m5-org-sso.md): written.
 
 **Read first:** `AGENTS.md`; `docs/mvp-decisions.md` (D9, D57, D136–D143, D169–D179, Track G, Track L, Track I, § Track P); specs 04, 05, 08, 09, 11 and 12; G's design [`../g-spine/00-design.md`](../g-spine/00-design.md); the research note [`../../research/entitlements.md`](../../research/entitlements.md).

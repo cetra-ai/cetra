@@ -1,0 +1,14 @@
+{
+  "name": "Relevance on answers",
+  "evaluator_id": "01900000-0000-7000-8000-000000000500",
+  "target": "trace",
+  "filter": "status = 'ok'",
+  "variable_mapping": {
+    "input": "trace.input",
+    "output": "trace.output"
+  },
+  "sample_rate": 0.25,
+  "budget_usd": 5.0,
+  "budget_period": "day",
+  "enabled": true
+}

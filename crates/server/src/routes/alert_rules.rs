@@ -375,7 +375,7 @@ async fn checked_condition(
     })?;
     if let Some(text) = &condition.filter {
         let ctx = open_query(state, org, project, None).await?;
-        llmobs_storage::check_alert_filter(&ctx, text)?;
+        llmobs_storage::validate_filter(&ctx, llmobs_storage::ViewName::Traces, text)?;
     }
     Ok(condition)
 }
@@ -417,13 +417,14 @@ struct EventCursor {
     id: Uuid,
 }
 
-fn encode_cursor(created_at: i64, id: Uuid) -> Result<String, ApiError> {
+/// The opaque cursor of a page of `(created_at, id)`; shared with the eval jobs list.
+pub(crate) fn encode_cursor(created_at: i64, id: Uuid) -> Result<String, ApiError> {
     let bytes = serde_json::to_vec(&EventCursor { created_at, id })
         .map_err(|error| ApiError::Internal(Box::new(error)))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn decode_cursor(text: &str) -> Result<(i64, Uuid), ApiError> {
+pub(crate) fn decode_cursor(text: &str) -> Result<(i64, Uuid), ApiError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(text)
         .map_err(|_| field_error("cursor", "invalid cursor"))?;

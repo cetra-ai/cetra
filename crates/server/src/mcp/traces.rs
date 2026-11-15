@@ -171,6 +171,7 @@ pub(crate) async fn search_traces(
         storage::TraceListRequest {
             filter: filter.as_deref(),
             search: search.as_deref(),
+            strict_exclusions: false,
             scope: storage::ListScope {
                 window: Some(window),
                 include_eval,

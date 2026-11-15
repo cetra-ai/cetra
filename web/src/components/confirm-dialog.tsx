@@ -20,6 +20,7 @@ export function ConfirmDialog({
   destructive,
   pending,
   error,
+  details,
   onConfirm,
 }: {
   open: boolean;
@@ -30,6 +31,8 @@ export function ConfirmDialog({
   destructive?: boolean;
   pending: boolean;
   error?: string;
+  /** Shown under the error, e.g. the rules that block the change. */
+  details?: ReactNode;
   onConfirm: () => void;
 }) {
   return (
@@ -48,6 +51,7 @@ export function ConfirmDialog({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         <FormError message={error} />
+        {details}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Cancel</AlertDialogCancel>
           <Button

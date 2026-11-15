@@ -24,6 +24,10 @@ const DECODER: GeneralPurpose = GeneralPurpose::new(&STANDARD_ALPHABET, PAD_INDI
 
 const OCTET_STREAM: &str = "application/octet-stream";
 
+/// Longest MIME type kept. Storage's `MediaBlob` allows 1 to 255 bytes. A longer
+/// declared type is ignored, so the blob is sniffed instead of failing the request.
+const MAX_MIME_BYTES: usize = 255;
+
 /// What replaced one candidate, when it was not left inline.
 enum Replacement {
     /// `media://<sha256>` plus the MIME type stored for that blob.
@@ -489,6 +493,9 @@ fn is_b64(byte: u8) -> bool {
 }
 
 fn is_mime(value: &str) -> bool {
+    if value.len() > MAX_MIME_BYTES {
+        return false;
+    }
     let Some((top, sub)) = value.split_once('/') else {
         return false;
     };
@@ -628,6 +635,19 @@ mod tests {
             };
             assert_eq!(found, *mime);
         }
+    }
+
+    #[test]
+    fn a_mime_type_over_the_storage_cap_is_sniffed_not_refused() {
+        // 300 bytes of token characters. Storage refuses a blob over 255 bytes,
+        // so the declared type must fall back to sniffing.
+        let long = format!("image/{}", "a".repeat(294));
+        assert_eq!(long.len(), 300);
+        assert_eq!(resolve_mime(Some(&long), &png()), "image/png");
+        assert_eq!(resolve_mime(Some(&long), b"unknown!"), OCTET_STREAM);
+        // The cap itself is kept.
+        let at_cap = format!("image/{}", "a".repeat(MAX_MIME_BYTES - 6));
+        assert_eq!(resolve_mime(Some(&at_cap), b"unknown!"), at_cap);
     }
 
     #[test]

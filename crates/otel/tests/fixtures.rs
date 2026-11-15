@@ -869,11 +869,18 @@ fn price_row_matches(
         return false;
     }
     if let Some(row_provider) = &row.provider
-        && provider.is_some_and(|span_provider| span_provider != row_provider)
+        && provider.is_some_and(|span_provider| !same_provider(row_provider, span_provider))
     {
         return false;
     }
     pattern.is_match(model)
+}
+
+/// Mirrors `cost.rs` `same_provider` (D-B1-11): `gcp.gen_ai` prices with either Google
+/// platform, every other provider matches exactly.
+fn same_provider(row_provider: &str, span_provider: &str) -> bool {
+    row_provider == span_provider
+        || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
 }
 
 fn model_of(span: &Span) -> Option<&str> {

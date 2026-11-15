@@ -69,6 +69,7 @@ User answers behind D81: Linux runners only, no release artifacts yet, Dependabo
   - Use the latest release that is at least 7 days old.
   - The cargo-deny version must accept the existing `deny.toml` (`version = 2` sections).
   - If you have the tools installed locally, the local `just` and `cargo-deny` versions are the ones to match, unless they are older than the latest by a major version.
+  - A tool that `taiki-e/install-action` does not install is downloaded from its release and checked against a pinned sha256 (`sha256sum -c`, as kubeconform is in `actions/packaging`). Current cases: actionlint 1.7.12 (no manifest in v2.90.0). mold 3.0.0 (`actions/rust`, Linux x86_64 only) is also downloaded this way, although v2.90.0 has a manifest for it, so it follows the kubeconform pattern. zizmor 1.32.0 is installed by install-action, which has its manifest.
 - **Runtimes come from the repo,** never duplicated in workflow files:
   - Rust from `rust-toolchain.toml`;
   - Node from `.node-version` (`node-version-file`);
@@ -223,13 +224,14 @@ ts-smoke tarball:
     trap 'rm -rf "$dir"' EXIT
     cd "$dir"
     npm init -y >/dev/null
-    npm install --no-audit --no-fund --ignore-scripts "$tarball" >/dev/null
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
     EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
     EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
     echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"
 ```
 
-The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The package has no dependencies, so `npm install` fetches nothing from the registry. `--ignore-scripts` keeps it that way.
+The CommonJS line is the point of this recipe. It proves the D77 claim that an ESM-only package works for `require()` callers on Node 22.12. The smoke test does fetch the SDK's dependencies (five `@opentelemetry` packages and their ranged transitive dependencies, plus the `@opentelemetry/api` peer), since the tarball has them. The `npm install` is therefore age-gated with `--before` (seven days, D74) and has no lockfile. `--ignore-scripts` stops install scripts from running.
 
 Job `ts-sdk-min-node` steps:
 1. Checkout (`persist-credentials: false`) and `./.github/actions/js`.

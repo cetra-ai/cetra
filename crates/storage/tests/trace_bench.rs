@@ -1031,6 +1031,7 @@ fn request<'a>(
     TraceListRequest {
         filter,
         search: None,
+        strict_exclusions: false,
         scope: ListScope {
             window,
             include_eval: false,

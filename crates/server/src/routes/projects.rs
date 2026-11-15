@@ -17,7 +17,9 @@ use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::members::project_override;
 use crate::meta::orgs::{self, SlugError};
-use crate::meta::projects::{self, ProjectPatch, ProjectRow};
+use crate::meta::projects::{
+    self, COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S, ProjectPatch, ProjectRow,
+};
 
 use super::orgs::page_named;
 
@@ -188,6 +190,10 @@ async fn update_project(
             detail: RETENTION_PLAN,
         });
     }
+    let timeout = body
+        .trace_completion_timeout_s
+        .map(checked_timeout)
+        .transpose()?;
     let id = access.project.id;
     let role = access.role;
     let now = state.clock.now_ns();
@@ -202,6 +208,7 @@ async fn update_project(
                     ProjectPatch {
                         name,
                         retention_days,
+                        trace_completion_timeout_s: timeout,
                     },
                     now,
                 )
@@ -216,6 +223,9 @@ async fn update_project(
             crate::retention::apply_now(&state, id, days).await;
         }
     }
+    if let Some(seconds) = timeout {
+        tracing::info!(target: "audit", project_id = %id, actor_id = %actor_id, seconds, "trace completion timeout changed");
+    }
     let Some(project) = projects::project_by_id(state.meta.reader(), id).await? else {
         return Err(ApiError::NotFound);
     };
@@ -229,6 +239,7 @@ fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
         slug: project.slug.clone(),
         name: project.name.clone(),
         retention_days: project.retention_days,
+        trace_completion_timeout_s: project.completion_timeout_s(),
         role: role.map(api_role),
         created_at: project.created_at,
     }
@@ -262,6 +273,17 @@ fn checked_retention(days: u32) -> Result<u32, ApiError> {
         Ok(days)
     } else {
         Err(field_error("retention_days", "must be 1 to 36500"))
+    }
+}
+
+fn checked_timeout(seconds: u32) -> Result<u32, ApiError> {
+    if (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(&seconds) {
+        Ok(seconds)
+    } else {
+        Err(field_error(
+            "trace_completion_timeout_s",
+            "must be 10 to 3600",
+        ))
     }
 }
 
@@ -629,6 +651,193 @@ mod tests {
             .await;
         let still: Project = still.json();
         assert!(still.retention_days.is_none());
+    }
+
+    /// Creates org `acme` and project `support-bot` as the caller, and returns the project.
+    async fn support_bot(app: &TestApp, cookie: &str) -> Project {
+        let org = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), cookie)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        assert_eq!(org.status, 201);
+        let created = app
+            .request(Method::POST, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), cookie)
+            .json(&serde_json::json!({ "name": "Support bot", "slug": "support-bot" }))
+            .send()
+            .await;
+        assert_eq!(created.status, 201);
+        created.json()
+    }
+
+    /// Writes `projects.settings` of a project by SQL.
+    async fn set_settings(app: &TestApp, project: &Project, settings: &'static str) {
+        let id = project.id.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE projects SET settings = ? WHERE id = ?")
+                        .bind(settings)
+                        .bind(id)
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// `projects.settings` of a project, read by SQL.
+    async fn stored_settings(app: &TestApp, project: &Project) -> serde_json::Value {
+        let text: String = sqlx::query_scalar("SELECT settings FROM projects WHERE id = ?")
+            .bind(project.id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_new_project_has_the_default_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        assert_eq!(created.trace_completion_timeout_s, 60);
+        let path = format!("/api/v1/projects/{}", created.id);
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 60);
+    }
+
+    #[tokio::test]
+    async fn patch_sets_the_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let patched = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
+            .send()
+            .await;
+        assert_eq!(patched.status, 200);
+        let patched: Project = patched.json();
+        assert_eq!(patched.trace_completion_timeout_s, 120);
+        assert_eq!(patched.name, "Support bot");
+        assert!(patched.retention_days.is_none());
+
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 120);
+        assert_eq!(
+            stored_settings(&app, &created).await,
+            serde_json::json!({ "trace_completion_timeout_s": 120 })
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_an_out_of_range_timeout() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        for seconds in [9, 3601] {
+            let rejected = app
+                .request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "trace_completion_timeout_s": seconds }))
+                .send()
+                .await;
+            assert_eq!(rejected.status, 400);
+            assert_eq!(
+                rejected.problem().errors[0].field,
+                "trace_completion_timeout_s"
+            );
+            assert_eq!(rejected.problem().errors[0].message, "must be 10 to 3600");
+        }
+        assert_eq!(stored_settings(&app, &created).await, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_timeout_change_is_audited() {
+        let app = TestApp::new().await;
+        let (user_id, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+
+        let (status, logs) = capture_logs(async {
+            app.request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
+                .send()
+                .await
+                .status
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert!(logs.contains("trace completion timeout changed"), "{logs}");
+        assert!(logs.contains(&user_id.to_string()), "{logs}");
+
+        let (status, logs) = capture_logs(async {
+            app.request(Method::PATCH, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "name": "Renamed" }))
+                .send()
+                .await
+                .status
+        })
+        .await;
+        assert_eq!(status, 200);
+        assert!(!logs.contains("trace completion timeout changed"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn patch_keeps_other_settings_keys() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        set_settings(&app, &created, r#"{"other": 1}"#).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let patched = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "trace_completion_timeout_s": 30 }))
+            .send()
+            .await;
+        assert_eq!(patched.status, 200);
+        assert_eq!(
+            stored_settings(&app, &created).await,
+            serde_json::json!({ "other": 1, "trace_completion_timeout_s": 30 })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_garbage_settings_value_reads_as_the_default() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        set_settings(&app, &created, r#"{"trace_completion_timeout_s": 99999}"#).await;
+        let path = format!("/api/v1/projects/{}", created.id);
+        let fetched = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        let fetched: Project = fetched.json();
+        assert_eq!(fetched.trace_completion_timeout_s, 60);
     }
 
     /// 2026-01-01T00:00:00Z, the manual clock's start.

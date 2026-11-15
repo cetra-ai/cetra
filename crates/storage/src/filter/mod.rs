@@ -8,7 +8,7 @@ mod scope;
 mod scores;
 mod validate;
 
-pub(crate) use scope::{exclusions, search, time_window};
+pub(crate) use scope::{exclusions, search, strict_exclusions, time_window};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;

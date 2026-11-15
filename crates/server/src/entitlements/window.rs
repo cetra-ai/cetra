@@ -183,6 +183,7 @@ mod tests {
                 "routes/read.rs",
                 "deletion/resolve.rs",
                 "eval/trace_load.rs",
+                "eval/trigger.rs",
                 "test_support/mod.rs",
             ],
             "direct storage reads",
