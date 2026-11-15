@@ -9,7 +9,7 @@ All HTTP on one port (`LLMOBS_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on 
 | `/api/v1/*` | REST API (UI + SDK + CLI) | cookie, PAT, or `sk` |
 | `/api/public/*` | browser-safe endpoints | `pk` |
 | `/mcp` | MCP server (streamable HTTP, `POST` only; not in the OpenAPI document) | PAT (D-H-3) |
-| `/api/internal/*` | endpoints the cloud control plane calls on a cell (§ Orgs, projects, members, keys) | a signed org token in the body (the entitlements PUT), else a `control_plane` bearer token with the route's scope (D-P-28) |
+| `/api/internal/*` | endpoints the cloud control plane calls on a cell (§ Orgs, projects, members, keys) | a signed org token in the body (the entitlements PUT), else a `control_plane` bearer token with the route's scope (D-P-28). Only when `entitlements.control_plane = true`; otherwise every route answers 404 (D-P-50) |
 | `/healthz`, `/readyz` | probes | none |
 | `/` (everything else) | web UI (SPA fallback to `index.html`) | — |
 
