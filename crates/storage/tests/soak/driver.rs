@@ -608,7 +608,7 @@ pub(crate) async fn context(
     around: Option<i64>,
 ) -> Result<QueryContext, String> {
     let query = storage
-        .query(project, QueryOptions { around })
+        .query(project, QueryOptions::new(around, None))
         .await
         .map_err(|error| error.to_string())?;
     QueryContext::new(query, None).map_err(|error| error.to_string())
@@ -847,6 +847,7 @@ async fn run_query(
                         include_eval: false,
                         include_experiments: false,
                     },
+                    strict_exclusions: false,
                     sort: TraceSort::StartTime,
                     order: SortOrder::Desc,
                     limit: 50,
@@ -915,6 +916,8 @@ async fn run_query(
                     session_id: None,
                     name: None,
                     source: None,
+                    evaluator_id: None,
+                    rule_id: None,
                     window: Some(hour),
                     limit: 50,
                     cursor: None,
