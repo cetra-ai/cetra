@@ -281,7 +281,9 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::error::ArrowError;
+    use bytes::Bytes;
     use datafusion::error::DataFusionError;
+    use object_store::PutPayload;
     use parquet::errors::ParquetError;
     use uuid::Uuid;
 
@@ -451,5 +453,66 @@ mod tests {
         let ids = (0..QUEUE_MAX as u128 + 5).map(|n| file_id(n + 1));
         assert_eq!(queue.suspect(ids, 0), QUEUE_MAX);
         assert_eq!(queue.take(usize::MAX).len(), QUEUE_MAX);
+    }
+
+    /// The minimized `parquet_file` input (`fuzz/regressions/parquet_file`): an
+    /// 8-byte file whose footer claims 0x152f bytes of metadata, with a footer
+    /// hint of 0x00ffffff. Upstream's push decoder underflows on it
+    /// (parquet `push_decoder.rs:391`). The guard turns that panic into a decode
+    /// failure, so every read reports the file corrupt.
+    #[test]
+    fn a_footer_claiming_more_metadata_than_the_file_is_corrupt() {
+        const DAY_NS: i64 = 86_400_000_000_000;
+        let file = Bytes::from_static(b"\x2f\x15\x00\x00PAR1");
+        let size = u64::try_from(file.len()).unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let runtime = crate::fuzz_entry::runtime();
+
+        let traces = crate::fuzz_entry::parquet_meta(FileTable::Traces, size, 0x00ff_ffff);
+        runtime.block_on(async {
+            store
+                .put(
+                    &ObjectPath::from(traces.path.as_str()),
+                    PutPayload::from(file.clone()),
+                )
+                .await
+                .unwrap();
+            let verdict = verify_file(&store, &traces).await;
+            assert!(
+                matches!(
+                    verdict,
+                    Verdict::Corrupt {
+                        reason: "decode failed"
+                    }
+                ),
+                "the footer is reported corrupt"
+            );
+            let mut anchors = crate::anchor::Anchors::new(DAY_NS);
+            assert!(
+                anchors
+                    .rebuild_file(&traces, Arc::clone(&store), 0)
+                    .await
+                    .is_err()
+            );
+        });
+
+        let spans = crate::fuzz_entry::parquet_meta(FileTable::Spans, size, 0x00ff_ffff);
+        runtime.block_on(async {
+            store
+                .put(
+                    &ObjectPath::from(spans.path.as_str()),
+                    PutPayload::from(file),
+                )
+                .await
+                .unwrap();
+            let files = [Arc::new(spans)];
+            let read = crate::compaction::slice::time_values(
+                Arc::clone(&store),
+                &files,
+                llmobs_core::schema::spans::START_TIME,
+            )
+            .await;
+            assert!(read.is_err(), "the start times do not read");
+        });
     }
 }
