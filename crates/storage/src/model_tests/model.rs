@@ -236,6 +236,15 @@ impl Model {
         [self.a.project, self.b.project]
     }
 
+    /// Every score id the model has written for `p`, live or not, in key order.
+    pub(super) fn score_ids(&self, p: P) -> Vec<String> {
+        self.project(p)
+            .scores
+            .keys()
+            .map(|key| score_id(key).to_string())
+            .collect()
+    }
+
     pub(super) fn project(&self, p: P) -> &ProjectModel {
         if p == self.a.project {
             &self.a

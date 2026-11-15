@@ -35,7 +35,7 @@ use std::sync::atomic::Ordering;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
 pub(super) const MICRO_NS: i64 = 1_000;
-const MILLI_NS: i64 = 1_000_000;
+pub(super) const MILLI_NS: i64 = 1_000_000;
 /// Trace numbers are `0..TRACES`, span numbers `0..SPANS`.
 pub(super) const TRACES: u8 = 12;
 pub(super) const SPANS: u8 = 12;
@@ -319,11 +319,21 @@ fn resendable_trace() -> impl Strategy<Value = u8> {
 }
 
 /// What `apply_storage` reports around each storage call that changes what a read sees.
+#[derive(Clone, Copy)]
 pub(super) enum StepEvent<'a> {
     /// The call is about to start.
     Begin,
     /// The call returned; the model is already updated for it.
     Done(&'a Model),
+}
+
+/// How `apply_storage` runs its ops (docs/plans/r-hardening/06-m6-concurrency.md § R6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Concurrency {
+    /// M1: background tasks off; every pass must report `failed == 0`.
+    Sequential,
+    /// M6: background tasks run; jobs may lose a conflict, appends may meet backpressure.
+    Concurrent,
 }
 
 /// Runs one op against storage and the model. `clock` advances first (by one microsecond,
@@ -350,7 +360,14 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             *clock += MICRO_NS;
             settle(harness, model, clock);
         }
-        _ => apply_storage(op, harness, model, clock, &mut |_| {}),
+        _ => apply_storage(
+            op,
+            harness,
+            model,
+            clock,
+            Concurrency::Sequential,
+            &mut |_| {},
+        ),
     }
 }
 
@@ -367,6 +384,7 @@ pub(super) fn apply_storage(
     h: &Harness,
     model: &mut Model,
     clock: &mut i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     *clock += MICRO_NS;
@@ -376,12 +394,12 @@ pub(super) fn apply_storage(
             trace,
             count,
             split,
-        } => append(h, model, project, (trace, count, split), *clock, step),
+        } => append(h, model, project, (trace, count, split), *clock, mode, step),
         Op::Resend {
             project,
             trace,
             pick,
-        } => resend(h, model, project, trace, pick, *clock, step),
+        } => resend(h, model, project, trace, pick, *clock, mode, step),
         Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle => {
             unreachable!("{op:?} needs &mut Harness: use apply")
         }
@@ -400,20 +418,22 @@ pub(super) fn apply_storage(
         }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            compact(h, *clock);
+            compact(h, *clock, mode);
         }
         Op::Gc => collect_obsolete(h),
         Op::Score {
             project,
             target,
             name,
-        } => put_score(h, model, project, target, name, *clock, step),
-        Op::DeleteScore { project, pick } => delete_score(h, model, project, pick, *clock, step),
+        } => put_score(h, model, project, target, name, *clock, mode, step),
+        Op::DeleteScore { project, pick } => {
+            delete_score(h, model, project, pick, *clock, mode, step);
+        }
         Op::StaleScore {
             project,
             pick,
             back,
-        } => stale_score(h, model, project, pick, back, *clock, step),
+        } => stale_score(h, model, project, pick, back, *clock, mode, step),
         Op::DeleteTraces { project, ref picks } => {
             delete_traces(h, model, project, picks, *clock, step);
         }
@@ -422,22 +442,51 @@ pub(super) fn apply_storage(
         }
         Op::ApplyDeletions { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            apply_deletions(h, *clock);
+            apply_deletions(h, *clock, mode);
         }
         Op::Retention { project, keep } => retention(h, model, project, keep, step),
         Op::DropB => drop_b(h, model, step),
     }
 }
 
+/// How many times a concurrent run retries a refused append before the case fails (R6.5).
+const BACKPRESSURE_RETRIES: u32 = 500;
+
+/// The pause between two retries of a refused append (R6.5): 500 retries are 5 s.
+const BACKPRESSURE_PAUSE: Duration = Duration::from_millis(10);
+
+/// Runs one append (`attempt`) and returns its result. A refused append (`Backpressure`) wrote
+/// nothing (`lib.rs::tests::backpressure_writes_nothing`), so a concurrent run retries it after a
+/// pause and the model is unchanged until it is accepted. A sequential run expects the first
+/// attempt to succeed, as M1 does.
+fn accept<T>(
+    mode: Concurrency,
+    what: &str,
+    mut attempt: impl FnMut() -> Result<T, AppendError>,
+) -> T {
+    let mut retries = 0_u32;
+    loop {
+        match attempt() {
+            Ok(value) => return value,
+            Err(AppendError::Backpressure) if mode == Concurrency::Concurrent => {
+                assert!(retries < BACKPRESSURE_RETRIES, "backpressure for 5 s");
+                retries += 1;
+                std::thread::sleep(BACKPRESSURE_PAUSE);
+            }
+            Err(error) => panic!("{what} failed: {error:?}"),
+        }
+    }
+}
+
 /// Sends one batch of spans to storage, expecting success. Never called with an empty batch.
-fn send(harness: &Harness, project: P, batch: &[Span]) {
-    harness
-        .block_on(
+pub(super) fn send(harness: &Harness, mode: Concurrency, project: P, batch: &[Span]) {
+    accept(mode, "append_spans of a span batch", || {
+        harness.block_on(
             harness
                 .storage()
                 .append_spans(project.id(), span_rows(batch)),
         )
-        .expect("append_spans of a span batch");
+    });
 }
 
 /// Sends one batch of spans to a dropped project: storage refuses it, and the model keeps nothing.
@@ -460,6 +509,7 @@ fn append(
     project: P,
     (trace, count, split): (u8, u8, bool),
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     if model.project(project).dropped {
@@ -488,18 +538,18 @@ fn append(
         let (head, tail) = spans.split_at(spans.len() / 2);
         let middle = first + u8::try_from(head.len()).expect("a batch of at most 6 spans");
         step(StepEvent::Begin);
-        send(harness, project, head);
+        send(harness, mode, project, head);
         record_spans(harness, model, project, trace, first..middle, clock);
         model.project_mut(project).next_span.insert(trace, middle);
         step(StepEvent::Done(&*model));
         step(StepEvent::Begin);
-        send(harness, project, tail);
+        send(harness, mode, project, tail);
         record_spans(harness, model, project, trace, middle..end, clock);
         model.project_mut(project).next_span.insert(trace, end);
         step(StepEvent::Done(&*model));
     } else {
         step(StepEvent::Begin);
-        send(harness, project, &spans);
+        send(harness, mode, project, &spans);
         record_spans(harness, model, project, trace, first..end, clock);
         model.project_mut(project).next_span.insert(trace, end);
         step(StepEvent::Done(&*model));
@@ -532,6 +582,7 @@ fn record_spans(
         .appended(pushed, segments, always_synced(harness));
 }
 
+#[allow(clippy::too_many_arguments)] // the run's mode joins the op's inputs and its step callback
 fn resend(
     harness: &Harness,
     model: &mut Model,
@@ -539,6 +590,7 @@ fn resend(
     trace: u8,
     pick: u8,
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     debug_assert!(trace % 4 != 2, "class-2 traces are never re-sent");
@@ -558,7 +610,7 @@ fn resend(
         return;
     }
     step(StepEvent::Begin);
-    send(harness, project, &batch);
+    send(harness, mode, project, &batch);
     record_spans(harness, model, project, trace, span_no..span_no + 1, clock);
     step(StepEvent::Done(&*model));
 }
@@ -591,6 +643,7 @@ pub(super) fn score_key_space(projects: [P; 2]) -> Vec<ScoreKey> {
 }
 
 /// Writes the next version of `(project, target, name)`: version 1 when the key has none.
+#[allow(clippy::too_many_arguments)] // the run's mode joins the op's inputs and its step callback
 fn put_score(
     harness: &Harness,
     model: &mut Model,
@@ -598,6 +651,7 @@ fn put_score(
     target: u8,
     name: u8,
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     let key = ScoreKey {
@@ -617,6 +671,7 @@ fn put_score(
         last.map_or(1, |last| last + 1),
         false,
         clock,
+        mode,
         step,
     );
 }
@@ -678,6 +733,7 @@ fn delete_score(
     project: P,
     pick: u8,
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     if model.project(project).dropped {
@@ -692,6 +748,7 @@ fn delete_score(
             1,
             true,
             clock,
+            mode,
             step,
         );
         return;
@@ -700,11 +757,12 @@ fn delete_score(
         return;
     };
     let last = last_version(model, key);
-    send_score(harness, model, key, last + 1, true, clock, step);
+    send_score(harness, model, key, last + 1, true, clock, mode, step);
 }
 
 /// Writes an older (or equal, see `Op::StaleScore`) version of a score the model has written.
 /// The version repeats the `deleted` flag of the stored version it names, if one exists.
+#[allow(clippy::too_many_arguments)] // the run's mode joins the op's inputs and its step callback
 fn stale_score(
     harness: &Harness,
     model: &mut Model,
@@ -712,6 +770,7 @@ fn stale_score(
     pick: u8,
     back: u8,
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     let candidates = stale_candidates(model, project);
@@ -730,11 +789,12 @@ fn stale_score(
         .filter(|stored| stored.version == version)
         .max_by_key(|stored| stored.ingest)
         .is_some_and(|stored| stored.deleted);
-    send_score(harness, model, key, version, deleted, clock, step);
+    send_score(harness, model, key, version, deleted, clock, mode, step);
 }
 
 /// Sends one score version (a one-row batch). A dropped project refuses it, and the model
 /// keeps no version.
+#[allow(clippy::too_many_arguments)] // the run's mode joins the op's inputs and its step callback
 fn send_score(
     harness: &Harness,
     model: &mut Model,
@@ -742,6 +802,7 @@ fn send_score(
     version: u32,
     deleted: bool,
     clock: i64,
+    mode: Concurrency,
     step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     let project = key.project;
@@ -756,9 +817,9 @@ fn send_score(
         return;
     }
     step(StepEvent::Begin);
-    harness
-        .block_on(harness.storage().append_scores(project.id(), batch))
-        .expect("append_scores of one score");
+    accept(mode, "append_scores of one score", || {
+        harness.block_on(harness.storage().append_scores(project.id(), batch.clone()))
+    });
     let stored = model
         .project_mut(project)
         .write_score(key, version, deleted, clock);
@@ -789,11 +850,13 @@ fn injected_so_far(harness: &Harness) -> u64 {
     harness.chaos().map_or(0, ChaosStore::injected)
 }
 
-fn compact(harness: &Harness, clock: i64) {
+/// One compaction pass. A concurrent run may lose a conflict (a background job, or another lane's
+/// retention or drop, took its inputs), so only a sequential run asserts `failed == 0`.
+fn compact(harness: &Harness, clock: i64, mode: Concurrency) {
     let before = injected_so_far(harness);
     match harness.block_on(harness.storage().compact(clock)) {
         Ok(report) => assert!(
-            report.failed == 0 || allow_failure(harness, before),
+            mode == Concurrency::Concurrent || report.failed == 0 || allow_failure(harness, before),
             "a compaction job failed without an injected fault"
         ),
         Err(error) => assert!(
@@ -803,11 +866,12 @@ fn compact(harness: &Harness, clock: i64) {
     }
 }
 
-fn apply_deletions(harness: &Harness, clock: i64) {
+/// One deletion pass; as `compact`, a concurrent run may lose a conflict.
+fn apply_deletions(harness: &Harness, clock: i64, mode: Concurrency) {
     let before = injected_so_far(harness);
     match harness.block_on(harness.storage().apply_deletions(clock)) {
         Ok(report) => assert!(
-            report.failed == 0 || allow_failure(harness, before),
+            mode == Concurrency::Concurrent || report.failed == 0 || allow_failure(harness, before),
             "a deletion job failed without an injected fault"
         ),
         Err(error) => assert!(
@@ -1114,7 +1178,7 @@ fn drop_b(harness: &Harness, model: &mut Model, step: &mut dyn FnMut(StepEvent<'
 }
 
 /// Whether every deletion either project registered reads `Applied`.
-fn all_deletions_applied(harness: &Harness, model: &Model) -> bool {
+pub(super) fn all_deletions_applied(harness: &Harness, model: &Model) -> bool {
     model
         .a
         .deletions
@@ -1134,7 +1198,7 @@ fn all_deletions_applied(harness: &Harness, model: &Model) -> bool {
 /// Storage keeps one copy per key after compaction, and the newest one wins (spec 03 §6).
 /// A covered copy is never newer than an uncovered one of its key, so the newest copy is
 /// the visible one whenever a visible copy exists.
-fn keep_newest_copies(state: &mut ProjectModel) {
+pub(super) fn keep_newest_copies(state: &mut ProjectModel) {
     for copies in state.spans.values_mut() {
         let newest = copies
             .iter()
@@ -1150,7 +1214,7 @@ fn keep_newest_copies(state: &mut ProjectModel) {
 /// a tombstone, the day close dropped every version of the key, so the model drops them too. A
 /// later `StaleScore` then finds no key to pick, and a later `Score` starts at version 1 again.
 /// That is the known limit spec 03 § 5 documents: a stale version after the day close reads as live.
-fn drop_day_closed_scores(state: &mut ProjectModel) {
+pub(super) fn drop_day_closed_scores(state: &mut ProjectModel) {
     let closed: Vec<ScoreKey> = state
         .scores
         .iter()
@@ -1191,7 +1255,7 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
     // 3. Every deletion applied: while one is pending, the traces view hides covered
     //    partials whole and the checks would not match.
     for _ in 0..SETTLE_PASSES {
-        apply_deletions(harness, *clock);
+        apply_deletions(harness, *clock, Concurrency::Sequential);
         if all_deletions_applied(harness, model) {
             break;
         }
@@ -1231,7 +1295,7 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
     drop_day_closed_scores(&mut model.a);
     drop_day_closed_scores(&mut model.b);
 
-    check_settled_files(harness, model);
+    check_settled_files(harness, &[model]);
     check_s3_audit(harness);
 }
 
@@ -1262,7 +1326,7 @@ fn always_synced(harness: &Harness) -> bool {
 }
 
 /// The clean shutdown of `Restart` and `Settle` flushed this life's records.
-fn flushed(harness: &Harness, model: &mut Model) {
+pub(super) fn flushed(harness: &Harness, model: &mut Model) {
     model
         .spans_wal
         .flushed(segment_count(harness, Table::Spans));
@@ -1336,13 +1400,20 @@ mod tests {
     /// Runs one op through `apply_storage` and returns the events it reported.
     fn run(op: &Op, harness: &Harness, model: &mut Model, clock: &mut i64) -> Vec<Seen> {
         let mut seen = Vec::new();
-        apply_storage(op, harness, model, clock, &mut |event| match event {
-            StepEvent::Begin => seen.push(Seen::Begin),
-            StepEvent::Done(state) => seen.push(Seen::Done {
-                copies: copies(&state.a),
-                deletions: state.a.deletions.len(),
-            }),
-        });
+        apply_storage(
+            op,
+            harness,
+            model,
+            clock,
+            Concurrency::Sequential,
+            &mut |event| match event {
+                StepEvent::Begin => seen.push(Seen::Begin),
+                StepEvent::Done(state) => seen.push(Seen::Done {
+                    copies: copies(&state.a),
+                    deletions: state.a.deletions.len(),
+                }),
+            },
+        );
         seen
     }
 
@@ -1366,6 +1437,7 @@ mod tests {
             &harness,
             &mut model,
             &mut clock,
+            Concurrency::Sequential,
             &mut |event| match event {
                 StepEvent::Begin => {
                     if split_seen.is_empty() {

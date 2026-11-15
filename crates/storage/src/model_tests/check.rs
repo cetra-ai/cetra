@@ -8,6 +8,7 @@
 //! expected and observed values. proptest prints the shrunk op list.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::AsArray;
@@ -37,7 +38,7 @@ type Visible = BTreeMap<(u8, u8), Vec<i64>>;
 
 /// One read the checks and the reader threads run. `observe` runs it on one snapshot; `compare`
 /// checks the result against a model state.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) enum Read {
     Spans(P),
     /// Every trace row, unwindowed, evaluation traces kept.
@@ -63,6 +64,54 @@ pub(super) enum Read {
     FilterTraceIds(P, (i64, i64)),
     /// One `alert_value` over a window of whole days.
     AlertValue(P, (i64, i64), AlertMeasure),
+}
+
+impl fmt::Debug for Read {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Read::Spans(project) => f.debug_tuple("Spans").field(project).finish(),
+            Read::Traces(project) => f.debug_tuple("Traces").field(project).finish(),
+            Read::Windowed(project) => f.debug_tuple("Windowed").field(project).finish(),
+            Read::NoEval(project) => f.debug_tuple("NoEval").field(project).finish(),
+            Read::TraceDetail(project, trace) => f
+                .debug_tuple("TraceDetail")
+                .field(project)
+                .field(trace)
+                .finish(),
+            Read::SpanDetail(project, trace, span_no) => f
+                .debug_tuple("SpanDetail")
+                .field(project)
+                .field(trace)
+                .field(span_no)
+                .finish(),
+            Read::Scores(project) => f.debug_tuple("Scores").field(project).finish(),
+            // The ids of a read over every key of the lanes run to hundreds: print their count.
+            Read::ScoresById(project, ids) => f
+                .debug_tuple("ScoresById")
+                .field(project)
+                .field(&format_args!("{} ids", ids.len()))
+                .finish(),
+            Read::Latest(project) => f.debug_tuple("Latest").field(project).finish(),
+            Read::Sessions(project) => f.debug_tuple("Sessions").field(project).finish(),
+            Read::Users(project) => f.debug_tuple("Users").field(project).finish(),
+            Read::Metrics(project, window) => f
+                .debug_tuple("Metrics")
+                .field(project)
+                .field(window)
+                .finish(),
+            Read::FilterTraceIds(project, window) => f
+                .debug_tuple("FilterTraceIds")
+                .field(project)
+                .field(window)
+                .finish(),
+            Read::AlertValue(project, window, measure) => f
+                .debug_tuple("AlertValue")
+                .field(project)
+                .field(window)
+                .field(measure)
+                .finish(),
+        }
+    }
 }
 
 /// What a read returned: one variant per kind of read.
@@ -457,8 +506,9 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
     (!differing.is_empty()).then(|| format!("differing fields: {differing:?}"))
 }
 
-/// `span_list` shows each visible span key exactly once: the keys read equal the visible keys,
-/// and no key repeats.
+/// `span_list` shows each visible span key at least once and at most once per visible copy: the
+/// keys read equal the visible keys, and a key repeats only up to its copies (a copy that a
+/// flush or compaction has not merged yet is listed too, R6.5 § The rule).
 fn compare_span_keys(
     state: &ProjectModel,
     observed: &[(i64, String, String)],
@@ -467,26 +517,31 @@ fn compare_span_keys(
     for (_, trace, span) in observed {
         *counts.entry((trace.clone(), span.clone())).or_default() += 1;
     }
-    let expected: BTreeSet<(String, String)> = state
+    let expected: BTreeMap<(String, String), usize> = state
         .visible_spans()
-        .into_keys()
-        .map(|(trace, span_no)| {
+        .into_iter()
+        .map(|((trace, span_no), ingests)| {
             (
-                hex(trace_id(trace).as_bytes()),
-                hex(span_id(span_no).as_bytes()),
+                (
+                    hex(trace_id(trace).as_bytes()),
+                    hex(span_id(span_no).as_bytes()),
+                ),
+                ingests.len(),
             )
         })
         .collect();
-    let observed_keys: BTreeSet<(String, String)> = counts.keys().cloned().collect();
-    if observed_keys != expected {
+    let observed_keys: Vec<&(String, String)> = counts.keys().collect();
+    let expected_keys: Vec<&(String, String)> = expected.keys().collect();
+    if observed_keys != expected_keys {
         return Err(format!(
-            "the span keys read differ from the model's visible keys: observed {observed_keys:?}, expected {expected:?}"
+            "the span keys read differ from the model's visible keys: observed {observed_keys:?}, expected {expected_keys:?}"
         ));
     }
     for (key, count) in &counts {
-        if *count != 1 {
+        let copies = expected[key];
+        if *count < 1 || *count > copies {
             return Err(format!(
-                "span {key:?} is listed {count} times, expected once"
+                "span {key:?} is listed {count} times, the model has {copies} visible copies"
             ));
         }
     }
@@ -1278,19 +1333,35 @@ fn expected_score_avg(
 /// After `Settle`, the files on disk hold what the model predicts and nothing more (plan § R1.7):
 /// no row a deletion covers, no row before the retention watermark, no file of a dropped project,
 /// one partial per trace (two for class 2), and no staged object left.
-pub(super) fn check_settled_files(h: &Harness, model: &Model) {
+pub(super) fn check_settled_files(h: &Harness, models: &[&Model]) {
     let traces_by_id: BTreeMap<[u8; 16], u8> = (0..TRACES)
         .map(|trace| (*trace_id(trace).as_bytes(), trace))
         .collect();
-    let keys_by_id: BTreeMap<String, ScoreKey> = score_key_space(model.projects())
-        .into_iter()
+    let keys_by_id: BTreeMap<String, ScoreKey> = models
+        .iter()
+        .flat_map(|model| score_key_space(model.projects()))
         .map(|key| (score_id(&key).to_string(), key))
         .collect();
-    for project in model.projects() {
-        let state = model.project(project);
-        check_settled_spans(h, state, project, &traces_by_id);
-        check_settled_scores(h, state, project, &keys_by_id);
-        check_settled_traces(h, state, project, &traces_by_id);
+    // Every catalogued file belongs to a lane: the per-project checks below only see the files
+    // of the lanes' projects.
+    for table in [FileTable::Spans, FileTable::Traces, FileTable::Scores] {
+        for file in h.storage().catalog_files(table) {
+            assert!(
+                models
+                    .iter()
+                    .any(|model| model.projects().iter().any(|p| p.id() == file.project)),
+                "file of project {} belongs to no lane",
+                file.project
+            );
+        }
+    }
+    for model in models {
+        for project in model.projects() {
+            let state = model.project(project);
+            check_settled_spans(h, state, project, &traces_by_id);
+            check_settled_scores(h, state, project, &keys_by_id);
+            check_settled_traces(h, state, project, &traces_by_id);
+        }
     }
     let staged = h
         .block_on(h.storage().staged_paths())

@@ -2,6 +2,7 @@
 //! every read (docs/plans/r-hardening/01-m1-model.md).
 
 mod check;
+mod concurrent;
 mod harness;
 mod hook_crash;
 mod model;

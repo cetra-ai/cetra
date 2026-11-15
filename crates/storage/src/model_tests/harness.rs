@@ -75,6 +75,18 @@ pub(super) fn s3_tweaks(config: &mut StorageConfig) {
     config.compaction.threads = 1;
 }
 
+/// `model_config` with every background task running often (R6.5): flushes, and compaction,
+/// deletion and verify passes, at the minimums `StorageConfig::validate` allows. GC keeps its
+/// interval, so the GC thread of the concurrent runner drives it.
+pub(super) fn concurrent_tweaks(config: &mut StorageConfig) {
+    config.flush.max_age = Duration::from_millis(100);
+    config.compaction.interval = Duration::from_millis(100);
+    config.compaction.l0_files = 2;
+    config.compaction.l0_age = Duration::from_secs(1);
+    config.compaction.threads = 2;
+    config.gc.grace = Duration::from_secs(1);
+}
+
 /// Tokio worker threads of a life when [`HarnessOptions::workers`] is 0.
 const WORKERS: usize = 2;
 
@@ -535,4 +547,10 @@ fn restart_after_crash_twice() {
     append_spans_of_trace_one(&harness, 3, 2);
     harness.restart();
     assert_eq!(visible_span_rows(&harness, P::A.id()), 5);
+}
+
+#[test]
+fn harness_is_sync() {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Harness>();
 }

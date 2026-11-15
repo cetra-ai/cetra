@@ -176,7 +176,7 @@ pub(super) async fn observe_traces(
         .await?;
         for batch in &page.batches {
             for row in 0..batch.num_rows() {
-                rows.push(trace_from_batch(batch, row));
+                rows.push(trace_from_batch(batch, row)?);
             }
         }
         match page.next_cursor {
@@ -198,12 +198,18 @@ pub(super) async fn observe_trace_detail(
     let Some(detail) = trace_detail(&ctx, &hex(trace_id(trace).as_bytes()), TIMEOUT).await? else {
         return Ok(None);
     };
-    assert!(
-        !detail.truncated,
-        "a trace of at most 12 spans is not truncated"
-    );
-    assert_eq!(detail.trace.num_rows(), 1, "one traces row per trace");
-    let row = trace_from_batch(&detail.trace, 0);
+    if detail.truncated {
+        return Err(ReadFailure::Error(
+            "trace_detail truncated a trace of at most 12 spans".to_owned(),
+        ));
+    }
+    if detail.trace.num_rows() != 1 {
+        return Err(ReadFailure::Error(format!(
+            "trace_detail returned {} traces rows for one trace",
+            detail.trace.num_rows()
+        )));
+    }
+    let row = trace_from_batch(&detail.trace, 0)?;
     let mut span_ids = Vec::new();
     for batch in &detail.spans {
         let ids = utf8(batch, spans::SPAN_ID);
@@ -233,7 +239,12 @@ pub(super) async fn observe_span_detail(
     let Some(batch) = batch else {
         return Ok(None);
     };
-    assert_eq!(batch.num_rows(), 1, "one spans row per span key");
+    if batch.num_rows() != 1 {
+        return Err(ReadFailure::Error(format!(
+            "span_detail returned {} spans rows for one span key",
+            batch.num_rows()
+        )));
+    }
     Ok(Some(timestamp(&batch, spans::INGEST_TIME, 0)))
 }
 
@@ -265,7 +276,7 @@ pub(super) async fn observe_scores(
         .await?;
         for batch in &page.batches {
             for row in 0..batch.num_rows() {
-                rows.push(score_from_batch(batch, row));
+                rows.push(score_from_batch(batch, row)?);
             }
         }
         match page.next_cursor {
@@ -289,7 +300,7 @@ pub(super) async fn observe_scores_by_id(
     let mut rows = Vec::new();
     for batch in &batches {
         for row in 0..batch.num_rows() {
-            rows.push(score_from_batch(batch, row));
+            rows.push(score_from_batch(batch, row)?);
         }
     }
     Ok(rows)
@@ -315,7 +326,7 @@ pub(super) async fn observe_latest(
         let batches = latest_scores(&ctx, targets, TIMEOUT).await?;
         for batch in &batches {
             for row in 0..batch.num_rows() {
-                rows.push(latest_from_batch(batch, row));
+                rows.push(latest_from_batch(batch, row)?);
             }
         }
     }
@@ -494,41 +505,47 @@ fn int(batch: &RecordBatch, name: &str, row: usize) -> i64 {
 }
 
 /// One row of the `scores` view, read by column name.
-fn score_from_batch(batch: &RecordBatch, row: usize) -> ExpectedScore {
+fn score_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedScore, ReadFailure> {
     let target_kind = match utf8(batch, scores::TARGET).value(row) {
         "trace" => "trace",
         "session" => "session",
-        other => panic!("the scores view has no target {other:?}"),
+        other => {
+            return Err(ReadFailure::Error(format!(
+                "the scores view has a target that is neither trace nor session: {other:?}"
+            )));
+        }
     };
-    ExpectedScore {
+    let value_num = opt_f64(
+        column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
+        row,
+    )
+    .ok_or_else(|| ReadFailure::Error("a scores row has no numeric value".to_owned()))?;
+    Ok(ExpectedScore {
         score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
         name: utf8(batch, scores::NAME).value(row).to_owned(),
         target_kind,
         trace_id: opt_string(utf8(batch, scores::TRACE_ID), row),
         session_id: opt_string(utf8(batch, scores::SESSION_ID), row),
-        value_num: opt_f64(
-            column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
-            row,
-        )
-        .expect("a generated score is numeric"),
+        value_num,
         created_at: timestamp(batch, scores::CREATED_AT, row),
         user_id: opt_string(utf8(batch, scores::USER_ID), row),
-    }
+    })
 }
 
 /// One row of `latest_scores`. Its key column is `target_key`
 /// (`reads/scores.rs`, `LATEST_SCORE_COLUMNS`).
-fn latest_from_batch(batch: &RecordBatch, row: usize) -> LatestScore {
-    LatestScore {
+fn latest_from_batch(batch: &RecordBatch, row: usize) -> Result<LatestScore, ReadFailure> {
+    let value_num = opt_f64(
+        column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
+        row,
+    )
+    .ok_or_else(|| ReadFailure::Error("a latest_scores row has no numeric value".to_owned()))?;
+    Ok(LatestScore {
         target_key: utf8(batch, "target_key").value(row).to_owned(),
         name: utf8(batch, scores::NAME).value(row).to_owned(),
         score_id: utf8(batch, scores::SCORE_ID).value(row).to_owned(),
-        value_num: opt_f64(
-            column(batch, scores::VALUE_NUM).as_primitive::<Float64Type>(),
-            row,
-        )
-        .expect("a generated score is numeric"),
-    }
+        value_num,
+    })
 }
 
 /// A column of `batch` by name. The view names are the constants of `llmobs_core::schema`.
@@ -572,26 +589,29 @@ fn string_list(batch: &RecordBatch, name: &str, row: usize) -> Vec<String> {
 }
 
 /// Maps a status read back to the model's name for it. Any other text is a storage bug.
-fn static_status(text: &str) -> &'static str {
+fn static_status(text: &str) -> Result<&'static str, ReadFailure> {
     match text {
-        "error" => "error",
-        "ok" => "ok",
-        "unset" => "unset",
-        other => panic!("the traces view has no status {other:?}"),
+        "error" => Ok("error"),
+        "ok" => Ok("ok"),
+        "unset" => Ok("unset"),
+        other => Err(ReadFailure::Error(format!(
+            "the traces view has a status that is not error, ok or unset: {other:?}"
+        ))),
     }
 }
 
 /// One row of the `traces` view, read by column name.
-fn trace_from_batch(batch: &RecordBatch, row: usize) -> ExpectedTrace {
+fn trace_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedTrace, ReadFailure> {
     let count = |name: &str| column(batch, name).as_primitive::<Int64Type>().value(row);
-    ExpectedTrace {
+    let status = static_status(utf8(batch, traces::STATUS).value(row))?;
+    Ok(ExpectedTrace {
         trace_id: utf8(batch, traces::TRACE_ID).value(row).to_owned(),
         start_time: timestamp(batch, traces::START_TIME, row),
         end_time: timestamp(batch, traces::END_TIME, row),
         name: utf8(batch, traces::NAME).value(row).to_owned(),
         root_span_id: opt_string(utf8(batch, traces::ROOT_SPAN_ID), row),
         has_root: column(batch, traces::HAS_ROOT).as_boolean().value(row),
-        status: static_status(utf8(batch, traces::STATUS).value(row)),
+        status,
         session_id: opt_string(utf8(batch, traces::SESSION_ID), row),
         user_id: opt_string(utf8(batch, traces::USER_ID), row),
         environment: opt_string(utf8(batch, traces::ENVIRONMENT), row),
@@ -608,5 +628,5 @@ fn trace_from_batch(batch: &RecordBatch, row: usize) -> ExpectedTrace {
             column(batch, traces::COST_TOTAL).as_primitive::<Float64Type>(),
             row,
         ),
-    }
+    })
 }
