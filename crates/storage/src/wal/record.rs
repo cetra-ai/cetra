@@ -7,9 +7,11 @@
 #![allow(dead_code)]
 
 use std::ops::Range;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::Schema;
+use arrow::error::ArrowError;
 use arrow::ipc::CompressionType;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
@@ -149,11 +151,14 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, Wa
             reason: "invalid ipc stream",
         });
     }
+    // A panic in Arrow's decoder is a corrupt record (spec 03 §1, track R D-R-17).
     let cursor = std::io::Cursor::new(payload);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|_| WalError::InvalidPayload {
+    let opened = catch_unwind(AssertUnwindSafe(|| StreamReader::try_new(cursor, None)))
+        .map_err(|_| ipc_decoder_panicked())?;
+    let mut reader = opened.map_err(|_| WalError::InvalidPayload {
         reason: "invalid ipc stream",
     })?;
-    let Some(first) = reader.next() else {
+    let Some(first) = next_batch(&mut reader)? else {
         return Err(WalError::InvalidPayload {
             reason: "ipc stream has no batch",
         });
@@ -161,7 +166,7 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, Wa
     let batch = first.map_err(|_| WalError::InvalidPayload {
         reason: "invalid ipc stream",
     })?;
-    if reader.next().is_some() {
+    if next_batch(&mut reader)?.is_some() {
         return Err(WalError::InvalidPayload {
             reason: "ipc stream has more than one batch",
         });
@@ -172,6 +177,19 @@ pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, Wa
         });
     }
     Ok(batch)
+}
+
+/// `reader.next()`, with a decoder panic as a corrupt payload.
+fn next_batch<R: std::io::Read>(
+    reader: &mut StreamReader<R>,
+) -> Result<Option<Result<RecordBatch, ArrowError>>, WalError> {
+    catch_unwind(AssertUnwindSafe(|| reader.next())).map_err(|_| ipc_decoder_panicked())
+}
+
+fn ipc_decoder_panicked() -> WalError {
+    WalError::InvalidPayload {
+        reason: "ipc decoder panicked",
+    }
 }
 
 fn ipc_lengths_fit(payload: &[u8]) -> bool {

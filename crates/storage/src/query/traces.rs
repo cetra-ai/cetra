@@ -679,7 +679,7 @@ fn file_plan(
         // No work stealing: each partition reads only its own files.
         .with_preserve_order(true)
         .with_projection_indices(Some(input_indices.to_vec()))?;
-    Ok(DataSourceExec::from_data_source(builder.build()))
+    Ok(crate::unwind::guarded_scan(builder.build()))
 }
 
 fn mem_plan(

@@ -67,6 +67,7 @@ mod query_text;
 pub(crate) mod read_cache;
 mod reads;
 mod sql;
+pub(crate) mod unwind;
 pub(crate) mod verify;
 mod views;
 

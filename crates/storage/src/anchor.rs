@@ -28,6 +28,7 @@ use crate::catalog::{Catalog, FileMeta, FileTable, now_ns};
 use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
 use crate::objects::Objects;
+use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 use crate::verify::{VerifyQueue, is_store_error};
 use object_store::ObjectStore;
 
@@ -278,7 +279,7 @@ impl Anchors {
         #[allow(deprecated)]
         let reader = ParquetObjectReader::new(store, ObjectPath::from(file.path.as_str()))
             .with_file_size(file.size);
-        let builder = ParquetRecordBatchStreamBuilder::new(reader)
+        let builder = guard(ParquetRecordBatchStreamBuilder::new(reader))
             .await
             .map_err(AnchorError::parquet)?;
         let groups = row_groups_to_read(builder.metadata(), since);
@@ -291,11 +292,14 @@ impl Anchors {
                 traces::LAST_INGEST_TIME,
             ],
         );
-        let mut stream = builder
-            .with_row_groups(groups)
-            .with_projection(mask)
-            .build()
-            .map_err(AnchorError::parquet)?;
+        let stream = guard_sync(move || {
+            builder
+                .with_row_groups(groups)
+                .with_projection(mask)
+                .build()
+        })
+        .map_err(AnchorError::parquet)?;
+        let mut stream = GuardedStream::new(stream, || Err(decoder_panicked()));
         let mut rows = 0_usize;
         while let Some(batch) = stream.next().await {
             let batch = batch.map_err(AnchorError::parquet)?;

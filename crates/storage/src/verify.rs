@@ -19,6 +19,7 @@ use parquet::file::metadata::PageIndexPolicy;
 
 use crate::catalog::{self, FileId, FileMeta};
 use crate::query_error::root;
+use crate::unwind::{GuardedStream, decoder_panicked, guard, guard_sync};
 
 /// Whether `error` may come from a corrupt Parquet file rather than the object
 /// store or the query (spec 03 §10). False positives only cost a verification.
@@ -246,12 +247,16 @@ pub(crate) async fn verify_file(store: &Arc<dyn ObjectStore>, file: &FileMeta) -
     #[allow(deprecated)]
     let reader = ParquetObjectReader::new(Arc::clone(store), path).with_file_size(file.size);
     let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
-    let builder = match ParquetRecordBatchStreamBuilder::new_with_options(reader, options).await {
+    let builder = match guard(ParquetRecordBatchStreamBuilder::new_with_options(
+        reader, options,
+    ))
+    .await
+    {
         Ok(builder) => builder,
         Err(error) => return failed(&error),
     };
-    let mut stream = match builder.build() {
-        Ok(stream) => stream,
+    let mut stream = match guard_sync(move || builder.build()) {
+        Ok(stream) => GuardedStream::new(stream, || Err(decoder_panicked())),
         Err(error) => return failed(&error),
     };
     let mut rows = 0_u64;
