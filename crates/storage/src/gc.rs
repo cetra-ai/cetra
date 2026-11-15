@@ -251,12 +251,15 @@ mod tests {
 
     use super::{ObsoleteReport, collect_obsolete, collect_once};
     use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTable, now_ns};
+    use crate::compaction::job::tests as job;
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
     };
+    use crate::deletion::{Deletion, DeletionScope};
     use crate::error::GcError;
     use crate::hooks::{HookPoint, Hooks};
     use crate::objects::Objects;
+    use crate::test_support::{span_row, span_rows};
     use crate::wal::{Table, spans_at};
 
     fn project() -> ProjectId {
@@ -831,6 +834,126 @@ mod tests {
         assert_eq!(
             storage.collect_obsolete(Duration::ZERO).await.unwrap(),
             ObsoleteReport::default()
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    /// One `traces` deletion of the given traces, cut off at `cutoff`.
+    fn traces_deletion(traces: &[u16], cutoff: i64) -> Deletion {
+        Deletion {
+            id: uuid::Uuid::now_v7(),
+            project: job::project(),
+            cutoff,
+            scope: DeletionScope::Traces {
+                trace_ids: traces
+                    .iter()
+                    .map(|trace| span_row(*trace, 0, 0, 0).trace_id)
+                    .collect(),
+            },
+        }
+    }
+
+    /// A deletion raises a clean file: a reader that took its snapshot before
+    /// the raise still reads the file, so GC must keep it after the file is
+    /// removed (spec 03 §5).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn gc_keeps_a_file_a_snapshot_from_before_its_raise_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = job::config_in(
+            dir.path(),
+            job::quiet_compaction(8),
+            Duration::from_secs(3_600),
+        );
+        let mut storage = crate::Storage::open(config.clone()).await.unwrap();
+        let time = job::at(10, 0, 0);
+        storage = job::flush_cycle(
+            &config,
+            storage,
+            span_rows(&[span_row(2, 0, time, time + 1)]),
+        )
+        .await;
+        // Keep ids and paths, not `Arc`s: a held `FileMeta` would count as a reader.
+        let (file_id, file_path) = {
+            let files = storage.catalog_files(Table::Spans);
+            (files[0].id, files[0].path.clone())
+        };
+
+        // The snapshot from before the raise.
+        let held = storage
+            .query(job::project(), Default::default())
+            .await
+            .unwrap();
+
+        storage
+            .register_deletion(traces_deletion(&[1], job::at(11, 0, 0)))
+            .await
+            .unwrap();
+        let report = storage.apply_deletions(job::at(11, 0, 0)).await.unwrap();
+        assert_eq!(
+            (
+                report.rewritten,
+                report.raised,
+                report.applied,
+                report.failed
+            ),
+            (0, 1, 1, 0),
+            "{report:?}"
+        );
+        {
+            let raised = storage.catalog_files(Table::Spans);
+            assert_eq!(raised.len(), 1);
+            assert_eq!(raised[0].id, file_id, "the file is unchanged");
+            assert_eq!(raised[0].deletions_applied_seq, 1);
+        }
+
+        // Remove the file: retention drops every partition of its day.
+        let next_day = job::day().succ_opt().unwrap();
+        let retained = storage
+            .apply_retention(job::project(), next_day)
+            .await
+            .unwrap();
+        assert!(retained.files >= 1, "{retained:?}");
+        assert!(storage.catalog_files(Table::Spans).is_empty());
+
+        let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
+        assert_eq!(collected.deleted, 0, "{collected:?}");
+        assert!(collected.in_use >= 1, "{collected:?}");
+        assert!(object_exists(dir.path(), &file_path));
+
+        // The old snapshot still reads its one row.
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            Arc::clone(&held.runtime),
+        );
+        ctx.register_table("spans_t", held.spans.clone()).unwrap();
+        let counted = ctx
+            .sql("SELECT count(*) FROM spans_t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let total = counted[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(total, 1, "the pre-raise snapshot reads its row");
+
+        // Once the snapshot is gone, every obsolete file goes.
+        drop(ctx);
+        drop(held);
+        let collected = storage.collect_obsolete(Duration::ZERO).await.unwrap();
+        assert!(collected.deleted >= 1, "{collected:?}");
+        assert!(!object_exists(dir.path(), &file_path));
+        assert_eq!(
+            scalar(
+                dir.path(),
+                "SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'"
+            )
+            .await,
+            0
         );
         storage.shutdown().await.unwrap();
     }

@@ -185,3 +185,13 @@ The gaps:
 - **Tokio's multi-thread scheduling.**
 
 What M2 closed: every local file call of the crate, statvfs included, goes through `crate::fs`. A grep of `std::fs::` outside the seam finds only test code and the `TryLockError` type.
+
+---
+
+## M6 — Concurrency
+
+Track R, plan `docs/plans/r-hardening/06-m6-concurrency.md`. The sub-phases add a concurrent mode to the model test: background flush, compaction and GC run for real while reader threads check every read against the model.
+
+### Findings
+
+**M6-1, GC deleted a file a pre-raise snapshot still read.** A deletion pass raises a clean file: `Catalog::apply` replaces its `FileMeta` with a new `Arc`. A snapshot taken before the raise holds the old `Arc`, but when the file was later removed, the committer retired only the new `Arc`, so GC's in-use check (`strong_count`) did not count the reader. Once the grace had passed, GC deleted the object under the reader. The production grace of 5 minutes hid it. The regression test is `gc::tests::gc_keeps_a_file_a_snapshot_from_before_its_raise_reads`, which fails before the change at its GC step. Class: storage. Fixed in R6.4 (the commit that adds this note): the committer keeps a `Weak` of each replaced version (`superseded`), and GC treats the file as in use while one is alive.

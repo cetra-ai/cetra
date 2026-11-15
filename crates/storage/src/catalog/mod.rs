@@ -134,6 +134,10 @@ pub(crate) struct FileMeta {
 pub(super) type ProjectDays = Arc<BTreeMap<NaiveDate, Vec<Arc<FileMeta>>>>;
 pub(super) type Tables = [BTreeMap<ProjectId, ProjectDays>; 3];
 
+/// What [`Catalog::apply`] returns: the next catalog, the files an active remove
+/// took out, and the versions the raises replaced.
+pub(super) type Applied = (Catalog, Vec<Arc<FileMeta>>, Vec<Arc<FileMeta>>);
+
 /// Active files. Immutable once published: a commit builds a new value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Catalog {
@@ -189,15 +193,14 @@ impl Catalog {
 
     /// Clone the maps a remove or an add touches. Other projects stay the same `Arc`.
     ///
-    /// Returns the next catalog and the [`FileMeta`] of every file an `Active`
-    /// remove took out. A remove with another expected state changes nothing in
-    /// memory and returns nothing for it.
-    pub(super) fn apply(
-        &self,
-        edit: &CatalogEdit,
-    ) -> Result<(Self, Vec<Arc<FileMeta>>), CommitError> {
+    /// Returns the next catalog, the [`FileMeta`] of every file an `Active`
+    /// remove took out, and the version every raised file had before the
+    /// raise. A remove with another expected state changes nothing in memory
+    /// and returns nothing for it.
+    pub(super) fn apply(&self, edit: &CatalogEdit) -> Result<Applied, CommitError> {
         let mut tables = self.tables.clone();
         let mut removed = Vec::new();
+        let mut superseded = Vec::new();
         for (id, state) in &edit.remove {
             if *state != FileState::Active {
                 continue;
@@ -219,18 +222,18 @@ impl Catalog {
         for (id, seq) in &edit.raise {
             // Before `add`: the SQL check rejects a raise of an added file
             // before its row is inserted, and this keeps the two in step.
-            let replaced = replace_active(&mut tables, *id, |file| FileMeta {
+            let Some(replaced) = replace_active(&mut tables, *id, |file| FileMeta {
                 deletions_applied_seq: *seq,
                 ..file.clone()
-            });
-            if !replaced {
+            }) else {
                 return Err(CommitError::conflict("raised file is not active"));
-            }
+            };
+            superseded.push(replaced);
         }
         for file in &edit.add {
             insert_sorted(&mut tables, file.clone());
         }
-        Ok((Self { tables }, removed))
+        Ok((Self { tables }, removed, superseded))
     }
 }
 
@@ -267,8 +270,13 @@ pub(super) fn insert_sorted(tables: &mut Tables, file: FileMeta) {
 }
 
 /// Replace the `Arc<FileMeta>` of the active file `id` in place, keeping its
-/// day's order. `false` when the id is not an active file.
-fn replace_active(tables: &mut Tables, id: FileId, f: impl FnOnce(&FileMeta) -> FileMeta) -> bool {
+/// day's order. Returns the replaced `Arc`, or `None` when the id is not an
+/// active file.
+fn replace_active(
+    tables: &mut Tables,
+    id: FileId,
+    f: impl FnOnce(&FileMeta) -> FileMeta,
+) -> Option<Arc<FileMeta>> {
     for table in tables.iter_mut() {
         let Some((project, day)) = find_file(table, id) else {
             continue;
@@ -280,13 +288,11 @@ fn replace_active(tables: &mut Tables, id: FileId, f: impl FnOnce(&FileMeta) -> 
         let Some(files) = map.get_mut(&day) else {
             continue;
         };
-        let Some(position) = files.iter().position(|file| file.id == id) else {
-            return false;
-        };
-        files[position] = Arc::new(f(&files[position]));
-        return true;
+        let position = files.iter().position(|file| file.id == id)?;
+        let next = Arc::new(f(&files[position]));
+        return Some(std::mem::replace(&mut files[position], next));
     }
-    false
+    None
 }
 
 fn remove_active(tables: &mut Tables, id: FileId) -> Option<Arc<FileMeta>> {
@@ -371,8 +377,9 @@ mod tests {
             raise: Vec::new(),
             quarantine: Vec::new(),
         };
-        let (catalog, removed) = Catalog::empty().apply(&edit).unwrap();
+        let (catalog, removed, superseded) = Catalog::empty().apply(&edit).unwrap();
         assert!(removed.is_empty());
+        assert!(superseded.is_empty());
         let ids: Vec<_> = catalog
             .files(FileTable::Spans, project(), day(2)..=day(2))
             .map(|file| file.min_time)

@@ -9,8 +9,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::NaiveDate;
@@ -90,6 +90,9 @@ struct CommitterInner {
     /// a count above one means an older catalog, a provider or a plan still
     /// names the file, and the object must stay.
     retired: HashMap<FileId, Arc<FileMeta>>,
+    /// Earlier versions of files a raise replaced, still held by older
+    /// snapshots: GC treats the file as in use while any is alive (spec 03 §5).
+    superseded: HashMap<FileId, Vec<Weak<FileMeta>>>,
     /// The same flag as [`Committer::stopped`].
     stopped: Arc<AtomicBool>,
 }
@@ -124,6 +127,7 @@ impl Committer {
                 tombstones: Arc::new(tombstones),
                 hooks,
                 retired: HashMap::new(),
+                superseded: HashMap::new(),
                 stopped: Arc::clone(&stopped),
             }),
             stopped,
@@ -1211,6 +1215,13 @@ impl Committer {
         {
             return Ok(ObsoleteRemoval::InUse);
         }
+        let superseded_in_use = inner
+            .superseded
+            .get(&file.id)
+            .is_some_and(|versions| versions.iter().any(|version| version.strong_count() > 0));
+        if superseded_in_use {
+            return Ok(ObsoleteRemoval::InUse);
+        }
         let state: Option<String> = sqlx::query_scalar("SELECT state FROM data_files WHERE id = ?")
             .bind(file.id.to_string())
             .fetch_optional(&mut inner.connection)
@@ -1218,6 +1229,7 @@ impl Committer {
             .map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
         if state.as_deref() != Some("obsolete") {
             inner.retired.remove(&file.id);
+            inner.superseded.remove(&file.id);
             return Ok(ObsoleteRemoval::Gone);
         }
         hooks.pause(HookPoint::GcObsoleteBeforeDelete);
@@ -1238,6 +1250,7 @@ impl Committer {
         commit_point(&self.stopped, &inner.hooks, outcome)
             .map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
         inner.retired.remove(&file.id);
+        inner.superseded.remove(&file.id);
         Ok(ObsoleteRemoval::Deleted { bytes })
     }
 }
@@ -1461,8 +1474,8 @@ async fn commit_inner(
         let _ = transaction.rollback().await;
         return Err(error);
     }
-    let (next, removed) = match current.apply(edit) {
-        Ok((catalog, removed)) => (Arc::new(catalog), removed),
+    let (next, removed, superseded) = match current.apply(edit) {
+        Ok((catalog, removed, superseded)) => (Arc::new(catalog), removed, superseded),
         Err(error) => {
             let _ = transaction.rollback().await;
             return Err(error);
@@ -1495,10 +1508,24 @@ async fn commit_inner(
     for file in removed {
         inner.retired.insert(file.id, file);
     }
+    for file in superseded {
+        inner
+            .superseded
+            .entry(file.id)
+            .or_default()
+            .push(Arc::downgrade(&file));
+    }
     if let Some((table, sequence)) = edit.flushed_seq {
         inner.flushed[table_index(table)] = sequence;
     }
     inner.catalog = Arc::clone(&next);
+    // `current` is the catalog this commit replaced: once it is dropped, the
+    // versions only it held are dead and their entries can go.
+    drop(current);
+    inner.superseded.retain(|_, versions| {
+        versions.retain(|version| version.strong_count() > 0);
+        !versions.is_empty()
+    });
     Ok(next)
 }
 

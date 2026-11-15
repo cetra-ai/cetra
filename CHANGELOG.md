@@ -30,3 +30,4 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Storage: a WAL group whose fsync failed is no longer truncated with a second fsync, and the segment a failed group discards stays removed after a power loss.
 - Storage: a read-cache size file torn by a power loss could make S3-mode queries read short ranges. The size file now carries a CRC-32C; cache directories written in the old format are dropped at open and fetched again.
 - The span list no longer shows a re-sent span twice, and its pages no longer depend on the page size. A re-send that changed its `start_time` is still listed twice until compaction merges them.
+- Storage GC no longer deletes a data file that a query started before a deletion pass still reads (the deletion's raise of a clean file hid the query's reference).
