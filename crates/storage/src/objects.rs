@@ -78,8 +78,9 @@ enum Kind {
 impl Objects {
     /// Opens the store from `config`.
     ///
-    /// Local roots are created, including missing parents, and each new
-    /// directory's parent is fsynced. Blocking work runs on `spawn_blocking`.
+    /// Local roots are created, including missing parents. The parent of every
+    /// directory of the chain is fsynced, new or not (see `create_dir_chain`).
+    /// Blocking work runs on `spawn_blocking`.
     pub(crate) async fn new(config: &StorageConfig, hooks: Hooks) -> Result<Self, ObjectError> {
         let url = registered_url()?;
         let spill_dir = config.data_dir.join("tmp").join("compaction");
@@ -556,6 +557,10 @@ impl Objects {
     /// Deletes leftover temp files: under `tables/` and `media/` in local
     /// mode, every file of the spill directory in remote mode.
     ///
+    /// In local mode the walk fsyncs every directory it visits, children
+    /// first, then the root, so the removals and the `tables` and `media`
+    /// entries are durable before the first write of this life.
+    ///
     /// This walks the filesystem on the calling thread; open calls it from
     /// `spawn_blocking`.
     pub(crate) fn remove_temp_files(&self) -> Result<u64, ObjectError> {
@@ -911,9 +916,13 @@ fn remove_temps(dir: &Path, removed: &mut u64) -> Result<(), ObjectError> {
 /// below the nearest existing ancestor otherwise, so it never syncs from `/`
 /// down into directories the process does not own. Runs at open only.
 fn create_dir_chain(path: &Path, data_dir: &Path) -> Result<(), ObjectError> {
-    let base = match path.strip_prefix(data_dir) {
-        Ok(relative) if relative.components().next().is_some() => data_dir.to_path_buf(),
-        _ => nearest_existing_ancestor(path)?,
+    let inside = path
+        .strip_prefix(data_dir)
+        .is_ok_and(|relative| relative.components().next().is_some());
+    let base = if inside {
+        data_dir.to_path_buf()
+    } else {
+        nearest_existing_ancestor(path)?
     };
     let Ok(relative) = path.strip_prefix(&base) else {
         return Err(ObjectError::InvalidPath);
@@ -932,12 +941,24 @@ fn create_dir_chain(path: &Path, data_dir: &Path) -> Result<(), ObjectError> {
                 ));
             }
         }
-        if let Some(parent) = current.parent() {
-            fs::sync_dir(parent)
-                .map_err(|source| ObjectError::io("syncing object directory", parent, source))?;
-        }
+        sync_parent(&current)?;
+    }
+    if !inside {
+        // The walk above syncs the parent of each directory it creates or
+        // walks. When `path` already exists, nothing is walked: its own entry
+        // in its parent is synced here.
+        sync_parent(path)?;
     }
     Ok(())
+}
+
+/// Fsyncs the directory that holds the entry `path`.
+fn sync_parent(path: &Path) -> Result<(), ObjectError> {
+    match fs::parent_dir(path) {
+        Some(parent) => fs::sync_dir(parent)
+            .map_err(|source| ObjectError::io("syncing object directory", parent, source)),
+        None => Ok(()),
+    }
 }
 
 /// The nearest ancestor of `path` (or `path` itself) that exists. It must be a directory.
@@ -1566,5 +1587,29 @@ mod tests {
         let (key, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
         assert_eq!(objects.delete_len(&key).await.unwrap(), 0);
         objects.delete(&key).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_existing_outside_object_root_keeps_its_entry_after_a_lossy_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let shadow = tempfile::tempdir().unwrap();
+        let lossy = Lossy::enable(dir.path(), &shadow.path().join("shadow"));
+        let data = dir.path().join("data");
+        let root = dir.path().join("obj");
+        // A killed process left the object root created and never synced in
+        // its parent, which is outside `data`. Every directory of the chain
+        // exists, so only the root's own entry can still be unsynced.
+        crate::fs::create_dir(&root).unwrap();
+        let mut config = local_config(&data);
+        config.object_store = Some(ObjectStoreUrl::Local(root.clone()));
+
+        let objects = Objects::new(&config, Hooks::default()).await.unwrap();
+        drop(objects);
+
+        lossy.crash_with(CrashMode::DropAll, 0);
+        assert!(
+            root.is_dir(),
+            "the object root's entry in its parent was lost after a lossy crash"
+        );
     }
 }

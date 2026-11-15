@@ -454,6 +454,11 @@ fn picked_score(model: &Model, project: P, pick: u8) -> Option<ScoreKey> {
 /// compaction that day-closes the scores partition drops a tombstone, so after it a stale version
 /// reads as live while the model still expects the tombstone to win (known limit M1-2, spec 03 § 5).
 /// Such keys are left out, and a `StaleScore` with no candidate is a no-op without a call.
+///
+/// The function also skips keys with no visible version (every copy is covered by a deletion), and
+/// stale re-sends to a key whose newest stale version is a tombstone, even before any day close.
+/// Both are deliberate because of known limit M1-2: a re-send to such a key would resurrect data
+/// that the model can no longer see once a day close drops the tombstone.
 fn stale_candidates(model: &Model, project: P) -> Vec<ScoreKey> {
     let state = model.project(project);
     state

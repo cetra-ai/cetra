@@ -1559,7 +1559,7 @@ fn ensure_dir(path: &Path) -> Result<(), OpenError> {
         Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
         Err(source) => return Err(open_io("creating directory", path, source)),
     }
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = fs::parent_dir(path) {
         fs::sync_dir(parent).map_err(|source| open_io("syncing directory", parent, source))?;
     }
     Ok(())

@@ -321,6 +321,39 @@ pub(crate) fn sync_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }
 
+/// The directory that holds the entry `path`, to fsync for that entry. A
+/// relative one-component path has the parent `""`, which `open` rejects; its
+/// entry is in the current directory, so that is returned instead. `None` when
+/// `path` has no parent.
+#[inline]
+pub(crate) fn parent_dir(path: &Path) -> Option<&Path> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_one_component_path_syncs_the_current_directory() {
+        assert_eq!(parent_dir(Path::new("data")), Some(Path::new(".")));
+        assert_eq!(
+            parent_dir(Path::new("data/objects")),
+            Some(Path::new("data"))
+        );
+        assert_eq!(parent_dir(Path::new("/data")), Some(Path::new("/")));
+        assert_eq!(parent_dir(Path::new("/")), None);
+        // The mapped parent opens, where the empty one does not.
+        sync_dir(parent_dir(Path::new("data")).unwrap()).unwrap();
+    }
+}
+
 /// Sizes of the file system holding a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Space {

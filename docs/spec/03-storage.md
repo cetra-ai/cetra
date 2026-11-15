@@ -28,7 +28,7 @@ Configuration keys named in this spec (`wal.sync`, `flush.max_bytes`, …) live 
 
 With `storage.object_store = s3://bucket/prefix`, the `objects/` tree lives in the bucket; `catalog.db`, `meta.db` and `wal/` stay on local disk, which **must be persistent** (an ephemeral disk loses up to `flush.max_age` of acknowledged data on machine loss — documented). Absent, `object_store` is `file://<data_dir>/objects`. A local path is `file://<absolute path>`.
 
-A local object write lands in the destination directory as `.<filename>.tmp-<uuidv7>`, then `sync_all`, rename onto `<filename>`, and an fsync of that directory. Startup deletes leftover files whose names start with `.` and contain `.tmp-`. A local delete unlinks the file and fsyncs its directory before the catalog row is removed. Startup fsyncs every directory of the data directory layout and of the local object tree, so an entry that a crashed process created is durable before it is used.
+A local object write lands in the destination directory as `.<filename>.tmp-<uuidv7>`, then `sync_all`, rename onto `<filename>`, and an fsync of that directory. Startup deletes leftover files whose names start with `.` and contain `.tmp-`. A local delete unlinks the file and fsyncs its directory before the catalog row is removed. Startup fsyncs the parent of every directory of the data directory layout and of the local object tree, the root's own entry included, and fsyncs each object directory it walks for leftover temp files, so an entry that a crashed process created is durable before it is used.
 
 **Partition key:** `(project_id, day)`.
 - For `spans` and `traces`, `day` is the trace's **anchor day** (§ Trace anchor). It equals the UTC date of the row's own `start_time` or differs from it by at most one day.
