@@ -251,14 +251,14 @@ FMT_VARIANTS=pq_default,st ./target/release/fmtbench profile $D 3
 
 1. **Shared column lists.** Define `pub const LIGHT_COLS: [&str; 9]` and `pub const LIST_COLS: [&str; 10]` once, in `main.rs`, from the current light-lookup and list query texts. Build those SQL texts, `profile.rs`'s, and the fast-path projections from them.
 
-2. **Ids.** Make `profile.rs`'s `unhex` `pub(crate)`. Convert ids with `let k: [u8; 16] = unhex(id).try_into().map_err(|_| "bad trace id")?;`.
+2. **Ids.** Make `profile.rs`'s `unhex` `pub(crate)`; it maps invalid hex to zero bytes, so only a wrong length errors. Convert ids with `let k: [u8; 16] = unhex(id).try_into().map_err(|_| "bad trace id")?;`.
 
 3. **`pqfast.rs`.** Add `mod pqfast;`. Do not change its logic. `open` takes `loc.store.clone()` and each file's `Path`, from listing `prefix.join(variant)` for `.parquet` objects.
 
 4. **Runners:**
 
    ```rust
-   enum Runner { Sql(SessionContext), StFast(Vec<Arc<StrataFile>>), PqFast(Vec<pqfast::PqFile>) }
+   enum Runner { Sql(SessionContext, Vec<Arc<StrataFile>>), StFast(Vec<Arc<StrataFile>>), PqFast(Vec<pqfast::PqFile>) }
    /// Runs one query (all its SQL texts or lookups) and returns the row count; None when the
    /// runner does not support the query.
    async fn run_query(r: &Runner, q: &Query, ids: &[[u8; 16]]) -> R<Option<usize>>;
@@ -280,7 +280,7 @@ FMT_VARIANTS=pq_default,st ./target/release/fmtbench profile $D 3
    - I/O figures come from the **first measured run**: `Counting` is reset before it, and for Strata files `reset_io_stats` is called before it too.
    - For `TraceFull` and `TraceLight`, print requests, KiB and waves **divided by the number of ids**, for every variant.
 
-6. **Waves** (`st`, `st_fast` and `pq_fast`; others print `-`). Print two figures:
+6. **Waves** (`st` and `st_fast`; every other variant, `pq_fast` included, prints `-`: they have no wave counter, and their latency on S3 shows the round trips). Print two figures:
    - `waves_max`, the max over files of `io_stats().waves`, valid when the files are read concurrently: lookups, and `st` with at least as many partitions as files;
    - `waves_sum`, the sum over files, valid for `trace_list`, which visits chunks one after another.
 
