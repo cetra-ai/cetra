@@ -225,6 +225,51 @@ impl fmt::Debug for UpdateItemRequest {
     }
 }
 
+/// `POST …/items/from-trace` body (D-J-8). Fields left out take the span's values.
+#[derive(Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FromTraceRequest {
+    /// 32 hex digits, either case.
+    pub trace_id: String,
+    /// 16 hex digits. Absent: the trace root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
+    /// Replaces the span's input. Any JSON; `null` keeps the span's input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = any_json)]
+    pub input: Option<Value>,
+    /// Replaces the span's output. Any JSON; `null` stores no expected output. Absent keeps
+    /// the span's output.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schema(schema_with = any_json)]
+    pub expected_output: Option<Option<Value>>,
+    /// The item's metadata, a JSON object. Absent: `{}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub metadata: Option<Map<String, Value>>,
+}
+
+// `Debug` is hand-written: presence flags and sizes only, never content (AGENTS.md § Privacy).
+impl fmt::Debug for FromTraceRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.input.clone().unwrap_or(Value::Null);
+        let expected = self.expected_output.clone().flatten();
+        let metadata = self.metadata.clone().unwrap_or_default();
+        let bytes = json_bytes(&input, expected.as_ref(), &metadata);
+        f.debug_struct("FromTraceRequest")
+            .field("span_id_present", &self.span_id.is_some())
+            .field("input_present", &self.input.is_some())
+            .field("expected_output_present", &self.expected_output.is_some())
+            .field("metadata_present", &self.metadata.is_some())
+            .field("bytes", &bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 /// `GET /datasets` query.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]

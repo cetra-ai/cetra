@@ -14,8 +14,9 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+use llmobs_eval::{TraceData, VariableMapping, resolve};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
@@ -24,9 +25,9 @@ use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ExportFormat, ExportParams, ImportFormat, ImportMapping,
-    ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem, PreviewParams,
-    UpdateDatasetRequest, UpdateItemRequest,
+    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportFormat,
+    ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem,
+    PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
@@ -35,6 +36,9 @@ use crate::datasets::{
     ItemValues, MAX_BATCH_ITEMS, MAX_SCHEMA_CHECK_BYTES, MAX_SCHEMA_FAILURES, Schemas,
     check_description, check_item, check_name, check_schema, json_bytes,
 };
+use crate::entitlements::Visibility;
+use crate::eval::execute;
+use crate::eval::trace_load::{self, LoadError, LoadedTrace};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -225,6 +229,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(export_items),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(add_from_trace),
         },
     ]
 }
@@ -1357,7 +1371,7 @@ async fn import_items(
         description: format!("import {file_name} ({imported} items)"),
         created_by: actor.clone(),
     };
-    let version = write_checked(&state, project, &used, change).await?;
+    let version = write_checked(&state, project, &used, change, None).await?;
     tracing::info!(
         target: "audit",
         dataset_id = %used.id,
@@ -1418,48 +1432,222 @@ fn check_file(
     Ok(Ok(Checked { items, errors }))
 }
 
-/// What the import's write transaction found.
-enum ImportWrite {
+/// What the write transaction of [`write_checked`] found.
+enum CheckedWrite {
     Written(i64),
     Gone,
     SchemaChanged,
+    Blocked,
 }
 
 /// Writes `change` as one version of the dataset `used`, after re-reading the dataset in the
 /// write transaction: gone is 404; a changed `input_schema` or `expected_schema` is a 409 and
-/// nothing is written (D-J-2: the rows were checked against `used`).
+/// nothing is written (D-J-2: the rows were checked against `used`). With `guard = Some((trace,
+/// users))` (add-from-trace) the transaction first asks the deletion guard whether a deletion
+/// blocks a copy of `trace` and answers 404 when one does, nothing written (D-J-9). The import
+/// passes `None`.
 async fn write_checked(
     state: &AppState,
     project: ProjectId,
     used: &DatasetRow,
     change: VersionChange,
+    guard: Option<(TraceId, Vec<(String, i64)>)>,
 ) -> Result<i64, ApiError> {
     let key = DatasetKey::Id(used.id);
     let input_schema = used.input_schema.clone();
     let expected_schema = used.expected_schema.clone();
     let now = state.clock.now_ns();
+    let deletions = state.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                if let Some((trace, users)) = &guard {
+                    let users = execute::borrowed_users(users);
+                    if deletions
+                        .deletions
+                        .guard
+                        .blocking(project, *trace, &users, now)
+                        .is_some()
+                    {
+                        return Ok(CheckedWrite::Blocked);
+                    }
+                }
                 let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
-                    return Ok(ImportWrite::Gone);
+                    return Ok(CheckedWrite::Gone);
                 };
                 if row.input_schema != input_schema || row.expected_schema != expected_schema {
-                    return Ok(ImportWrite::SchemaChanged);
+                    return Ok(CheckedWrite::SchemaChanged);
                 }
                 let version = store::write_version(conn, row.id, change, now).await?;
-                Ok(ImportWrite::Written(version))
+                Ok(CheckedWrite::Written(version))
             })
         })
         .await?;
     match outcome {
-        ImportWrite::Written(version) => Ok(version),
-        ImportWrite::Gone => Err(ApiError::NotFound),
-        ImportWrite::SchemaChanged => Err(ApiError::Conflict {
+        CheckedWrite::Written(version) => Ok(version),
+        CheckedWrite::Gone | CheckedWrite::Blocked => Err(ApiError::NotFound),
+        CheckedWrite::SchemaChanged => Err(ApiError::Conflict {
             detail: "the dataset's schema changed; retry",
         }),
     }
+}
+
+/// A 400 on one id field of a `from-trace` request.
+fn bad_id(field: &str, message: &str) -> ApiError {
+    bad_request(vec![field_error(field, message)])
+}
+
+/// The answer of the add-from-trace route for a failed trace load (D-J-8, D-I-23).
+fn trace_load_failed(error: LoadError) -> ApiError {
+    match error {
+        LoadError::NotFound | LoadError::NoTargetSpan => ApiError::NotFound,
+        LoadError::EvaluationTrace => bad_request(vec![field_error(
+            "trace_id",
+            "an evaluation trace cannot be added to a dataset",
+        )]),
+        LoadError::TooLarge => bad_request(vec![field_error(
+            "trace_id",
+            "the trace is too large to load",
+        )]),
+        LoadError::Busy | LoadError::Saturated => ApiError::Unavailable {
+            detail: "storage is busy; retry in a few seconds",
+        },
+        LoadError::Failed(error) => ApiError::Internal(Box::new(error)),
+        LoadError::Convert(error) => ApiError::Internal(Box::new(error)),
+    }
+}
+
+/// The item a trace copy makes (D-J-8): the source span (`span`, or the trace root), its input
+/// and output as `span.input?` and `span.output?` decode them, and the request's replacements.
+/// A truncated trace is refused, since its root may be a span that was skipped. Pure: no store.
+fn item_from(
+    loaded: &LoadedTrace,
+    span: Option<SpanId>,
+    request: &FromTraceRequest,
+) -> Result<(SpanId, ItemValues), ApiError> {
+    if loaded.truncated {
+        return Err(bad_request(vec![field_error(
+            "trace_id",
+            "the trace is too large to copy",
+        )]));
+    }
+    let source = match span {
+        Some(span) => span,
+        None => TraceData::new(&loaded.spans, None)
+            .root_span_id()
+            .ok_or(ApiError::NotFound)?,
+    };
+    let mapping = VariableMapping::from_json(&json!({
+        "input": "span.input?",
+        "output": "span.output?",
+    }))
+    .map_err(|error| ApiError::Internal(Box::new(error)))?;
+    let variables = resolve(
+        &mapping,
+        Some(&TraceData::new(&loaded.spans, Some(source))),
+        None,
+    )
+    .map_err(|error| ApiError::Internal(Box::new(error)))?;
+    let decoded = |name: &str| -> Value {
+        variables
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map_or(Value::Null, |(_, value)| value.clone())
+    };
+    let input = match &request.input {
+        Some(input) => input.clone(),
+        None => decoded("input"),
+    };
+    if input.is_null() {
+        return Err(bad_request(vec![field_error(
+            "input",
+            "the span has no input",
+        )]));
+    }
+    let expected_output = match &request.expected_output {
+        Some(explicit) => explicit.clone(),
+        None => Some(decoded("output")).filter(|value| !value.is_null()),
+    };
+    let metadata = request.metadata.clone().unwrap_or_default();
+    Ok((
+        source,
+        ItemValues {
+            input,
+            expected_output,
+            metadata,
+        },
+    ))
+}
+
+/// `POST …/items/from-trace` (D-J-8, D-J-9): one item copied from a trace or one of its spans,
+/// as a new version. A deletion that blocks the trace answers 404 and writes nothing.
+async fn add_from_trace(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<FromTraceRequest>,
+) -> Result<(StatusCode, error::Json<DatasetItem>), ApiError> {
+    let trace_id = body
+        .trace_id
+        .parse::<TraceId>()
+        .map_err(|_| bad_id("trace_id", "must be 32 hex digits"))?;
+    let span_id = match body.span_id.as_deref() {
+        Some(text) => Some(
+            text.parse::<SpanId>()
+                .map_err(|_| bad_id("span_id", "must be 16 hex digits"))?,
+        ),
+        None => None,
+    };
+    let project = access.project.id;
+    let used = find(&state, project, &dataset).await?;
+    let loaded = trace_load::load_trace(
+        &state,
+        project,
+        Visibility::window(&state, access.project.org_id),
+        trace_id,
+        span_id,
+        None,
+    )
+    .await
+    .map_err(trace_load_failed)?;
+    let (source, values) = item_from(&loaded, span_id, &body)?;
+    let errors = check_item("", &values, &Schemas::of(&used)?);
+    if !errors.is_empty() {
+        return Err(bad_request(errors));
+    }
+    let item_id = Uuid::now_v7();
+    let actor = created_by(&principal);
+    let users = execute::users_of(&loaded.spans);
+    let change = VersionChange {
+        close: Vec::new(),
+        insert: vec![NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id,
+            input: values.input,
+            expected_output: values.expected_output,
+            metadata: values.metadata,
+            source_trace_id: Some(trace_id),
+            source_span_id: Some(source),
+        }],
+        description: format!("add from trace {}", trace_id.to_hex()),
+        created_by: actor.clone(),
+    };
+    let version = write_checked(&state, project, &used, change, Some((trace_id, users))).await?;
+    tracing::info!(
+        target: "audit",
+        dataset_id = %used.id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        version,
+        item_id = %item_id,
+        "dataset item added from a trace"
+    );
+    let row = store::get_item(state.meta.reader(), used.id, item_id, version)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok((StatusCode::CREATED, error::Json(item_json(&row))))
 }
 
 /// One permit of [`IMPORTS`], or 503 when every one is taken.
@@ -1620,7 +1808,9 @@ mod tests {
 
     use super::*;
     use crate::auth::roles::OrgRole;
-    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs};
+    use crate::test_support::{
+        Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
+    };
 
     const FAQ_SCHEMA: &str =
         r#"{"type":"object","required":["question"],"properties":{"question":{"type":"string"}}}"#;
@@ -3257,7 +3447,7 @@ mod tests {
             description: "import".to_owned(),
             created_by: None,
         };
-        let outcome = write_checked(&app.state, seeded.project.id, &used, change).await;
+        let outcome = write_checked(&app.state, seeded.project.id, &used, change, None).await;
         assert!(matches!(
             outcome,
             Err(ApiError::Conflict { detail }) if detail == "the dataset's schema changed; retry"
@@ -3528,5 +3718,341 @@ mod tests {
         assert_eq!(status, 201);
         assert!(!logs.contains("canary-import-2"), "{logs}");
         assert!(!logs.contains("canary-file-2"), "{logs}");
+    }
+
+    /// The example trace of `fixtures/api/dataset`: root `b100000000000011`.
+    const T1: &str = "a1000000000000000000000000000001";
+    const DAY_NS: i64 = 86_400_000_000_000;
+
+    fn from_trace_path(seeded: &Seeded) -> String {
+        format!("{}/faq/items/from-trace", base(seeded))
+    }
+
+    async fn from_trace(app: &TestApp, seeded: &Seeded, body: Value) -> TestResponse {
+        app.request(Method::POST, &from_trace_path(seeded))
+            .header("cookie", &seeded.cookie)
+            .json(&body)
+            .send()
+            .await
+    }
+
+    /// The example traces in the project, and the dataset `faq` with no items.
+    async fn faq_with_traces(app: &TestApp, seeded: &Seeded) {
+        app.load_example_dataset(seeded.project.id).await;
+        create_ok(app, seeded, "faq").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_trace_copies_the_root() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_trace(&app, &seeded, json!({ "trace_id": T1 })).await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let item: Value = response.json();
+        assert_eq!(item["input"], "My order 1234 hasn't arrived.");
+        assert_eq!(
+            item["expected_output"],
+            "Your order 1234 shipped and arrives tomorrow."
+        );
+        assert_eq!(item["source_trace_id"], T1);
+        assert_eq!(item["source_span_id"], "b100000000000011");
+
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        assert_eq!(
+            versions["data"][0]["description"],
+            "add from trace a1000000000000000000000000000001"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_span_decodes_json() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_trace(
+            &app,
+            &seeded,
+            json!({ "trace_id": T1, "span_id": "b100000000000013" }),
+        )
+        .await;
+        assert_eq!(response.status, 201);
+        let item: Value = response.json();
+        assert_eq!(item["input"], json!({ "order_id": "1234" }));
+        assert_eq!(
+            item["expected_output"],
+            json!({ "status": "shipped", "eta": "2026-01-02" })
+        );
+        assert_eq!(item["source_span_id"], "b100000000000013");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edited_values_replace_the_span() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_trace(
+            &app,
+            &seeded,
+            json!({
+                "trace_id": T1,
+                "input": { "q": "x" },
+                "expected_output": null,
+                "metadata": { "k": 1 }
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 201);
+        let item: Value = response.json();
+        assert_eq!(item["input"], json!({ "q": "x" }));
+        assert!(item.get("expected_output").is_none(), "{item}");
+        assert_eq!(item["metadata"], json!({ "k": 1 }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uppercase_ids_are_accepted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_trace(
+            &app,
+            &seeded,
+            json!({ "trace_id": T1.to_uppercase(), "span_id": "B100000000000011" }),
+        )
+        .await;
+        assert_eq!(response.status, 201);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_trace_and_span_are_not_found() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let trace = from_trace(
+            &app,
+            &seeded,
+            json!({ "trace_id": "a10000000000000000000000000000ff" }),
+        )
+        .await;
+        assert_eq!(trace.status, 404);
+        let span = from_trace(
+            &app,
+            &seeded,
+            json!({ "trace_id": T1, "span_id": "b1000000000000ff" }),
+        )
+        .await;
+        assert_eq!(span.status, 404);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluation_trace_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_trace(
+            &app,
+            &seeded,
+            json!({ "trace_id": "a1000000000000000000000000000005" }),
+        )
+        .await;
+        assert_eq!(response.status, 400);
+        let errors = field_errors(&response);
+        assert_eq!(errors[0].0, "trace_id");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_ids_are_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let trace = from_trace(&app, &seeded, json!({ "trace_id": "xyz" })).await;
+        assert_eq!(field_errors(&trace)[0].0, "trace_id");
+        let span = from_trace(&app, &seeded, json!({ "trace_id": T1, "span_id": "xyz" })).await;
+        assert_eq!(field_errors(&span)[0].0, "span_id");
+
+        // The static `from-trace` segment is not an item id: a GET there is not an item read.
+        let get_path = app
+            .request(Method::GET, &from_trace_path(&seeded))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert!(
+            matches!(get_path.status.as_u16(), 404 | 405),
+            "GET from-trace answered {}",
+            get_path.status
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_applies_to_the_copied_item() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let created = create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": { "type": "object" } }),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+
+        // The root's input is a string, which the object schema refuses.
+        let response = from_trace(&app, &seeded, json!({ "trace_id": T1 })).await;
+        assert_eq!(response.status, 400);
+        assert_eq!(field_errors(&response)[0].0, "input");
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_trace_is_not_found() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        // Two days after the example traces, a one-day window no longer reaches them.
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({ "data_access_days": 1 }),
+        );
+        app.state.clock.set(app.state.clock.now_ns() + 2 * DAY_NS);
+
+        let response = from_trace(&app, &seeded, json!({ "trace_id": T1 })).await;
+        assert_eq!(response.status, 404);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocked_trace_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        let trace: TraceId = T1.parse().unwrap();
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+
+        let response = from_trace(&app, &seeded, json!({ "trace_id": T1 })).await;
+        assert_eq!(response.status, 404);
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+    }
+
+    #[test]
+    fn a_truncated_trace_is_refused() {
+        let loaded = LoadedTrace {
+            spans: vec![dataset_span(0)],
+            truncated: true,
+        };
+        let result = item_from(&loaded, None, &from_trace_body(T1));
+        assert!(matches!(
+            result,
+            Err(ApiError::BadRequest { ref detail, ref errors })
+                if detail.is_none()
+                    && errors.len() == 1
+                    && errors[0].field == "trace_id"
+                    && errors[0].message == "the trace is too large to copy"
+        ));
+    }
+
+    /// A request body with only the trace id.
+    fn from_trace_body(trace: &str) -> FromTraceRequest {
+        FromTraceRequest {
+            trace_id: trace.to_owned(),
+            span_id: None,
+            input: None,
+            expected_output: None,
+            metadata: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn from_trace_rechecks_the_schema() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        let used = find(&app.state, seeded.project.id, "faq").await.unwrap();
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        let patched = patch(&app, &seeded, "faq", json!({ "input_schema": schema })).await;
+        assert_eq!(patched.status, 200);
+
+        let change = VersionChange {
+            close: Vec::new(),
+            insert: vec![NewRevision {
+                revision_id: Uuid::now_v7(),
+                item_id: Uuid::now_v7(),
+                input: json!("x"),
+                expected_output: None,
+                metadata: Map::new(),
+                source_trace_id: Some(T1.parse().unwrap()),
+                source_span_id: None,
+            }],
+            description: "add from trace".to_owned(),
+            created_by: None,
+        };
+        let trace: TraceId = T1.parse().unwrap();
+        let outcome = write_checked(
+            &app.state,
+            seeded.project.id,
+            &used,
+            change,
+            Some((trace, Vec::new())),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            Err(ApiError::Conflict { detail }) if detail == "the dataset's schema changed; retry"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn read_key_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        let read_header = format!("Bearer {}", seeded.read_key);
+        let response = app
+            .request(Method::POST, &from_trace_path(&seeded))
+            .header("authorization", &read_header)
+            .json(&json!({ "trace_id": T1 }))
+            .send()
+            .await;
+        assert_eq!(response.status, 403);
+    }
+
+    #[tokio::test]
+    async fn from_trace_logs_hold_no_content() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+        let (status, logs) = capture_logs(async {
+            from_trace(
+                &app,
+                &seeded,
+                json!({ "trace_id": T1, "input": "canary-trace-3" }),
+            )
+            .await
+            .status
+        })
+        .await;
+        assert_eq!(status, 201);
+        assert!(!logs.contains("canary-trace-3"), "{logs}");
     }
 }

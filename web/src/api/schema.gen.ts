@@ -1377,6 +1377,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an item copied from a trace or a span
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).
+         */
+        post: operations["post_dataset_item_from_trace"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}": {
         parameters: {
             query?: never;
@@ -3811,6 +3831,19 @@ export interface components {
         ForgotPasswordRequest: {
             /** @description Email address. */
             email: string;
+        };
+        /** @description `POST …/items/from-trace` body (D-J-8). Fields left out take the span's values. */
+        FromTraceRequest: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input?: unknown;
+            /** @description The item's metadata, a JSON object. Absent: `{}`. */
+            metadata?: Record<string, never>;
+            /** @description 16 hex digits. Absent: the trace root. */
+            span_id?: string;
+            /** @description 32 hex digits, either case. */
+            trace_id: string;
         };
         /**
          * @description One function the filter DSL or SQL console can call.
@@ -12979,6 +13012,98 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_item_from_trace: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FromTraceRequest"];
+            };
+        };
+        responses: {
+            /** @description The new item. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

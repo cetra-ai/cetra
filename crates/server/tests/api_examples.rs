@@ -22,8 +22,8 @@ use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
 use llmobs_server::api::datasets::{
-    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, ImportMapping,
-    ImportPreview, ImportResult,
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
+    ImportMapping, ImportPreview, ImportResult,
 };
 use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
@@ -432,6 +432,7 @@ fn static_files_match_their_types() {
     roundtrip::<BackfillEstimate>("static/backfill-estimate.json");
     roundtrip::<ImportPreview>("static/dataset-import-preview.json");
     roundtrip::<ImportResult>("static/dataset-import-result.json");
+    roundtrip::<DatasetItem>("static/dataset-item-from-trace.json");
 }
 
 #[test]
@@ -445,6 +446,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
+    roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
     let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
@@ -501,6 +503,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
+        (
+            "post_dataset_item_from_trace",
+            "requests/dataset-from-trace.json",
+        ),
         ("post_backfill", "requests/backfill-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
     ];
@@ -631,6 +637,7 @@ fn generated_files_roundtrip() {
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
             "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
             "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
+            "post_dataset_item_from_trace" => roundtrip::<DatasetItem>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }

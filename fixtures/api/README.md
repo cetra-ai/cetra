@@ -41,8 +41,8 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Eval jobs | `01900000-0000-7000-8000-000000000800` (done rule job of `…0700`, judge trace `e1000000000000000000000000000002`, score `…0900`), `…0801` (failed rule job, `provider status 503`), `…0802` (queued manual run of `…0500`). `eval-job.json`, `eval-jobs.json` and `eval-job-queued.json` use them. They are not live jobs |
 | Backfills | `01900000-0000-7000-8000-000000000b00` (`done`), `…0b01` (`failed`, `interrupted`), `…0b02` (`running`, the `202` answer of `post_backfill`), all of rule `…0700`. `backfills.json`, `backfill.json` and the requests use them. They are not live backfills |
 | Dataset | `01900000-0000-7000-8000-000000000c01`, `faq`, at version 2 with 3 live items. `datasets.json` and `datasets/…c01.json` use it. `requests/dataset-create.json` has the same name and schema |
-| Dataset items | `01900000-0000-7000-8000-000000000d01`, `…0d02`, `…0d03` |
-| Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2) |
+| Dataset items | `01900000-0000-7000-8000-000000000d01`, `…0d02`, `…0d03`, and `…0d04` (added from a trace in version 4, `static/dataset-item-from-trace.json`) |
+| Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2), `…0d15` (`…0d04`, version 4, from trace `a100…0001`) |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |

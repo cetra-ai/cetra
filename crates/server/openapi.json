@@ -8351,6 +8351,128 @@
         }
       }
     },
+    "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace": {
+      "post": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Add an item copied from a trace or a span",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).",
+        "operationId": "post_dataset_item_from_trace",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FromTraceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}": {
       "get": {
         "tags": [
@@ -18098,6 +18220,34 @@
           "email": {
             "type": "string",
             "description": "Email address."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FromTraceRequest": {
+        "type": "object",
+        "description": "`POST …/items/from-trace` body (D-J-8). Fields left out take the span's values.",
+        "required": [
+          "trace_id"
+        ],
+        "properties": {
+          "expected_output": {
+            "description": "Any JSON value."
+          },
+          "input": {
+            "description": "Any JSON value."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "The item's metadata, a JSON object. Absent: `{}`."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "16 hex digits. Absent: the trace root."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "32 hex digits, either case."
           }
         },
         "additionalProperties": false

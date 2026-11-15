@@ -559,6 +559,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+        "post_dataset_item_from_trace",
+    ),
+    (
+        "post",
         "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
         "post_dataset_import_preview",
     ),
@@ -934,6 +939,8 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset_item_from_trace" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_dataset_import_preview" {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {

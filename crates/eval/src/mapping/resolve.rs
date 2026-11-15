@@ -80,6 +80,14 @@ impl<'a> TraceData<'a> {
     pub fn new(spans: &'a [Span], target_span: Option<SpanId>) -> Self {
         Self { spans, target_span }
     }
+
+    /// The span `trace.*` expressions read: a span with no parent (or whose parent is not loaded),
+    /// the earliest by start time, then the lowest id; failing that, the earliest `llm` span.
+    /// `None` for an empty trace.
+    #[must_use]
+    pub fn root_span_id(&self) -> Option<SpanId> {
+        root_span(self.spans).map(|span| span.span_id)
+    }
 }
 
 impl Variables {
@@ -359,6 +367,16 @@ mod tests {
             .0
             .get(name)
             .unwrap_or_else(|| panic!("missing variable {name}"))
+    }
+
+    #[test]
+    fn root_span_id_is_the_trace_root() {
+        let root = bare(1, None, "root", SpanKind::Chain, 10);
+        let child = bare(2, Some(1), "child", SpanKind::Llm, 0);
+        let spans = vec![child, root];
+        let trace = TraceData::new(&spans, None);
+        assert_eq!(trace.root_span_id(), Some(span_id(1)));
+        assert_eq!(TraceData::new(&[], None).root_span_id(), None);
     }
 
     #[test]

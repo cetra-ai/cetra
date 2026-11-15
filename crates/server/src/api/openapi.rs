@@ -49,9 +49,9 @@ use super::connections::{
 use super::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ExportFormat, ExportParams, ImportColumn, ImportFormat,
-    ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem,
-    PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportColumn,
+    ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
+    NewDatasetItem, PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -306,6 +306,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AddItemsRequest>();
     set.insert::<AddItemsResponse>();
     set.insert::<UpdateItemRequest>();
+    set.insert::<FromTraceRequest>();
     set.insert_page::<DatasetVersion>("DatasetVersionPage");
     set.insert_page::<DatasetItem>("DatasetItemPage");
     set.insert::<ImportFormat>();
@@ -2918,6 +2919,22 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let item_from_trace = operation(
+        "post_dataset_item_from_trace",
+        "datasets",
+        "Add an item copied from a trace or a span",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).",
+    ))
+    .parameters(Some(vec![project_param(), dataset.clone()]))
+    .request_body(Some(json_body("FromTraceRequest")))
+    .responses(responses(
+        "201",
+        json_of::<DatasetItem>("The new item."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
     let import_preview = operation(
         "post_dataset_import_preview",
         "datasets",
@@ -3008,6 +3025,10 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/datasets/{{dataset}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/from-trace"),
+            PathItem::new(HttpMethod::Post, item_from_trace),
         )
         .path(
             format!("{PROJECT}/datasets/{{dataset}}/import/preview"),
