@@ -66,8 +66,8 @@ proptest! {
 
     /// Random ops on two projects read back exactly as the model predicts, with lossy crashes.
     #[test]
-    fn storage_matches_the_model(ops in ops::ops()) {
-        run_case(&ops);
+    fn storage_matches_the_model(ops in ops::ops_for(P::A, P::B)) {
+        run_case(&ops, (P::A, P::B));
     }
 }
 
@@ -76,8 +76,8 @@ proptest! {
 
     /// `wal.sync = "1h"`: a lossy crash may drop a suffix of each WAL (R2.9).
     #[test]
-    fn storage_matches_the_model_in_interval_mode(ops in ops::ops()) {
-        run_case_with(&ops, interval_mode);
+    fn storage_matches_the_model_in_interval_mode(ops in ops::ops_for(P::A, P::B)) {
+        run_case_with(&ops, interval_mode, (P::A, P::B));
     }
 }
 
@@ -93,14 +93,14 @@ proptest! {
     #[test]
     fn storage_matches_the_model_on_s3(ops in ops::ops_s3(), seed in any::<u64>().no_shrink()) {
         if remote_mode() {
-            run_case_s3_remote(&ops, seed);
+            run_case_s3_remote(&ops, seed, (P::A, P::B));
         } else {
             let harness = run_case_s3(
                 &ops,
                 Some((seed, Rates::MODEL)),
                 Arc::new(InMemory::new()),
                 MODEL_PUT_SIZES,
-            );
+             (P::A, P::B),);
             record_stats(&harness);
         }
     }
@@ -112,17 +112,19 @@ fn interval_mode(config: &mut StorageConfig) {
     config.wal.sync = WalSync::Interval(Duration::from_secs(3_600));
 }
 
-fn run_case(ops: &[Op]) {
-    run_case_with(ops, |_| {});
+/// Runs `ops` on the lane of projects `pair` (lane 0 is `(P::A, P::B)`).
+fn run_case(ops: &[Op], pair: (P, P)) {
+    run_case_with(ops, |_| {}, pair);
 }
 
 /// Runs `ops` and checks every read. Returns the harness, so a test can read what its lossy
 /// crashes did.
-fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig)) -> Harness {
+fn run_case_with(ops: &[Op], change: impl FnOnce(&mut StorageConfig), pair: (P, P)) -> Harness {
     run_with(
         Harness::with_options(HarnessOptions::default(), change),
         ops,
         None,
+        pair,
     )
 }
 
@@ -136,14 +138,20 @@ fn remote_mode() -> bool {
 /// The case's objects are deleted afterwards, whether the case passed or not. Its abandoned uploads
 /// (a failed abort, a lost create answer, a cancelled task) cannot be listed through `object_store`:
 /// the bucket's lifecycle rule removes them (`docs/self-hosting/s3.md`).
-fn run_case_s3_remote(ops: &[Op], seed: u64) {
+fn run_case_s3_remote(ops: &[Op], seed: u64, pair: (P, P)) {
     let prefix = format!("model-{}-{seed:016x}", now_ms());
     let inner: Arc<dyn ObjectStore> = Arc::new(PrefixStore::new(
         remote_bucket(),
         ObjectPath::from(prefix.as_str()),
     ));
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        let harness = run_case_s3(ops, Some((seed, Rates::MODEL)), inner, REMOTE_PUT_SIZES);
+        let harness = run_case_s3(
+            ops,
+            Some((seed, Rates::MODEL)),
+            inner,
+            REMOTE_PUT_SIZES,
+            pair,
+        );
         record_stats(&harness);
     }));
     let deleted = block_on_fresh(delete_prefix(&remote_bucket(), &prefix));
@@ -219,6 +227,7 @@ fn run_case_s3(
     faults: Option<(u64, Rates)>,
     inner: Arc<dyn ObjectStore>,
     put_sizes: PutSizes,
+    pair: (P, P),
 ) -> Harness {
     let harness = Harness::with_options(
         HarnessOptions {
@@ -234,7 +243,7 @@ fn run_case_s3(
             .expect("an S3-mode harness has a chaos store")
             .set_schedule(seed, rates);
     }
-    run_with(harness, ops, seed)
+    run_with(harness, ops, seed, pair)
 }
 
 /// Switches the chaos schedule of an S3-mode harness on or off. Local mode has none.
@@ -269,10 +278,10 @@ fn boosts(op: &Op) -> bool {
 /// mode the schedule is on during each op but `Settle`, and off during the checks and the final
 /// settle. The rates of an op are the boosted ones for `boosts` ops, the base ones otherwise. A
 /// panic turns the schedule off, prints the journal and the seed, and resumes (R4.5).
-fn run_with(mut harness: Harness, ops: &[Op], seed: Option<u64>) -> Harness {
+fn run_with(mut harness: Harness, ops: &[Op], seed: Option<u64>, pair: (P, P)) -> Harness {
     let base = harness.chaos().map(ChaosStore::rates);
     let boosted = seed.zip(base).map(|(seed, base)| boosted_rates(base, seed));
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, pair);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     let mut index = 0_usize;
     let ran = catch_unwind(AssertUnwindSafe(|| {
@@ -371,10 +380,11 @@ fn record_stats(harness: &Harness) {
     }
 }
 
-/// `check_quick` on both projects.
+/// `check_quick` on both projects of the lane.
 fn check_both(harness: &Harness, model: &Model, index: usize) {
-    check_quick(harness, model, P::A, index);
-    check_quick(harness, model, P::B, index);
+    for project in model.projects() {
+        check_quick(harness, model, project, index);
+    }
 }
 
 /// Dropping B leaves A's reads as the model has them, and B's reads empty (spec 03 §7). B has a
@@ -457,7 +467,7 @@ fn drop_keeps_project_a() {
         Op::Settle,
     ];
     let mut harness = Harness::new();
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -495,7 +505,7 @@ fn drop_keeps_project_a() {
 #[test]
 fn deletion_of_dropped_project_is_applied() {
     let mut harness = Harness::new();
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in [
         Op::Append {
@@ -592,10 +602,10 @@ fn score_ops_produce_live_scores() {
             back: 4,
         },
     ];
-    run_case(&ops);
+    run_case(&ops, (P::A, P::B));
 
     let mut harness = Harness::new();
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -610,85 +620,120 @@ fn score_ops_produce_live_scores() {
 /// list at 7 rows used to drop one copy at a page boundary (spec 01: list views de-duplicate).
 #[test]
 fn regression_m1_1_span_paging_with_duplicates() {
-    run_case(&[
-        Op::Append {
-            project: P::A,
-            trace: 0,
-            count: 3,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 4,
-            count: 5,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 0,
-            count: 5,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 1,
-            count: 1,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 4,
-            count: 1,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 3,
-            count: 1,
-            split: false,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 7,
-            count: 1,
-            split: true,
-        },
-        Op::Resend {
-            project: P::A,
-            trace: 7,
-            pick: 218,
-        },
-        Op::Append {
-            project: P::A,
-            trace: 0,
-            count: 4,
-            split: true,
-        },
-        Op::Crash,
-    ]);
+    run_case(
+        &[
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 3,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 4,
+                count: 5,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 5,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 1,
+                count: 1,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 4,
+                count: 1,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 3,
+                count: 1,
+                split: false,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 7,
+                count: 1,
+                split: true,
+            },
+            Op::Resend {
+                project: P::A,
+                trace: 7,
+                pick: 218,
+            },
+            Op::Append {
+                project: P::A,
+                trace: 0,
+                count: 4,
+                split: true,
+            },
+            Op::Crash,
+        ],
+        (P::A, P::B),
+    );
 }
 
 /// The first case of the retired `compaction/model.rs` regression file, on the new op set: a
 /// trace re-sent after a restart and after its day was compacted.
 #[test]
 fn regression_compaction_restart_resend() {
-    run_case(&[
-        Op::Append {
-            project: P::A,
-            trace: 1,
-            count: 1,
-            split: false,
-        },
-        Op::Restart,
-        Op::Compact { hours: 41 },
-        Op::Compact { hours: 66 },
-        Op::Compact { hours: 34 },
-        Op::Resend {
-            project: P::A,
-            trace: 1,
-            pick: 0,
-        },
-    ]);
+    run_case(
+        &[
+            Op::Append {
+                project: P::A,
+                trace: 1,
+                count: 1,
+                split: false,
+            },
+            Op::Restart,
+            Op::Compact { hours: 41 },
+            Op::Compact { hours: 66 },
+            Op::Compact { hours: 34 },
+            Op::Resend {
+                project: P::A,
+                trace: 1,
+                pick: 0,
+            },
+        ],
+        (P::A, P::B),
+    );
+}
+
+/// Lane 1 (projects 2 and 3) runs M1's `regression_compaction_restart_resend` ops on its first
+/// project, then drops its second project and settles (R6.1).
+#[test]
+fn a_lane_one_case_runs() {
+    let lane = (P(2), P(3));
+    run_case(
+        &[
+            Op::Append {
+                project: lane.0,
+                trace: 1,
+                count: 1,
+                split: false,
+            },
+            Op::Restart,
+            Op::Compact { hours: 41 },
+            Op::Compact { hours: 66 },
+            Op::Compact { hours: 34 },
+            Op::Resend {
+                project: lane.0,
+                trace: 1,
+                pick: 0,
+            },
+            Op::DropB,
+            Op::Settle,
+        ],
+        lane,
+    );
 }
 
 /// The shrunk case of finding M1-2: a score's tombstone is dropped by the day close, and a stale
@@ -696,23 +741,26 @@ fn regression_compaction_restart_resend() {
 /// key at settle, so the stale version is not written for it.
 #[test]
 fn stale_score_after_day_close_of_tombstone() {
-    run_case(&[
-        Op::Score {
-            project: P::A,
-            target: 0,
-            name: 0,
-        },
-        Op::DeleteScore {
-            project: P::A,
-            pick: 2,
-        },
-        Op::Settle,
-        Op::StaleScore {
-            project: P::A,
-            pick: 106,
-            back: 127,
-        },
-    ]);
+    run_case(
+        &[
+            Op::Score {
+                project: P::A,
+                target: 0,
+                name: 0,
+            },
+            Op::DeleteScore {
+                project: P::A,
+                pick: 2,
+            },
+            Op::Settle,
+            Op::StaleScore {
+                project: P::A,
+                pick: 106,
+                back: 127,
+            },
+        ],
+        (P::A, P::B),
+    );
 }
 
 /// M1-2 (spec 03 § 5): a compaction that day-closes the scores partition drops the tombstone of a
@@ -738,10 +786,10 @@ fn stale_score_skips_deleted_keys() {
             back: 1,
         },
     ];
-    run_case(&ops);
+    run_case(&ops, (P::A, P::B));
 
     let mut harness = Harness::new();
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     for op in &ops[..3] {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -766,17 +814,20 @@ fn regression_lossy_crash_after_gc() {
         count: 2,
         split: false,
     };
-    run_case(&[
-        append(),
-        Op::Restart,
-        append(),
-        Op::Restart,
-        append(),
-        Op::Restart,
-        Op::Compact { hours: 30 },
-        Op::Gc,
-        Op::LossyCrash { seed: 0 },
-    ]);
+    run_case(
+        &[
+            append(),
+            Op::Restart,
+            append(),
+            Op::Restart,
+            append(),
+            Op::Restart,
+            Op::Compact { hours: 30 },
+            Op::Gc,
+            Op::LossyCrash { seed: 0 },
+        ],
+        (P::A, P::B),
+    );
 }
 
 /// A lossy crash in interval mode may tear the WAL tail: the second record may be cut or lost
@@ -800,6 +851,7 @@ fn regression_lossy_crash_tears_the_wal_tail() {
             Op::LossyCrash { seed: 2 },
         ],
         interval_mode,
+        (P::A, P::B),
     );
     // Seed 2 is `TearLast`: the second append's write must have been cut, so the reopen
     // replayed fewer records than were appended. Without this the test could pass on a crash
@@ -854,6 +906,7 @@ fn a_high_rate_run_injects_faults() {
         Some((3, rates)),
         Arc::new(InMemory::new()),
         MODEL_PUT_SIZES,
+        (P::A, P::B),
     );
     let chaos = harness
         .chaos()
@@ -943,6 +996,7 @@ fn a_run_leaves_the_schedule_off() {
         Some((1, Rates::MODEL)),
         Arc::new(InMemory::new()),
         MODEL_PUT_SIZES,
+        (P::A, P::B),
     );
     let chaos = harness
         .chaos()
@@ -964,7 +1018,13 @@ fn s3_mode_uses_both_upload_paths() {
         })
         .collect();
     ops.extend([Op::Restart, Op::Compact { hours: 60 }, Op::Settle]);
-    let harness = run_case_s3(&ops, None, Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let harness = run_case_s3(
+        &ops,
+        None,
+        Arc::new(InMemory::new()),
+        MODEL_PUT_SIZES,
+        (P::A, P::B),
+    );
     let chaos = harness
         .chaos()
         .expect("an S3-mode harness has a chaos store");

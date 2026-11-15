@@ -192,23 +192,24 @@ pub(super) enum Mode {
     S3,
 }
 
-/// A sequence of 1 to 24 ops.
-pub(super) fn ops() -> impl Strategy<Value = Vec<Op>> {
-    proptest::collection::vec(op_strategy(Mode::Local), 1..=24)
+/// A sequence of 1 to 24 ops on the lane of projects `a` and `b`: project `a` with weight 3,
+/// project `b` with weight 1.
+pub(super) fn ops_for(a: P, b: P) -> impl Strategy<Value = Vec<Op>> {
+    proptest::collection::vec(op_strategy(Mode::Local, a, b), 1..=24)
 }
 
-/// A sequence of 1 to 24 ops for S3 mode.
+/// A sequence of 1 to 24 ops for S3 mode, on projects A and B.
 pub(super) fn ops_s3() -> impl Strategy<Value = Vec<Op>> {
-    proptest::collection::vec(op_strategy(Mode::S3), 1..=24)
+    proptest::collection::vec(op_strategy(Mode::S3, P::A, P::B), 1..=24)
 }
 
 /// Every op with its weight. One weighted union, since `prop_oneof!` takes at most ten arms and a
 /// zero weight panics. `Mode::Local` adds `LossyCrash`; `Mode::S3` adds the S3-only ops.
-fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
+fn op_strategy(mode: Mode, a: P, b: P) -> impl Strategy<Value = Op> {
     let mut arms = vec![
         (
             30,
-            (project(), 0..TRACES, 1..=6_u8, any::<bool>())
+            (project(a, b), 0..TRACES, 1..=6_u8, any::<bool>())
                 .prop_map(|(project, trace, count, split)| Op::Append {
                     project,
                     trace,
@@ -219,7 +220,7 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         ),
         (
             4,
-            (project(), resendable_trace(), any::<u8>())
+            (project(a, b), resendable_trace(), any::<u8>())
                 .prop_map(|(project, trace, pick)| Op::Resend {
                     project,
                     trace,
@@ -237,7 +238,7 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         (1, Just(Op::Settle).boxed()),
         (
             8,
-            (project(), 0..SCORE_TARGETS, 0..SCORE_NAMES)
+            (project(a, b), 0..SCORE_TARGETS, 0..SCORE_NAMES)
                 .prop_map(|(project, target, name)| Op::Score {
                     project,
                     target,
@@ -247,13 +248,13 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         ),
         (
             2,
-            (project(), any::<u8>())
+            (project(a, b), any::<u8>())
                 .prop_map(|(project, pick)| Op::DeleteScore { project, pick })
                 .boxed(),
         ),
         (
             2,
-            (project(), any::<u8>(), any::<u8>())
+            (project(a, b), any::<u8>(), any::<u8>())
                 .prop_map(|(project, pick, back)| Op::StaleScore {
                     project,
                     pick,
@@ -263,13 +264,13 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         ),
         (
             3,
-            (project(), prop::collection::vec(any::<u8>(), 1..=3))
+            (project(a, b), prop::collection::vec(any::<u8>(), 1..=3))
                 .prop_map(|(project, picks)| Op::DeleteTraces { project, picks })
                 .boxed(),
         ),
         (
             2,
-            (project(), any::<u8>())
+            (project(a, b), any::<u8>())
                 .prop_map(|(project, user)| Op::DeleteUser { project, user })
                 .boxed(),
         ),
@@ -281,7 +282,7 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         ),
         (
             1,
-            (project(), 0..3_u8)
+            (project(a, b), 0..3_u8)
                 .prop_map(|(project, keep)| Op::Retention { project, keep })
                 .boxed(),
         ),
@@ -299,7 +300,7 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
             arms.push((2, Just(Op::EvictCache).boxed()));
             arms.push((
                 6,
-                (project(), any::<u8>())
+                (project(a, b), any::<u8>())
                     .prop_map(|(project, pick)| Op::FaultyRead { project, pick })
                     .boxed(),
             ));
@@ -308,9 +309,9 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
     Union::new_weighted(arms)
 }
 
-/// Project A with weight 3, project B with weight 1.
-fn project() -> impl Strategy<Value = P> {
-    prop_oneof![3 => Just(P::A), 1 => Just(P::B)]
+/// Project `a` with weight 3, project `b` with weight 1.
+fn project(a: P, b: P) -> impl Strategy<Value = P> {
+    prop_oneof![3 => Just(a), 1 => Just(b)]
 }
 
 /// Traces a re-send may pick: every trace but class 2 (`anchor.rs`, known limit).
@@ -516,11 +517,11 @@ fn target_of(target: u8) -> Target {
     }
 }
 
-/// Every score key the ops can write: both projects, every target, every name (96 keys).
-/// Keys the model has dropped or hides still have ids, so reads by id can check them.
-pub(super) fn score_key_space() -> Vec<ScoreKey> {
+/// Every score key the ops can write on `projects`: every target, every name (96 keys per
+/// project). Keys the model has dropped or hides still have ids, so reads by id can check them.
+pub(super) fn score_key_space(projects: [P; 2]) -> Vec<ScoreKey> {
     let mut keys = Vec::new();
-    for project in [P::A, P::B] {
+    for project in projects {
         for target in 0..SCORE_TARGETS {
             for name in 0..SCORE_NAMES {
                 keys.push(ScoreKey {
@@ -609,7 +610,7 @@ fn last_version(model: &Model, key: ScoreKey) -> u32 {
 /// On a dropped project it writes version 1 of one key of the project's score space, refused.
 fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
     if model.project(project).dropped {
-        let keys: Vec<ScoreKey> = score_key_space()
+        let keys: Vec<ScoreKey> = score_key_space(model.projects())
             .into_iter()
             .filter(|key| key.project == project)
             .collect();
@@ -999,10 +1000,11 @@ fn drop_b(harness: &Harness, model: &mut Model) {
     if model.b.dropped {
         return;
     }
+    let project = model.b.project;
     harness
-        .block_on(harness.storage().drop_project(P::B.id()))
-        .expect("drop_project of B");
-    model.project_mut(P::B).drop_project();
+        .block_on(harness.storage().drop_project(project.id()))
+        .expect("drop_project of the lane's second project");
+    model.project_mut(project).drop_project();
 }
 
 /// Whether every deletion either project registered reads `Applied`.
@@ -1127,9 +1129,12 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
     check_s3_audit(harness);
 }
 
-/// A model for a fresh case on `harness`: its WALs start with the segments the open found.
-pub(super) fn new_model(harness: &Harness) -> Model {
-    Model::new(
+/// A model for a fresh case of projects `pair` on `harness`: its WALs start with the segments the
+/// open found.
+pub(super) fn new_model(harness: &Harness, pair: (P, P)) -> Model {
+    Model::for_pair(
+        pair.0,
+        pair.1,
         segment_count(harness, Table::Spans),
         segment_count(harness, Table::Scores),
     )

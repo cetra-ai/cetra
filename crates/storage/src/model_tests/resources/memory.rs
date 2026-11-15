@@ -19,7 +19,7 @@ use bytesize::ByteSize;
 use super::super::check::check_full;
 use super::super::harness::{Harness, HarnessOptions};
 use super::super::ops::new_model;
-use super::super::shape::{HOUR_NS, day, midnight};
+use super::super::shape::{HOUR_NS, P, day, midnight};
 use super::disk_full::SPILL_SQL;
 use super::fill::{Text, filler, filler_batch};
 use super::{model_steps, seed_ops};
@@ -574,7 +574,7 @@ fn child_run() {
             }
         },
     );
-    let mut model = new_model(&h);
+    let mut model = new_model(&h, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 

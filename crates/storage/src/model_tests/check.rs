@@ -51,7 +51,7 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
         }
     }
     let model: &Model = model;
-    for project in [P::A, P::B] {
+    for project in model.projects() {
         let state = model.project(project);
         check_quick(h, model, project, index);
         check_paging(h, project, index);
@@ -107,7 +107,7 @@ pub(super) fn check_no_leaked_uploads(h: &Harness, index: usize) {
 /// `Applied` it never reads `Pending` again (spec 03 §7). Dropped projects' deletions are
 /// checked too: a drop marks them applied.
 pub(super) fn check_deletions(h: &Harness, model: &mut Model, index: usize) {
-    for project in [P::A, P::B] {
+    for project in model.projects() {
         for deletion in &mut model.project_mut(project).deletions {
             let status = h
                 .block_on(h.storage().deletion_status(deletion.id))
@@ -186,12 +186,12 @@ fn check_scores(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     );
 }
 
-/// `scores_by_id` over every score key either project can write (`score_key_space`) returns
+/// `scores_by_id` over every score key the lane's projects can write (`score_key_space`) returns
 /// exactly this project's live scores, so ids the model hides or never saw are tested too.
 /// `latest_scores` returns the live score of each key.
 fn check_score_reads(h: &Harness, model: &Model, project: P, index: usize) {
     let state = model.project(project);
-    let ids: Vec<String> = score_key_space()
+    let ids: Vec<String> = score_key_space(model.projects())
         .iter()
         .map(|key| score_id(key).to_string())
         .collect();
@@ -1035,11 +1035,11 @@ pub(super) fn check_settled_files(h: &Harness, model: &Model) {
     let traces_by_id: BTreeMap<[u8; 16], u8> = (0..TRACES)
         .map(|trace| (*trace_id(trace).as_bytes(), trace))
         .collect();
-    let keys_by_id: BTreeMap<String, ScoreKey> = score_key_space()
+    let keys_by_id: BTreeMap<String, ScoreKey> = score_key_space(model.projects())
         .into_iter()
         .map(|key| (score_id(&key).to_string(), key))
         .collect();
-    for project in [P::A, P::B] {
+    for project in model.projects() {
         let state = model.project(project);
         check_settled_spans(h, state, project, &traces_by_id);
         check_settled_scores(h, state, project, &keys_by_id);

@@ -216,29 +216,40 @@ impl<T> Wal<T> {
 }
 
 impl Model {
-    /// `a.project = P::A`, `b.project = P::B`, everything else empty. `segments` is each WAL's
-    /// segment count at the first open.
-    pub(super) fn new(spans_segments: usize, scores_segments: usize) -> Self {
+    /// The lane of projects `a` and `b`, everything else empty. `spans_segments` and
+    /// `scores_segments` are each WAL's segment count at the first open.
+    pub(super) fn for_pair(a: P, b: P, spans_segments: usize, scores_segments: usize) -> Self {
         Self {
-            a: ProjectModel::new(P::A),
-            b: ProjectModel::new(P::B),
+            a: ProjectModel::new(a),
+            b: ProjectModel::new(b),
             spans_wal: Wal::new(spans_segments),
             scores_wal: Wal::new(scores_segments),
             ops_applied: 0,
         }
     }
 
+    /// The lane's two projects, `a` first.
+    pub(super) fn projects(&self) -> [P; 2] {
+        [self.a.project, self.b.project]
+    }
+
     pub(super) fn project(&self, p: P) -> &ProjectModel {
-        match p {
-            P::A => &self.a,
-            P::B => &self.b,
+        if p == self.a.project {
+            &self.a
+        } else if p == self.b.project {
+            &self.b
+        } else {
+            panic!("project {p:?} is not in this lane")
         }
     }
 
     pub(super) fn project_mut(&mut self, p: P) -> &mut ProjectModel {
-        match p {
-            P::A => &mut self.a,
-            P::B => &mut self.b,
+        if p == self.a.project {
+            &mut self.a
+        } else if p == self.b.project {
+            &mut self.b
+        } else {
+            panic!("project {p:?} is not in this lane")
         }
     }
 }

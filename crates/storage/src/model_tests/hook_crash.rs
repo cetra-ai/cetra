@@ -166,7 +166,7 @@ fn case(n: u64) -> HookCase {
     seed[..8].copy_from_slice(&n.to_le_bytes());
     let rng = TestRng::from_seed(RngAlgorithm::ChaCha, &seed);
     let mut runner = TestRunner::new_with_rng(Config::default(), rng);
-    let mut prefix = ops::ops()
+    let mut prefix = ops::ops_for(P::A, P::B)
         .new_tree(&mut runner)
         .expect("a prefix from its seed")
         .current();
@@ -206,7 +206,7 @@ fn hook_crash_child() {
         point,
     } = case(number);
     let mut harness = Harness::attach(Path::new(&dir), Path::new(&shadow), seed);
-    let mut model = new_model(&harness);
+    let mut model = new_model(&harness, (P::A, P::B));
     let mut clock = start();
     for op in &prefix {
         apply(op, &mut harness, &mut model, &mut clock);
@@ -327,7 +327,7 @@ fn check_case(number: u64) -> bool {
     // every other op leaves the model as it is whether it finished or not (R1.3, R1.5), so it is
     // simply run.
     let mut oracle = Harness::new();
-    let mut model = new_model(&oracle);
+    let mut model = new_model(&oracle, (P::A, P::B));
     let mut clock = start();
     for op in &prefix {
         apply(op, &mut oracle, &mut model, &mut clock);

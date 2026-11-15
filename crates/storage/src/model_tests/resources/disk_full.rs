@@ -110,7 +110,7 @@ fn appends_stop_at_min_free_before_the_disk_fills() {
             config.min_free_bytes = ByteSize::mib(16);
             config.flush.max_bytes = ByteSize::mib(256);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -191,7 +191,7 @@ fn a_full_disk_fails_the_wal_and_a_restart_recovers() {
             config.min_free_bytes = ByteSize::b(0);
             config.flush.max_bytes = ByteSize::mib(256);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -288,7 +288,7 @@ fn put_media_on_a_full_disk_fails_and_leaves_nothing() {
             let mut h = harness_in(root, |config| {
                 config.min_free_bytes = ByteSize::mib(2);
             });
-            let mut model = new_model(&h);
+            let mut model = new_model(&h, (P::A, P::B));
             let mut clock = clock_start();
             model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -305,7 +305,7 @@ fn put_media_on_a_full_disk_fails_and_leaves_nothing() {
 
         // ENOSPC from the write itself.
         let mut h = harness_in(root, |_| {});
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -382,7 +382,7 @@ fn running_out_of_inodes_is_an_error_not_a_panic() {
             config.min_free_bytes = ByteSize::b(0);
             config.flush.max_bytes = ByteSize::mib(1);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -538,7 +538,7 @@ fn a_flush_on_a_full_disk_retries_and_leaves_no_temp_files() {
             config.flush.max_bytes = ByteSize::mib(4);
             config.memtable.hard_limit = ByteSize::mib(24);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -643,7 +643,7 @@ fn a_compaction_that_does_not_fit_is_deferred_until_it_does() {
             config.min_free_bytes = ByteSize::b(0);
             config.flush.max_bytes = ByteSize::mib(256);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -721,7 +721,7 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
             config.min_free_bytes = ByteSize::b(0);
             config.flush.max_bytes = ByteSize::mib(256);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -836,7 +836,7 @@ fn a_spilling_query_stops_at_min_free() {
             config.query.max_memory_total = Some(ByteSize::mib(32));
             config.query.initial_memory = ByteSize::mib(16);
         });
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
 
@@ -999,7 +999,7 @@ fn the_read_cache_never_fills_the_disk() {
                 config.flush.max_bytes = ByteSize::mib(8);
             },
         );
-        let mut model = new_model(&h);
+        let mut model = new_model(&h, (P::A, P::B));
         let mut clock = clock_start();
         model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
         // At least 40 MiB of the filler's spans files in the store.

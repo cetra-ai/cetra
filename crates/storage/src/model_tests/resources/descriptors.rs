@@ -364,7 +364,7 @@ fn load_child(limit: u64, seconds: u64, dir: &Path) {
             config.query.initial_memory = ByteSize::mib(8);
         },
     );
-    let mut model = new_model(&h);
+    let mut model = new_model(&h, (P::A, P::B));
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     model_steps(&mut h, &mut model, &mut clock, &seed_ops(), 0);
     let baseline = open_fds().expect("the baseline is read at the normal limit");

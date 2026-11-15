@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use super::super::harness::{Harness, HarnessOptions};
 use super::super::ops::new_model;
-use super::super::shape::{HOUR_NS, day, midnight};
+use super::super::shape::{HOUR_NS, P, day, midnight};
 use super::{model_steps, seed_ops, settle_and_check};
 
 /// Bytes of the namespace tmpfs.
@@ -376,7 +376,7 @@ fn small_fs_fills_and_frees() {
             },
             |_| {},
         );
-        let mut model = new_model(&harness);
+        let mut model = new_model(&harness, (P::A, P::B));
         let mut clock = midnight(day(0)) + 12 * HOUR_NS;
         model_steps(&mut harness, &mut model, &mut clock, &seed_ops(), 0);
         settle_and_check(&mut harness, &mut model, &mut clock);

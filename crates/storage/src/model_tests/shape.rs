@@ -44,28 +44,30 @@ pub(super) fn date_of(ns: i64) -> NaiveDate {
     NaiveDate::from_num_days_from_ce_opt(days).expect("timestamp within chrono's range")
 }
 
-/// The two projects. Both parse as `ProjectId`.
+/// A project of the test, numbered: lane `n` of the concurrent mode uses `P(2n)` and `P(2n + 1)`
+/// (`P::A` and `P::B` are lane 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum P {
-    A,
-    B,
-}
+pub(super) struct P(pub(super) u8);
 
 impl P {
+    pub(super) const A: P = P(0);
+    pub(super) const B: P = P(1);
+
+    /// `PROJECT_A` for 0, `PROJECT_B` for 1, else a UUID of the same shape with the number in
+    /// its last field.
     pub(super) fn id(self) -> ProjectId {
-        let raw = match self {
-            Self::A => PROJECT_A,
-            Self::B => PROJECT_B,
+        let raw = match self.0 {
+            0 => PROJECT_A.to_owned(),
+            1 => PROJECT_B.to_owned(),
+            n => format!("018f6b4e-7c1a-7c1a-8c1a-{:012x}", 0xc00 + u64::from(n)),
         };
         raw.parse().expect("project id constant parses")
     }
 
-    /// 0 for A, 1 for B. Mixed into the content so the projects differ.
+    /// The project's number. Mixed into the content so the projects differ; at most 31 (16
+    /// lanes), which the score id's 8-bit salt field holds.
     pub(super) fn salt(self) -> u8 {
-        match self {
-            Self::A => 0,
-            Self::B => 1,
-        }
+        self.0
     }
 }
 
@@ -278,4 +280,33 @@ pub(super) fn score(key: &ScoreKey, version: u32, deleted: bool, ingest: i64) ->
     row.user_id = user_id;
     row.value = ScoreValue::Numeric(f64::from(version));
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn p_ids_are_distinct_and_a_b_unchanged() {
+        assert_eq!(
+            P::A.id(),
+            PROJECT_A.parse::<ProjectId>().expect("PROJECT_A parses")
+        );
+        assert_eq!(
+            P::B.id(),
+            PROJECT_B.parse::<ProjectId>().expect("PROJECT_B parses")
+        );
+        let ids: HashSet<ProjectId> = (0..32).map(|n| P(n).id()).collect();
+        assert_eq!(
+            ids.len(),
+            32,
+            "the 32 projects of 16 lanes have distinct ids"
+        );
+        assert!(
+            (0..32).all(|n| P(n).salt() == n),
+            "the salt is the project number"
+        );
+    }
 }
