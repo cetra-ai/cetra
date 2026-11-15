@@ -176,6 +176,7 @@ Track R, plan `docs/plans/r-hardening/06-m6-concurrency.md`. The sub-phases add 
 ### Pending and limits
 
 - **Nightly stress.** `just stress` (R6.7) is not yet run nightly. The nightly steps wait for M3's nightly workflow (`.github/workflows/nightly.yml`); until it exists, the stress test runs only by hand.
+- **Read cache (R6.8).** `read_cache::tests::concurrent_use_never_returns_wrong_bytes` pins no wrong bytes, the capacity and the file-to-index direction under 8 threads. A block can be indexed without its file for a moment when an eviction runs between a block's write and its index insert (benign: the next read finds the file missing, drops the entry and fetches again). The test does not reach the window that `write_blocks` guards by removing a block written after its object was evicted: with that removal taken out it still passed 200 of 200 runs, so that guard has no deterministic test yet.
 - **Watchdog scope.** The stuck-item watchdog covers `run_segment` only. `check_full`, the barriers and `settle_concurrent` run outside it, so a hang there is not caught by the watchdog.
 
 ---

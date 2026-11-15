@@ -1364,4 +1364,84 @@ mod tests {
         assert_eq!(block_len(7 * MIB / 2, 4), None);
         assert_eq!(block_len(MIB, 0), Some(MIB));
     }
+
+    /// R6.8. Eight threads insert, read, evict and shed 32 objects at once. No
+    /// read returns other bytes, the capacity holds, and every block file on
+    /// disk is indexed. Evicted-and-rewritten blocks may be indexed without a
+    /// file for a moment, which is benign (see `hardening.md` § M6), so only the
+    /// file-to-index direction is asserted.
+    #[test]
+    fn concurrent_use_never_returns_wrong_bytes() {
+        /// Object `n`: byte `i` is `(n * 31 + i) mod 256`, so objects differ.
+        fn object(n: u64) -> Bytes {
+            (0..4_096_u64)
+                .map(|i| u8::try_from((n * 31 + i) % 256).unwrap_or(0))
+                .collect::<Vec<u8>>()
+                .into()
+        }
+
+        /// The block files under `dir`: every file but `size` files and temp files.
+        fn block_bytes_on_disk(dir: &Path) -> u64 {
+            let mut total = 0;
+            let mut pending = vec![dir.to_path_buf()];
+            while let Some(current) = pending.pop() {
+                for entry in fs::read_dir(&current).unwrap() {
+                    let entry = entry.unwrap();
+                    let path = entry.path();
+                    if entry.file_type().unwrap().is_dir() {
+                        pending.push(path);
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name != SIZE_FILE && !is_temp_name(&name) {
+                        total += entry.metadata().unwrap().len();
+                    }
+                }
+            }
+            total
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let capacity = 8 * 4_100;
+        let fixture = fixture(dir.path(), capacity, 0);
+        let objects: Vec<(String, Bytes)> = (0..32_u64)
+            .map(|n| (format!("obj-{n}"), object(n)))
+            .collect();
+        std::thread::scope(|scope| {
+            for thread in 0..8_u64 {
+                let cache = Arc::clone(&fixture.cache);
+                let objects = &objects;
+                scope.spawn(move || {
+                    // A xorshift64 generator, seeded per thread.
+                    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ (thread + 1);
+                    for _ in 0..2_000 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        let (name, bytes) = &objects[usize::try_from(state % 32).unwrap()];
+                        match (state >> 8) % 4 {
+                            0 => cache.insert_bytes(name, bytes),
+                            1 => {
+                                for (index, data) in cache.read_blocks(name, &[0]) {
+                                    assert_eq!(index, 0);
+                                    assert_eq!(&data, bytes, "{name} returned other bytes");
+                                }
+                            }
+                            2 => cache.evict_file(name),
+                            _ => cache.shed(4_100),
+                        }
+                    }
+                });
+            }
+        });
+
+        let stats = fixture.cache.stats();
+        assert!(stats.bytes <= capacity, "{stats:?}");
+        let on_disk = block_bytes_on_disk(&fixture.cache_dir);
+        assert!(
+            on_disk <= stats.bytes,
+            "{on_disk} bytes of block files, {} indexed",
+            stats.bytes
+        );
+    }
 }
