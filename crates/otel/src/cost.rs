@@ -5,7 +5,7 @@
 
 use llmobs_core::enums::{CostSource, SpanKind};
 use llmobs_core::names::attr;
-use regex::{Regex, RegexSet, RegexSetBuilder};
+use regex::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::bag::AttrBag;
@@ -110,6 +110,17 @@ impl PriceTable {
     fn compile(rows: Vec<PriceRow>, size_limit: usize) -> Result<Self, PriceError> {
         let mut patterns = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().enumerate() {
+            // The pattern must be a complete regex on its own. Checking only the
+            // wrapped form would accept `x)|(.*`, which wraps to `^(?i:x)|(.*)$`
+            // and matches every model.
+            match RegexBuilder::new(&row.match_pattern)
+                .size_limit(size_limit)
+                .build()
+            {
+                Ok(_) => {}
+                Err(regex::Error::CompiledTooBig(_)) => return Err(PriceError::TooLarge),
+                Err(_) => return Err(PriceError::InvalidPattern { index }),
+            }
             let pattern = format!("^(?i:{})$", row.match_pattern);
             if Regex::new(&pattern).is_err() {
                 return Err(PriceError::InvalidPattern { index });
@@ -587,6 +598,22 @@ mod tests {
         let text = err.to_string();
         assert!(!text.contains('('));
         assert!(text.contains("index 0"));
+    }
+
+    #[test]
+    fn a_pattern_must_be_a_complete_regex_on_its_own() {
+        // Wrapped, `x)|(.*` would be `^(?i:x)|(.*)$`, a valid regex that matches every model.
+        for pattern in ["x)|(.*", "foo)|(.*"] {
+            let rows = vec![
+                row("gpt-4o", PriceScope::Builtin, None, 0, 1.0),
+                row(pattern, PriceScope::Builtin, None, 0, 1.0),
+            ];
+            let err = PriceTable::new(rows).expect_err("unbalanced pattern");
+            assert_eq!(err, PriceError::InvalidPattern { index: 1 });
+        }
+        let ok = table(vec![row("gpt-4o", PriceScope::Builtin, None, 0, 1.0)]);
+        assert!(lookup(&ok, "gpt-4o", None, 0).is_some());
+        assert!(lookup(&ok, "claude-3", None, 0).is_none());
     }
 
     #[test]
