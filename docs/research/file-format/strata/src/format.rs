@@ -38,6 +38,8 @@ pub const MAX_CHUNK_OUTPUT: usize = 256 * 1024 * 1024;
 pub const MAX_PAGE_ENTRIES: usize = 4_096;
 /// Largest number of values in one dictionary.
 pub const MAX_DICT_VALUES: usize = 1 << 20;
+/// Largest number of keys of one `Map` column that are promoted to child columns.
+pub const MAX_PROMOTED_KEYS: usize = 64;
 
 /// The little-endian value of `bytes`, zero-extended to 64 bits. `None` when there are
 /// more than eight bytes.
