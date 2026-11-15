@@ -15,7 +15,7 @@ use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_fil
 use crate::narrow::{
     BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, numeric_of,
 };
-use crate::segment::{Codec, Kind, encode_segment};
+use crate::segment::{Codec, Kind, SegmentCodec, encode_segment};
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
 /// [`StrataWriter::finish`].
@@ -168,6 +168,7 @@ impl StrataWriter {
     pub fn finish(self) -> Result<(Vec<u8>, FileSummary)> {
         let mut out = Out(Vec::new());
         write_file_header(&mut out);
+        let mut codec = SegmentCodec::new(self.config.zstd_level)?;
 
         let mut directory = Vec::with_capacity(self.schema.fields().len());
         let mut pages = Out(Vec::new());
@@ -185,7 +186,7 @@ impl StrataWriter {
                         Kind::Dictionary,
                         &body.0,
                         Codec::Zstd,
-                        self.config.zstd_level,
+                        &mut codec,
                         &mut out,
                     )?;
                     (seg.offset, seg.len)
@@ -217,7 +218,7 @@ impl StrataWriter {
                             Kind::NarrowChunk,
                             &body,
                             Codec::Zstd,
-                            self.config.zstd_level,
+                            &mut codec,
                             &mut out,
                         )?;
                         (seg.offset, seg.len)
@@ -261,7 +262,7 @@ impl StrataWriter {
                     Kind::BlockTablePage,
                     &body.0,
                     Codec::Raw,
-                    self.config.zstd_level,
+                    &mut codec,
                     &mut out,
                 )?;
                 let first_row = page.first().map_or(0, |entry| entry.first_row);
@@ -506,5 +507,41 @@ mod tests {
         let record = &file.directory()[1];
         assert_eq!(record.dict_offset, 0);
         assert_eq!(record.flags & 1, 0);
+    }
+
+    /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
+    /// Recorded on the M1F.2 code. A change to this value means the output changed.
+    const GOLDEN: u64 = 0x4162_9ca7_5279_492c;
+
+    #[test]
+    fn golden_output_hash() {
+        let rows = wide_batch(20_000);
+        let mut w = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+        let hash = xxhash_rust::xxh3::xxh3_64(&bytes);
+        println!("golden hash: {hash:#018x}");
+        assert_eq!(hash, GOLDEN);
+    }
+
+    /// Writes 200,000 wide rows and prints the throughput. MB is 10^6 bytes of
+    /// `get_array_memory_size`; the time covers `write` and `finish`. Nothing is asserted.
+    #[test]
+    #[ignore]
+    fn writer_throughput() {
+        let rows = wide_batch(200_000);
+        let mb = rows.get_array_memory_size() as f64 / 1e6;
+        let start = std::time::Instant::now();
+        let mut w = StrataWriter::new(wide_schema(), &SORT, Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+        let secs = start.elapsed().as_secs_f64();
+        println!(
+            "writer_throughput: {:.1} MB/s ({:.1} MB in {:.3} s, {} bytes out)",
+            mb / secs,
+            mb,
+            secs,
+            bytes.len()
+        );
     }
 }

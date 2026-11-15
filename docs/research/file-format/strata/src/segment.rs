@@ -3,8 +3,32 @@
 //! A segment is a 16-byte header (`u16` magic, `u8` kind, `u8` codec,
 //! `u32` raw length, `u32` stored length, `u32` checksum) followed by the stored bytes.
 
+use std::cell::RefCell;
+
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, MAX_SEGMENT_RAW, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum32};
+
+thread_local! {
+    /// The decompressor of this thread, created on first use and reused.
+    static DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { RefCell::new(None) };
+}
+
+/// A zstd compressor at one level, reused for every segment of a file.
+pub(crate) struct SegmentCodec {
+    compressor: zstd::bulk::Compressor<'static>,
+}
+
+impl SegmentCodec {
+    /// A codec that compresses at `level`.
+    pub(crate) fn new(level: i32) -> Result<Self> {
+        let compressor = zstd::bulk::Compressor::new(level).map_err(|source| StrataError::Io {
+            action: "zstd init",
+            source,
+        })?;
+        Ok(Self { compressor })
+    }
+}
 
 /// What a segment holds (S1 table).
 #[repr(u8)]
@@ -81,13 +105,13 @@ pub struct SegmentRef {
 
 /// Appends one segment to `out` and returns its reference.
 ///
-/// The body is compressed when `prefer` is [`Codec::Zstd`] and the result is strictly
-/// smaller; otherwise it is stored raw.
-pub fn encode_segment(
+/// The body is compressed with `codec` when `prefer` is [`Codec::Zstd`] and the result is
+/// strictly smaller; otherwise it is stored raw.
+pub(crate) fn encode_segment(
     kind: Kind,
     body: &[u8],
     prefer: Codec,
-    level: i32,
+    codec: &mut SegmentCodec,
     out: &mut Out,
 ) -> Result<SegmentRef> {
     if body.len() > MAX_SEGMENT_RAW as usize {
@@ -96,7 +120,9 @@ pub fn encode_segment(
         });
     }
     let compressed = match prefer {
-        Codec::Zstd => zstd::bulk::compress(body, level)
+        Codec::Zstd => codec
+            .compressor
+            .compress(body)
             .ok()
             .filter(|c| c.len() < body.len()),
         Codec::Raw => None,
@@ -127,6 +153,24 @@ pub fn encode_segment(
     out.u32(checksum);
     out.bytes(stored);
     Ok(SegmentRef { offset, len })
+}
+
+/// Decompresses one zstd frame with this thread's reused decompressor. When the
+/// decompressor is busy (a re-entrant call) or cannot be created, it decompresses with a
+/// fresh one; the output is the same either way.
+fn decompress(stored: &[u8], raw_len: usize) -> std::io::Result<Vec<u8>> {
+    DECOMPRESSOR.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut slot) => {
+            if slot.is_none() {
+                *slot = zstd::bulk::Decompressor::new().ok();
+            }
+            match slot.as_mut() {
+                Some(decompressor) => decompressor.decompress(stored, raw_len),
+                None => zstd::bulk::decompress(stored, raw_len),
+            }
+        }
+        Err(_) => zstd::bulk::decompress(stored, raw_len),
+    })
 }
 
 /// Checks and decodes the segment whose `bytes` (exactly its `len` bytes) start at
@@ -163,8 +207,8 @@ pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>
     match codec {
         Codec::Raw => Ok(stored.to_vec()),
         Codec::Zstd => {
-            let body = zstd::bulk::decompress(stored, raw_len as usize)
-                .map_err(|_| corrupt("segment decompress"))?;
+            let body =
+                decompress(stored, raw_len as usize).map_err(|_| corrupt("segment decompress"))?;
             if body.len() != raw_len as usize {
                 return Err(corrupt("segment decompress"));
             }
@@ -186,7 +230,8 @@ mod tests {
 
     fn encode(kind: Kind, body: &[u8], prefer: Codec, prefix: usize) -> (Vec<u8>, SegmentRef) {
         let mut out = Out(vec![0; prefix]);
-        let seg = encode_segment(kind, body, prefer, 1, &mut out).unwrap();
+        let mut codec = SegmentCodec::new(1).unwrap();
+        let seg = encode_segment(kind, body, prefer, &mut codec, &mut out).unwrap();
         (out.0, seg)
     }
 

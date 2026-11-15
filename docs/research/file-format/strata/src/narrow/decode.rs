@@ -352,14 +352,16 @@ fn read_codes(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Vec<u64>> {
     })
 }
 
-/// The value of a code, as a string. A code outside the dictionary is corrupt.
+/// The value of a code, as a string. A code outside the dictionary is corrupt. The dictionary
+/// holds only valid UTF-8, so the value needs no check here.
 fn code_str(dict: &Dictionary, code: u64, at: u64) -> Result<&str> {
-    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
-    let value = u32::try_from(code)
+    u32::try_from(code)
         .ok()
-        .and_then(|code| dict.value(code))
-        .ok_or_else(|| corrupt("dictionary code"))?;
-    std::str::from_utf8(value).map_err(|_| corrupt("dictionary utf8"))
+        .and_then(|code| dict.str_value(code))
+        .ok_or(StrataError::Corrupt {
+            what: "dictionary code",
+            offset: at,
+        })
 }
 
 /// A `Dict` chunk of Utf8: one code per row. Null rows also carry a code, which must be

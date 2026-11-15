@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray, RecordBatch};
+use arrow::array::{
+    Array, ArrayData, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray, RecordBatch,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 
@@ -108,44 +110,69 @@ fn set_bit(bitmap: &mut [u8], i: usize) {
     }
 }
 
-/// The Arrow validity bitmap of `array`: bit `i` is set when row `i` is valid.
+/// The Arrow validity bitmap of `array`: bit `i` is set when row `i` is valid. Called only when
+/// the array has nulls.
 fn validity_bitmap(array: &dyn Array) -> Vec<u8> {
-    let mut bitmap = vec![0u8; array.len().div_ceil(8)];
-    for i in 0..array.len() {
-        if array.is_valid(i) {
-            set_bit(&mut bitmap, i);
-        }
+    let len = array.len();
+    let nbytes = len.div_ceil(8);
+    // `sliced` copies the slice's bits to bit 0, so the bytes start at row 0. Its last byte can
+    // hold bits of rows past the end, which are cleared below.
+    let mut bitmap = match array.nulls() {
+        Some(nulls) => nulls
+            .inner()
+            .sliced()
+            .as_slice()
+            .get(..nbytes)
+            .unwrap_or_default()
+            .to_vec(),
+        None => vec![0xFF; nbytes],
+    };
+    bitmap.resize(nbytes, 0);
+    let rem = len % 8;
+    if rem != 0
+        && let Some(last) = bitmap.last_mut()
+    {
+        *last &= (1u8 << rem) - 1;
     }
     bitmap
 }
 
-/// The physical bits of every row, read from the value buffer. Null rows read as 0.
-fn read_bits(array: &dyn Array, num: Numeric) -> Result<Vec<u64>> {
-    let data = array.to_data();
-    let bytes = data
+/// The value bytes of the `n` rows of a numeric array of `width` bytes per row, read from its
+/// value buffer with the array's offset applied.
+fn value_bytes_of<'a>(
+    data: &'a ArrayData,
+    dt: &DataType,
+    n: usize,
+    width: usize,
+) -> Result<&'a [u8]> {
+    let raw = data
         .buffers()
         .first()
-        .ok_or_else(|| unsupported(array.data_type()))?
+        .ok_or_else(|| unsupported(dt))?
         .as_slice();
-    let offset = data.offset();
-    let mut bits = Vec::with_capacity(array.len());
-    for i in 0..array.len() {
-        if !array.is_valid(i) {
-            bits.push(0);
-            continue;
-        }
-        let start = (offset + i) * num.width;
-        let raw = bytes
-            .get(start..start + num.width)
-            .and_then(le_u64)
-            .ok_or_else(|| unsupported(array.data_type()))?;
-        bits.push(if num.signed {
+    let start = data
+        .offset()
+        .checked_mul(width)
+        .ok_or_else(|| unsupported(dt))?;
+    let end = n
+        .checked_mul(width)
+        .and_then(|len| start.checked_add(len))
+        .ok_or_else(|| unsupported(dt))?;
+    raw.get(start..end).ok_or_else(|| unsupported(dt))
+}
+
+/// The physical bits of each row of `values`, which holds `num.width` bytes per row. Null rows
+/// hold whatever the buffer has there, so callers check validity. Signed values are
+/// sign-extended.
+fn row_bits(values: &[u8], num: Numeric) -> impl Iterator<Item = u64> + '_ {
+    values.chunks_exact(num.width.max(1)).map(move |row| {
+        let raw = le_u64(row).unwrap_or_default();
+        if num.signed {
             super::sign_extend(raw, num.width)
         } else {
             raw
-        });
-    }
-    Ok(bits)
+        }
+    })
 }
 
 /// The float value of `bits`, read as `f32` when `width` is 4.
@@ -188,11 +215,13 @@ fn constant_numeric(num: Numeric, value: u64) -> EncodedChunk {
 }
 
 fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
-    let bits = read_bits(array, num)?;
-    let valid: Vec<bool> = (0..array.len()).map(|i| array.is_valid(i)).collect();
+    let data = array.to_data();
+    let values = value_bytes_of(&data, array.data_type(), array.len(), num.width)?;
+    let nulls = array.nulls();
+    let is_valid = |i: usize| nulls.is_none_or(|nb| nb.is_valid(i));
     let has_nulls = array.null_count() > 0;
-    let first = bits.first().copied().unwrap_or_default();
-    if !has_nulls && bits.iter().all(|b| *b == first) {
+    let first = row_bits(values, num).next().unwrap_or_default();
+    if !has_nulls && row_bits(values, num).all(|b| b == first) {
         return Ok(constant_numeric(num, first));
     }
 
@@ -209,19 +238,21 @@ fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
             // chunk is not all null.
             let mut min = i64::MAX;
             let mut max = i64::MIN;
-            for (b, v) in bits.iter().zip(&valid) {
-                if *v {
-                    let x = *b as i64;
+            for (i, b) in row_bits(values, num).enumerate() {
+                if is_valid(i) {
+                    let x = b as i64;
                     min = min.min(x);
                     max = max.max(x);
                 }
             }
-            let deltas: Vec<u64> = bits
-                .iter()
-                .zip(&valid)
-                .map(|(b, v)| if *v { b.wrapping_sub(min as u64) } else { 0 })
+            // Every valid delta lies in 0..=max - min, and max - min is one of them, so the
+            // width comes from max - min without a pass over the deltas. Null slots are 0.
+            let base = min as u64;
+            let width = width_for((max as u64).wrapping_sub(base));
+            let deltas: Vec<u64> = row_bits(values, num)
+                .enumerate()
+                .map(|(i, b)| if is_valid(i) { b.wrapping_sub(base) } else { 0 })
                 .collect();
-            let width = width_for(deltas.iter().copied().max().unwrap_or_default());
             body.push(width);
             pack(&deltas, width, &mut body);
             set_prefix(&mut chunk.min, &min.to_le_bytes());
@@ -230,19 +261,20 @@ fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
             chunk.encoding = Encoding::ForBitpack;
         }
         Class::Wide => {
-            for b in &bits {
-                push_le(&mut body, *b, num.width);
+            for (i, b) in row_bits(values, num).enumerate() {
+                push_le(&mut body, if is_valid(i) { b } else { 0 }, num.width);
             }
         }
         Class::Float => {
             let mut has_nan = false;
             let mut zone: Option<(f64, f64)> = None;
-            for (b, v) in bits.iter().zip(&valid) {
-                push_le(&mut body, *b, num.width);
-                if !*v {
+            for (i, b) in row_bits(values, num).enumerate() {
+                if !is_valid(i) {
+                    push_le(&mut body, 0, num.width);
                     continue;
                 }
-                let x = float_of(*b, num.width);
+                push_le(&mut body, b, num.width);
+                let x = float_of(b, num.width);
                 if x.is_nan() {
                     has_nan = true;
                     continue;

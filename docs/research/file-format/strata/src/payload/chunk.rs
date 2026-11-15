@@ -5,7 +5,6 @@
 //! chunk is at least `MIN_CHUNK` bytes, except the last.
 
 use std::ops::Range;
-use std::sync::OnceLock;
 
 /// Minimum size of every chunk of a value except its last (S4 step 5).
 pub(crate) const MIN_CHUNK: usize = 256;
@@ -17,26 +16,25 @@ pub(crate) const GEAR_MAX: usize = 8192;
 pub(crate) const GEAR_MASK: u64 = (1 << 11) - 1;
 const GEAR_SEED: u64 = 0x1234_5678_9abc_def1;
 
-static GEAR_TABLE: OnceLock<[u64; 256]> = OnceLock::new();
-
-fn gear_table() -> [u64; 256] {
+#[allow(clippy::indexing_slicing)] // i < 256 by the loop bound
+const fn gear_table() -> [u64; 256] {
     let mut t = [0u64; 256];
     let mut x: u64 = GEAR_SEED;
-    for v in t.iter_mut() {
+    let mut i = 0;
+    while i < 256 {
         x ^= x << 13;
         x ^= x >> 7;
         x ^= x << 17;
-        *v = x;
+        t[i] = x;
+        i += 1;
     }
     t
 }
 
+static GEAR_TABLE: [u64; 256] = gear_table();
+
 fn gear_entry(b: u8) -> u64 {
-    GEAR_TABLE
-        .get_or_init(gear_table)
-        .get(usize::from(b))
-        .copied()
-        .unwrap_or(0)
+    GEAR_TABLE.get(usize::from(b)).copied().unwrap_or(0)
 }
 
 /// Appends piece ranges covering `data` exactly, shifted by `base`.

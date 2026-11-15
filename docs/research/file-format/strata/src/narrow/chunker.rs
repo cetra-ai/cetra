@@ -3,7 +3,7 @@
 
 use std::ops::Range;
 
-use arrow::array::{Array, AsArray, ListArray, MapArray};
+use arrow::array::{Array, AsArray, MapArray};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
 
@@ -25,11 +25,75 @@ pub fn chunk_ranges(
     if uses_ipc(array.data_type(), has_dict) {
         return ipc_ranges(array, max_rows, max_bytes);
     }
+    let n = array.len();
+    let ranges = match array.data_type() {
+        DataType::Utf8 if has_dict => fixed_ranges(n, 4, max_rows, max_bytes),
+        DataType::Utf8 => match array.as_string_opt::<i32>() {
+            Some(strings) => close_ranges(
+                row_lengths(strings.value_offsets()).map(|len| len + 4),
+                max_rows,
+                max_bytes,
+            ),
+            None => fixed_ranges(n, 0, max_rows, max_bytes),
+        },
+        DataType::Binary => match array.as_binary_opt::<i32>() {
+            Some(binaries) => close_ranges(
+                row_lengths(binaries.value_offsets()).map(|len| len + 4),
+                max_rows,
+                max_bytes,
+            ),
+            None => fixed_ranges(n, 0, max_rows, max_bytes),
+        },
+        DataType::List(field) if field.data_type() == &DataType::Utf8 => {
+            match array.as_list_opt::<i32>() {
+                Some(list) => close_ranges(
+                    row_lengths(list.value_offsets()).map(|elements| elements * 4 + 4),
+                    max_rows,
+                    max_bytes,
+                ),
+                None => fixed_ranges(n, 0, max_rows, max_bytes),
+            }
+        }
+        dt if crate::narrow::is_utf8_map(dt) => match array.as_map_opt() {
+            Some(map) => map_ranges(map, max_rows, max_bytes),
+            None => fixed_ranges(n, 0, max_rows, max_bytes),
+        },
+        dt => fixed_ranges(n, value_bytes(dt), max_rows, max_bytes),
+    };
+    Ok(ranges)
+}
+
+/// The chunks of `n` rows that each cost `width` bytes per row. A chunk closes at `max_rows`
+/// rows or when its bytes reach `max_bytes`, so a chunk holds `ceil(max_bytes / width)` rows
+/// (`max_bytes` = 0 gives one row each). A width of 0 is bounded by the row limit alone, unless
+/// `max_bytes` is 0. Chunks are consecutive blocks of `per` rows, and `per` is at least 1.
+fn fixed_ranges(n: usize, width: usize, max_rows: usize, max_bytes: usize) -> Vec<Range<usize>> {
+    let per = match width {
+        0 if max_bytes > 0 => max_rows,
+        0 => 1,
+        w => max_bytes.div_ceil(w),
+    }
+    .min(max_rows)
+    .max(1);
+    (0..n)
+        .step_by(per)
+        .map(|start| start..start.saturating_add(per).min(n))
+        .collect()
+}
+
+/// Closes chunks over per-row byte budgets, read lazily: a chunk closes at `max_rows` rows or
+/// when its bytes reach `max_bytes`. The ranges are non-empty and cover the rows in order.
+fn close_ranges(
+    sizes: impl Iterator<Item = usize>,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;
+    let mut end = 0;
     let mut rows = 0usize;
     let mut bytes = 0usize;
-    for (i, row_bytes) in row_sizes(array, has_dict).into_iter().enumerate() {
+    for (i, row_bytes) in sizes.enumerate() {
         rows += 1;
         bytes = bytes.saturating_add(row_bytes);
         if rows >= max_rows || bytes >= max_bytes {
@@ -38,11 +102,54 @@ pub fn chunk_ranges(
             rows = 0;
             bytes = 0;
         }
+        end = i + 1;
     }
-    if start < array.len() {
-        ranges.push(start..array.len());
+    if start < end {
+        ranges.push(start..end);
     }
-    Ok(ranges)
+    ranges
+}
+
+/// The number of elements of each row, from the offsets of a `i32` array. A row whose offsets
+/// are missing counts 0.
+fn row_lengths(offsets: &[i32]) -> impl Iterator<Item = usize> + '_ {
+    offsets.windows(2).map(|pair| match pair {
+        [start, end] => usize::try_from(end.saturating_sub(*start)).unwrap_or(0),
+        _ => 0,
+    })
+}
+
+/// The chunks of a `Map<Utf8, Utf8>` array. A row costs, per entry, its key length, its value
+/// length (0 for a null value) and 8, and 4 more for the row.
+fn map_ranges(map: &MapArray, max_rows: usize, max_bytes: usize) -> Vec<Range<usize>> {
+    let entries = map.entries();
+    let (Some(keys), Some(values)) = (
+        entries.column(0).as_string_opt::<i32>(),
+        entries.column(1).as_string_opt::<i32>(),
+    ) else {
+        return fixed_ranges(map.len(), 0, max_rows, max_bytes);
+    };
+    let sizes = map.value_offsets().windows(2).map(|pair| {
+        let (start, end) = match pair {
+            [start, end] => (
+                usize::try_from(*start).unwrap_or(0),
+                usize::try_from(*end).unwrap_or(0),
+            ),
+            _ => (0, 0),
+        };
+        let entry_bytes: usize = (start..end)
+            .map(|j| {
+                let value = if values.is_valid(j) {
+                    values.value(j).len()
+                } else {
+                    0
+                };
+                keys.value(j).len() + value + 8
+            })
+            .sum();
+        entry_bytes + 4
+    });
+    close_ranges(sizes, max_rows, max_bytes)
 }
 
 /// Whether a column of type `dt` is stored as `IPC` chunks. Every type without a narrow
@@ -147,89 +254,6 @@ fn covered_child(child: &dyn Array, (first, last): (i64, i64)) -> Result<usize> 
     slice_bytes(child.slice(start, end - start).as_ref())
 }
 
-/// The bytes each row of `array` counts for in the chunk budget. `has_dict` tells whether the
-/// column has a dictionary, which decides what a Utf8 row and a List(Utf8) row cost.
-///
-/// Fixed-width types count their width. A Utf8 row with a dictionary counts its 4-byte code;
-/// without one it counts its length plus 4. A Binary row counts its length plus 4. A List(Utf8)
-/// row with a dictionary counts 4 bytes per element and 4 more for the row. A `Map<Utf8, Utf8>`
-/// row counts, per entry, its key length, its value length (0 for a null value) and 8, and 4
-/// more for the row.
-fn row_sizes(array: &dyn Array, has_dict: bool) -> Vec<usize> {
-    let n = array.len();
-    match array.data_type() {
-        DataType::Utf8 if has_dict => vec![4; n],
-        DataType::Utf8 => match array.as_string_opt::<i32>() {
-            Some(strings) => (0..n).map(|i| strings.value(i).len() + 4).collect(),
-            None => vec![0; n],
-        },
-        DataType::Binary => match array.as_binary_opt::<i32>() {
-            Some(binaries) => (0..n).map(|i| binaries.value(i).len() + 4).collect(),
-            None => vec![0; n],
-        },
-        DataType::List(field) if field.data_type() == &DataType::Utf8 => {
-            match array.as_list_opt::<i32>() {
-                Some(list) => list_row_sizes(list),
-                None => vec![0; n],
-            }
-        }
-        dt if super::is_utf8_map(dt) => match array.as_map_opt() {
-            Some(map) => map_row_sizes(map),
-            None => vec![0; n],
-        },
-        dt => vec![value_bytes(dt); n],
-    }
-}
-
-/// The byte budget of each row of a List(Utf8) array with a dictionary: 4 bytes per element
-/// and 4 for the row. The elements are counted from the offsets, so no child is read.
-fn list_row_sizes(list: &ListArray) -> Vec<usize> {
-    list.value_offsets()
-        .windows(2)
-        .map(|pair| {
-            let elements = match pair {
-                [start, end] => usize::try_from(end.saturating_sub(*start)).unwrap_or(0),
-                _ => 0,
-            };
-            elements * 4 + 4
-        })
-        .collect()
-}
-
-/// The byte budget of each row of a `Map<Utf8, Utf8>` array, as its encoding stores it.
-fn map_row_sizes(map: &MapArray) -> Vec<usize> {
-    let entries = map.entries();
-    let (Some(keys), Some(values)) = (
-        entries.column(0).as_string_opt::<i32>(),
-        entries.column(1).as_string_opt::<i32>(),
-    ) else {
-        return vec![0; map.len()];
-    };
-    map.value_offsets()
-        .windows(2)
-        .map(|pair| {
-            let (start, end) = match pair {
-                [start, end] => (
-                    usize::try_from(*start).unwrap_or(0),
-                    usize::try_from(*end).unwrap_or(0),
-                ),
-                _ => (0, 0),
-            };
-            let entry_bytes: usize = (start..end)
-                .map(|j| {
-                    let value = if values.is_valid(j) {
-                        values.value(j).len()
-                    } else {
-                        0
-                    };
-                    keys.value(j).len() + value + 8
-                })
-                .sum();
-            entry_bytes + 4
-        })
-        .collect()
-}
-
 /// The value bytes one row of a fixed-width type `dt` counts for in the chunk budget.
 fn value_bytes(dt: &DataType) -> usize {
     match dt {
@@ -258,6 +282,220 @@ mod tests {
 
     fn lens(ranges: &[Range<usize>]) -> Vec<usize> {
         ranges.iter().map(Range::len).collect()
+    }
+
+    use arrow::array::{
+        ArrayRef, BooleanArray, Int16Array, ListBuilder, MapBuilder, StringBuilder,
+    };
+    use arrow::buffer::Buffer;
+    use proptest::prelude::*;
+
+    /// The M1F.2 `row_sizes`, kept as the reference for the proptest below.
+    fn row_sizes_reference(array: &dyn Array, has_dict: bool) -> Vec<usize> {
+        let n = array.len();
+        match array.data_type() {
+            DataType::Utf8 if has_dict => vec![4; n],
+            DataType::Utf8 => match array.as_string_opt::<i32>() {
+                Some(strings) => (0..n).map(|i| strings.value(i).len() + 4).collect(),
+                None => vec![0; n],
+            },
+            DataType::Binary => match array.as_binary_opt::<i32>() {
+                Some(binaries) => (0..n).map(|i| binaries.value(i).len() + 4).collect(),
+                None => vec![0; n],
+            },
+            DataType::List(field) if field.data_type() == &DataType::Utf8 => {
+                match array.as_list_opt::<i32>() {
+                    Some(list) => list_row_sizes_reference(list),
+                    None => vec![0; n],
+                }
+            }
+            dt if crate::narrow::is_utf8_map(dt) => match array.as_map_opt() {
+                Some(map) => map_row_sizes_reference(map),
+                None => vec![0; n],
+            },
+            dt => vec![value_bytes(dt); n],
+        }
+    }
+
+    fn list_row_sizes_reference(list: &ListArray) -> Vec<usize> {
+        list.value_offsets()
+            .windows(2)
+            .map(|pair| {
+                let elements = match pair {
+                    [start, end] => usize::try_from(end.saturating_sub(*start)).unwrap_or(0),
+                    _ => 0,
+                };
+                elements * 4 + 4
+            })
+            .collect()
+    }
+
+    fn map_row_sizes_reference(map: &MapArray) -> Vec<usize> {
+        let entries = map.entries();
+        let (Some(keys), Some(values)) = (
+            entries.column(0).as_string_opt::<i32>(),
+            entries.column(1).as_string_opt::<i32>(),
+        ) else {
+            return vec![0; map.len()];
+        };
+        map.value_offsets()
+            .windows(2)
+            .map(|pair| {
+                let (start, end) = match pair {
+                    [start, end] => (
+                        usize::try_from(*start).unwrap_or(0),
+                        usize::try_from(*end).unwrap_or(0),
+                    ),
+                    _ => (0, 0),
+                };
+                let entry_bytes: usize = (start..end)
+                    .map(|j| {
+                        let value = if values.is_valid(j) {
+                            values.value(j).len()
+                        } else {
+                            0
+                        };
+                        keys.value(j).len() + value + 8
+                    })
+                    .sum();
+                entry_bytes + 4
+            })
+            .collect()
+    }
+
+    /// The M1F.2 chunk loop over `row_sizes_reference`.
+    fn reference_ranges(
+        array: &dyn Array,
+        has_dict: bool,
+        max_rows: usize,
+        max_bytes: usize,
+    ) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        let mut rows = 0usize;
+        let mut bytes = 0usize;
+        for (i, row_bytes) in row_sizes_reference(array, has_dict).into_iter().enumerate() {
+            rows += 1;
+            bytes = bytes.saturating_add(row_bytes);
+            if rows >= max_rows || bytes >= max_bytes {
+                ranges.push(start..i + 1);
+                start = i + 1;
+                rows = 0;
+                bytes = 0;
+            }
+        }
+        if start < array.len() {
+            ranges.push(start..array.len());
+        }
+        ranges
+    }
+
+    fn text(x: u16) -> String {
+        "ab".repeat(usize::from(x) % 50)
+    }
+
+    /// An array of case `case` (0..10) with one row per element of `values` (`None` is null),
+    /// and whether the column has a dictionary.
+    fn case_array(case: usize, values: &[Option<u16>]) -> (ArrayRef, bool) {
+        let array: ArrayRef = match case {
+            0 => Arc::new(
+                values
+                    .iter()
+                    .map(|v| v.map(i64::from))
+                    .collect::<Int64Array>(),
+            ),
+            1 => Arc::new(
+                values
+                    .iter()
+                    .map(|v| v.map(|x| x as i16))
+                    .collect::<Int16Array>(),
+            ),
+            2 => Arc::new(
+                values
+                    .iter()
+                    .map(|v| v.map(|x| x % 2 == 0))
+                    .collect::<BooleanArray>(),
+            ),
+            3 => Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    values.iter().map(|v| v.map(|x| [x as u8; 16])),
+                    16,
+                )
+                .unwrap(),
+            ),
+            4 => Arc::new(
+                FixedSizeBinaryArray::try_new_with_len(
+                    0,
+                    Buffer::from_vec(Vec::<u8>::new()),
+                    Some(NullBuffer::from(
+                        values.iter().map(Option::is_some).collect::<Vec<bool>>(),
+                    )),
+                    values.len(),
+                )
+                .unwrap(),
+            ),
+            5 | 6 => Arc::new(values.iter().map(|v| v.map(text)).collect::<StringArray>()),
+            7 => Arc::new(
+                values
+                    .iter()
+                    .map(|v| v.map(|x| text(x).into_bytes()))
+                    .collect::<BinaryArray>(),
+            ),
+            8 => {
+                let mut builder = ListBuilder::new(StringBuilder::new());
+                for v in values {
+                    match v {
+                        None => builder.append(false),
+                        Some(x) => {
+                            for k in 0..usize::from(*x) % 5 {
+                                builder.values().append_value(format!("v{k}"));
+                            }
+                            builder.append(true);
+                        }
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+            _ => {
+                let mut builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+                for v in values {
+                    match v {
+                        None => builder.append(false).unwrap(),
+                        Some(x) => {
+                            for k in 0..usize::from(*x) % 4 {
+                                builder.keys().append_value(format!("k{k}"));
+                                if (usize::from(*x) + k) % 5 == 0 {
+                                    builder.values().append_null();
+                                } else {
+                                    builder.values().append_value(text(*x));
+                                }
+                            }
+                            builder.append(true).unwrap();
+                        }
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        };
+        // Case 5 is Utf8 with a dictionary and case 8 is List(Utf8) with one; the others have none.
+        (array, matches!(case, 5 | 8))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn chunk_ranges_match_the_m1f2_loop(
+            case in 0usize..10,
+            values in proptest::collection::vec(proptest::option::of(any::<u16>()), 0..2000),
+            max_rows in prop_oneof![Just(0u32), 0u32..5000],
+            max_bytes in prop_oneof![Just(1usize), 1usize..70_000],
+        ) {
+            let (array, has_dict) = case_array(case, &values);
+            let got = chunk_ranges(array.as_ref(), max_rows, max_bytes, has_dict).unwrap();
+            let want = reference_ranges(array.as_ref(), has_dict, max_rows as usize, max_bytes);
+            prop_assert_eq!(got, want);
+        }
     }
 
     #[test]

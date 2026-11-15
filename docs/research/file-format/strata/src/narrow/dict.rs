@@ -9,24 +9,30 @@ use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, MAX_DICT_VALUES, Out};
 
-/// The distinct values of a column, sorted bytewise. A code is the index of a value.
+/// The distinct values of a column, sorted bytewise. A code is the index of a value. Every
+/// value is valid UTF-8, checked once when the dictionary is built or decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dictionary {
-    values: Vec<Vec<u8>>,
+    values: Vec<String>,
 }
 
 impl Dictionary {
     /// The code of `v`, or `None` when `v` is not in the dictionary.
     pub fn code_of(&self, v: &[u8]) -> Option<u32> {
         self.values
-            .binary_search_by(|x| x.as_slice().cmp(v))
+            .binary_search_by(|x| x.as_bytes().cmp(v))
             .ok()
             .and_then(|i| u32::try_from(i).ok())
     }
 
     /// The value of `code`, or `None` when the code is out of range.
     pub fn value(&self, code: u32) -> Option<&[u8]> {
-        self.values.get(code as usize).map(Vec::as_slice)
+        self.values.get(code as usize).map(String::as_bytes)
+    }
+
+    /// The value of `code` as a string, or `None` when the code is out of range.
+    pub fn str_value(&self, code: u32) -> Option<&str> {
+        self.values.get(code as usize).map(String::as_str)
     }
 
     /// Writes the S3 layout: `u32 n`, `u32 offsets[n+1]` relative to the bytes area, then
@@ -46,7 +52,7 @@ impl Dictionary {
             out.u32(stored);
         }
         for value in &self.values {
-            out.bytes(value);
+            out.bytes(value.as_bytes());
         }
         Ok(())
     }
@@ -74,7 +80,7 @@ impl Dictionary {
             return Err(corrupt("dictionary trailing bytes"));
         }
 
-        let mut values: Vec<Vec<u8>> = Vec::new();
+        let mut values: Vec<String> = Vec::new();
         for pair in offsets.windows(2) {
             let [start, end] = pair else {
                 return Err(corrupt("dictionary offsets"));
@@ -85,18 +91,16 @@ impl Dictionary {
             let value = area
                 .get(*start..*end)
                 .ok_or_else(|| corrupt("dictionary offsets"))?;
-            if std::str::from_utf8(value).is_err() {
-                return Err(corrupt("dictionary utf8"));
-            }
+            let text = std::str::from_utf8(value).map_err(|_| corrupt("dictionary utf8"))?;
             if let Some(prev) = values.last() {
-                if prev.as_slice() == value {
+                if prev.as_bytes() == value {
                     return Err(corrupt("dictionary duplicate"));
                 }
-                if prev.as_slice() > value {
+                if prev.as_bytes() > value {
                     return Err(corrupt("dictionary order"));
                 }
             }
-            values.push(value.to_vec());
+            values.push(text.to_string());
         }
         Ok(Self { values })
     }
@@ -151,24 +155,32 @@ pub(crate) fn build(
     max_values: usize,
     max_bytes: usize,
 ) -> Option<Dictionary> {
-    let mut distinct: BTreeSet<&[u8]> = BTreeSet::new();
+    // The size only grows as values are inserted, so the build stops at the first value that
+    // takes it over a limit. The size is checked again at the end, for the empty dictionary.
+    let mut distinct: BTreeSet<&str> = BTreeSet::new();
+    let mut value_bytes = 0usize;
     for array in arrays {
         for i in 0..array.len() {
             if array.is_valid(i) {
-                distinct.insert(array.value(i).as_bytes());
-                if distinct.len() > max_values {
-                    return None;
+                let value = array.value(i);
+                if distinct.insert(value) {
+                    if distinct.len() > max_values {
+                        return None;
+                    }
+                    value_bytes = value_bytes.checked_add(value.len())?;
+                    if value_bytes.checked_add(4 * (distinct.len() + 1))? > max_bytes {
+                        return None;
+                    }
                 }
             }
         }
     }
-    let value_bytes: usize = distinct.iter().map(|v| v.len()).sum();
     let size = value_bytes.checked_add(4 * (distinct.len() + 1))?;
     if size > max_bytes {
         return None;
     }
     Some(Dictionary {
-        values: distinct.into_iter().map(<[u8]>::to_vec).collect(),
+        values: distinct.into_iter().map(str::to_string).collect(),
     })
 }
 

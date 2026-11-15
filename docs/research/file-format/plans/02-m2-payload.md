@@ -310,7 +310,7 @@ No search structures yet (M2.3): the header's `n_edge_groups`, `filters_offset` 
   pub payload_min_avg: usize,
   ```
 
-- Replace the doc of `zstd_level` with: "zstd level for narrow, refs, header and table segments. Default 1." Payload frames use the fixed `FRAME_ZSTD_LEVEL`.
+- Replace the doc of `zstd_level` with: "zstd level for narrow, refs, header and table segments. Default 3." Payload frames use the fixed `FRAME_ZSTD_LEVEL`.
 
 ### Constants (`payload/mod.rs`)
 
@@ -386,9 +386,9 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
    impl FrameBuilder {
        pub fn new() -> Self;
        /// Returns the chunk's id; appends it to the open frame if new, closing the frame when full.
-       pub fn add(&mut self, chunk: &[u8], out: &mut Out) -> Result<u32>;
+       pub fn add(&mut self, chunk: &[u8], codec: &mut SegmentCodec, out: &mut Out) -> Result<u32>;
        /// Closes the open frame if it has any chunk.
-       pub fn finish(&mut self, out: &mut Out) -> Result<()>;
+       pub fn finish(&mut self, codec: &mut SegmentCodec, out: &mut Out) -> Result<()>;
        /// Number of unique chunks so far.
        pub fn n_chunks(&self) -> u32;
    }
@@ -402,7 +402,7 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
 
    **Closing a frame:**
    1. Build the raw frame: `u32 n_chunks`, `u32 end_offset[n]` (the `cur_ends`), then `cur`.
-   2. `encode_segment(Kind::PayloadFrame, &raw, Codec::Zstd, FRAME_ZSTD_LEVEL, out)`.
+   2. `encode_segment(Kind::PayloadFrame, &raw, Codec::Zstd, frame_codec, out)`. `add` and `finish` write frames and hold no codec of their own, so the `codec` they receive is the frame codec: `write_payload_column` passes its `frame_codec` there.
    3. Push `FrameEntry { offset: seg.offset, len: seg.len, raw_len: raw.len(), first_chunk: cur_first, n_chunks }`, using `u32::try_from` for the lengths.
    4. `stored_bytes += u64::from(seg.len)`, `raw_total += raw.len() as u64`, `stored_total += u64::from(seg.len) - 16` (`seg.len ≥ 16` always), and `ratio = raw_total as f64 / stored_total as f64` when `stored_total > 0`.
    5. Clear `cur` and `cur_ends`, and set `cur_first = next_id`.
@@ -480,7 +480,7 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
    - frames are contiguous and non-empty: `first_chunk` of frame 0 is 0, each frame has `n_chunks ≥ 1`, each next `first_chunk` equals the previous `first_chunk + n_chunks`, and the total equals `n_chunks`;
    - ref pages: the first has `first_row = 0`, `first_row` is strictly increasing and below `n_rows`, and there is at least one page when `n_rows > 0`.
 
-   The header is stored as a `Kind::PayloadHeader` segment with `Codec::Zstd` at `config.zstd_level`.
+   The header is stored as a `Kind::PayloadHeader` segment with `Codec::Zstd` through `codec`.
 
 6. **`payload/write.rs`.**
 
@@ -498,16 +498,16 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
        pub bytes: u64,
    }
    pub(crate) fn is_payload(array: &dyn Array, config: &Config) -> bool;
-   pub(crate) fn write_payload_column(array: &dyn Array, config: &Config, out: &mut Out) -> Result<(SegmentRef, PayloadStats)>;
+   pub(crate) fn write_payload_column(array: &dyn Array, config: &Config, codec: &mut SegmentCodec, frame_codec: &mut SegmentCodec, out: &mut Out) -> Result<(SegmentRef, PayloadStats)>;
    ```
 
    **`is_payload`** is true when the type is Utf8 or Binary and at least one value is non-null. Then take `sum` (the non-null value lengths) and `count` (the non-null values) as `u64`, and require `sum >= (config.payload_min_avg as u64).saturating_mul(count)`.
 
    **`write_payload_column`:**
    1. Downcast with `array.as_any().downcast_ref::<StringArray>()` or `::<BinaryArray>()`. Any other type is `Schema`; never use `as_string()`, which panics.
-   2. For each row: null becomes `RowRefs::Null`. Otherwise take the value bytes, compute `chunk_value`, and pass each range's bytes (`value.get(range)`) to `FrameBuilder::add`, giving the row's id list. `chunk_refs` counts the ids.
-   3. After the last row, call `FrameBuilder::finish`.
-   4. Group the rows by `REFS_PAGE_ROWS`. Encode each group with `encode_page`, write it as a `Kind::PayloadRefs` segment (`Codec::Zstd`, `config.zstd_level`), and record its `RefPage`.
+   2. For each row: null becomes `RowRefs::Null`. Otherwise take the value bytes, compute `chunk_value`, and pass each range's bytes (`value.get(range)`) to `FrameBuilder::add` with `frame_codec` and `out`, giving the row's id list. `chunk_refs` counts the ids.
+   3. After the last row, call `FrameBuilder::finish` with `frame_codec` and `out`.
+   4. Group the rows by `REFS_PAGE_ROWS`. Encode each group with `encode_page`, write it as a `Kind::PayloadRefs` segment (`Codec::Zstd`, `codec`), and record its `RefPage`.
    5. Build the `PayloadHeader` and write it.
    6. `bytes` = `frame_builder.stored_bytes` + the refs segments' `len` + the header's `len`.
    7. Return the header `SegmentRef` and the stats.
@@ -547,11 +547,11 @@ pub(crate) const HEADER_FIXED_LEN: usize = 32;
 
 8. **`writer.rs`.**
    - `use crate::payload::{self, PayloadStats};`.
-   - In `finish`, for each column, **before** computing the dictionary:
+   - In `finish`, next to `let mut codec = SegmentCodec::new(self.config.zstd_level)?;`, create `let mut frame_codec = SegmentCodec::new(FRAME_ZSTD_LEVEL)?;`. Then, for each column, **before** computing the dictionary:
 
      ```rust
      if payload::is_payload(array.as_ref(), &self.config) {
-         let (header, stats) = payload::write_payload_column(array.as_ref(), &self.config, &mut out)?;
+         let (header, stats) = payload::write_payload_column(array.as_ref(), &self.config, &mut codec, &mut frame_codec, &mut out)?;
          // push DirectoryRecord and ColumnSummary as below
          continue;
      }
