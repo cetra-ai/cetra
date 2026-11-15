@@ -742,6 +742,9 @@ mod tests {
     use llmobs_storage::error::{AppendError, DeletionError};
 
     use super::*;
+    use crate::meta::datasets::{
+        DatasetFields, NewRevision, VersionChange, insert_dataset, write_version,
+    };
     use crate::meta::deletions::{
         ActorKind, DeletionState, NewDeletion, RequestDetails, deletion_by_id, insert_deletion,
         insert_projects, insert_traces, mark_handed_over, scope_sessions, scope_traces,
@@ -749,6 +752,9 @@ mod tests {
     };
     use crate::meta::eval_jobs::{KIND_MANUAL, NewJob, insert_job};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+    use crate::meta::experiments::{
+        NewExperiment, NewResult, insert_tx as insert_experiment, upsert_results_tx,
+    };
     use crate::meta::orgs::{insert_org, org_by_id};
     use crate::meta::projects::{ProjectRow, insert_project, project_by_id};
     use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
@@ -1846,5 +1852,327 @@ mod tests {
         assert_eq!(row.kind, DeletionKind::TraceIds);
         assert_eq!(row.state, DeletionState::Resolving);
         assert_eq!(row.request.requested, Some(1));
+    }
+
+    /// A dataset `faq` of `project` at version 1 with two items: `item` is copied from `trace`
+    /// (its revision is `copied`), `plain` has no source. An experiment `baseline` pins it with
+    /// two results: `item` on `trace`, `plain` on another trace. Returns (dataset, item, plain,
+    /// experiment).
+    async fn copy_of(
+        app: &TestApp,
+        project: ProjectId,
+        trace: TraceId,
+    ) -> (Uuid, Uuid, Uuid, Uuid) {
+        let (dataset, item, experiment) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (copied, plain, plain_rev) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let other = trace_id(200).parse::<TraceId>().unwrap();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_dataset(
+                        conn,
+                        dataset,
+                        project,
+                        DatasetFields {
+                            name: "faq".to_owned(),
+                            description: None,
+                            input_schema: None,
+                            expected_schema: None,
+                        },
+                        now,
+                    )
+                    .await?;
+                    write_version(
+                        conn,
+                        dataset,
+                        VersionChange {
+                            close: vec![],
+                            insert: vec![
+                                NewRevision {
+                                    revision_id: copied,
+                                    item_id: item,
+                                    input: serde_json::json!("copied"),
+                                    expected_output: None,
+                                    metadata: serde_json::Map::new(),
+                                    source_trace_id: Some(trace),
+                                    source_span_id: None,
+                                },
+                                NewRevision {
+                                    revision_id: plain_rev,
+                                    item_id: plain,
+                                    input: serde_json::json!("plain"),
+                                    expected_output: None,
+                                    metadata: serde_json::Map::new(),
+                                    source_trace_id: None,
+                                    source_span_id: None,
+                                },
+                            ],
+                            description: "add 2 items".to_owned(),
+                            created_by: None,
+                        },
+                        now,
+                    )
+                    .await?;
+                    insert_experiment(
+                        conn,
+                        &NewExperiment {
+                            id: experiment,
+                            project_id: project,
+                            dataset_id: dataset,
+                            dataset_name: "faq".to_owned(),
+                            dataset_version: 1,
+                            name: "baseline".to_owned(),
+                            description: None,
+                            metadata: "{}".to_owned(),
+                            repetitions: 1,
+                            item_count: 2,
+                            created_by: None,
+                            created_at: now,
+                        },
+                    )
+                    .await?;
+                    let result = |dataset_item_id, revision_id, trace_id| NewResult {
+                        dataset_item_id,
+                        repetition: 0,
+                        revision_id,
+                        input: "\"in\"".to_owned(),
+                        expected_output: None,
+                        trace_id: Some(trace_id),
+                        output: Some("\"out\"".to_owned()),
+                        error: None,
+                        latency_ns: Some(7),
+                    };
+                    upsert_results_tx(
+                        conn,
+                        experiment,
+                        &[result(item, copied, trace), result(plain, plain_rev, other)],
+                        now,
+                    )
+                    .await?;
+                    Ok::<_, MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+        (dataset, item, plain, experiment)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trace_deletion_erases_copies() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, item, plain, experiment) = copy_of(&app, project.id, trace(1)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                item.to_string()
+            )
+            .await,
+            0,
+            "every revision of the copied item is gone"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                plain.to_string()
+            )
+            .await,
+            1,
+            "an item without a source stays"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM experiment_items WHERE experiment_id = ?",
+                experiment.to_string()
+            )
+            .await,
+            1,
+            "only the result on the other trace stays"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edited_copies_go_too() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (dataset, item, _, _) = copy_of(&app, project.id, trace(1)).await;
+        let (edited, now) = (Uuid::now_v7(), app.state.clock.now_ns());
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    write_version(
+                        conn,
+                        dataset,
+                        VersionChange {
+                            close: vec![item],
+                            insert: vec![NewRevision {
+                                revision_id: edited,
+                                item_id: item,
+                                input: serde_json::json!("edited"),
+                                expected_output: None,
+                                metadata: serde_json::Map::new(),
+                                source_trace_id: Some(trace(1)),
+                                source_span_id: None,
+                            }],
+                            description: "edit the copied item".to_owned(),
+                            created_by: None,
+                        },
+                        now,
+                    )
+                    .await
+                    .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        let revisions = "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?";
+        assert_eq!(count_rows(&app, revisions, item.to_string()).await, 2);
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        assert_eq!(count_rows(&app, revisions, item.to_string()).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_erases_copies() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(2), &span_id(2), |row| {
+            row.user_id = Some("u-1".to_owned());
+        })
+        .await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, item, _, _) = copy_of(&app, project.id, trace(2)).await;
+
+        let mut new = new_row(&app, project, DeletionKind::User);
+        new.user_id = Some("u-1".to_owned());
+        insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                item.to_string()
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn other_projects_are_untouched() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        let (other, _key) = app.add_project(&seeded, "other", None).await;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, mine, _, _) = copy_of(&app, project.id, trace(1)).await;
+        let (_, theirs, _, _) = copy_of(&app, other.id, trace(1)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        let live = "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?";
+        assert_eq!(count_rows(&app, live, mine.to_string()).await, 0);
+        assert_eq!(count_rows(&app, live, theirs.to_string()).await, 1);
+    }
+
+    #[tokio::test]
+    async fn nothing_to_cascade_logs_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        commit(&app, project, &trace_id(2), &span_id(2), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (_, kept, _, _) = copy_of(&app, project.id, trace(2)).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        let ((), logs) = capture_logs(async { worker(&app).await }).await;
+
+        assert!(
+            !logs.contains("deletion removed dataset and experiment copies"),
+            "{logs}"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM dataset_items WHERE item_id = ?",
+                kept.to_string()
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn project_drop_removes_everything() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (doomed, _key) = app.add_project(&seeded, "doomed", None).await;
+        commit(&app, &doomed, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let (dataset, item, _, experiment) = copy_of(&app, doomed.id, trace(1)).await;
+
+        let mut new = new_row(&app, &doomed, DeletionKind::Project);
+        new.request = RequestDetails {
+            name: Some("doomed".to_owned()),
+            slug: Some("doomed".to_owned()),
+            ..RequestDetails::default()
+        };
+        insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        for (sql, id) in [
+            ("SELECT COUNT(*) FROM datasets WHERE id = ?", dataset),
+            ("SELECT COUNT(*) FROM dataset_items WHERE item_id = ?", item),
+            ("SELECT COUNT(*) FROM experiments WHERE id = ?", experiment),
+            (
+                "SELECT COUNT(*) FROM experiment_items WHERE experiment_id = ?",
+                experiment,
+            ),
+        ] {
+            assert_eq!(count_rows(&app, sql, id.to_string()).await, 0, "{sql}");
+        }
     }
 }

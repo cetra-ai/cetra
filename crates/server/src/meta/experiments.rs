@@ -586,6 +586,65 @@ pub(crate) async fn delete_tx(
     Ok(result.rows_affected() > 0)
 }
 
+/// Rows removed by [`delete_copies_of_tx`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cascade {
+    /// Experiment results removed: about a trace in the scope, or whose snapshot is a deleted
+    /// dataset item revision.
+    pub(crate) experiment_items: u64,
+    /// Dataset item revisions removed, of every version.
+    pub(crate) dataset_item_revisions: u64,
+}
+
+/// D-J-9: deletes, in `project`, the experiment results whose trace is in the deletion's scope,
+/// the results whose snapshot came from a dataset item copied from a trace in the scope, and
+/// those dataset item revisions (all versions). Reads the scope from `deletion_traces`, inside
+/// the caller's write transaction, after `insert_traces` stored it.
+pub(crate) async fn delete_copies_of_tx(
+    conn: &mut SqliteConnection,
+    deletion: Uuid,
+    project: ProjectId,
+) -> Result<Cascade, MetaError> {
+    let project = project.to_string();
+    let deletion = deletion.to_string();
+    // The results first: their snapshot's revision is one of the items deleted by the third.
+    let by_revision = sqlx::query(
+        "DELETE FROM experiment_items \
+         WHERE experiment_id IN (SELECT id FROM experiments WHERE project_id = ?) \
+           AND revision_id IN ( \
+             SELECT i.revision_id FROM dataset_items i JOIN datasets d ON d.id = i.dataset_id \
+             WHERE d.project_id = ? \
+               AND i.source_trace_id IN (SELECT trace_id FROM deletion_traces WHERE deletion_id = ?))",
+    )
+    .bind(&project)
+    .bind(&project)
+    .bind(&deletion)
+    .execute(&mut *conn)
+    .await?;
+    let by_trace = sqlx::query(
+        "DELETE FROM experiment_items \
+         WHERE experiment_id IN (SELECT id FROM experiments WHERE project_id = ?) \
+           AND trace_id IN (SELECT trace_id FROM deletion_traces WHERE deletion_id = ?)",
+    )
+    .bind(&project)
+    .bind(&deletion)
+    .execute(&mut *conn)
+    .await?;
+    let revisions = sqlx::query(
+        "DELETE FROM dataset_items \
+         WHERE dataset_id IN (SELECT id FROM datasets WHERE project_id = ?) \
+           AND source_trace_id IN (SELECT trace_id FROM deletion_traces WHERE deletion_id = ?)",
+    )
+    .bind(&project)
+    .bind(&deletion)
+    .execute(&mut *conn)
+    .await?;
+    Ok(Cascade {
+        experiment_items: by_revision.rows_affected() + by_trace.rows_affected(),
+        dataset_item_revisions: revisions.rows_affected(),
+    })
+}
+
 /// The light projection of every result of `experiment`, ordered by `dataset_item_id`, then
 /// `repetition`. At most `MAX_EXPERIMENT_ROWS` rows exist (the create check bounds them). No
 /// text column is read (D-J-13).

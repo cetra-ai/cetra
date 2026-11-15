@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15; M1–M6 not started
+Status: planned on 2026-11-15; M1 and M3 done; M2 and M4–M6 not started
 
 # J · Datasets and experiments — design
 
