@@ -103,6 +103,65 @@ None yet. The S3 mode of R4.5 found no disagreement in the 50-case run above.
 
 **M4-1, shutdown retry backoff (to raise with the coordinator).** During shutdown, `flush.rs` `sleep_backoff` is woken by `stop.changed()` only once. A watch receiver that has already seen the change does not wake again, so each later retry sleeps its full backoff (the backoff doubles from 1 s up to 60 s, so 2, 4, 8 and 16 s in turn) until the 30 s cut-off. A flush that fails through a shutdown therefore loses the retries that would have committed it. The proposal is to cap the backoff at about 1 s while stopping. This is a production change, so it is not made here. The model harness works around it: 3 s into a restart it switches the fault schedule off (`CALM_AFTER`), so a retry commits.
 
+## M5 — Resource exhaustion
+
+The resource milestone (plan `docs/plans/r-hardening/05-m5-resources.md`, decision D-R-9). It runs the engine out of disk, memory and file descriptors and checks that each ends in a clean refusal.
+
+What the tests cover:
+- **Disk (`model_tests/resources/disk_full.rs`):** D1 appends stop at `min_free` before the disk fills; D2 a full disk fails the WAL and a restart recovers; D3 a flush on a full disk retries without temp files; D4 a compaction that does not fit is deferred; D5 a compaction that meets `ENOSPC` fails cleanly; D6 a spilling query stops at `min_free`; D7 the read cache never fills the disk; D8 `put_media` on a full disk leaves nothing; D9 running out of inodes is an error, not a panic.
+- **Spill cap (R5.2):** the spill limit is the free disk above `min_free_bytes`, shared by all queries (unit tests in `disk.rs` and `sql/run.rs`, and `lib.rs`'s `a_spill_past_the_cap_fails_as_too_large`).
+- **Memory (`model_tests/resources/memory.rs`):** a child process under `systemd-run --user --scope -p MemoryMax=…`, at the defaults and at a small-machine profile, and the minimum each survives.
+- **File descriptors (`model_tests/resources/descriptors.rs`):** a load under a lowered `RLIMIT_NOFILE`, the peak of open descriptors, and opening under a low limit.
+
+Environment:
+- **Small filesystem:** an unprivileged `unshare -rm` 64 MiB tmpfs. Tmpfs misses what a disk does: `fdatasync` is a no-op, so a sync never reports `ENOSPC`, and `remount,size=` fails in the namespace, so the tests free space by removing a ballast file. The ext4 loop device (`LLMOBS_TEST_SMALL_FS`) is not run yet.
+- **Memory:** a systemd user scope (`systemd-run --user`). Its limit is honoured by the query pool from R5.6, not before.
+- **Cgroup namespace:** the sandbox this plan was written in has a `/proc/self/cgroup` path that starts with `/../..`, which the sysinfo reader cannot resolve. The memory probe (`child_sees_the_scope_limit`) reports whether it applies.
+
+### Runs
+
+| Date | Commit | Command | Mode | Duration | Result |
+|---|---|---|---|---|---|
+| 2026-11-15 | 4c8fe6a | `cargo test -p llmobs-storage --all-features --lib writes_check_free_disk_now`, before the fix | debug | 0.02 s | fail: a block was written on a stale measurement |
+| 2026-11-15 | 4c8fe6a | same, after the fix | debug | 0.02 s | pass |
+| 2026-11-15 | 4c8fe6a | `read_cache` unit tests | debug | 1.5 s | pass: 19 tests, 1 ignored |
+| 2026-11-15 | uncommitted: check per call | D7 under `unshare -rm`, `--ignored --exact` | debug, 64 MiB tmpfs | 5.4 s | fail: sampler minimum 2.7 MiB, below `min_free - 1 MiB` |
+| 2026-11-15 | uncommitted: check per block, no lock | D7, same | debug, 64 MiB tmpfs | 6.7 s | fail: sampler minimum 3.7 MiB |
+| 2026-11-15 | 4c8fe6a | D7, same | debug, 64 MiB tmpfs | 9.9 s | sampler passes (minimum 15.8 MiB); fails in settle, see M5-6 |
+| 2026-11-15 | 4c8fe6a | D1 `appends_stop_at_min_free_before_the_disk_fills`, same | debug, 64 MiB tmpfs | 10.4 s | pass |
+| | | `just resources` (three runs), `LLMOBS_TEST_SMALL_FS` on an ext4 loop device | | | pending (long run, not run in this pass) |
+| | | `just resources-memory`, `just resources-memory-min defaults` and `small` | release | | pending (long run, needs free RAM and about 10 GiB of disk) |
+| | | `peak_at_the_default_limit` and the low-limit descriptor runs | debug | | pending: the run was refused by the sandbox's permission check, so it is not recorded here |
+
+### Measured limits
+
+- **Memory:** pending. The smallest passing limit and the documented minimum for the defaults and the small profile are not measured yet, so spec 03 § 10 gives them as provisional.
+- **Descriptors:** pending. The baseline and peak at the default limit, and the lowest limit that runs without errors, are not measured yet.
+
+### Findings
+
+**M5-1, a failed local write left its temp file.** `objects.rs::put_local` returned on a `write_all` error and `publish_local` on a `sync_all` or rename error, without removing `.<name>.tmp-<uuid>`. On a full disk each flush retry left another partial file under a new name, so the freed space was eaten again until a restart. The earlier `SQLITE_FULL` in `collect_staged` on a full disk has the same cause. Confirmed by D8, D3 and D5. Fixed in 1f5e989 (R5.5).
+
+**M5-2, a spill-cap failure mid-merge stops later spills until restart (D6).** When the spill cap is hit during a merge, later queries stop spilling until the process restarts, under the D6 case. Cause under investigation. Not fixed in M5.
+
+**M5-3, D5 stops at its free-space assertion.** D5 (compaction that meets `ENOSPC`) fails at its free-space assertion, after catalog writes that follow the ballast. Cause unconfirmed. Not fixed in M5.
+
+**M5-4, a 16 MiB per-query cap refuses a trace list over a tiny project.** Found by R5.7's smoke run: with `query.max_memory` at 16 MiB, a trace list over a tiny project is refused, because spill shares can drop to about 98 KiB. Not fixed in M5; spec 03 § 10 notes it under Memory.
+
+**M5-5, the read cache outran the monitor (D7).** `ReadCache::write_blocks` trusted the monitor's measurement, up to a second old, and several concurrent calls could each pass the check and then write, so the cache took the disk below `min_free_bytes`. The fix measures before each block and serializes the check with the writes (`read_cache.rs`, `write_lock`). The regression test is `read_cache::tests::writes_check_free_disk_now_not_the_last_measurement`, which fails before the change. Fixed in 4c8fe6a (R5.8). The lock was needed: a measurement per call alone still let concurrent calls overshoot.
+
+**M5-6, cache writes ignore compaction reservations (found by D7, open).** After M5-5, D7's sampler passes, and the case then fails in its settle step: a compaction job's Parquet write returns `ENOSPC` after the ballast is removed (the job's input reservation had passed). The read cache checks `free()`, not `free()` minus the outstanding reservations, so cache blocks can take space a compaction has reserved. The cause is suspected, not confirmed. Not fixed in M5: it is a rule question (whether the cache respects reservations) and the case's 64 MiB filesystem may be too small for its settle.
+
+### Requests
+
+- **Track N, `docs/self-hosting/`** (not edited in M5): a sizing section with the memory minimum and small profile, `min_free_bytes` and the descriptor limit; `LimitNOFILE=` in the systemd unit at the recommended value, and an optional `MemoryMax=` (honoured by the query pool since R5.6); Helm `values.yaml` resource requests and limits at the documented minimum.
+- **Server and CLI:** `llmobs serve` raises its soft `RLIMIT_NOFILE` to the hard limit at start, as Go programs do, and logs both values (decided, Q2). This is the coordinator's to assign.
+- **`/readyz`:** no change requested. It already returns 503 when the WAL has failed (`crates/server/src/http/health.rs`, from `spans_wal_failed`), and spec 12 lists the free-disk check. Revisit it only if the WAL rotation decision changes what counts as a WAL failure.
+- **The 422 text:** R5.2 changed `RunError::TooLarge` to "the query needed more memory or temporary disk space than allowed". The server still says "needed more memory than allowed" in `crates/server/src/http/error.rs`, `crates/server/src/alerts/evaluate.rs`, `crates/server/src/api/openapi.rs` and `crates/server/openapi.json`, and `docs/spec/05-query.md` says "needed more memory than the cap". Add "or temporary disk space" to each.
+- **WAL rotation (coordinator, Q3):** a proposed decision is written out in `docs/plans/r-hardening/05-m5-resources.md` § R5.8, with the provisional sentence now in spec 03 § 1. The coordinator numbers and records it. Until then `wal/writer.rs` is unchanged.
+
+---
+
 ## Gaps toward deterministic simulation
 
 Counts from the plan's commands (D-R-13), run from the repository root. Each filter drops only lines that contain `test`, so some test code in production files is still counted; the counts are an upper bound for production code.

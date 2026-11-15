@@ -360,11 +360,11 @@ fn put_media_on_a_full_disk_fails_and_leaves_nothing() {
         model_steps(&mut h, &mut model, &mut clock, &after_ops(), 100);
         settle_and_check(&mut h, &mut model, &mut clock);
 
-        // Expected to fail until R5.5: the failed object write leaves its temp file behind.
+        // A failed object write leaves no temp file (R5.5).
         let leftovers = temp_files(&h.dir().join("objects"));
         assert!(
             leftovers.is_empty(),
-            "a failed put left {} temp file(s) under objects/ (expected until R5.5): {leftovers:?}",
+            "a failed put left {} temp file(s) under objects/: {leftovers:?}",
             leftovers.len()
         );
     });
@@ -587,18 +587,18 @@ fn a_flush_on_a_full_disk_retries_and_leaves_no_temp_files() {
             filler_spans_paths(&h).is_empty(),
             "no spans file of the filler is catalogued while its flush fails"
         );
-        // Expected to fail until R5.5: the failed attempts leave their partial files.
+        // Failed flush attempts leave no partial files (R5.5).
         let leftovers = temp_files(&h.dir().join("objects"));
         assert!(
             leftovers.is_empty(),
-            "failed flush attempts left {} temp file(s) under objects/ (expected until R5.5): {leftovers:?}",
+            "failed flush attempts left {} temp file(s) under objects/: {leftovers:?}",
             leftovers.len()
         );
-        // Expected to fail until R5.5: failed attempts give their space back.
+        // Failed flush attempts give their space back (R5.5).
         let free = free_bytes(root);
         assert!(
             free >= 192 * 1024,
-            "failed flush attempts gave their space back: {free} bytes free (expected until R5.5)"
+            "failed flush attempts gave their space back: {free} bytes free"
         );
         assert!(
             !h.storage().health().spans_wal_failed,
@@ -767,18 +767,18 @@ fn a_compaction_that_meets_enospc_fails_cleanly_and_runs_later() {
         );
         check_full(&h, &mut model, 500);
 
-        // Expected to fail until R5.5: the merge that failed in writer.finish leaves its temp file.
+        // A merge that fails in writer.finish leaves no temp file (R5.5).
         let leftovers = temp_files(h.dir());
         assert!(
             leftovers.is_empty(),
-            "the failed job left {} temp file(s) (expected until R5.5): {leftovers:?}",
+            "the failed job left {} temp file(s): {leftovers:?}",
             leftovers.len()
         );
-        // Expected to fail until R5.5: the failed job's output is removed at once.
+        // The failed job's output is removed at once (R5.5).
         let free = free_bytes(root);
         assert!(
             free >= 64 * 1024,
-            "the failed job gave its output back: {free} bytes free (expected until R5.5)"
+            "the failed job gave its output back: {free} bytes free"
         );
 
         // The failed job's outputs are staged, and GC removes them.
@@ -1078,7 +1078,7 @@ fn the_read_cache_never_fills_the_disk() {
         assert!(
             least + MIB >= 8 * MIB,
             "the cache stopped at 2 x min_free, and never took the disk below min_free - 1 MiB: \
-             least free {least} bytes (a stale measurement, expected until R5.8)"
+             least free {least} bytes"
         );
         // The monitor sheds blocks within a few seconds, so free disk recovers.
         assert!(

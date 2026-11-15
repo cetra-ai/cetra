@@ -22,6 +22,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.
+- The S3 read cache no longer writes blocks on a stale free-disk measurement, so it cannot take the disk below `storage.min_free_bytes`.
 - With S3, a multipart upload that fails is now aborted, so its parts no longer stay on the bucket (track R).
 - With S3, a file that passes verification has its read-cache blocks dropped, so a bad cached block no longer keeps failing queries (track R).
 - Storage: a local object deleted by garbage collection, or a directory created just before a crash, could reappear or disappear after a power loss.

@@ -77,6 +77,8 @@ This gives one fsync per group, so throughput is bounded by disk bandwidth, not 
 
 The `wal/<table>/` directory is fsynced when a segment is created or deleted.
 
+*Provisional, pending the coordinator's decision on the WAL rotation rule (R5.8; not yet in force):* A segment that cannot be created is not a write error: the writer keeps the current segment and retries the rotation after the next group. Until that is recorded, a failed rotation is final, as below.
+
 A segment is fsynced before a newer one is created, at rotation and at open, so only the last segment can have a torn tail. In interval mode, a power loss therefore loses a suffix of each WAL: the records acknowledged since that WAL's last fsync.
 
 **Write errors are final.** If a write or `fdatasync` fails, the writer fails every pending ack (`WalFailed`), refuses further writes and reports the storage unhealthy; the operator restarts the process. The failed fsync is never retried, because the kernel may already have dropped the dirty pages. The write-and-sync step runs on a blocking thread and cannot be cancelled halfway. A group whose `fdatasync` failed is left as written: a restart may replay it, although its appends answered `WalFailed`. Clients retry on 503, and replayed duplicates merge like any re-send (§2, §5).
@@ -98,7 +100,7 @@ Per table: `active` (accepting inserts) and at most one `frozen` (being flushed)
 
 **Flush triggers:** active size ≥ `flush.max_bytes` (default 256 MiB), oldest row age ≥ `flush.max_age` (default 120 s), or shutdown.
 
-**Backpressure:** if `active + frozen` exceeds `memtable.hard_limit` (default 1 GiB) ingestion answers `503 Retry-After: 1` / `UNAVAILABLE` (D-G-3; `429` is kept for per-org limits).
+**Backpressure:** if a table's `active + frozen` exceeds `memtable.hard_limit` (default 1 GiB; each table on its own, so both together can hold twice that) ingestion answers `503 Retry-After: 1` / `UNAVAILABLE` (D-G-3; `429` is kept for per-org limits).
 
 ### Flush
 
@@ -463,8 +465,26 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Ambiguous upload (error reported, object may exist) | retried under a new name; the old one is collected from `staged_objects` (§2); a failed multipart upload is aborted (§2). Uploads no abort reached are left to the bucket's lifecycle rule (`docs/self-hosting/s3.md`) |
 | Crash | WAL replay before ingestion opens; staged objects are GC'd |
 | Corrupted Parquet file | A read that fails with a decode error makes the files it read **suspects**: compaction and rewrite jobs (their inputs), the deletion pass's check scan, the anchor rebuild at open (which skips the file instead of failing), the media GC and queries (every file the query scanned). After each deletion pass, a verify pass reads each suspect again, whole, from the object store (never the read cache). A store error puts it back in the queue; a file read whole with the catalog's row count is healthy and isn't re-verified for an hour; a decode error, a wrong size or row count, or a missing object makes it **corrupt**, logged as an error. A corrupt `spans` file is quarantined with its `traces` file, a corrupt `scores` file alone: state `quarantined`, out of every snapshot, object kept for inspection, its rows lost. A corrupt `traces` file is rebuilt from its `spans` file by a rewrite job instead; nothing is lost. Quarantined files become `obsolete` (and GC deletes them) when retention drops their day, when their project is dropped, or when a pending deletion may cover them (§7). There is no periodic scrub (D-A1-10) |
+| The disk fills before the monitor sees it (`ENOSPC`) | WAL: `WalFailed`, final (§1). Flush: retried with backoff (§2). Compaction: the job fails, and a later pass redoes it. `put_media`: the call fails, and GC collects the staged row (§9). Read cache: the block is not cached. Query spill: too large (422). A failed write removes its temp file. Once space is free, the next attempt succeeds. Inodes are not monitored: running out of them behaves the same way |
+| Out of file descriptors (`EMFILE`) | The step that opened the file fails as for an I/O error: a query fails, and a flush or compaction is retried. *(Provisional, pending the coordinator's decision on WAL rotation: until it is recorded, an append is refused when a WAL segment cannot be created, then `WalFailed`, §1. Once it is recorded, the writer keeps the current segment instead.)* Nothing is quarantined |
+| Memory limit | Below the documented minimum (§ Resource needs) the kernel can kill the process. At or above it, the budgets refuse work instead: `Backpressure` (503), `Busy` (503), too large (422) |
 
 The model test (`crates/storage/src/model_tests/`, track R M1) checks every read against an in-memory model through restarts and crashes.
+
+### Resource needs
+
+- **Disk:** `storage.min_free_bytes` must cover at least one second of the peak write rate (WAL plus flush and compaction outputs), because free disk is measured once a second. The default 2 GiB covers about 2 GB/s. *Measured:* with `min_free_bytes` at 16 MiB, appends were refused with `DiskFull` before the disk filled, and no WAL failure followed (`disk_full::appends_stop_at_min_free_before_the_disk_fills`). With `min_free_bytes` at 8 MiB, a read-cache run kept the lowest free disk at 15.8 MiB, just under `2 × min_free_bytes` (R5.8).
+- **Memory:** the budgets add up as:
+  - `2 × memtable.hard_limit` (spans and scores, each table on its own);
+  - plus the copy a flush makes while sorting (up to `flush.max_bytes` per table, so `2 × flush.max_bytes`);
+  - plus `compaction.max_memory`;
+  - plus `query.metadata_cache_bytes`;
+  - plus the query pool (`query.max_memory_total`, by default half the limit);
+  - plus about 200 MiB of base.
+
+  *Provisional, not measured:* the measured minimum with every default is not yet known, because the memory runs (R5.6) are deferred. The small-machine profile is `memtable.hard_limit` 128 MiB; `flush.max_bytes` 32 MiB with `upload_concurrency` 2; `compaction.max_memory` 128 MiB with `compaction.threads` 1; `query.max_memory_total` 256 MiB, `query.max_memory` 128 MiB, `query.initial_memory` 16 MiB; `query.metadata_cache_bytes` 64 MiB; `query.target_partitions` 2. Its minimum is not yet measured either. A query whose pool is 16 MiB can refuse a trace list over a tiny project, because spill files then share very little of the pool (M5-4, `docs/research/storage/hardening.md`). The budgets are not sized from the machine: `Storage::open` logs a warning when they add up to more than the memory limit it detects. The server adds `ingest.max_inflight_bytes` and its own needs (spec 12).
+- **File descriptors:** the engine holds one descriptor for `LOCK`, three for `catalog.db` (the database, `-wal`, `-shm`), one open segment per WAL table (plus one for a moment when a segment is created), and, while they run, up to `flush.upload_concurrency` temp files per table and one per compaction job. A query holds a descriptor per spill file while it is written, and a spill merge opens all of a sort's spill files at once. *Provisional:* the measured baseline and peak are pending (the descriptor sweep is deferred). Until they are recorded, the recommended soft limit for the storage is at least 4,096. The server's sockets come on top.
+- **Tested by** `just resources` and `just resources-memory` (track R M5).
 
 ## Durability
 
