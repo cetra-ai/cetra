@@ -83,7 +83,7 @@ A segment is fsynced before a newer one is created, at rotation and at open, so 
 
 **Write errors are final.** If a write or `fdatasync` fails, the writer fails every pending ack (`WalFailed`), refuses further writes and reports the storage unhealthy; the operator restarts the process. The failed fsync is never retried, because the kernel may already have dropped the dirty pages. The write-and-sync step runs on a blocking thread and cannot be cancelled halfway. A group whose `fdatasync` failed is left as written: a restart may replay it, although its appends answered `WalFailed`. Clients retry on 503, and replayed duplicates merge like any re-send (§2, §5).
 
-**Checkpoint.** The catalog stores `flushed_seq` per table (highest WAL seq whose rows are in Parquet files). WAL segments are deleted only after the catalog transaction that advanced `flushed_seq` has returned (§2). Segment `k` is deleted when a later segment exists and `first_seq(k + 1) - 1 <= flushed_seq`. The newest segment stays, because the writer may still be appending to it (D120). At low traffic that segment can hold flushed and unflushed records; replay skips the flushed ones. The extra bytes are at most one segment (`wal.segment_bytes`).
+**Checkpoint.** The catalog stores `flushed_seq` per table (highest WAL seq whose rows are in Parquet files). WAL segments are deleted only after the catalog transaction that advanced `flushed_seq` has returned (§2). Segment `k` is deleted when a later segment exists and `first_seq(k + 1) - 1 <= flushed_seq`. The newest segment stays, because the writer may still be appending to it (D120). After every flush that commits, the flush first asks the writer to start a new segment when the open one holds records (D-A1-14): the writer syncs the open segment when it holds unsynced bytes, creates the next one at `next_seq` (which fsyncs `wal/<table>/`), and acknowledges. The same flush then deletes every segment whose records are all flushed. A segment that also holds records newer than the flush stays until the next flush deletes it, so flushed rows leave the WAL by the end of the next flush cycle. Replay skips the flushed records in such a segment. The extra bytes are at most one segment (`wal.segment_bytes`).
 
 **Recovery.** At startup, before ingestion opens, for each table:
 - read segments in order, skip records with seq ≤ `flushed_seq`, and insert the rest into the memtable;
@@ -203,6 +203,7 @@ CREATE TABLE media (                   -- §9
   project_id TEXT NOT NULL, sha256 TEXT NOT NULL,   -- 64 lowercase hex
   mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL,
   first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL,
+  newest_span_start INTEGER NOT NULL DEFAULT 0,   -- ns, newest span that referenced it (D-P-21)
   PRIMARY KEY (project_id, sha256)
 );
 
@@ -279,13 +280,13 @@ Times below are wall-clock nanoseconds (`now`). A file's age is `now` minus its 
 
 **Commit:** one catalog edit (§4) adds the outputs (`spans` with their `traces`, or `scores`) and the `file_sources` rows of the new pairs, and marks the inputs and the `traces` files derived from them `obsolete` with `obsoleted_at` = the committer's wall clock at commit. Shutdown stops compaction between slices or before a commit, never inside one. The committer refuses an edit that removes a `spans` file without its active `traces` file, or a `traces` file without every one of its sources.
 
-**GC of obsolete files.** Every 10 min, GC deletes an obsolete object and then its `data_files` row (its `file_sources` rows go with it), once `obsoleted_at + gc.grace ≤ now` (`gc.grace`, default 5 min, at least the longest query timeout) **and** no `ReadState` of this process still references the file (reference counts on `FileMeta`). A raise replaces a file's `FileMeta`; the count covers the versions it replaced too. After a restart the counts are gone and the grace alone decides.
+**GC of obsolete files.** Every 10 min, GC deletes an obsolete object and then its `data_files` row (its `file_sources` rows go with it), once `obsoleted_at + gc.grace ≤ now` (`gc.grace`, default 5 min, at least the longest query timeout; at most 30 days. In S3 mode it is also how long a metadata-only backup stays restorable against the live bucket (D-N-20)) **and** no `ReadState` of this process still references the file (reference counts on `FileMeta`). A raise replaces a file's `FileMeta`; the count covers the versions it replaced too. After a restart the counts are gone and the grace alone decides.
 
 **Crash safety:** an output written but never committed is still in `staged_objects`. GC deletes staged objects older than 1 h and their rows, so the bucket is never listed. Startup removes leftover temp files: in the object directories in local mode, and in `<data_dir>/tmp/compaction/` in S3 mode. A job interrupted by a crash or a conflict is redone by a later pass.
 
 ## 6. Query path
 
-For each request, `Storage::query` returns a `ProjectQuery`: the project's `TableProvider`s, all bound to one `ReadState` (catalog, memtable and tombstones, §4), plus a `RuntimeEnv` of the query's own, built from the process one at open (object store, metadata cache and spill directory) with a memory pool of its own (§ Resource limits, D-A1-8), `target_partitions`, and the physical optimizer rules the session appends (the trace list fast path, D153). `Storage::query` takes `QueryOptions` (`around`, D154). The query layer (05, D91) builds the DataFusion session from it. The providers expose the stored Arrow schemas of 01 (binary IDs, `project_id`). They don't register themselves: the query layer (05) registers the user-facing views over them (hex IDs, hidden `project_id`, `sessions`, default exclusions, D89). Because each provider is constructed for a single project, the user cannot name another project's data. A dropped project (§7) gets empty tables.
+For each request, `Storage::query` returns a `ProjectQuery`: the project's `TableProvider`s, all bound to one `ReadState` (catalog, memtable and tombstones, §4), plus a `RuntimeEnv` of the query's own, built from the process one at open (object store, metadata cache and spill directory) with a memory pool of its own (§ Resource limits, D-A1-8), `target_partitions`, and the physical optimizer rules the session appends (the trace list fast path, D153). `Storage::query` takes `QueryOptions::new(around, visible_from)`: `around` (D154), and `visible_from`, the org's data-window bound, which the base views of 05 apply to `start_time` (`spans`, `traces`) and `created_at` (`scores`) (D-P-21, D-P-47); the providers themselves are unfiltered, for storage's own reads. The query layer (05, D91) builds the DataFusion session from it. The providers expose the stored Arrow schemas of 01 (binary IDs, `project_id`). They don't register themselves: the query layer (05) registers the user-facing views over them (hex IDs, hidden `project_id`, `sessions`, default exclusions, D89). Because each provider is constructed for a single project, the user cannot name another project's data. A dropped project (§7) gets empty tables.
 
 ### `SpansProvider::scan(projection, filters, limit)`
 
@@ -383,7 +384,7 @@ Pending `traces` and `user` deletions are kept in memory per project as the **to
 Every `IN` term is guarded by `IS NOT NULL` (`scores.trace_id`, `user_id` and `session_id` are nullable), so the predicate is never null: a row with no `user_id`, or a session score with no `trace_id`, is never covered by a term on that column.
 
 Known limits:
-- `EXPLAIN` in the SQL console prints the predicate, so project members can see the IDs of a pending deletion until it is applied (accepted, D-A1-3).
+- `EXPLAIN` in the SQL console prints the predicate. The trace ids of a pending deletion show until it is applied (accepted); user and session ids print only as a count, `user_id IN (<n redacted>)`, so the plan never names an erased person (D-A1-3).
 - For a `user` deletion, the `traces` view hides partials by the resolved trace IDs only; the server resolves every trace with a span of the user ingested up to the cut-off.
 - A row stamped with `ingest_time ≤ cut-off` but appended after its deletion is applied is neither dropped nor hidden. The server stamps `ingest_time` at receipt, so this needs a request in flight for longer than the deletion takes to apply.
 
@@ -393,12 +394,12 @@ A deletion may cover rows of a `spans` or `scores` file only when its `deletion_
 
 `project` and `org` deletions are immediate: `drop_project` marks the project dropped in `catalog.db` and removes it from every new read state in the same commit; the server returns 404 for it.
 
-### Cascades, inside the server's request transaction (`meta.db`)
+### Cascades, in the worker's scope transaction (`meta.db`)
 
 The server stores a resolved scope and its cascades in one transaction, before it registers the deletion (D-M-3):
 - Dataset items whose `source_trace_id` is in scope are hard-deleted, all versions (track J).
-- `experiment_items` referencing those traces are deleted (track J); `eval_jobs` referencing them are deleted unless `running` (D-M-6). Not built yet: this waits for track M's M8, which waits for I's M3.
-- A running judge job, and any judge run that loaded its target before the deletion, is stopped by the server's 24-hour deletion guard before it commits a judge trace or a score (D-M-6). The guard exists; the judge executor does not call it yet (M8).
+- `experiment_items` referencing those traces are deleted (track J); `eval_jobs` referencing them are deleted unless `running` (D-M-6).
+- A running judge job, and any judge run that loaded its target before the deletion, is stopped by the server's 24-hour deletion guard before it commits a judge trace or a score; a copy it committed just before the guard saw the deletion has an `ingest_time` after the cut-off, so the executor stores a follow-up `trace_ids` deletion of the judge trace and the target (D-M-6).
 - `alert_events` hold only aggregates; they are pruned after 90 days with their deliveries (D-K-10).
 
 ### Physical erasure: the deletion rewriter
@@ -422,7 +423,7 @@ After each compaction pass, the compaction task runs a **deletion pass** (D-A1-5
 
 Compaction and the rewriter never run on the same file (claims, §4), and a compaction that started before a deletion records an older `deletions_applied_seq`, so its outputs remain candidates. Deleted rows cannot come back through a merge.
 
-**Guarantee:** the bytes are gone from Parquet files within `deletion.max_delay` (default 24 h). A pending deletion older than that is logged once as a warning. The WAL holds data only until the next flush checkpoint (minutes), so it ages out by itself. The meaning of GDPR deletion for backups is covered in 12 §Backups.
+**Guarantee:** the bytes are gone from Parquet files within `deletion.max_delay` (default 24 h). A pending deletion older than that is logged once as a warning. The WAL holds a deleted row only until the end of the flush cycle after it was written (§1, D-A1-14), so the row ages out with the flush checkpoints (minutes at low traffic), not at the segment size. A clean shutdown does not rotate, because the writers stop before the final flush: the drained segment then waits for the first flush after the next start. The meaning of GDPR deletion for backups is covered in 12 §Backups.
 
 ### Project drop
 
@@ -440,13 +441,13 @@ Each project has `retention_days` in `meta.db` (null means keep forever). The se
 - commits one catalog edit that obsoletes every file of the project in days before the watermark, across `spans`, `traces` and `scores`, quarantined files included (no file is rewritten, because partitions are per day);
 - records the watermark in `retention_watermarks`, in the same transaction. The watermark is the later of the stored one and `keep_from`: it never moves back.
 
-From then on, a flush drops rows of that project older than the watermark, queries don't show memtable rows older than it, and the committer refuses a file older than it (§4), so late rows cannot recreate a dropped day. Memtable `spans` are keyed by each row's own day and files by the anchor day, so a span next to midnight at the watermark can be hidden in the memtable and kept by the flush, or the reverse; the file is what counts. Retention is day-granular. Since a trace lives in one anchor day (§ Trace anchor), it is dropped as a whole.
+From then on, a flush drops rows of that project older than the watermark, queries don't show memtable rows older than it, and the committer refuses a file older than it (§4), so late rows cannot recreate a dropped day. Memtable `spans` are keyed by each row's own day and files by the anchor day, so a span next to midnight at the watermark can be hidden in the memtable and kept by the flush, or the reverse; the file is what counts. Retention is day-granular. Since a trace lives in one anchor day (§ Trace anchor), it is dropped as a whole. Judge traces and scores are dropped by their own day, not their target's: an evaluation or a score written later about an old trace lives at most the retention plus the target's age when it was written, and can outlive its target (its trace link then leads nowhere). A deletion, unlike retention, follows the target to its judge traces and scores (§7, D-M-6, D-M-10).
 
 ## 9. Media
 
 Media blobs live under `media/<project_id>/<sha256>` (64 lowercase hex) in the object store; their index is the `media` table of `catalog.db`.
 
-`put_media` checks that the SHA-256 of the bytes matches the given hash, and fails otherwise (D-A1-6). For a hash already stored it only refreshes `last_seen_at`. Otherwise it records the path in `staged_objects`, writes the blob durably (local: temp file, `sync_all`, rename, directory fsync; S3: a plain `PutObject`, since the name is the content's hash and an overwrite writes the same bytes), then inserts the `media` row and removes the staged row in one transaction. Staged-object GC deletes an object left without a row, and leaves alone a staged path whose `media` row exists. `get_media` reads a blob, whole or a byte range.
+`put_media` checks that the SHA-256 of the bytes matches the given hash, and fails otherwise (D-A1-6). For a hash already stored it only refreshes `last_seen_at`. Otherwise it records the path in `staged_objects`, writes the blob durably (local: temp file, `sync_all`, rename, directory fsync; S3: a plain `PutObject`, since the name is the content's hash and an overwrite writes the same bytes), then inserts the `media` row and removes the staged row in one transaction. Staged-object GC deletes an object left without a row, and leaves alone a staged path whose `media` row exists. `get_media` reads a blob, whole or a byte range. Each row keeps `newest_span_start`, the newest `start_time` of the spans that referenced the blob (raised by every `put_media`); `get_media` with an org's `visible_from` answers not found when it is older (D-P-21).
 
 **GC** runs daily, and for one project right after one of its deletions is applied (§7). For each project, it reads only the `media_refs` column of `spans` (a cheap projection, through the same read path as queries, so rows hidden by tombstones don't count) to build the set of live hashes. It then deletes the objects and `media` rows that are absent from the set and whose `last_seen_at` is more than 1 h old. The age guard covers a span appended just after its blob; since every `put_media` refreshes `last_seen_at`, a blob reused by new spans is never collected under them (D-A1-6).
 
@@ -508,11 +509,11 @@ Every write path, what it syncs and in what order. "fsync dir" is an fsync of th
 | S3 objects | `objects.rs` remote writes | the PUT or `complete` returned → catalog commit | n/a: no local fsync | `tests/s3.rs` (a real S3-compatible server, `LLMOBS_TEST_S3_ENDPOINT`) |
 | Read cache | `read_cache.rs` | no fsync. Blocks and `size` carry a CRC-32C; a bad one is dropped and fetched again | n/a | `a_torn_size_file_never_serves_short_ranges`, `a_corrupt_block_is_fetched_again` |
 | Scratch: query spill, compaction temp | DataFusion spill; `create_output` | no fsync; spill directories are removed at open | n/a | `open_removes_leftover_spill_directories` |
-| Catalog snapshot (N B3, not merged yet) | `snapshot_catalog` (N M2) | `VACUUM INTO` (SQLite) | the backup fails | N's tests |
-| Backup object copies (N B4, not merged yet) | `copy_objects` (N M2) | hard link, or copy → fsync file; at the end, fsync every directory of `dest` | the backup fails | N's tests |
-| Pre-migration copy (N B9, not merged yet) | `catalog/db.rs` (N M2) | `VACUUM INTO <tmp>` → rename → fsync dir (added by R2.3 when B9 merges) → migrations | open fails | none yet: `a_pre_migration_copy_survives_a_lossy_crash` is written with B9 |
+| Catalog snapshot (N B3) | `snapshot_catalog` (`snapshot.rs`) | `VACUUM INTO` (SQLite) | the backup fails | N's tests |
+| Backup object copies (N B4) | `copy_objects` (`snapshot.rs`; calls `crate::fs`, unrecorded in lossy mode because `dest` is outside the data directory) | hard link, or copy → fsync file; at the end, fsync every directory of `dest` | the backup fails | N's tests |
+| Pre-migration copy (N B9) | `catalog/db.rs` | `VACUUM INTO <tmp>` → fsync the copy → rename → fsync dir (all through `crate::fs`) → migrations | open fails | none yet: `a_pre_migration_copy_survives_a_lossy_crash` is not written |
 
-The N rows are marked "not merged yet": the track N code that writes them is not on this branch. When it merges, its file calls go through `crate::fs` (as R2.1 requires), and its row gets the test.
+The N rows (backups, pre-migration copy) merged with their file calls routed through `crate::fs`, as R2.1 requires. Their lossy-crash tests are not written yet.
 
 **Why a failed WAL truncation is retried, not fatal.** Truncation deletes only segments whose every record is at or below `flushed_seq`, and the catalog has already advanced `flushed_seq` when it runs (§1). If the directory fsync fails, the segments may come back after a power loss. They then hold only records that replay skips, and every non-last segment was fsynced before its successor was created (§1), so it is intact. The next flush retries the truncation, and nothing is lost. The retry is not covered by a test.
 

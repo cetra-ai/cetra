@@ -120,6 +120,10 @@ CREATE TABLE deletions (
     error TEXT
 )
 
+index deletions_applied_drops
+CREATE INDEX deletions_applied_drops ON deletions(applied_at, id)
+  WHERE kind IN ('project', 'org') AND status = 'applied'
+
 index deletions_open
 CREATE INDEX deletions_open ON deletions(created_at, id) WHERE status IN ('resolving', 'pending')
 
@@ -140,6 +144,51 @@ CREATE TABLE email_verifications (
 
 index email_verifications_user
 CREATE INDEX email_verifications_user ON email_verifications(user_id)
+
+table eval_jobs
+CREATE TABLE eval_jobs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  rule_id TEXT REFERENCES online_rules(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  variable_mapping TEXT,
+  trace_id BLOB NOT NULL,
+  span_id BLOB,
+  trace_start_ns INTEGER NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claims INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,
+  error_class TEXT,
+  error TEXT,
+  judge_trace_id BLOB,
+  score_id TEXT,
+  evaluator_version INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cost_usd REAL,
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
+)
+
+index eval_jobs_finished
+CREATE INDEX eval_jobs_finished ON eval_jobs(finished_at) WHERE finished_at IS NOT NULL
+
+index eval_jobs_project
+CREATE INDEX eval_jobs_project ON eval_jobs(project_id, created_at)
+
+index eval_jobs_ready
+CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before)
+
+index eval_jobs_rule
+CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at)
 
 table evaluators
 CREATE TABLE evaluators (
@@ -255,6 +304,31 @@ CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next
 index notification_deliveries_event
 CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)
 
+table online_rules
+CREATE TABLE online_rules (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
+  name TEXT NOT NULL,
+  target TEXT NOT NULL,
+  filter TEXT,
+  variable_mapping TEXT NOT NULL,
+  sample_rate REAL NOT NULL DEFAULT 1.0,
+  budget_usd REAL,
+  budget_period TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  paused_reason TEXT,
+  paused_at INTEGER,
+  paused_detail TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+index online_rules_evaluator
+CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id)
+
 table org_entitlements
 CREATE TABLE org_entitlements (
     org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
@@ -275,6 +349,37 @@ CREATE TABLE org_members (
 
 index org_members_user
 CREATE INDEX org_members_user ON org_members(user_id)
+
+table org_sso_domains
+CREATE TABLE org_sso_domains (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,               -- lowercase, no trailing dot
+    token TEXT NOT NULL,                -- 32 lowercase hex; the TXT value's random part (public)
+    verified_at INTEGER,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (org_id, domain)
+)
+
+index org_sso_domains_verified
+CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL
+
+table org_sso_providers
+CREATE TABLE org_sso_providers (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
+    org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    enabled INTEGER NOT NULL DEFAULT 0,
+    enforced INTEGER NOT NULL DEFAULT 0,
+    jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
+    last_login_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
 
 table org_window_ends
 CREATE TABLE org_window_ends (
@@ -305,6 +410,17 @@ CREATE TABLE password_resets (
 
 index password_resets_user
 CREATE INDEX password_resets_user ON password_resets(user_id)
+
+table pending_traces
+CREATE TABLE pending_traces (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id BLOB NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  min_start INTEGER NOT NULL,
+  root_ended INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, trace_id)
+)
 
 table personal_tokens
 CREATE TABLE personal_tokens (
@@ -350,6 +466,14 @@ CREATE TABLE projects (
 
 index projects_org
 CREATE INDEX projects_org ON projects(org_id)
+
+table rule_spend
+CREATE TABLE rule_spend (
+  rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
+  day INTEGER NOT NULL,
+  spent_usd REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (rule_id, day)
+)
 
 table saved_views
 CREATE TABLE saved_views (
@@ -411,6 +535,10 @@ index sqlite_autoindex_deletions_1
 
 index sqlite_autoindex_email_verifications_1
 
+index sqlite_autoindex_eval_jobs_1
+
+index sqlite_autoindex_eval_jobs_2
+
 index sqlite_autoindex_evaluators_1
 
 index sqlite_autoindex_evaluators_2
@@ -433,9 +561,21 @@ index sqlite_autoindex_notification_channels_1
 
 index sqlite_autoindex_notification_deliveries_1
 
+index sqlite_autoindex_online_rules_1
+
+index sqlite_autoindex_online_rules_2
+
 index sqlite_autoindex_org_entitlements_1
 
 index sqlite_autoindex_org_members_1
+
+index sqlite_autoindex_org_sso_domains_1
+
+index sqlite_autoindex_org_sso_domains_2
+
+index sqlite_autoindex_org_sso_providers_1
+
+index sqlite_autoindex_org_sso_providers_2
 
 index sqlite_autoindex_org_window_ends_1
 
@@ -444,6 +584,8 @@ index sqlite_autoindex_orgs_1
 index sqlite_autoindex_orgs_2
 
 index sqlite_autoindex_password_resets_1
+
+index sqlite_autoindex_pending_traces_1
 
 index sqlite_autoindex_personal_tokens_1
 
@@ -455,11 +597,15 @@ index sqlite_autoindex_projects_1
 
 index sqlite_autoindex_projects_2
 
+index sqlite_autoindex_rule_spend_1
+
 index sqlite_autoindex_saved_views_1
 
 index sqlite_autoindex_score_definitions_1
 
 index sqlite_autoindex_usage_daily_1
+
+index sqlite_autoindex_usage_notices_1
 
 index sqlite_autoindex_users_1
 
@@ -475,6 +621,15 @@ CREATE TABLE usage_daily (
   judge_input_tokens INTEGER NOT NULL DEFAULT 0, judge_output_tokens INTEGER NOT NULL DEFAULT 0,
   judge_cost_usd REAL NOT NULL DEFAULT 0,
   PRIMARY KEY (org_id, project_id, day)
+)
+
+table usage_notices
+CREATE TABLE usage_notices (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    month TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    PRIMARY KEY (org_id, month, threshold)
 )
 
 table users
@@ -499,7 +654,7 @@ CREATE TABLE web_sessions (
     expires_at INTEGER NOT NULL,
     user_agent TEXT,
     ip TEXT
-)
+, sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL)
 
 index web_sessions_user
 CREATE INDEX web_sessions_user ON web_sessions(user_id)

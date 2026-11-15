@@ -22,6 +22,7 @@ import requests
 from llmobs._context import current_values
 from llmobs._log import logger
 from llmobs._mask import apply
+from llmobs._quota import QuotaState
 from llmobs._serialize import serialize
 
 DataType = Literal["numeric", "boolean", "categorical", "text"]
@@ -245,9 +246,10 @@ class ScoreQueue:
     ``_BATCH_LIMIT`` items, retrying 429/5xx/network failures.
     """
 
-    def __init__(self, *, base_url: str, api_key: str) -> None:
+    def __init__(self, *, base_url: str, api_key: str, quota: QuotaState | None = None) -> None:
         self._url = f"{base_url}/api/v1/scores"
         self._api_key = api_key
+        self._quota = quota if quota is not None else QuotaState()
         self._condition = threading.Condition()
         self._items: list[ScoreItem] = []
         self._stop = threading.Event()
@@ -347,11 +349,20 @@ class ScoreQueue:
                     self._condition.wait(_INTERVAL_S)
 
     def _send(self, batch: list[ScoreItem]) -> None:
-        """Post one batch with the § Score request retry policy."""
+        """Post one batch with the § Score request retry policy.
+
+        While the org is paused for its units cap the batch is dropped unsent;
+        a ``402`` starts that pause and drops the batch (D-P-34).
+        """
+        if self._quota.paused():
+            return
         attempt = 0
         while True:
             response = self._post(batch)
             if response is not None and 200 <= response.status_code < 300:
+                return
+            if response is not None and response.status_code == 402:
+                self._quota.on_402(response.headers.get("Retry-After"))
                 return
             if response is None or response.status_code == 429 or response.status_code >= 500:
                 if attempt >= _MAX_RETRIES:
@@ -368,12 +379,16 @@ class ScoreQueue:
         if response is not None:
             header = response.headers.get("Retry-After")
             if header is not None:
-                try:
-                    seconds = int(header)
-                except ValueError:
-                    seconds = None  # an HTTP-date or any other value uses the default
-                if seconds is not None and seconds >= 0:
-                    return min(float(seconds), _RETRY_AFTER_CAP_S)
+                # Spec 10 (Score delivery): ASCII digits, surrounding whitespace ignored. "+5",
+                # "1_0" and fullwidth digits are not integers here, so they use the default.
+                value = header.strip()
+                if value.isascii() and value.isdigit():
+                    try:
+                        seconds = int(value)
+                    except ValueError:  # more digits than int() converts: far above the cap
+                        return _RETRY_AFTER_CAP_S
+                    # Cap before float(): a very long digit string must not overflow the conversion.
+                    return float(min(seconds, _RETRY_AFTER_CAP_S))
         return _RETRY_BACKOFF_S[attempt]
 
     def _post(self, batch: list[ScoreItem]) -> requests.Response | None:

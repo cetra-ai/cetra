@@ -310,7 +310,7 @@ fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) ->
                 string_attr(attr::SPAN_KIND, SpanKind::Llm.as_str()),
                 string_attr(attr::ENVIRONMENT, environment::EVAL),
                 string_attr("gen_ai.operation.name", "chat"),
-                string_attr("gen_ai.provider.name", provider_name(*adapter)),
+                string_attr("gen_ai.provider.name", adapter.provider_name()),
                 string_attr("gen_ai.request.model", request_model),
                 string_attr(attr::INPUT, &user_message(prompt)),
                 string_attr(attr::INPUT_FORMAT, "messages"),
@@ -396,14 +396,6 @@ fn usage_attrs(usage: &JudgeUsage) -> Vec<KeyValue> {
             token_count(usage.reasoning),
         ),
     ]
-}
-
-fn provider_name(adapter: Adapter) -> &'static str {
-    match adapter {
-        Adapter::OpenAi => "openai",
-        Adapter::Anthropic => "anthropic",
-        Adapter::Gemini => "gcp.gemini",
-    }
 }
 
 fn otel_span(

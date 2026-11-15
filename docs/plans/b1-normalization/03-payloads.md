@@ -140,7 +140,7 @@ Fixtures:
 - `llmobs/input-output-formats`: three spans with messages, json and text;
 - `genai/tool-span`;
 - `genai/operation-details-event`;
-- `genai/legacy-message-events`: `notes` says "shape as emitted by Strands/Logfire bridges; re-check against a B2 capture";
+- `genai/legacy-message-events`: `notes` says the shape is as emitted by Strands/Logfire bridges and that no captured case covers it yet;
 - `genai/finish-reasons-fill`;
 - `edge/messages-conversion-failure` (`gen_ai.input.messages` that isn't an array → raw JSON + `normalize_error`);
 - `edge/double-encoded-messages`.

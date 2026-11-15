@@ -385,7 +385,7 @@ async fn append(storage: &Storage, rows: usize, payload: usize) -> Result<usize,
 /// Every span row the project reads, through a query of its snapshot.
 async fn count_rows(storage: &Storage) -> Result<usize, String> {
     let query = storage
-        .query(project(), Default::default())
+        .query(project(), llmobs_storage::QueryOptions::new(None, None))
         .await
         .map_err(|error| format!("query: {error}"))?;
     Ok(span_count(&query).await)

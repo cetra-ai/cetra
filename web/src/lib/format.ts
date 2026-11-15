@@ -101,6 +101,28 @@ export function formatCost(usd?: number): string {
   return `${sign}$${abs.toFixed(2)}`;
 }
 
+const BYTE_UNITS = ["KB", "MB", "GB", "TB"] as const;
+
+/** Decimal (base 1000) byte sizes: `999 B`, `3.5 MB`. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes)) {
+    return "—";
+  }
+  const sign = bytes < 0 ? "-" : "";
+  const abs = Math.abs(bytes);
+  if (abs < 1_000) {
+    return `${sign}${Math.round(abs)} B`;
+  }
+  let value = abs;
+  let index = -1;
+  do {
+    value /= 1_000;
+    index += 1;
+    // Roll over when rounding reaches 1000 (999 950 bytes is 1.0 MB, not 1000.0 KB).
+  } while (Number(value.toFixed(1)) >= 1_000 && index < BYTE_UNITS.length - 1);
+  return `${sign}${value.toFixed(1)} ${BYTE_UNITS[index]}`;
+}
+
 export function formatTimestamp(
   rfc3339: string,
   zone: "local" | "utc",
@@ -223,4 +245,12 @@ function zoneOffsetMs(zone: string): number {
   const hours = Number(zone.slice(1, 3));
   const minutes = Number(zone.slice(4, 6));
   return sign * (hours * 60 + minutes) * 60_000;
+}
+
+/** A project's retention: `null` or absent keeps data forever (spec 09, `retention_days`). */
+export function formatRetention(days: number | null | undefined): string {
+  if (days == null) {
+    return "Forever";
+  }
+  return days === 1 ? "1 day" : `${days} days`;
 }

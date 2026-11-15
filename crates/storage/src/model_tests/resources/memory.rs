@@ -445,7 +445,7 @@ enum QueryFailure {
 /// the list accepts is reported by the test that uses it), a sort that spills, and R5.2's window
 /// count, which spills across many files.
 async fn run_query(storage: &Storage, which: usize) -> Result<(), QueryFailure> {
-    let query = match storage.query(filler(), QueryOptions::default()).await {
+    let query = match storage.query(filler(), QueryOptions::new(None, None)).await {
         Ok(query) => query,
         Err(QueryError::Busy) => return Err(QueryFailure::Busy),
         Err(other) => panic!("query admission failed: {other}"),
@@ -466,6 +466,7 @@ async fn run_query(storage: &Storage, which: usize) -> Result<(), QueryFailure> 
                         include_eval: true,
                         include_experiments: true,
                     },
+                    strict_exclusions: false,
                     sort: TraceSort::CostTotal,
                     order: SortOrder::Desc,
                     limit: 50,

@@ -279,6 +279,20 @@ pub(crate) fn write<P: AsRef<Path>, B: AsRef<[u8]>>(path: P, bytes: B) -> io::Re
     std::fs::write(path, bytes)
 }
 
+/// Hard-links `original` at `link`. Only for a backup directory outside the data
+/// directory (`snapshot::copy_objects`), so lossy mode does not record it.
+#[inline]
+pub(crate) fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Result<()> {
+    std::fs::hard_link(original, link)
+}
+
+/// Copies `from` to `to`, like `std::fs::copy`. Only for a backup directory outside
+/// the data directory (`snapshot::copy_objects`), so lossy mode does not record it.
+#[inline]
+pub(crate) fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<u64> {
+    std::fs::copy(from, to)
+}
+
 #[inline]
 pub(crate) fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
     std::fs::read(path)

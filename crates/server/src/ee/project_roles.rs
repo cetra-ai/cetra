@@ -168,7 +168,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
+        let cookie = start_session(&app.state, user.id, None, None, None)
             .await
             .unwrap();
         (user.id, cookie_pair(&cookie))

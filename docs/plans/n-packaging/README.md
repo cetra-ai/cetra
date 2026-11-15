@@ -483,9 +483,11 @@ Hetzner server with Hetzner Object Storage (D170). What N gives Q, and what Q ne
 4. **Backups:** M1 gives only cold snapshots (docs/self-hosting/backup.md), i.e. a minute of
    downtime per cell. Q's design asks for two things: R9, `llmobs admin backup [--meta-only] --to
    <dir>` run with `docker compose exec` while `llmobs serve` runs, writing `meta.db` and
-   `catalog.db` at the top of `<dir>`; and R10, `storage.gc.object_retention`, which Q sets to
-   `8d`. Both are N's M2 (§ After M1), not this plan. Q's M1 phases 10–11 (backups, restore
-   drill) wait for M2.
+   `catalog.db` at the top of `<dir>`; and R10, a longer object retention for meta-only backups. Both are N's M2 (§ After M1,
+   `docs/plans/n-packaging/m2/`), not this plan: R9 is `llmobs admin backup` through the control
+   socket `<data_dir>/admin.sock` (D-N-17), and R10 is `storage.gc.grace` allowed up to `30d`, which
+   Q sets to `8d` (D-N-20). There is no `storage.gc.object_retention` key, and the config loader
+   rejects unknown keys. Q's M1 phases 10–11 (backups, restore drill) wait for M2.
 
 Q's R8 (the official image) is this plan's N4 and N10. Two differences from Q's interim image
 (`llmobs-control/deploy/image/Dockerfile`):
@@ -513,15 +515,11 @@ The image's tags are release builds only, so they trust only the compiled-in lic
 - **Q:** § Requests for Q. Q's own repository holds its deploy tooling. N's chart and compose
   files are for self-hosters, and Q may use either.
 
-## After M1 (N M2, a later plan)
+## After M1 (N M2)
 
-- `llmobs admin backup --to <dir> [--meta-only]`, online. It needs a server-side trigger, because
-  the running server holds the data directory's lock. It flushes, pauses compaction, deletion and
-  retention, copies `meta.db` and `catalog.db` with `VACUUM INTO`, copies the listed files, and
-  writes a manifest.
-- `gc.object_retention`, so that a metadata-only backup stays restorable in S3 mode.
-- `llmobs admin gc-orphans`.
-- `meta.db.pre-<version>` and `catalog.db.pre-<version>` before migrations.
+Planned in [`m2/`](m2/00-design.md): online `llmobs admin backup` through a control socket,
+`gc.grace` up to 30 days for S3-mode metadata backups, `llmobs admin gc-orphans`, and pre-migration
+copies of `meta.db` and `catalog.db` (D-N-17–D-N-24).
 
 ## Open items
 

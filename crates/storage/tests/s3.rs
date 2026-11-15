@@ -30,6 +30,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use llmobs_storage::QueryOptions;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -300,7 +301,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )
@@ -315,7 +316,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )
@@ -334,7 +335,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )

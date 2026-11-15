@@ -494,7 +494,7 @@ pub(super) fn visible_span_rows(harness: &Harness, project: ProjectId) -> usize 
     harness.block_on(async {
         let storage = harness.storage();
         let query = storage
-            .query(project, Default::default())
+            .query(project, crate::QueryOptions::new(None, None))
             .await
             .expect("query on the project");
         let ctx =

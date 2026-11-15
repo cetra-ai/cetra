@@ -100,7 +100,9 @@ pub(super) async fn observe_eval_trace_ids(
 /// A query context on `project`'s snapshot, as the server's read handlers build one. A read takes
 /// one, and every page it reads comes from it.
 async fn context(storage: &Storage, project: P) -> Result<QueryContext, ReadFailure> {
-    let query = storage.query(project.id(), Default::default()).await?;
+    let query = storage
+        .query(project.id(), crate::QueryOptions::new(None, None))
+        .await?;
     Ok(QueryContext::new(query, None)?)
 }
 
@@ -121,6 +123,7 @@ pub(super) async fn observe_spans(
                 filter: None,
                 search: None,
                 scope: ALL_ROWS,
+                strict_exclusions: false,
                 sort: SpanSort::StartTime,
                 order: SortOrder::Asc,
                 limit,
@@ -166,6 +169,7 @@ pub(super) async fn observe_traces(
                 filter: None,
                 search: None,
                 scope,
+                strict_exclusions: false,
                 sort: TraceSort::StartTime,
                 order: SortOrder::Desc,
                 limit,
@@ -267,6 +271,8 @@ pub(super) async fn observe_scores(
                 session_id: None,
                 name: None,
                 source: None,
+                evaluator_id: None,
+                rule_id: None,
                 window: None,
                 limit,
                 cursor: cursor.as_deref(),

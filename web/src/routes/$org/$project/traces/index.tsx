@@ -1,4 +1,4 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -14,7 +14,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
-import { traceListOptions } from "@/components/data-table/use-infinite-list";
+import { traceListOptions, traceProbeOptions } from "@/components/data-table/use-infinite-list";
 import { useLiveTraces } from "@/components/data-table/use-live-traces";
 import { DeleteMatchingDialog } from "@/components/deletions/delete-matching-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -24,7 +24,7 @@ import { ListToolbar } from "@/components/list-toolbar";
 import { LiveToggle } from "@/components/live-toggle";
 import { OnboardingPanel } from "@/components/onboarding/panel";
 import { onboardingPollMs } from "@/components/onboarding/poll";
-import { tracesNeedOnboarding } from "@/components/onboarding/state";
+import { onboardingShown, tracesNeedOnboarding } from "@/components/onboarding/state";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
@@ -32,6 +32,7 @@ import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { orderedTraceColumns, scoreNames, traceColumnSpecs } from "@/components/trace-columns";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { atLeast } from "@/lib/roles";
 import {
@@ -114,18 +115,24 @@ function TracesPage() {
     includeEval: search.eval === 1,
     includeExperiments: search.exp === 1,
   });
+  const queryClient = useQueryClient();
+  const needsOnboarding = tracesNeedOnboarding(search, range);
+  const probe = traceProbeOptions(org, project);
   const list = useInfiniteQuery({
     ...listOptions,
     enabled: !hold,
     refetchInterval: (query) => {
-      if (hold || !tracesNeedOnboarding(search, range)) {
+      if (hold || !needsOnboarding) {
         return false;
       }
       const data = query.state.data;
       if (!data || data.pages.some((page) => page.data.length > 0)) {
         return false;
       }
-      return onboardingPollMs();
+      const probeState = queryClient.getQueryState<Schema<"TracePage">>(probe.queryKey);
+      const probeRows = probeState?.data?.data.length;
+      const probeFailed = probeState?.status === "error";
+      return onboardingShown(needsOnboarding, probeRows, probeFailed) ? onboardingPollMs() : false;
     },
   });
   const fetchNextPage = useCallback(() => {
@@ -194,22 +201,31 @@ function TracesPage() {
 
   const problem = list.isError ? problemOf(list.error) : undefined;
   const filterError = problem?.code === "invalid_filter" ? problem : undefined;
+  const listEmpty = !hold && list.data !== undefined && rows.length === 0;
+  const projectProbe = useQuery({ ...probe, enabled: listEmpty && needsOnboarding });
+  const probeRows = projectProbe.data?.data.length;
+  // A cached empty answer is not trusted while it refetches: a trace may have arrived since.
+  const probing =
+    listEmpty &&
+    needsOnboarding &&
+    (projectProbe.isPending || (projectProbe.isFetching && probeRows === 0));
   const onboarding =
-    !hold && list.data !== undefined && rows.length === 0 && tracesNeedOnboarding(search, range);
+    listEmpty && !probing && onboardingShown(needsOnboarding, probeRows, projectProbe.isError);
   const reason = traceLiveReason(search);
   const liveOn = search.live === 1 && reason === undefined && !hold;
   const live = useLiveTraces({
-    url: liveOn
-      ? traceStreamUrl(projectRef(org, project), {
-          filter: search.filter,
-          search: search.search,
-          includeEval: search.eval === 1,
-          includeExperiments: search.exp === 1,
-        })
-      : undefined,
+    url:
+      liveOn && (list.isSuccess || list.isRefetchError)
+        ? traceStreamUrl(projectRef(org, project), {
+            filter: search.filter,
+            search: search.search,
+            includeEval: search.eval === 1,
+            includeExperiments: search.exp === 1,
+          })
+        : undefined,
     queryKey: listOptions.queryKey,
     selectedId: search.trace,
-    ready: !hold && list.data !== undefined && !filterError && !onboarding,
+    ready: !hold && list.data !== undefined && !filterError && !onboarding && !probing,
   });
   useEffect(() => {
     if (search.live !== 1 || reason === undefined) {
@@ -358,11 +374,17 @@ function TracesPage() {
                     <h2 className="text-sm font-medium">{filterError.title}</h2>
                     <p className="text-sm text-destructive">{filterMessage(filterError)}</p>
                   </div>
+                ) : probing ? (
+                  <div className="flex flex-col gap-2 p-4">
+                    <Skeleton className="h-8 w-full" />
+                    <Skeleton className="h-8 w-full" />
+                    <Skeleton className="h-8 w-full" />
+                  </div>
                 ) : onboarding ? (
                   <div className="min-h-0 flex-1 overflow-auto">
                     <OnboardingPanel origin={window.location.origin} />
                   </div>
-                ) : !hold && list.data ? (
+                ) : !hold && list.data && !probing ? (
                   <DataTable
                     tableId="traces"
                     ariaLabel="Traces"
@@ -411,18 +433,25 @@ function TracesPage() {
                       ) : null
                     }
                     emptyState={
-                      <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
-                        <Waypoints className="size-8 text-muted-foreground" />
-                        <h2 className="text-lg font-medium">No traces match</h2>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={clearConstraints}
-                        >
-                          Clear filters
-                        </Button>
-                      </div>
+                      needsOnboarding ? (
+                        <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                          <Waypoints className="size-8 text-muted-foreground" />
+                          <h2 className="text-lg font-medium">No traces in this time range.</h2>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center gap-3 px-4 py-16 text-center">
+                          <Waypoints className="size-8 text-muted-foreground" />
+                          <h2 className="text-lg font-medium">No traces match</h2>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={clearConstraints}
+                          >
+                            Clear filters
+                          </Button>
+                        </div>
+                      )
                     }
                   />
                 ) : null}

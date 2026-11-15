@@ -1753,7 +1753,7 @@ fn stored_partials(h: &Harness, project: P) -> Vec<(String, i32)> {
     h.block_on(async {
         let query = h
             .storage()
-            .query(project.id(), Default::default())
+            .query(project.id(), crate::QueryOptions::new(None, None))
             .await
             .expect("query for the traces file check");
         let ctx =

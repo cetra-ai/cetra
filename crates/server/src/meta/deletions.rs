@@ -100,6 +100,8 @@ pub(crate) enum ActorKind {
     User,
     /// A project API key.
     ApiKey,
+    /// The control plane (cloud), by a `control_plane` token; the id is the token's `id`.
+    ControlPlane,
 }
 
 impl ActorKind {
@@ -108,6 +110,7 @@ impl ActorKind {
         match self {
             Self::User => "user",
             Self::ApiKey => "api_key",
+            Self::ControlPlane => "control_plane",
         }
     }
 
@@ -116,6 +119,7 @@ impl ActorKind {
         Some(match text {
             "user" => Self::User,
             "api_key" => Self::ApiKey,
+            "control_plane" => Self::ControlPlane,
             _ => return None,
         })
     }
@@ -252,10 +256,10 @@ pub(crate) struct NewDeletion {
 /// The deletion guard's view of the recent deletions (M3, D-M-6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GuardEntries {
-    /// `(project, trace, created_at)` of every stored scope trace.
-    pub(crate) traces: Vec<(ProjectId, TraceId, i64)>,
-    /// `(project, user_id, created_at)` of every `user` deletion.
-    pub(crate) users: Vec<(ProjectId, String, i64)>,
+    /// `(project, trace, deletion id, created_at)` of every stored scope trace.
+    pub(crate) traces: Vec<(ProjectId, TraceId, Uuid, i64)>,
+    /// `(project, user_id, deletion id, created_at)` of every `user` deletion.
+    pub(crate) users: Vec<(ProjectId, String, Uuid, i64)>,
 }
 
 /// The private record that `sqlx` decodes. Field names are the column names.
@@ -540,6 +544,39 @@ pub(crate) async fn insert_traces(
     Ok(())
 }
 
+/// Stores a `trace_ids` deletion `id` of `traces` that follows `parent` (D-M-6): same org,
+/// project and actor, `requested` = the trace count, status `resolving`, `created_at = now`.
+/// It skips the open-request limit (`count_open_in_project`).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the row or its scope cannot be stored.
+pub(crate) async fn insert_follow_up(
+    conn: &mut SqliteConnection,
+    parent: &DeletionRow,
+    id: Uuid,
+    traces: &[TraceId],
+    now: i64,
+) -> Result<(), MetaError> {
+    let new = NewDeletion {
+        id,
+        org_id: parent.org_id,
+        project_id: parent.project_id,
+        kind: DeletionKind::TraceIds,
+        user_id: None,
+        request: RequestDetails {
+            requested: Some(u32::try_from(traces.len()).unwrap_or(u32::MAX)),
+            ..RequestDetails::default()
+        },
+        actor_kind: parent.actor_kind,
+        actor_id: parent.actor_id,
+        state: DeletionState::Resolving,
+        created_at: now,
+    };
+    insert_deletion(conn, &new).await?;
+    insert_traces(conn, id, traces).await
+}
+
 /// Adds session ids to the scope. Ids already present are ignored.
 ///
 /// # Errors
@@ -749,6 +786,112 @@ pub(crate) async fn deletion_by_id(
         .fetch_optional(pool)
         .await?;
     record.map(row_from).transpose()
+}
+
+/// The org's newest org deletion, of any status; `None` when the org was never dropped. The
+/// control plane's repeated `DELETE` answers with it (D-P-49).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the stored row does not decode.
+pub(crate) async fn org_drop_of(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<Option<DeletionRow>, MetaError> {
+    // The SQL is built only from constants.
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM deletions WHERE org_id = ? AND kind = 'org' \
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    );
+    let record: Option<DeletionRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(org.to_string())
+        .fetch_optional(pool)
+        .await?;
+    record.map(row_from).transpose()
+}
+
+/// One applied project or org drop, as the control plane's feed lists it (D-P-49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppliedDrop {
+    /// The deletion id.
+    pub(crate) id: Uuid,
+    /// `project` or `org`.
+    pub(crate) kind: DeletionKind,
+    /// Owning org.
+    pub(crate) org_id: OrgId,
+    /// `Some` for `project` only.
+    pub(crate) project_id: Option<ProjectId>,
+    /// When the drop was applied, nanoseconds.
+    pub(crate) applied_at: i64,
+}
+
+/// Applied project and org drops, oldest first, after `after` (`(applied_at, id)` of the last
+/// row of the previous page). `kind` narrows to one kind. Rows are kept forever (D-M-17), so
+/// any position can be paged from. At most `limit` rows.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored row does not decode.
+pub(crate) async fn applied_drops(
+    pool: &SqlitePool,
+    kind: Option<DeletionKind>,
+    after: Option<(i64, Uuid)>,
+    limit: u32,
+) -> Result<Vec<AppliedDrop>, MetaError> {
+    let kind_text = kind.map(DeletionKind::as_str);
+    // An empty id sorts before every id, and no time is below `i64::MIN`: no cursor means "from
+    // the first row".
+    let (after_at, after_id) = match after {
+        Some((at, id)) => (at, id.to_string()),
+        None => (i64::MIN, String::new()),
+    };
+    let rows: Vec<(String, String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT id, kind, org_id, project_id, applied_at FROM deletions \
+         WHERE kind IN ('project', 'org') AND status = 'applied' \
+           AND (? IS NULL OR kind = ?) \
+           AND (applied_at, id) > (?, ?) \
+         ORDER BY applied_at, id LIMIT ?",
+    )
+    .bind(kind_text)
+    .bind(kind_text)
+    .bind(after_at)
+    .bind(after_id)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|(id, kind, org_id, project_id, applied_at)| {
+            Ok(AppliedDrop {
+                id: Uuid::parse_str(&id).map_err(|_| corrupt("id"))?,
+                kind: DeletionKind::parse(&kind).ok_or_else(|| corrupt("kind"))?,
+                org_id: org_id.parse::<OrgId>().map_err(|_| corrupt("org_id"))?,
+                project_id: project_id
+                    .as_deref()
+                    .map(str::parse::<ProjectId>)
+                    .transpose()
+                    .map_err(|_| corrupt("project_id"))?,
+                applied_at,
+            })
+        })
+        .collect()
+}
+
+/// Whether any org deletion exists for `org`, in this transaction. An id with one is never
+/// created again (D-P-49).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn org_drop_exists_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<bool, MetaError> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM deletions WHERE org_id = ? AND kind = 'org' LIMIT 1")
+            .bind(org.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(found.is_some())
 }
 
 /// One row by id when it belongs to `project`; `None` otherwise (the route answers 404).
@@ -965,8 +1108,8 @@ pub(crate) async fn guard_entries(
     .await?;
     let mut traces = Vec::with_capacity(trace_rows.len());
     for (id, project, blob, created_at) in trace_rows {
-        match guard_trace(project, &blob) {
-            Ok((project, trace)) => traces.push((project, trace, created_at)),
+        match guard_id(&id).and_then(|deletion| Ok((deletion, guard_trace(project, &blob)?))) {
+            Ok((deletion, (project, trace))) => traces.push((project, trace, deletion, created_at)),
             Err(error) => log_undecodable(Uuid::parse_str(&id).ok(), &error),
         }
     }
@@ -980,12 +1123,17 @@ pub(crate) async fn guard_entries(
     .await?;
     let mut users = Vec::with_capacity(user_rows.len());
     for (id, project, user, created_at) in user_rows {
-        match guard_user(project, user) {
-            Ok((project, user)) => users.push((project, user, created_at)),
+        match guard_id(&id).and_then(|deletion| Ok((deletion, guard_user(project, user)?))) {
+            Ok((deletion, (project, user))) => users.push((project, user, deletion, created_at)),
             Err(error) => log_undecodable(Uuid::parse_str(&id).ok(), &error),
         }
     }
     Ok(GuardEntries { traces, users })
+}
+
+/// The deletion id of one guard entry.
+fn guard_id(id: &str) -> Result<Uuid, MetaError> {
+    Uuid::parse_str(id).map_err(|_| corrupt("id"))
 }
 
 /// The project and trace of one guard trace entry.
@@ -1470,12 +1618,15 @@ mod tests {
         assert_eq!(
             entries.traces,
             vec![
-                (project_a(), trace(0), 100),
-                (project_a(), trace(1), 100),
-                (project_a(), trace(2), 200),
+                (project_a(), trace(0), Uuid::from_u128(1), 100),
+                (project_a(), trace(1), Uuid::from_u128(1), 100),
+                (project_a(), trace(2), Uuid::from_u128(2), 200),
             ]
         );
-        assert_eq!(entries.users, vec![(project_a(), "user-1".to_owned(), 200)]);
+        assert_eq!(
+            entries.users,
+            vec![(project_a(), "user-1".to_owned(), Uuid::from_u128(2), 200)]
+        );
     }
 
     #[tokio::test]
@@ -1702,7 +1853,54 @@ mod tests {
         add_traces(&db, Uuid::from_u128(4), vec![trace(6)]).await;
 
         let entries = guard_entries(db.reader(), 0).await.unwrap();
-        assert_eq!(entries.traces, vec![(project_b(), trace(6), 40)]);
-        assert_eq!(entries.users, vec![(project_a(), "user-1".to_owned(), 30)]);
+        assert_eq!(
+            entries.traces,
+            vec![(project_b(), trace(6), Uuid::from_u128(4), 40)]
+        );
+        assert_eq!(
+            entries.users,
+            vec![(project_a(), "user-1".to_owned(), Uuid::from_u128(3), 30)]
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_follow_up_copies_the_actor() {
+        let (_dir, db) = test_db().await;
+        let parent = insert(&db, new(1, DeletionKind::TraceIds, project_a(), 100)).await;
+        // Fill the project's open-request limit: a follow-up skips it.
+        db.write(move |conn| {
+            Box::pin(async move {
+                for n in 0..1_000_u128 {
+                    insert_deletion(
+                        conn,
+                        &new(5_000 + n, DeletionKind::TraceIds, project_a(), 100),
+                    )
+                    .await?;
+                }
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        let id = Uuid::from_u128(9);
+        let traces = vec![trace(1), trace(2)];
+        let stored = traces.clone();
+        let copy = parent.clone();
+        db.write(move |conn| {
+            Box::pin(async move { insert_follow_up(conn, &copy, id, &stored, 200).await })
+        })
+        .await
+        .unwrap();
+
+        let row = state(&db, id).await;
+        assert_eq!(row.org_id, parent.org_id);
+        assert_eq!(row.project_id, parent.project_id);
+        assert_eq!(row.kind, DeletionKind::TraceIds);
+        assert_eq!(row.state, DeletionState::Resolving);
+        assert_eq!(row.created_at, 200);
+        assert_eq!(row.actor_kind, parent.actor_kind);
+        assert_eq!(row.actor_id, parent.actor_id);
+        assert_eq!(row.request.requested, Some(2));
+        assert_eq!(scope_traces(db.reader(), id).await.unwrap(), traces);
     }
 }

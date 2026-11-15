@@ -594,12 +594,14 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
    pub(crate) fn service(state: AppState) -> TraceServiceServer<GrpcTraces>
    ```
    - `service`: `TraceServiceServer::new(GrpcTraces { state })` `.max_decoding_message_size(limit)` with `limit = usize::try_from(config.ingest.max_grpc_message_bytes.as_u64()).unwrap_or(usize::MAX)` (validated in G3.7) and `.accept_compressed(tonic::codec::CompressionEncoding::Gzip)`. `GrpcTraces` needs a manual `Debug` that prints nothing of the state (`missing_debug_implementations`).
-   - `export`, steps (each failure maps per § gRPC status mapping; for `ApiError`s from `bearer_principal` / `key_only_project`: `Unauthorized` → `Unauthenticated`, `Forbidden` → `PermissionDenied`, `NotFound` → `NotFound`, anything else → `Internal`; read `now = state.clock.now_ns()` once at the start):
-     1. `headers = request.metadata().clone().into_headers()`; `bearer_principal(&state, &headers)`; the principal must be `ApiKey` with `scopes.contains(KeyScope::Ingest)`.
-     2. `project = key_only_project(&state, project_id)`.
-     3. `message = request.into_inner()`; `bytes = message.encoded_len() as u64` (`prost::Message`).
-     4. `reservation = ingest.reserve_exact(bytes)`.
-     5. `accepted = ingest.accept_request(message, reservation, bytes, bytes, &project, now)`.
+   - **Amended by G-1 (review fix, D-G-29):** the admission runs before tonic reads the body, in a tower layer around the service. `grpc::service(state)` returns `Admit<TraceServiceServer<GrpcTraces>>` (an `AdmitLayer` wraps the inner service; `Admit` implements `NamedService` by delegating to it). `Admit::call` runs the checks below on the `http::Request` headers, before the body is polled. A refusal is answered with `status.into_http()` and the body is never read. An admitted request gets an extension `GrpcAdmitted { project, reservation: Arc<Mutex<Option<Reservation>>> }`, and `export` takes the reservation from it (missing → `Internal`). `export` does not authenticate or reserve again.
+   - `export`, steps (each failure maps per § gRPC status mapping; for `ApiError`s from `bearer_principal` / `key_only_project`: `Unauthorized` → `Unauthenticated`, `Forbidden` → `PermissionDenied`, `NotFound` → `NotFound`, anything else → `Internal`; read `now = state.clock.now_ns()` once at the start). Admission, in the layer, in this order:
+     1. `bearer_principal(&state, request.headers())`; the principal must be `ApiKey` with `scopes.contains(KeyScope::Ingest)`.
+     2. `project = key_only_project(&state, project_id)`; `check_cap` (`ResourceExhausted`).
+     3. `reservation = ingest.reserve_exact(config.ingest.max_grpc_message_bytes)`: the budget for the largest message is held from before the body is read (`Unavailable` when the budget is full).
+   - Then `export`:
+     1. `message = request.into_inner()`; `bytes = message.encoded_len() as u64` (`prost::Message`); `ingest.fit(&mut reservation, bytes)` gives back the budget above the decoded size.
+     2. `accepted = ingest.accept_request(message, reservation, bytes, bytes, &project, now)`.
      6. `ingest.commit(&storage, &usage, CommitTarget { org_id: project.org_id, project_id: project.id, request_bytes: bytes, now_ns: now }, accepted.normalized)`.
      7. Answer `ExportTraceServiceResponse { partial_success }`, built from `accepted.normalized.rejections` with `ingest/otlp.rs`'s private `partial_success(rejections)` helper, made `pub(crate)` (it returns `Option<(rejected_spans, error_message)>`; map it to `ExportTracePartialSuccess` as `export_response` does for protobuf). Read the rejections before `commit` consumes `normalized`.
    - Log like `routes/otlp.rs` does (project id, sizes, counts, duration; refusals by kind), under `transport = "grpc"`.
@@ -611,7 +613,7 @@ The two contract tests above; `cargo test -p llmobs-server --test openapi` passe
 
 ### Tests
 
-- **`grpc.rs` unit tests** (`TestApp` + `seed()`, calling `GrpcTraces { state: app.state.clone() }.export(request)` directly; build the request with `tonic::Request::new(message)` and insert `authorization` with `request.metadata_mut().insert("authorization", format!("Bearer {key}").parse().unwrap())`; the message is `llmobs_otel::decode_json` of `fixtures/otlp/genai/finish-reasons-fill/input.json`):
+- **`grpc.rs` unit tests** (`TestApp` + `seed()`, sending an encoded gRPC request through the layered `service(state)` with `tower::ServiceExt::oneshot` (G-1: admission is in the layer, so the tests go through it); the `authorization` header is `Bearer {key}`; the message is `llmobs_otel::decode_json` of `fixtures/otlp/genai/finish-reasons-fill/input.json`; `export` called without the layer is `Internal`):
   - the `ingest_key` → OK with `partial_success: None`; `llmobs_storage` / `GET …/traces` (cookie) then lists the trace; after `state.usage.flush(&state.meta)` `usage_daily.spans` equals the stored span count and `bytes` equals the message's `encoded_len()`;
   - no metadata → `Code::Unauthenticated`; the `read_key` → `Code::PermissionDenied`; a session cookie in `cookie` metadata only → `Code::Unauthenticated`;
   - each `tonic::Status` message is the static text of § gRPC status mapping.

@@ -499,13 +499,31 @@ pub struct SecurityConfig {
 }
 
 /// `[entitlements]` (D-P-15).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EntitlementsConfig {
     /// Where Upgrade buttons go. `{org}` is replaced by the org id. Unset: no button.
     pub upgrade_url: Option<String>,
     /// What an org without a valid token gets (D-P-10, D-P-13).
     pub defaults: EntitlementDefaults,
+    /// The `identities.provider` of the control plane's OIDC provider, whose subjects
+    /// the control plane uses to name users (D-P-39). Default `"oidc:cloud"`.
+    pub control_plane_provider: String,
+    /// This instance is a cloud cell managed by the control plane (D-P-50). When false (the
+    /// default), every `/api/internal/v1/*` route answers 404, stored and pushed org tokens are
+    /// ignored, and `llmobs1.` bearer tokens are refused: only licence keys are trusted.
+    pub control_plane: bool,
+}
+
+impl Default for EntitlementsConfig {
+    fn default() -> Self {
+        Self {
+            upgrade_url: None,
+            defaults: EntitlementDefaults::default(),
+            control_plane_provider: "oidc:cloud".to_owned(),
+            control_plane: false,
+        }
+    }
 }
 
 /// `[entitlements.defaults]`: what an org without a valid token gets (D-P-10, D-P-13).
@@ -873,19 +891,27 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_auth(&mut config.auth)?;
     validate_init(&config.init)?;
-    if config.otlp_http_addr == Some(config.http_addr) {
+    if config
+        .otlp_http_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "otlp_http_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr == Some(config.http_addr) {
+    if config
+        .grpc_addr
+        .is_some_and(|addr| same_listener(addr, config.http_addr))
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from http_addr",
         });
     }
-    if config.grpc_addr.is_some() && config.grpc_addr == config.otlp_http_addr {
+    if let (Some(grpc), Some(otlp)) = (config.grpc_addr, config.otlp_http_addr)
+        && same_listener(grpc, otlp)
+    {
         return Err(ConfigError::Invalid {
             key: "grpc_addr",
             reason: "must differ from otlp_http_addr",
@@ -1000,6 +1026,12 @@ fn normalize_domains(key: &'static str, domains: &mut [String]) -> Result<(), Co
         }
     }
     Ok(())
+}
+
+/// Two listen addresses collide when they are equal; port 0 asks the OS for a distinct free
+/// port per listener, so it never collides.
+fn same_listener(a: SocketAddr, b: SocketAddr) -> bool {
+    a == b && a.port() != 0
 }
 
 fn validate_auth(auth: &mut AuthSettings) -> Result<(), ConfigError> {
@@ -1119,38 +1151,32 @@ fn oidc_name_ok(name: &str) -> bool {
 }
 
 fn validate_issuer(key: String, issuer: &str) -> Result<(), ConfigError> {
-    let url = match url::Url::parse(issuer) {
-        Ok(url) => url,
-        Err(_) => {
-            return Err(ConfigError::Provider {
-                key,
-                reason: "invalid issuer",
-            });
-        }
+    match issuer_problem(issuer) {
+        None => Ok(()),
+        Some(reason) => Err(ConfigError::Provider { key, reason }),
+    }
+}
+
+/// Why `issuer` cannot be an OIDC issuer: not a URL, user info, not `https` (or `http` on a
+/// loopback host), or a multi-tenant Microsoft issuer. `None` when it can.
+pub(crate) fn issuer_problem(issuer: &str) -> Option<&'static str> {
+    let Ok(url) = url::Url::parse(issuer) else {
+        return Some("invalid issuer");
     };
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "invalid issuer",
-        });
+        return Some("invalid issuer");
     }
     let loopback = loopback_host(&url);
     if url.scheme() != "https" && !(url.scheme() == "http" && loopback) {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "issuer must be https, or http on a loopback host",
-        });
+        return Some("issuer must be https, or http on a loopback host");
     }
     if multi_tenant_entra(&url) {
-        return Err(ConfigError::Provider {
-            key,
-            reason: "multi-tenant Microsoft issuers are not allowed",
-        });
+        return Some("multi-tenant Microsoft issuers are not allowed");
     }
-    Ok(())
+    None
 }
 
-fn loopback_host(url: &url::Url) -> bool {
+pub(crate) fn loopback_host(url: &url::Url) -> bool {
     match url.host() {
         // `host_str` for IPv6 includes the brackets (`[::1]`). Match the parsed host.
         Some(url::Host::Domain("localhost")) => true,
@@ -1333,6 +1359,14 @@ fn validate_entitlements(entitlements: &mut EntitlementsConfig) -> Result<(), Co
     if let Some(template) = entitlements.upgrade_url.as_deref() {
         validate_upgrade_url(template)?;
     }
+    let provider = entitlements.control_plane_provider.trim().to_owned();
+    if provider.is_empty() {
+        return Err(ConfigError::Invalid {
+            key: "entitlements.control_plane_provider",
+            reason: "must not be empty",
+        });
+    }
+    entitlements.control_plane_provider = provider;
     validate_entitlement_defaults(&mut entitlements.defaults)
 }
 
@@ -1685,12 +1719,31 @@ mod tests {
 
     use super::{
         ConfigError, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret, ServerConfig,
-        SmtpUrl, Tls, load_from,
+        SmtpUrl, Tls, issuer_problem, load_from,
     };
     use crate::api::account::SignupPolicy;
 
     fn socket(raw: &str) -> SocketAddr {
         raw.parse().unwrap()
+    }
+
+    #[test]
+    fn issuer_problem_names_each_reason() {
+        assert_eq!(issuer_problem("https://idp.example/realm"), None);
+        assert_eq!(issuer_problem("http://localhost:8080"), None);
+        assert_eq!(issuer_problem("not a url"), Some("invalid issuer"));
+        assert_eq!(
+            issuer_problem("https://user:pw@idp.example"),
+            Some("invalid issuer")
+        );
+        assert_eq!(
+            issuer_problem("http://idp.example"),
+            Some("issuer must be https, or http on a loopback host")
+        );
+        assert_eq!(
+            issuer_problem("https://login.microsoftonline.com/common/v2.0"),
+            Some("multi-tenant Microsoft issuers are not allowed")
+        );
     }
 
     #[test]
@@ -2180,6 +2233,59 @@ mod tests {
     }
 
     #[test]
+    fn control_plane_provider_defaults_to_oidc_cloud() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.entitlements.control_plane_provider, "oidc:cloud");
+    }
+
+    #[test]
+    fn control_plane_provider_takes_a_custom_value() {
+        let config = load_from(
+            Some("[entitlements]\ncontrol_plane_provider = \"oidc:acme\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.entitlements.control_plane_provider, "oidc:acme");
+    }
+
+    #[test]
+    fn control_plane_provider_refuses_an_empty_value() {
+        let error = load_from(
+            Some("[entitlements]\ncontrol_plane_provider = \"  \"\n"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "entitlements.control_plane_provider",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn control_plane_is_off_by_default() {
+        let config = load_from(None, &[]).unwrap();
+        assert!(!config.entitlements.control_plane);
+    }
+
+    #[test]
+    fn control_plane_parses_true() {
+        let config = load_from(Some("[entitlements]\ncontrol_plane = true\n"), &[]).unwrap();
+        assert!(config.entitlements.control_plane);
+    }
+
+    #[test]
+    fn control_plane_from_env() {
+        let config = load_from(None, &[("LLMOBS_ENTITLEMENTS__CONTROL_PLANE", "true")]).unwrap();
+        assert!(config.entitlements.control_plane);
+    }
+
+    #[test]
     fn orgs_default_allows_user_created_orgs_without_a_link() {
         let config = load_from(None, &[]).unwrap();
         assert_eq!(config.orgs, OrgsConfig::default());
@@ -2277,7 +2383,7 @@ mod tests {
 
     #[test]
     fn defaults_refuse_ee_and_unknown_features() {
-        for features in ["[\"project_roles\"]", "[\"nope\"]"] {
+        for features in ["[\"project_roles\"]", "[\"org_sso\"]", "[\"nope\"]"] {
             let toml = format!("[entitlements.defaults]\nfeatures = {features}\n");
             let error = load_from(Some(&toml), &[]).unwrap_err();
             assert!(
@@ -2889,6 +2995,16 @@ link_existing_by_email = true
             assert_eq!(text, expected, "{toml}");
             assert!(!text.contains(rejected), "{text}");
         }
+    }
+
+    #[test]
+    fn port_zero_on_every_listener_is_accepted() {
+        let config = load_from(
+            Some("http_addr = \"127.0.0.1:0\"\notlp_http_addr = \"127.0.0.1:0\"\ngrpc_addr = \"127.0.0.1:0\"\n"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(config.http_addr.port(), 0);
     }
 
     #[test]

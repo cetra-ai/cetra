@@ -3,7 +3,6 @@
 //! A flood of distinct keys can evict a real user's bucket. That user then
 //! starts again with a full bucket, so the flood never refuses someone who
 //! still had tokens, and it never locks an email that was not already locked.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -244,6 +243,15 @@ pub(crate) struct Limits {
     /// 10 connection tests per minute per user (D-I-21). M2's evaluator test
     /// runs share this limiter.
     pub(crate) connection_tests: KeyedLimiter<Uuid>,
+    /// Org domain verifications, D-P-54, D-P-64: 10 per minute per org.
+    pub(crate) sso_dns_checks: KeyedLimiter<llmobs_core::ids::OrgId>,
+    /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
+    /// behind NAT, so the bucket is generous.
+    pub(crate) sso_discover: KeyedLimiter<IpAddr>,
+    /// 5 alert test sends per minute per user, across channels (D-K-19).
+    pub(crate) alert_tests_by_user: KeyedLimiter<Uuid>,
+    /// 5 alert test sends per minute per channel, whoever sends them (D-K-19).
+    pub(crate) alert_tests_by_channel: KeyedLimiter<Uuid>,
     /// 60 requests per minute and 4 at once per personal access token on `POST /mcp` (D-H-10).
     pub(crate) mcp: McpLimits,
     /// 20 failures lock password login for 15 minutes.
@@ -290,6 +298,34 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            sso_dns_checks: KeyedLimiter::new(
+                Bucket {
+                    capacity: 10,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            alert_tests_by_user: KeyedLimiter::new(
+                Bucket {
+                    capacity: 5,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            sso_discover: KeyedLimiter::new(
+                Bucket {
+                    capacity: 300,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            alert_tests_by_channel: KeyedLimiter::new(
+                Bucket {
+                    capacity: 5,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             mcp: McpLimits::new(MAX_KEYS),
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
         }
@@ -302,6 +338,10 @@ impl Limits {
         self.email_mail.prune(now);
         self.feedback.prune(now);
         self.connection_tests.prune(now);
+        self.sso_dns_checks.prune(now);
+        self.sso_discover.prune(now);
+        self.alert_tests_by_user.prune(now);
+        self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
         self.lockout.prune(now);
     }

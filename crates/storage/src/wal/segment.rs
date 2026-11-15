@@ -41,6 +41,11 @@ impl SegmentWriter {
         let name = segment_name(first_seq);
         let path = dir.join(&name);
         let file = open_segment(&path)?;
+        // From here a failure leaves the empty file behind. The rotation path
+        // removes it; see `writer::remove_stray_segment`.
+        if let Some(source) = hooks.fail(HookPoint::WalSegmentDirSync) {
+            return Err(WalError::io("syncing WAL directory", dir, source));
+        }
         fs::sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))?;
         let len = file
             .metadata()

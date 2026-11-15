@@ -105,7 +105,7 @@ async fn traces_of(data_dir: &Path, spans: FileId) -> Vec<FileId> {
 /// The one-row result of a scalar query over the project's views.
 async fn count(storage: &Storage, sql: &str) -> i64 {
     let query = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
@@ -465,7 +465,7 @@ async fn a_failed_quarantine_commit_requeues() {
 /// One SQL statement through a fresh query context over the project's views.
 async fn sql_all(storage: &Storage, query: &str) -> Result<crate::SqlJson, crate::RunError> {
     let source = storage
-        .query(project(), QueryOptions::default())
+        .query(project(), QueryOptions::new(None, None))
         .await
         .unwrap();
     let ctx = QueryContext::new(source, None).unwrap();

@@ -15,7 +15,7 @@ use crate::api::account::AuthProvider;
 use crate::config::AuthSettings;
 
 pub(crate) use github::GithubProvider;
-pub(crate) use provider::OidcProvider;
+pub(crate) use provider::{IdpHttp, OidcProvider};
 pub(crate) use state_cookie::random_key;
 
 /// Failure talking to an identity provider during login.
@@ -28,6 +28,8 @@ pub(crate) enum ExchangeError {
     Unavailable,
     /// The provider rejected the code, or the token failed validation.
     Rejected,
+    /// The discovered authorization endpoint is not one the egress policy allows.
+    Refused,
 }
 
 /// Claims the login flow is allowed to read. `hd` is kept for the domain check.
@@ -37,8 +39,8 @@ pub(crate) struct LoginClaims {
     pub(crate) subject: String,
     /// Provider email. Absent when the provider did not assert one.
     pub(crate) email: Option<String>,
-    /// Missing means false.
-    pub(crate) email_verified: bool,
+    /// `None` when the provider did not assert it (D-P-55). Only `Some(true)` verifies an email.
+    pub(crate) email_verified: Option<bool>,
     /// Google hosted-domain claim. Absent for GitHub and when Google omits it.
     pub(crate) hd: Option<String>,
     /// Display name, before trimming.

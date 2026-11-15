@@ -1,6 +1,6 @@
 # 10 — SDKs (Python, TypeScript)
 
-Both SDKs are thin layers over OpenTelemetry: tracing goes out as OTLP/HTTP (protobuf) to `/v1/traces`; everything else uses a small REST client generated from the OpenAPI spec. License: MIT (independent of the server license decision).
+Both SDKs are thin layers over OpenTelemetry: tracing goes out as OTLP/HTTP (protobuf) to `/v1/traces`; everything else is plain JSON over HTTP (`requests` in Python, `fetch` in TypeScript); scores and feedback use small hand-written clients (D-F-1, D-F-16, D-F-17). License: MIT (independent of the server license decision).
 
 ## Design rules
 
@@ -49,6 +49,7 @@ TypeScript spells the options in camelCase (`apiKey`, `baseUrl`, `captureContent
 - **`flush()`** blocks (Python) or resolves (TS) when pending spans and scores are exported or the export timeout expires. **`shutdown()`** flushes, then stops the exporters; it is idempotent, and spans and scores after it are dropped.
 - **Buffers.** Spans go through the OTel `BatchSpanProcessor` with its default queue size; when it is full, new spans are dropped (OTel behaviour). Scores are buffered up to 10 000; when full, new scores are dropped. Dropped score counts are logged at warning level at most once per minute, with counts only; span drops are reported by the OTel batch processor's own logging.
 - **Score delivery.** A batch that gets a `2xx` response is done. `429`, any `5xx`, network errors and timeouts (10 s per attempt) retry the same batch up to 3 more times, waiting `Retry-After` when it is a non-negative integer number of seconds (capped at 30), else 1 s, 2 s, 4 s (an HTTP-date `Retry-After` uses the default), then drop with `llmobs: score batch failed after retries; dropped <n> scores`. Any other status drops the batch at once with `llmobs: score batch rejected with status <code>; dropped <n> scores`.
+- **Quota pause.** After a `402`, the exporter and score writes drop data for `Retry-After` seconds, at most one hour at a time, then send again; one warning per pause (D-P-34).
 - **Identification.** Spans created by the SDK use the instrumentation scope name `llmobs` and the SDK version as scope version (instrumentor spans keep their own scope). The provider's resource carries `telemetry.distro.name = "llmobs"` and `telemetry.distro.version = <SDK version>` (OTel semantic conventions), so the server can tell SDK versions apart. Storing the version server-side is not in the MVP; `scope_name` is stored (01).
 
 ## Recorded data
@@ -164,6 +165,7 @@ Known, accepted differences that the fixtures do not cover. The SDK READMEs list
 - **Zero-argument functions and `None`/`undefined`** (§ Testing).
 - **Integral floats.** JavaScript has one number type, and OTel JS encodes an integral number as `intValue`. So Python `params={"temperature": 1.0}`, `set_cost(1.0)` or metadata `2.0` give a double, TypeScript gives an int. Python always converts `set_cost`'s argument with `float()`. The server reads both (spec 02 rule 20).
 - **Large integers.** Python ints beyond ±(2^53−1) inside JSON payloads are written as JSON numbers; TypeScript `bigint` becomes a decimal string. As attributes (metadata) both write a JSON string.
+- **Usage counts.** TypeScript `setUsage` records only safe integers (`Number.isSafeInteger`, at most 2^53−1); larger values, non-integers and negatives are skipped with a debug line. Python `set_usage` records any non-negative `int` (not `bool`), including values beyond 2^53.
 - **Resource attributes:** see § Names.
 - **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to llmobs too; TypeScript sends only ours. The Python README warns about it.
 - **Abandoned generators.** A half-consumed Python sync generator that is garbage-collected ends its span with status ok; TypeScript (no finalizer) and Python async generators leave it unexported.

@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use crate::api::common::FieldError;
 use crate::api::convert;
+use crate::api::evaluators::EvaluatorKind;
 use crate::api::scores::ScoreCreate;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::ingest::IngestError;
@@ -41,6 +43,12 @@ pub(crate) enum Writer {
     Sdk { key_id: Uuid },
     /// A `pk` key on `POST /api/public/feedback`.
     EndUser { key_id: Uuid },
+    /// An evaluator through the queue: a rule's job, or a manual run (`rule_id: None`).
+    Evaluator {
+        kind: EvaluatorKind,
+        evaluator_id: Uuid,
+        rule_id: Option<Uuid>,
+    },
 }
 
 impl Writer {
@@ -52,6 +60,12 @@ impl Writer {
             (Self::Api { .. }, Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::Sdk { .. }, None | Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::EndUser { .. }, None | Some(ScoreSource::EndUser)) => Some(ScoreSource::EndUser),
+            (Self::Evaluator { kind, .. }, None) => Some(evaluator_source(kind)),
+            (Self::Evaluator { kind, .. }, Some(requested))
+                if requested == evaluator_source(kind) =>
+            {
+                Some(requested)
+            }
             _ => None,
         }
     }
@@ -62,6 +76,11 @@ impl Writer {
             Self::Human { user_id } => user_id,
             Self::Api { author } => author,
             Self::Sdk { key_id } | Self::EndUser { key_id } => key_id,
+            Self::Evaluator {
+                evaluator_id,
+                rule_id,
+                ..
+            } => rule_id.unwrap_or(evaluator_id),
         }
     }
 
@@ -69,8 +88,33 @@ impl Writer {
     fn author_user(self) -> Option<Uuid> {
         match self {
             Self::Human { user_id } => Some(user_id),
-            Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } => None,
+            Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } | Self::Evaluator { .. } => {
+                None
+            }
         }
+    }
+
+    /// `evaluator_id` and `rule_id` of the stored rows. Only an evaluator has them.
+    fn evaluator_ids(self) -> (Option<Uuid>, Option<Uuid>) {
+        match self {
+            Self::Evaluator {
+                evaluator_id,
+                rule_id,
+                ..
+            } => (Some(evaluator_id), rule_id),
+            Self::Human { .. } | Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } => {
+                (None, None)
+            }
+        }
+    }
+}
+
+/// The `source` an evaluator's scores are stored with (spec 06 § Scores).
+fn evaluator_source(kind: EvaluatorKind) -> ScoreSource {
+    match kind {
+        EvaluatorKind::LlmJudge => ScoreSource::LlmJudge,
+        EvaluatorKind::Check => ScoreSource::Check,
+        EvaluatorKind::Webhook => ScoreSource::Webhook,
     }
 }
 
@@ -82,6 +126,9 @@ pub(crate) async fn write(
     writer: Writer,
     items: Vec<ScoreCreate>,
 ) -> Result<Vec<Uuid>, ApiError> {
+    check_cap(state, project.org_id)
+        .await
+        .map_err(ApiError::from)?;
     let now = state.clock.now_ns();
     let definitions = state.definitions.live(&state.meta, project.id, now).await?;
     let mut errors = Vec::new();
@@ -136,9 +183,10 @@ pub(crate) async fn write(
         .filter(|pending| !is_v7(pending.id))
         .map(|pending| pending.id.to_string())
         .collect();
-    let live = live_scores(state, project.id, &lookup).await?;
+    let live = live_scores(state, project, &lookup).await?;
 
     let author_user = writer.author_user();
+    let (evaluator_id, rule_id) = writer.evaluator_ids();
     let rows: Vec<Score> = kept
         .into_iter()
         .map(|pending| {
@@ -168,8 +216,8 @@ pub(crate) async fn write(
                 value,
                 reason,
                 source,
-                evaluator_id: None,
-                rule_id: None,
+                evaluator_id,
+                rule_id,
                 experiment_id: None,
                 dataset_item_id: None,
                 author_user_id: author_user,
@@ -201,7 +249,7 @@ pub(crate) async fn delete(
     score_id: Uuid,
 ) -> Result<(), ApiError> {
     let now = state.clock.now_ns();
-    let mut live = live_scores(state, project.id, &[score_id.to_string()]).await?;
+    let mut live = live_scores(state, project, &[score_id.to_string()]).await?;
     let Some(mut tombstone) = live.remove(&score_id) else {
         return Err(ApiError::NotFound);
     };
@@ -422,13 +470,13 @@ fn derive_id(
 /// The live versions of `ids` (UUID strings), keyed by score id. No ids means no lookup.
 async fn live_scores(
     state: &AppState,
-    project: ProjectId,
+    project: &ProjectRow,
     ids: &[String],
 ) -> Result<HashMap<Uuid, Score>, ApiError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let ctx = open_query(state, project, None).await?;
+    let ctx = open_query(state, project.org_id, project.id, None).await?;
     let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
     let batches = llmobs_storage::scores_by_id(&ctx, &refs, READ_TIMEOUT)
         .await
@@ -438,7 +486,7 @@ async fn live_scores(
                 detail: "score lookup is unavailable, retry later",
             }
         })?;
-    let scores = convert::scores(&batches, project)?;
+    let scores = convert::scores(&batches, project.id)?;
     Ok(scores
         .into_iter()
         .map(|score| (score.score_id, score))
@@ -461,9 +509,12 @@ async fn append(state: &AppState, project: ProjectId, rows: &[Score]) -> Result<
 mod tests {
     use std::collections::BTreeMap;
 
+    use llmobs_core::ids::OrgId;
+
     use super::*;
+    use crate::api::common::ProblemCode;
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
-    use crate::test_support::TestApp;
+    use crate::test_support::{TestApp, set_limits};
     use llmobs_core::enums::ScoreDataType;
     use llmobs_storage::ScoreListRequest;
 
@@ -518,8 +569,8 @@ mod tests {
     }
 
     /// Every stored live score of `project`, read through storage.
-    async fn stored(app: &TestApp, project: ProjectId) -> Vec<Score> {
-        let ctx = open_query(&app.state, project, None).await.unwrap();
+    async fn stored(app: &TestApp, org: OrgId, project: ProjectId) -> Vec<Score> {
+        let ctx = open_query(&app.state, org, project, None).await.unwrap();
         let page = llmobs_storage::score_list(
             &ctx,
             ScoreListRequest {
@@ -529,6 +580,8 @@ mod tests {
                 session_id: None,
                 name: None,
                 source: None,
+                evaluator_id: None,
+                rule_id: None,
                 window: None,
                 limit: 100,
                 cursor: None,
@@ -680,7 +733,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(written, vec![accepted]);
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows[0].created_at, now + 3_600_000_000_000);
 
         let refused_id = v7_at(now_ms + hour_ms + 1);
@@ -722,7 +775,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].score_id, id);
         assert_eq!(rows[0].created_at, V7_FIXED_MS * 1_000_000);
@@ -746,7 +799,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.score_id, id);
@@ -780,7 +833,7 @@ mod tests {
         app.state.clock.advance(std::time::Duration::from_secs(60));
         write_value(0.2).await.unwrap();
 
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value, ScoreValue::Numeric(0.2));
         assert_eq!(rows[0].created_at, now);
@@ -805,7 +858,11 @@ mod tests {
         .unwrap();
 
         delete(&app.state, &seeded.project, id).await.unwrap();
-        assert!(stored(&app, seeded.project.id).await.is_empty());
+        assert!(
+            stored(&app, seeded.org_id, seeded.project.id)
+                .await
+                .is_empty()
+        );
         match delete(&app.state, &seeded.project, id).await {
             Err(ApiError::NotFound) => {}
             other => panic!("expected not found, got {other:?}"),
@@ -896,7 +953,7 @@ mod tests {
         .await
         .unwrap();
 
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         let relevance = rows.iter().find(|row| row.name == "relevance").unwrap();
         assert_eq!(relevance.source, ScoreSource::Sdk);
         assert_eq!(relevance.author_user_id, None);
@@ -906,6 +963,118 @@ mod tests {
         let helpful = rows.iter().find(|row| row.name == "helpful").unwrap();
         assert_eq!(helpful.source, ScoreSource::EndUser);
         assert_eq!(helpful.author_user_id, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_writer_sets_source_ids_and_author() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator: Uuid = "01900000-0000-7000-8000-000000000500".parse().unwrap();
+        let rule: Uuid = "01900000-0000-7000-8000-000000000700".parse().unwrap();
+        let project = seeded.project.id;
+
+        let through_rule = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: evaluator,
+            rule_id: Some(rule),
+        };
+        write(
+            &app.state,
+            &seeded.project,
+            through_rule,
+            vec![item("same", 1.0)],
+        )
+        .await
+        .unwrap();
+        // A manual run has no rule: its author is the evaluator.
+        let manual = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: evaluator,
+            rule_id: None,
+        };
+        write(&app.state, &seeded.project, manual, vec![item("same", 0.0)])
+            .await
+            .unwrap();
+
+        let rows = stored(&app, seeded.org_id, project).await;
+        assert_eq!(rows.len(), 2);
+        let by_rule = rows.iter().find(|row| row.rule_id == Some(rule)).unwrap();
+        assert_eq!(by_rule.source, ScoreSource::Check);
+        assert_eq!(by_rule.evaluator_id, Some(evaluator));
+        assert_eq!(by_rule.author_user_id, None);
+        assert_eq!(
+            by_rule.score_id,
+            derive_id(project, &span_target(), "same", ScoreSource::Check, rule)
+        );
+        let by_evaluator = rows.iter().find(|row| row.rule_id.is_none()).unwrap();
+        assert_eq!(by_evaluator.evaluator_id, Some(evaluator));
+        assert_eq!(
+            by_evaluator.score_id,
+            derive_id(
+                project,
+                &span_target(),
+                "same",
+                ScoreSource::Check,
+                evaluator
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_writer_refuses_another_source() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::LlmJudge,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                writer,
+                vec![ScoreCreate {
+                    source: Some(ScoreSource::Human),
+                    ..item("same", 1.0)
+                }],
+            )
+            .await,
+        );
+        assert_eq!(
+            errors,
+            vec![(
+                "scores[0].source".to_owned(),
+                "source human is not allowed here".to_owned()
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluator_scores_count_in_usage() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let writer = Writer::Evaluator {
+            kind: EvaluatorKind::Webhook,
+            evaluator_id: author(),
+            rule_id: None,
+        };
+        write(&app.state, &seeded.project, writer, vec![item("same", 1.0)])
+            .await
+            .unwrap();
+        app.state
+            .usage
+            .flush(&app.state.meta)
+            .await
+            .expect("usage flushes");
+        let scores: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(scores), 0) FROM usage_daily WHERE project_id = ?",
+        )
+        .bind(seeded.project.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("usage reads");
+        assert_eq!(scores, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -952,7 +1121,11 @@ mod tests {
                 ),
             ]
         );
-        assert!(stored(&app, seeded.project.id).await.is_empty());
+        assert!(
+            stored(&app, seeded.org_id, seeded.project.id)
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -989,7 +1162,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids, vec![id, id]);
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value, ScoreValue::Numeric(0.9));
     }
@@ -1018,7 +1191,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first[0].get_version_num(), 8);
 
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].value, ScoreValue::Numeric(0.9));
         assert_eq!(rows[0].created_at, now);
@@ -1121,7 +1294,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         let row = rows.iter().find(|row| row.score_id == id).unwrap();
         assert_eq!(row.source, ScoreSource::Sdk);
         assert_eq!(row.author_user_id, None);
@@ -1155,7 +1328,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let rows = stored(&app, seeded.project.id).await;
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
         let session = rows.iter().find(|row| row.score_id == on_session).unwrap();
         assert_eq!(session.session_id, None);
         let span = rows.iter().find(|row| row.score_id == on_span).unwrap();
@@ -1261,7 +1434,11 @@ mod tests {
                 ),
             ]
         );
-        assert!(stored(&app, seeded.project.id).await.is_empty());
+        assert!(
+            stored(&app, seeded.org_id, seeded.project.id)
+                .await
+                .is_empty()
+        );
 
         let fitting = vec![
             item("relevance", 0.0),
@@ -1358,5 +1535,78 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_cannot_write_scores() {
+        use crate::api::scores::ScoreBatch;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let scores_path = format!("/api/v1/projects/{}/scores", seeded.project.id);
+        let score = |id: &str| ScoreCreate {
+            score_id: Some(id.parse().unwrap()),
+            target: span_target(),
+            session_id: None,
+            user_id: None,
+            name: "tone".to_owned(),
+            value: ScoreValue::Numeric(1.0),
+            reason: None,
+            source: None,
+            metadata: BTreeMap::new(),
+        };
+        let id = "01900000-0000-7000-8000-000000000402";
+        let before_cap = app
+            .request(axum::http::Method::POST, &scores_path)
+            .header("cookie", &seeded.cookie)
+            .json(&ScoreBatch {
+                scores: vec![score(id)],
+            })
+            .send()
+            .await;
+        assert_eq!(before_cap.status, axum::http::StatusCode::OK);
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+
+        let refused = app
+            .request(axum::http::Method::POST, &scores_path)
+            .header("cookie", &seeded.cookie)
+            .json(&ScoreBatch {
+                scores: vec![score("01900000-0000-7000-8000-000000000403")],
+            })
+            .send()
+            .await;
+        assert_eq!(refused.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert!(refused.header("retry-after").is_some());
+        assert_eq!(refused.problem().code, ProblemCode::QuotaExceeded);
+
+        let feedback = app
+            .request(axum::http::Method::POST, "/api/public/feedback")
+            .header("authorization", &format!("Bearer {}", seeded.public_key))
+            .header("content-type", "application/json")
+            .body(include_bytes!("../../../fixtures/api/requests/feedback.json").to_vec())
+            .send()
+            .await;
+        assert_eq!(feedback.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(feedback.problem().code, ProblemCode::QuotaExceeded);
+
+        let deleted = app
+            .request(axum::http::Method::DELETE, &format!("{scores_path}/{id}"))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
     }
 }

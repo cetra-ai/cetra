@@ -22,6 +22,11 @@ export function warnOnce(key: string, message: string): void {
   runtimeGlobals().console?.warn(message);
 }
 
+/** Warn `message` on every call (no deduplication). */
+export function warn(message: string): void {
+  runtimeGlobals().console?.warn(message);
+}
+
 /** Debug logging through the OTel diagnostics logger. */
 export function debug(message: string): void {
   diag.debug(message);

@@ -15,10 +15,15 @@ use crate::http::error::ApiError;
 use crate::meta::entitlements::window_ends_since;
 use crate::meta::{MetaDb, MetaError};
 
+pub(crate) mod notices;
+pub(crate) mod rate;
 pub(crate) mod tokens;
+pub(crate) mod units;
+pub(crate) mod window;
 
 pub(crate) use crate::api::entitlements::Feature;
 use tokens::{OrgGrant, OrgTokenError, grant_from_token};
+pub(crate) use window::{Visibility, query_options};
 
 /// The window history looks back this far (D-P-30).
 const WINDOW_LOOKBACK_NS: i64 = 30 * 86_400 * 1_000_000_000;
@@ -134,6 +139,12 @@ impl Entitlements {
         Self { features, limits }
     }
 
+    /// The current window plus 30 days, in days; `None` without a window (D-P-22). Ingest's D85
+    /// age check uses it. M's retention uses the window history instead (D-P-45).
+    pub(crate) fn retention_cap_days(self) -> Option<u32> {
+        retention_cap(self.limits.data_access_days)
+    }
+
     /// Whether the org may use `feature`.
     pub(crate) fn allows(self, feature: Feature) -> bool {
         self.features.contains(feature)
@@ -196,14 +207,31 @@ impl EntitlementsState {
     ///
     /// A stored token that no longer verifies for this cell (a retired key, a changed
     /// `public_url`) is skipped with a `warn` naming the org id and the reason.
+    ///
+    /// With `control_plane` off (D-P-50) no stored token is read: the org map stays empty.
     pub(crate) async fn load(
         meta: &MetaDb,
         license: LicenseState,
         defaults: Defaults,
         public_url: &str,
+        control_plane: bool,
     ) -> Result<Self, MetaError> {
         let mut orgs = HashMap::new();
-        for stored in crate::meta::entitlements::all_tokens(meta.reader()).await? {
+        let stored_tokens = crate::meta::entitlements::all_tokens(meta.reader()).await?;
+        if !control_plane {
+            if !stored_tokens.is_empty() {
+                tracing::warn!(
+                    count = stored_tokens.len(),
+                    "stored org tokens ignored: entitlements.control_plane is off"
+                );
+            }
+            return Ok(Self {
+                license,
+                defaults,
+                orgs: RwLock::new(orgs),
+            });
+        }
+        for stored in stored_tokens {
             let granted = grant_from_token(&stored.token, public_url, &defaults.limits).and_then(
                 |(org, grant)| {
                     if org == stored.org_id {
@@ -331,6 +359,12 @@ impl EntitlementsState {
     }
 }
 
+/// The retention cap of a data window of `days` (D-P-22, D-P-45): the window plus 30 days, in
+/// days, saturating at `u32::MAX`. `None` (no window) caps nothing.
+pub(crate) fn retention_cap(days: Option<u64>) -> Option<u32> {
+    days.map(|days| u32::try_from(days.saturating_add(30)).unwrap_or(u32::MAX))
+}
+
 /// What `org` may do now. Synchronous and in memory; call it at every check (D-P-10).
 pub(crate) fn of(state: &AppState, org: OrgId) -> Entitlements {
     state.entitlements.resolve(org, state.clock.now_ns())
@@ -344,6 +378,21 @@ pub(crate) fn require(state: &AppState, org: OrgId, feature: Feature) -> Result<
         Err(ApiError::PlanRequired {
             detail: feature.locked_detail(),
         })
+    }
+}
+
+/// Whether `count + adding` would exceed `limit` (D-P-20). `None` never does.
+pub(crate) fn over_limit(limit: Option<u64>, count: u64, adding: u64) -> bool {
+    limit.is_some_and(|limit| count.saturating_add(adding) > limit)
+}
+
+/// The `plan_limit` error for `limit` (D-P-14). `noun` is (singular, plural).
+pub(crate) fn plan_limit(limit: u64, noun: (&str, &str)) -> ApiError {
+    ApiError::PlanLimit {
+        detail: format!(
+            "Your plan allows {limit} {}.",
+            if limit == 1 { noun.0 } else { noun.1 }
+        ),
     }
 }
 
@@ -388,6 +437,25 @@ pub(crate) fn log_license(license: &LicenseState, now_ns: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_cap_is_the_window_plus_thirty_days() {
+        assert_eq!(retention_cap(None), None);
+        assert_eq!(retention_cap(Some(30)), Some(60));
+        assert_eq!(retention_cap(Some(u64::MAX)), Some(u32::MAX));
+        assert_eq!(retention_cap(Some(u64::from(u32::MAX))), Some(u32::MAX));
+        assert_eq!(
+            Entitlements::new(
+                FeatureSet::EMPTY,
+                Limits {
+                    data_access_days: Some(30),
+                    ..Limits::default()
+                }
+            )
+            .retention_cap_days(),
+            Some(60)
+        );
+    }
     use crate::config::{EntitlementDefaults, PublicUrl, Secret};
     use crate::ee::license::InvalidLicense;
     use crate::meta::entitlements::{StoredToken, put_token, record_window_end};
@@ -471,6 +539,8 @@ mod tests {
             serde_json::to_string(&Feature::ProjectRoles).unwrap(),
             "\"project_roles\""
         );
+        assert_eq!(Feature::from_name("org_sso"), Some(Feature::OrgSso));
+        assert!(Feature::OrgSso.is_ee());
         assert_eq!(Feature::from_name("audit_logs"), None);
         assert!(Feature::ALL.len() <= 32);
     }
@@ -607,6 +677,17 @@ mod tests {
         let app = TestApp::with_license(&["project_roles"]).await;
         assert!(require(&app.state, org, Feature::ProjectRoles).is_ok());
         assert!(require(&app.state, org, Feature::SsoEnforcement).is_err());
+    }
+
+    #[tokio::test]
+    async fn org_sso_follows_the_license() {
+        let org = OrgId::new_v7();
+        let app = TestApp::new().await;
+        assert!(!of(&app.state, org).allows(Feature::OrgSso));
+
+        let app = TestApp::with_license(&["org_sso"]).await;
+        assert!(of(&app.state, org).allows(Feature::OrgSso));
+        assert!(require(&app.state, org, Feature::OrgSso).is_ok());
     }
 
     #[tokio::test]
@@ -747,6 +828,7 @@ mod tests {
             LicenseState::Absent,
             defaults,
             PublicUrl::default().origin(),
+            true,
         ))
         .await;
         let loaded = loaded.unwrap();
@@ -755,6 +837,52 @@ mod tests {
         assert!(logs.contains("WARN"), "{logs}");
         assert!(logs.contains(&other_org.to_string()), "{logs}");
         assert!(logs.contains("the token is for another cell"), "{logs}");
+        assert!(!logs.contains("llmobs1."), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn stored_tokens_are_ignored_when_off() {
+        let app = TestApp::new().await;
+        let org = new_org(&app, "opt-out").await;
+        let received = app.state.clock.now_ns();
+        let token = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+        );
+        let record = StoredToken {
+            org_id: org,
+            token,
+            token_id: Uuid::now_v7(),
+            issued_at: received - 1,
+            received_at: received,
+        };
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { put_token(conn, &record).await }))
+            .await
+            .unwrap();
+
+        let defaults = app.state.entitlements.defaults().clone();
+        let (loaded, logs) = capture_logs(EntitlementsState::load(
+            &app.state.meta,
+            LicenseState::Absent,
+            defaults,
+            PublicUrl::default().origin(),
+            false,
+        ))
+        .await;
+        let loaded = loaded.unwrap();
+        assert!(loaded.grant(org).is_none());
+        assert_eq!(
+            loaded.resolve(org, received),
+            app.state.entitlements.resolve(org, received)
+        );
+        assert!(logs.contains("stored org tokens ignored"), "{logs}");
+        assert!(logs.contains("count=1"), "{logs}");
         assert!(!logs.contains("llmobs1."), "{logs}");
     }
 

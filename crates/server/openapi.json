@@ -67,7 +67,7 @@
           "auth"
         ],
         "summary": "Finish an OAuth or OIDC login",
-        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+        "description": "Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
         "operationId": "get_oauth_callback",
         "parameters": [
           {
@@ -719,13 +719,287 @@
         "security": []
       }
     },
+    "/api/auth/sso/authorize": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start an org's single sign-on login",
+        "description": "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+        "operationId": "get_sso_authorize",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "The email domain, e.g. `acme.com`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect",
+            "in": "query",
+            "description": "Relative path to open after a successful login.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the identity provider, or to `/login?error=sso_unavailable`."
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/sso/discover": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Ask whether an email's domain signs in through an org",
+        "description": "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+        "operationId": "post_sso_discover",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoDiscoverRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Whether the domain signs in through an org.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoDiscovery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/internal/v1/deletions": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List applied org and project drops",
+        "description": "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+        "operationId": "list_internal_deletions",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`project` or `org`; both when omitted.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/InternalDropKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1–10 000. Default 1 000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of applied drops, oldest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalDropPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/memberships/lookup": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Look up a user's memberships",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+        "operationId": "post_internal_membership_lookup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MembershipLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The user's active memberships.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipLookup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/v1/orgs": {
       "post": {
         "tags": [
           "internal"
         ],
         "summary": "Create an org",
-        "description": "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+        "description": "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         "operationId": "post_internal_org",
         "requestBody": {
           "content": {
@@ -788,8 +1062,107 @@
               }
             }
           },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/orgs/{org_id}": {
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Drop an org",
+        "description": "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        "operationId": "delete_internal_org",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org drop is applied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deletion"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The org drop, in status pending or resolving.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deletion"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -894,6 +1267,448 @@
         "security": []
       }
     },
+    "/api/internal/v1/orgs/{org_id}/members": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List an org's members",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+        "operationId": "list_internal_org_members",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every\nmember.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's members.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalMembers"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/usage": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List org usage by day",
+        "description": "Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.",
+        "operationId": "list_internal_usage",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive, `YYYY-MM-DD`. Required.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive, `YYYY-MM-DD`. Required. `to - from` is at most 92 days.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1–10 000. Default 1 000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of org usage by day.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUsagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/delete": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Delete a user",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+        "operationId": "post_internal_user_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The user is deleted, with the orgs it solely owned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUserDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/disable": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Disable a user",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "operationId": "post_internal_user_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The user is disabled and its access is revoked."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/revoke": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "End a user's sessions and personal tokens",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "operationId": "post_internal_user_revoke",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The user's sessions and tokens were revoked."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/public/feedback": {
       "post": {
         "tags": [
@@ -935,6 +1750,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3992,6 +4817,775 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/sso": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's identity provider and domains",
+        "description": "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+        "operationId": "get_org_sso",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Turn the org's identity provider on, off or enforced",
+        "description": "Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).",
+        "operationId": "patch_org_sso",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchOrgSso"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/domains": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Add an email domain to the org's SSO",
+        "description": "Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+        "operationId": "post_org_sso_domain",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddOrgSsoDomain"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The SSO settings, with the new domain pending.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/domains/{id}": {
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Remove an email domain from the org's SSO",
+        "description": "Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).",
+        "operationId": "delete_org_sso_domain",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Domain id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The domain is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/domains/{id}/verify": {
+      "post": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Verify an email domain with its DNS TXT record",
+        "description": "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+        "operationId": "post_org_sso_domain_verify",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Domain id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The SSO settings, with the domain verified.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/sso/provider": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Save the org's identity provider",
+        "description": "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+        "operationId": "put_org_sso_provider",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutOrgSsoProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The saved SSO settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgSso"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Remove the org's identity provider",
+        "description": "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+        "operationId": "delete_org_sso_provider",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The provider is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/usage": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's usage by day",
+        "description": "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        "operationId": "get_org_usage",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's usage by day.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}": {
       "get": {
         "tags": [
@@ -5211,7 +6805,7 @@
           "alerts"
         ],
         "summary": "Create a notification channel",
-        "description": "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+        "description": "Needs role member. Email channels need SMTP. At most 20 channels per project (409). Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         "operationId": "create_channel",
         "parameters": [
           {
@@ -5397,6 +6991,7 @@
           "alerts"
         ],
         "summary": "Update a notification channel",
+        "description": "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         "operationId": "update_channel",
         "parameters": [
           {
@@ -5509,7 +7104,7 @@
           "alerts"
         ],
         "summary": "Send a test notification",
-        "description": "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+        "description": "Sends one sample message now and reports the result. Nothing is stored. Needs role member. At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         "operationId": "test_channel",
         "parameters": [
           {
@@ -5786,7 +7381,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5898,7 +7493,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -5965,6 +7560,239 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Deletion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/eval-jobs": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "List eval jobs",
+        "description": "Any project member can read. Newest first. Jobs are kept 7 days after they finish.",
+        "operationId": "list_eval_jobs",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "query",
+            "description": "Jobs queued by this online rule.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "evaluator_id",
+            "in": "query",
+            "description": "Jobs of this evaluator.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Jobs with this status.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EvalJobStatus"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Jobs of this kind.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/EvalJobKind"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of jobs to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of eval jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalJobPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/eval-jobs/{id}": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get an eval job",
+        "description": "Any project member can read.",
+        "operationId": "get_eval_job",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Eval job id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalJob"
                 }
               }
             }
@@ -6498,7 +8326,7 @@
           "evaluation"
         ],
         "summary": "Delete an evaluator",
-        "description": "Project members and above. API keys cannot call it.",
+        "description": "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
         "operationId": "delete_evaluator",
         "parameters": [
           {
@@ -6557,6 +8385,16 @@
           },
           "404": {
             "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6668,6 +8506,109 @@
           },
           "409": {
             "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/evaluators/{id}/run": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Run an evaluator on one trace",
+        "description": "Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.",
+        "operationId": "post_evaluator_run",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Evaluator id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunEvaluatorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The queued job.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7259,7 +9200,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7280,6 +9221,703 @@
           },
           "503": {
             "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/online-rules": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "List online rules",
+        "description": "Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).",
+        "operationId": "list_online_rules",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of online rules.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRulePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Create an online rule",
+        "description": "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.",
+        "operationId": "post_online_rule",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOnlineRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/online-rules/preview": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Count what a rule's filter matches",
+        "description": "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+        "operationId": "post_online_rule_preview",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OnlineRulePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the filter matches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRulePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/online-rules/{id}": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get an online rule",
+        "description": "Any project member can read.",
+        "operationId": "get_online_rule",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Delete an online rule",
+        "description": "Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.",
+        "operationId": "delete_online_rule",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Update an online rule",
+        "description": "Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
+        "operationId": "patch_online_rule",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOnlineRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated rule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/online-rules/{id}/resume": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Resume an online rule",
+        "description": "Project members and above. API keys cannot call it. Clears the rule's pause.",
+        "operationId": "post_online_rule_resume",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Online rule id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule, not paused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnlineRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -7524,6 +10162,97 @@
       }
     },
     "/api/v1/projects/{project}/saved-views/{id}": {
+      "get": {
+        "tags": [
+          "saved_views"
+        ],
+        "summary": "Get a saved view",
+        "description": "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        "operationId": "get_saved_view",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Saved view id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The saved view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "saved_views"
@@ -8293,6 +11022,26 @@
             }
           },
           {
+            "name": "evaluator_id",
+            "in": "query",
+            "description": "Scores written by this evaluator.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "rule_id",
+            "in": "query",
+            "description": "Scores written by this online rule.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Inclusive `created_at` start. RFC 3339 or epoch milliseconds.",
@@ -8382,7 +11131,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8464,6 +11213,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8774,7 +11533,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8904,7 +11663,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9098,7 +11857,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9247,7 +12006,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9441,7 +12200,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9580,7 +12339,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9701,7 +12460,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9821,7 +12580,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10098,7 +12857,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10228,7 +12987,7 @@
             }
           },
           "422": {
-            "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10309,6 +13068,16 @@
               }
             }
           },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
             "content": {
@@ -10370,6 +13139,20 @@
   },
   "components": {
     "schemas": {
+      "AddOrgSsoDomain": {
+        "type": "object",
+        "description": "`POST /api/v1/orgs/{org}/sso/domains`.",
+        "required": [
+          "domain"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The email domain, e.g. `acme.com`. Punycode for internationalized names."
+          }
+        },
+        "additionalProperties": false
+      },
       "AdminLicense": {
         "type": "object",
         "description": "`GET /api/v1/admin/license`. Never contains the key.",
@@ -10624,7 +13407,7 @@
           "threshold": {
             "type": "number",
             "format": "double",
-            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`."
+            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target)."
           },
           "window": {
             "$ref": "#/components/schemas/AlertWindow",
@@ -11053,7 +13836,8 @@
           "providers",
           "smtp_enabled",
           "email_verification_required",
-          "org_create_allowed"
+          "org_create_allowed",
+          "sso_discovery"
         ],
         "properties": {
           "email_verification_required": {
@@ -11090,6 +13874,10 @@
           "smtp_enabled": {
             "type": "boolean",
             "description": "SMTP is configured, so password reset and verification email can be sent."
+          },
+          "sso_discovery": {
+            "type": "boolean",
+            "description": "The login page asks for the email first: some domain signs in through an org's\nprovider (D-P-60)."
           }
         }
       },
@@ -11150,6 +13938,14 @@
           }
         },
         "additionalProperties": true
+      },
+      "BudgetPeriod": {
+        "type": "string",
+        "description": "The period of a rule budget, in UTC.",
+        "enum": [
+          "day",
+          "month"
+        ]
       },
       "ChangePasswordRequest": {
         "type": "object",
@@ -11677,6 +14473,64 @@
         },
         "additionalProperties": false
       },
+      "CreateOnlineRuleRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/online-rules` body. Absent optional fields take their defaults.\n\nOptional fields refuse `null` (spec 09 § Conventions). Its `Debug` is derived: a rule holds\nconfiguration only, no payload or secret.",
+        "required": [
+          "name",
+          "evaluator_id",
+          "target",
+          "variable_mapping"
+        ],
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Required with `budget_usd`."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Budget per period, in USD. Judge evaluators only."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the rule runs. Default true."
+          },
+          "evaluator_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The evaluator the rule runs."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Filter over the target's view. Absent means no filter."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching targets to evaluate, in `(0, 1]`. Default 1."
+          },
+          "target": {
+            "$ref": "#/components/schemas/RuleTarget",
+            "description": "What the rule matches. Immutable once created."
+          },
+          "variable_mapping": {
+            "type": "object",
+            "description": "Prompt variable to mapping expression, 1 to 32 variables.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateOrgRequest": {
         "type": "object",
         "description": "`POST /api/v1/orgs`.",
@@ -11733,14 +14587,18 @@
             "description": "Display name. Trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
-            "description": "Days to keep data, from 1 to 36500. Absent keeps data forever.",
-            "minimum": 0
+            "description": "Days to keep data, from 1 to 36500. Null or absent keeps data forever.",
+            "maximum": 36500,
+            "minimum": 1
           },
           "slug": {
             "type": "string",
-            "description": "URL slug. Absent derives one from the name. Project slugs are not reserved words."
+            "description": "URL slug. Absent derives one from the name. `settings` is reserved."
           }
         },
         "additionalProperties": false
@@ -11989,11 +14847,11 @@
           "id": {
             "type": "string",
             "format": "uuid",
-            "description": "The user id or the API key id."
+            "description": "The user, API key or control-plane token id."
           },
           "kind": {
             "$ref": "#/components/schemas/DeletionActorKind",
-            "description": "`user` or `api_key`."
+            "description": "`user`, `api_key` or `control_plane`."
           }
         }
       },
@@ -12002,7 +14860,8 @@
         "description": "Who requested a deletion.",
         "enum": [
           "user",
-          "api_key"
+          "api_key",
+          "control_plane"
         ]
       },
       "DeletionFailure": {
@@ -12154,6 +15013,14 @@
           "failed"
         ]
       },
+      "DomainStatus": {
+        "type": "string",
+        "description": "Whether the org has proved the domain.",
+        "enum": [
+          "pending",
+          "verified"
+        ]
+      },
       "EndUserDetail": {
         "type": "object",
         "description": "User summary plus the most recent sessions.\n\nSpec 09 § Response shapes.",
@@ -12251,6 +15118,158 @@
             "description": "End-user id."
           }
         }
+      },
+      "EvalJob": {
+        "type": "object",
+        "description": "An eval job. Spec 09 § Evaluation & alerts.",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "evaluator_id",
+          "trace_id",
+          "attempts",
+          "not_before",
+          "created_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Attempts made so far.",
+            "minimum": 0
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Cost of the judge call, in USD."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "error": {
+            "type": "string",
+            "description": "The failure text, without payload content or secrets."
+          },
+          "error_class": {
+            "$ref": "#/components/schemas/TestErrorClass",
+            "description": "What the caller should do with the failure. Omitted unless the job failed or was requeued."
+          },
+          "evaluator_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The evaluator the job runs."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Time the job finished. Omitted while it is queued or running."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Job id."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Input tokens of the judge call.",
+            "minimum": 0
+          },
+          "judge_trace_id": {
+            "$ref": "#/components/schemas/TraceId",
+            "description": "The judge trace of the run, 32 lowercase hex digits."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EvalJobKind",
+            "description": "Where the job came from."
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Latency of the judge call, in milliseconds.",
+            "minimum": 0
+          },
+          "not_before": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Earliest time the job may run. JSON is RFC 3339."
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Output tokens of the judge call.",
+            "minimum": 0
+          },
+          "rule_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The rule that queued the job. Omitted for a manual run."
+          },
+          "score_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The score the run wrote."
+          },
+          "span_id": {
+            "$ref": "#/components/schemas/SpanId",
+            "description": "Target span, 16 lowercase hex digits. Omitted for a trace target."
+          },
+          "status": {
+            "$ref": "#/components/schemas/EvalJobStatus",
+            "description": "Where the job is in its life."
+          },
+          "trace_id": {
+            "$ref": "#/components/schemas/TraceId",
+            "description": "Target trace, 32 lowercase hex digits."
+          }
+        }
+      },
+      "EvalJobKind": {
+        "type": "string",
+        "description": "Where a job came from. Stored as `eval_jobs.kind`.",
+        "enum": [
+          "rule",
+          "manual",
+          "backfill"
+        ]
+      },
+      "EvalJobPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvalJob"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "EvalJobStatus": {
+        "type": "string",
+        "description": "Where a job is in its life. Stored as `eval_jobs.status`.",
+        "enum": [
+          "queued",
+          "running",
+          "done",
+          "failed",
+          "skipped"
+        ]
       },
       "Evaluator": {
         "type": "object",
@@ -12558,7 +15577,8 @@
         "enum": [
           "retention_management",
           "project_roles",
-          "sso_enforcement"
+          "sso_enforcement",
+          "org_sso"
         ]
       },
       "FeedbackRequest": {
@@ -12693,6 +15713,116 @@
           }
         }
       },
+      "InternalDrop": {
+        "type": "object",
+        "description": "One applied drop in the feed (D-P-49).",
+        "required": [
+          "id",
+          "kind",
+          "org_id",
+          "applied_at"
+        ],
+        "properties": {
+          "applied_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the drop was applied."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The deletion id."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/InternalDropKind"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Project drops only."
+          }
+        }
+      },
+      "InternalDropKind": {
+        "type": "string",
+        "description": "A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).",
+        "enum": [
+          "project",
+          "org"
+        ]
+      },
+      "InternalDropPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalDrop"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "InternalMember": {
+        "type": "object",
+        "description": "One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it.",
+        "required": [
+          "user_id",
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The user's email. Sent to the control plane only; never logged."
+          },
+          "name": {
+            "type": "string",
+            "description": "The user's display name, when it has one."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The member's org role."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user id."
+          }
+        }
+      },
+      "InternalMembers": {
+        "type": "object",
+        "description": "Answer of `GET /api/internal/v1/orgs/{org_id}/members`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalMember"
+            },
+            "description": "The members, ordered by email."
+          }
+        }
+      },
       "InternalOrg": {
         "type": "object",
         "description": "The created or existing org.",
@@ -12726,6 +15856,121 @@
           "name": {
             "type": "string",
             "description": "Display name for a new user. Ignored when the user exists."
+          }
+        },
+        "additionalProperties": false
+      },
+      "InternalUsagePage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalUsageRow"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "InternalUsageRow": {
+        "type": "object",
+        "description": "One org's usage on one UTC day, summed over its projects (D-P-24).",
+        "required": [
+          "org_id",
+          "day",
+          "spans",
+          "scores",
+          "units",
+          "bytes",
+          "judge_input_tokens",
+          "judge_output_tokens",
+          "judge_cost_usd"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "description": "`YYYY-MM-DD`, UTC."
+          },
+          "judge_cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "judge_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "judge_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "scores": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spans": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`spans + scores`.",
+            "minimum": 0
+          }
+        }
+      },
+      "InternalUserDeleted": {
+        "type": "object",
+        "description": "Answer of `POST /api/internal/v1/users/delete`.",
+        "required": [
+          "sole_owner_of"
+        ],
+        "properties": {
+          "sole_owner_of": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Orgs the user was the only owner of. They are kept without an owner; the control\nplane resolves them."
+          }
+        }
+      },
+      "InternalUserRef": {
+        "type": "object",
+        "description": "Body of the `users` routes (D-P-39): the user's subject at the control plane's provider.",
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`."
           }
         },
         "additionalProperties": false
@@ -12843,6 +16088,57 @@
           "role": {
             "$ref": "#/components/schemas/OrgRole",
             "description": "Role granted on accept."
+          }
+        }
+      },
+      "JitRole": {
+        "type": "string",
+        "description": "Role given to people who join through the org's provider (D-P-56).",
+        "enum": [
+          "viewer",
+          "member"
+        ]
+      },
+      "JobCounts": {
+        "type": "object",
+        "description": "Job counts of a rule, by status.",
+        "required": [
+          "queued",
+          "running",
+          "done",
+          "failed",
+          "skipped"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Finished jobs with a score.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs that failed for good.",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs waiting to run.",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs running now.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Jobs left out before they ran.",
+            "minimum": 0
           }
         }
       },
@@ -13145,6 +16441,70 @@
           }
         }
       },
+      "MembershipLookup": {
+        "type": "object",
+        "description": "Answer of `POST /api/internal/v1/memberships/lookup`.",
+        "required": [
+          "orgs"
+        ],
+        "properties": {
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MembershipOrg"
+            },
+            "description": "The user's active orgs, sorted by slug."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user's id. Absent when no user matches."
+          }
+        }
+      },
+      "MembershipLookupRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;\nthe email only when no identity has the subject.",
+        "required": [
+          "subject",
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email, normalized like every email (D136), for a user the subject does not find."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The OIDC subject at `entitlements.control_plane_provider`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipOrg": {
+        "type": "object",
+        "description": "One active org the user belongs to.",
+        "required": [
+          "org_id",
+          "slug",
+          "role"
+        ],
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org id."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The user's role in the org."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The org slug."
+          }
+        }
+      },
       "Message": {
         "type": "object",
         "description": "One message in a conversation. Spec 01 § Canonical message format.",
@@ -13430,13 +16790,213 @@
           }
         }
       },
+      "OnlineRule": {
+        "type": "object",
+        "description": "An online rule. Spec 09 § Evaluation & alerts.",
+        "required": [
+          "id",
+          "name",
+          "evaluator_id",
+          "target",
+          "variable_mapping",
+          "sample_rate",
+          "enabled",
+          "jobs_last_24h",
+          "dropped_last_hour",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Present exactly when `budget_usd` is."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Budget per period, in USD. Omitted when the rule has none."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "User who created the rule. Omitted when that user is unknown."
+          },
+          "dropped_last_hour": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live matches dropped by the hourly cap in the current UTC hour. Counted in memory, so 0 after a restart.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the rule runs."
+          },
+          "evaluator_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The evaluator the rule runs. Immutable."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Filter over the target's view. Omitted when the rule has none."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Rule id."
+          },
+          "jobs_last_24h": {
+            "$ref": "#/components/schemas/JobCounts",
+            "description": "Jobs of the rule created in the last 24 hours, by status."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 128 characters."
+          },
+          "paused_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the rule was paused. Omitted when it is not paused."
+          },
+          "paused_detail": {
+            "type": "string",
+            "description": "Detail of the pause: an error text or a fixed text. Never payload content."
+          },
+          "paused_reason": {
+            "$ref": "#/components/schemas/PauseReason",
+            "description": "Why the rule is paused. Omitted when it is not paused."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching targets that are evaluated, in `(0, 1]`."
+          },
+          "spend": {
+            "$ref": "#/components/schemas/RuleSpend",
+            "description": "Budget spend of the current period. Omitted when the rule has no budget."
+          },
+          "target": {
+            "$ref": "#/components/schemas/RuleTarget",
+            "description": "What the rule matches. Immutable."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last change time. JSON is RFC 3339."
+          },
+          "variable_mapping": {
+            "type": "object",
+            "description": "Prompt variable to mapping expression.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "OnlineRulePage": {
+        "type": "object",
+        "description": "One page of online rules. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor",
+          "org_enabled_rules"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OnlineRule"
+            },
+            "description": "Rules in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          },
+          "org_enabled_rules": {
+            "type": "integer",
+            "description": "Enabled rules of the whole org, counted for the plan's active-rule limit.",
+            "minimum": 0
+          }
+        }
+      },
+      "OnlineRulePreview": {
+        "type": "object",
+        "description": "The preview's count (D-I-9).",
+        "required": [
+          "matched",
+          "capped",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "capped": {
+            "type": "boolean",
+            "description": "More than 10 000 matched."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The window that was counted. RFC 3339."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matching traces or spans, at most 10 000.",
+            "minimum": 0
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The end of the window that was counted. RFC 3339."
+          }
+        }
+      },
+      "OnlineRulePreviewRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/online-rules/preview` body (D-I-9). Absent fields take their\ndefaults.\n\nDeserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the filter\nis a query over stored data, and nothing logs it.",
+        "required": [
+          "target"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "Filter DSL over the target's view. Absent or blank matches everything."
+          },
+          "from": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window start. Default: `to` minus 24 hours."
+          },
+          "target": {
+            "$ref": "#/components/schemas/RuleTarget",
+            "description": "The rule's target: the view the filter is read on."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Window end. Default: now."
+          }
+        },
+        "additionalProperties": false
+      },
       "OrgEntitlements": {
         "type": "object",
-        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.",
+        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15).",
         "required": [
           "features",
           "plan",
-          "limits"
+          "limits",
+          "usage"
         ],
         "properties": {
           "features": {
@@ -13457,6 +17017,10 @@
           "upgrade_url": {
             "type": "string",
             "description": "Where an Upgrade button goes. Omitted when the instance sets none."
+          },
+          "usage": {
+            "$ref": "#/components/schemas/OrgMonthUsage",
+            "description": "The org's units this month (D-P-16)."
           }
         }
       },
@@ -13601,6 +17165,36 @@
           }
         }
       },
+      "OrgMonthUsage": {
+        "type": "object",
+        "description": "This UTC month's units (D-P-16, D-P-38).",
+        "required": [
+          "month",
+          "units",
+          "resets_at",
+          "notice"
+        ],
+        "properties": {
+          "month": {
+            "type": "string",
+            "description": "`YYYY-MM`."
+          },
+          "notice": {
+            "$ref": "#/components/schemas/UsageNotice"
+          },
+          "resets_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "00:00 UTC on the 1st of the next month."
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units so far this month, flushed or not.",
+            "minimum": 0
+          }
+        }
+      },
       "OrgPage": {
         "type": "object",
         "description": "One page of results. `next_cursor` is null when there is no next page.",
@@ -13679,6 +17273,160 @@
           "viewer"
         ]
       },
+      "OrgSso": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/sso` and every settings write.",
+        "required": [
+          "callback_url",
+          "domains"
+        ],
+        "properties": {
+          "callback_url": {
+            "type": "string",
+            "description": "The redirect URI to register at the identity provider."
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrgSsoDomain"
+            },
+            "description": "Ordered by domain."
+          },
+          "provider": {
+            "$ref": "#/components/schemas/OrgSsoProvider",
+            "description": "The provider, when the org has one."
+          }
+        }
+      },
+      "OrgSsoDomain": {
+        "type": "object",
+        "description": "One email domain of the org and how to prove it.",
+        "required": [
+          "id",
+          "domain",
+          "status",
+          "txt_name",
+          "txt_value",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "domain": {
+            "type": "string",
+            "description": "Lowercase domain name."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The domain row id."
+          },
+          "last_checked_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last lookup, found or not. Omitted before the first one."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DomainStatus",
+            "description": "Pending or verified."
+          },
+          "txt_name": {
+            "type": "string",
+            "description": "TXT record name, `_llmobs-verify.<domain>`."
+          },
+          "txt_value": {
+            "type": "string",
+            "description": "TXT record value, `llmobs-verify=<token>`."
+          },
+          "verified_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the TXT record was found. Omitted while pending."
+          }
+        }
+      },
+      "OrgSsoProvider": {
+        "type": "object",
+        "description": "The org's identity provider. The client secret is write-only.",
+        "required": [
+          "display_name",
+          "issuer",
+          "client_id",
+          "enabled",
+          "enforced",
+          "jit_role",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The OAuth client id."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Shown on the login page."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Discovery sends users to this provider (D-P-57)."
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "Password and other sign-ins are refused for the org's domains (D-P-58)."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OIDC issuer URL."
+          },
+          "jit_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "description": "Role of people who join through the provider."
+          },
+          "last_login_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The last successful sign-in through the provider. Absent before the first one."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last change to the settings."
+          }
+        }
+      },
+      "OrgUsage": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/usage`.",
+        "required": [
+          "from",
+          "to",
+          "days"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            },
+            "description": "Days with usage, oldest first. Days without usage are absent."
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
+      },
       "OutputScoreBody": {
         "type": "object",
         "description": "The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`.",
@@ -13730,6 +17478,30 @@
           }
         ],
         "description": "One part of a canonical message. Spec 01 § Canonical message format."
+      },
+      "PatchOrgSso": {
+        "type": "object",
+        "description": "`PATCH /api/v1/orgs/{org}/sso`: the flags, each optional.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Discovery sends users to the provider (D-P-57)."
+          },
+          "enforced": {
+            "type": "boolean",
+            "description": "Enforce SSO for the org's verified domains (D-P-58)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PauseReason": {
+        "type": "string",
+        "description": "Why a rule is paused (D-I-14, D-I-15).",
+        "enum": [
+          "budget",
+          "errors",
+          "connection"
+        ]
       },
       "Payload": {
         "oneOf": [
@@ -13961,6 +17733,7 @@
           "unsupported_media_type",
           "range_not_satisfiable",
           "conflict",
+          "quota_exceeded",
           "rate_limited",
           "internal"
         ]
@@ -13973,6 +17746,7 @@
           "org_id",
           "slug",
           "name",
+          "trace_completion_timeout_s",
           "created_at"
         ],
         "properties": {
@@ -14006,6 +17780,12 @@
           "slug": {
             "type": "string",
             "description": "URL slug, unique within the org."
+          },
+          "trace_completion_timeout_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds without a new span after which a trace counts as complete for online rules (D-I-7).\n10 to 3600; 60 unless set.",
+            "minimum": 0
           }
         }
       },
@@ -14098,6 +17878,39 @@
           "none"
         ]
       },
+      "PutOrgSsoProvider": {
+        "type": "object",
+        "description": "`PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.",
+        "required": [
+          "display_name",
+          "issuer",
+          "client_id",
+          "jit_role"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "The OAuth client id; 1 to 255 characters."
+          },
+          "client_secret": {
+            "type": "string",
+            "description": "Required when creating, and when the issuer or client id changes; omit to keep it."
+          },
+          "display_name": {
+            "type": "string",
+            "description": "Shown on the login page; 1 to 100 characters."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "The OIDC issuer URL; `https`, or `http` on a loopback host."
+          },
+          "jit_role": {
+            "$ref": "#/components/schemas/JitRole",
+            "description": "Role of people who join through the provider."
+          }
+        },
+        "additionalProperties": false
+      },
       "PutOrgTokenRequest": {
         "type": "object",
         "description": "`PUT /api/internal/v1/orgs/{org_id}/entitlements` (D-P-11). The signature is the credential.",
@@ -14163,6 +17976,74 @@
           "token": {
             "type": "string",
             "description": "The token from the reset link."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RuleSpend": {
+        "type": "object",
+        "description": "Spend of a rule budget in the current period.",
+        "required": [
+          "period_start",
+          "spent_usd",
+          "reserved_usd"
+        ],
+        "properties": {
+          "period_start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the current UTC day or month."
+          },
+          "reserved_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Estimated cost of the running jobs, in USD."
+          },
+          "spent_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Cost of the finished jobs in the period, in USD."
+          }
+        }
+      },
+      "RuleTarget": {
+        "type": "string",
+        "description": "What an online rule matches: a trace, or a span of a trace (D-I-9).",
+        "enum": [
+          "trace",
+          "span"
+        ]
+      },
+      "RunEvaluatorRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/evaluators/{id}/run` body.\n\nDeserialize only, because `TimeParam` has no `Serialize`. Its `Debug` is derived: the\nmapping holds expressions, not payload.",
+        "required": [
+          "trace_id",
+          "trace_start",
+          "variable_mapping"
+        ],
+        "properties": {
+          "span_id": {
+            "type": "string",
+            "description": "Span of the trace to target, 16 hex digits. Omitted for a trace target; `null` is refused."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Trace to run on, 32 hex digits."
+          },
+          "trace_start": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "The trace's `start_time`, from the trace detail the UI loaded."
+          },
+          "variable_mapping": {
+            "type": "object",
+            "description": "Prompt variable to mapping expression, 1 to 32 variables.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           }
         },
         "additionalProperties": false
@@ -15780,6 +19661,33 @@
           }
         }
       },
+      "SsoDiscoverRequest": {
+        "type": "object",
+        "description": "`POST /api/auth/sso/discover`. `Debug` omits the email.",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address the person typed on the login page."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SsoDiscovery": {
+        "type": "object",
+        "description": "Whether the email's domain signs in through an org's provider (D-P-60). A function of the\ndomain only.",
+        "required": [
+          "sso"
+        ],
+        "properties": {
+          "sso": {
+            "type": "boolean",
+            "description": "True when the domain's org has an enabled provider."
+          }
+        }
+      },
       "StructuredOutputMode": {
         "type": "string",
         "description": "How the provider is asked to fill the answer schema.",
@@ -16404,6 +20312,53 @@
         },
         "additionalProperties": false
       },
+      "UpdateOnlineRuleRequest": {
+        "type": "object",
+        "description": "`PATCH /api/v1/projects/{project}/online-rules/{id}` body. Absent means unchanged.\n\nThere is no `evaluator_id` or `target`: sending either is a 400 (unknown field). Optional\nfields refuse `null`; removing the budget is `clear_budget: true`.",
+        "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Needed with `budget_usd` when the rule has none yet."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Budget per period, in USD. Judge evaluators only."
+          },
+          "clear_budget": {
+            "type": "boolean",
+            "description": "Removes the budget. Cannot come with `budget_usd` or `budget_period`."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Turns the rule on or off."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Filter over the target's view. `\"\"` clears it."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching targets to evaluate, in `(0, 1]`."
+          },
+          "variable_mapping": {
+            "type": "object",
+            "description": "Replaces the whole mapping, 1 to 32 variables.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateOrgMemberRequest": {
         "type": "object",
         "description": "`PATCH /api/v1/orgs/{org}/members/{user}`.",
@@ -16441,9 +20396,19 @@
             "description": "Display name. Absent leaves the name unchanged. A present value is trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "description": "Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.",
+            "maximum": 36500,
+            "minimum": 1
+          },
+          "trace_completion_timeout_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.\nAbsent leaves it unchanged.",
             "minimum": 0
           }
         },
@@ -16548,18 +20513,92 @@
         },
         "additionalProperties": true
       },
+      "UsageDay": {
+        "type": "object",
+        "description": "One UTC day of an org's usage, summed over its projects.",
+        "required": [
+          "day",
+          "spans",
+          "scores",
+          "units",
+          "bytes",
+          "judge_input_tokens",
+          "judge_output_tokens",
+          "judge_cost_usd"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "description": "`YYYY-MM-DD`."
+          },
+          "judge_cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "judge_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "judge_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scores": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spans": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`spans + scores`.",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageNotice": {
+        "type": "string",
+        "description": "Usage level against `units_included`.",
+        "enum": [
+          "none",
+          "warning",
+          "reached"
+        ]
+      },
       "User": {
         "type": "object",
         "description": "A user account.\n\nSpec 04 `users` and spec 08.",
         "required": [
           "id",
           "email",
-          "is_instance_admin"
+          "is_instance_admin",
+          "email_verified",
+          "has_password"
         ],
         "properties": {
           "email": {
             "type": "string",
             "description": "Email address."
+          },
+          "email_verified": {
+            "type": "boolean",
+            "description": "The address has been verified."
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "A password is set. SSO-only accounts are false."
           },
           "id": {
             "type": "string",

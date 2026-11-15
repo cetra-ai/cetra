@@ -34,7 +34,7 @@ pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,
 };
-pub use egress::{EgressClient, EgressPolicy, EgressRequest, EgressResponse};
+pub use egress::{EgressClient, EgressPolicy, EgressRequest, EgressResponse, identity_http_client};
 pub use error::{
     CheckError, ConfigError, EgressError, ErrorClass, EvalError, JudgeError, MappingError,
     TemplateError, WebhookError,

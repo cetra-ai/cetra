@@ -147,6 +147,14 @@ struct ChannelRecord {
     updated_at: i64,
 }
 
+/// A due rule's row and the org that owns its project (D-P-21: the window is the org's).
+#[derive(Debug, sqlx::FromRow)]
+struct DueRuleRecord {
+    org_id: String,
+    #[sqlx(flatten)]
+    rule: RuleRecord,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct RuleRecord {
     id: String,
@@ -794,12 +802,12 @@ pub(crate) async fn due_rules(
     pool: &SqlitePool,
     now: i64,
     slack_ns: i64,
-) -> Result<Vec<RuleRow>, MetaError> {
-    let records: Vec<RuleRecord> = sqlx::query_as(
-        "SELECT r.id, r.project_id, r.name, r.metric, r.config, r.enabled, r.cooldown_s, \
-         r.notify_while_firing, r.state, r.clear_streak, r.last_value, r.last_count, \
-         r.last_evaluated_at, r.last_fired_at, r.last_notified_at, r.last_error, r.created_by, \
-         r.created_at, r.updated_at \
+) -> Result<Vec<(OrgId, RuleRow)>, MetaError> {
+    let records: Vec<DueRuleRecord> = sqlx::query_as(
+        "SELECT p.org_id AS org_id, r.id, r.project_id, r.name, r.metric, r.config, r.enabled, \
+         r.cooldown_s, r.notify_while_firing, r.state, r.clear_streak, r.last_value, \
+         r.last_count, r.last_evaluated_at, r.last_fired_at, r.last_notified_at, r.last_error, \
+         r.created_by, r.created_at, r.updated_at \
          FROM alert_rules r \
          JOIN projects p ON p.id = r.project_id \
          JOIN orgs o ON o.id = p.org_id \
@@ -807,20 +815,24 @@ pub(crate) async fn due_rules(
     )
     .fetch_all(pool)
     .await?;
-    let mut due = Vec::new();
+    let mut due: Vec<(OrgId, RuleRow)> = Vec::new();
     for record in records {
-        let rule = rule_from(record, Vec::new())?;
+        let org: OrgId = record
+            .org_id
+            .parse()
+            .map_err(|_| corrupt("projects", "org_id"))?;
+        let rule = rule_from(record.rule, Vec::new())?;
         let is_due = rule.last_evaluated_at.is_none_or(|at| {
             at.saturating_add(rule.condition.window.interval_ns())
                 .saturating_sub(slack_ns)
                 <= now
         });
         if is_due {
-            due.push(rule);
+            due.push((org, rule));
         }
     }
-    due.sort_by_key(|rule| (rule.last_evaluated_at, rule.id));
-    for rule in &mut due {
+    due.sort_by_key(|(_, rule)| (rule.last_evaluated_at, rule.id));
+    for (_, rule) in &mut due {
         rule.channel_ids = rule_channel_ids(pool, rule.id).await?;
     }
     Ok(due)
@@ -991,6 +1003,7 @@ pub(crate) struct DueDelivery {
     pub(crate) project_id: ProjectId,
     pub(crate) project_name: String,
     pub(crate) project_slug: String,
+    pub(crate) org_id: OrgId,
     pub(crate) org_slug: String,
 }
 
@@ -1027,6 +1040,7 @@ struct DueRecord {
     project_id: String,
     project_name: String,
     project_slug: String,
+    org_id: String,
     org_slug: String,
 }
 
@@ -1045,7 +1059,8 @@ pub(crate) async fn due_deliveries(
         "SELECT d.id, d.attempts, d.channel_id, c.kind AS channel_kind, c.config_enc, \
          e.id AS event_id, e.rule_id, e.kind AS event_kind, e.value, e.count, e.threshold, \
          e.window_from, e.window_to, e.details, e.created_at AS event_created_at, \
-         p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.slug AS org_slug \
+         p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.id AS org_id, \
+         o.slug AS org_slug \
          FROM notification_deliveries d \
          JOIN notification_channels c ON c.id = d.channel_id \
          JOIN alert_events e ON e.id = d.event_id \
@@ -1170,6 +1185,10 @@ fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
             .map_err(|_| corrupt(DELIVERIES, "id"))?,
         project_name: record.project_name,
         project_slug: record.project_slug,
+        org_id: record
+            .org_id
+            .parse()
+            .map_err(|_| corrupt(DELIVERIES, "org_id"))?,
         org_slug: record.org_slug,
     })
 }
@@ -2149,7 +2168,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|rule| rule.id)
+            .map(|(_, rule)| rule.id)
             .collect();
         ids.sort();
         ids

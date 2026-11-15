@@ -69,7 +69,10 @@ async fn wait_for_catalog(storage: &Storage, table: Table, rows: u64) {
 async fn span_count(storage: &Storage) -> Result<usize, datafusion::error::DataFusionError> {
     use datafusion::execution::context::SessionContext;
     use datafusion::prelude::SessionConfig;
-    let query = storage.query(project(), Default::default()).await.unwrap();
+    let query = storage
+        .query(project(), crate::QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
     ctx.register_table("spans_t", query.spans)?;
     let batches = ctx.sql("SELECT name FROM spans_t").await?.collect().await?;
@@ -201,6 +204,7 @@ async fn media_put_under_faults_leaves_nothing_behind() {
         sha256,
         mime_type: "text/plain".to_owned(),
         bytes: bytes.clone(),
+        newest_span_start: 0,
     };
     let sha = hex::encode(sha256);
     let path = Objects::media_path(project(), &sha);
@@ -225,7 +229,10 @@ async fn media_put_under_faults_leaves_nothing_behind() {
         (0, 0, 0),
         "{audit:?}"
     );
-    let read = storage.get_media(project(), &sha256, None).await.unwrap();
+    let read = storage
+        .get_media(project(), &sha256, None, None)
+        .await
+        .unwrap();
     assert_eq!(read.bytes, bytes);
     storage.shutdown().await.unwrap();
 }

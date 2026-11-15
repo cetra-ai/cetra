@@ -16,10 +16,12 @@ use crate::api::members::{
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectOverride, ProjectPerm, Role};
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
+use crate::meta::invites;
 use crate::meta::members::{self, MemberRow};
 
 use super::orgs::page_named;
@@ -81,6 +83,14 @@ pub(crate) enum MemberChange {
     Forbidden,
 }
 
+enum RoleChange {
+    Done,
+    Missing,
+    Forbidden,
+    /// The org's seat limit, which the new role would exceed.
+    OverLimit(u64),
+}
+
 async fn list_org_members(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
@@ -115,21 +125,37 @@ async fn update_org_member(
     let actor = user.id;
     let org_id = access.org.id;
     let role = body.role;
+    let now = state.clock.now_ns();
+    let limits_state = state.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 let Some(actor_role) = members::org_role_tx(conn, org_id, actor).await? else {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
                 };
                 if roles::org_rank(actor_role) < roles::org_rank(OrgRole::Admin) {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
                 }
                 let Some(target_role) = members::org_role_tx(conn, org_id, target).await? else {
-                    return Ok(MemberChange::Missing);
+                    return Ok(RoleChange::Missing);
                 };
                 if !may_set_role(actor_role, target_role, role) {
-                    return Ok(MemberChange::Forbidden);
+                    return Ok(RoleChange::Forbidden);
+                }
+                if target_role == OrgRole::Viewer && role != OrgRole::Viewer {
+                    let max_seats = limits_state
+                        .entitlements
+                        .resolve(org_id, now)
+                        .limits
+                        .max_seats;
+                    if let Some(limit) = max_seats {
+                        let seats = members::seat_members_tx(conn, org_id).await?
+                            + invites::seat_invites_tx(conn, org_id, now, None).await?;
+                        if over_limit(Some(limit), seats, 1) {
+                            return Ok(RoleChange::OverLimit(limit));
+                        }
+                    }
                 }
                 members::set_org_role(conn, org_id, target, role).await?;
                 if matches!(role, OrgRole::Owner | OrgRole::Admin) {
@@ -138,14 +164,15 @@ async fn update_org_member(
                 if members::count_owners(conn, org_id).await? == 0 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
-                Ok(MemberChange::Done)
+                Ok(RoleChange::Done)
             })
         })
         .await?;
     match outcome {
-        MemberChange::Done => {}
-        MemberChange::Missing => return Err(ApiError::NotFound),
-        MemberChange::Forbidden => return Err(forbidden()),
+        RoleChange::Done => {}
+        RoleChange::Missing => return Err(ApiError::NotFound),
+        RoleChange::Forbidden => return Err(forbidden()),
+        RoleChange::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
     }
     tracing::info!(
         target: "audit",
@@ -319,9 +346,10 @@ mod tests {
 
     use super::*;
     use crate::api::account::{OrgMembership, Project};
+    use crate::api::common::ProblemCode;
     use crate::auth::session::start_session;
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{TestApp, capture_logs};
+    use crate::test_support::{TestApp, capture_logs, set_limits};
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
         set_cookie
@@ -357,7 +385,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None)
+        let cookie = start_session(&app.state, user.id, None, None, None)
             .await
             .unwrap();
         (user.id, cookie_pair(&cookie))
@@ -430,6 +458,65 @@ mod tests {
                     }
                 )
         }));
+    }
+
+    #[tokio::test]
+    async fn promoting_a_viewer_needs_a_seat() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (viewer_id, _) = signed_in(&app, "viewer@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, viewer_id, OrgRole::Viewer).await;
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_seats": 1}),
+        );
+        let path = format!("/api/v1/orgs/acme/members/{viewer_id}");
+
+        let refused = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 seat.")
+        );
+        let still: OrgMember = app
+            .request(Method::GET, "/api/v1/orgs/acme/members")
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await
+            .json::<Page<OrgMember>>()
+            .data
+            .into_iter()
+            .find(|member| member.user.id == viewer_id)
+            .unwrap();
+        assert_eq!(still.role, OrgRole::Viewer);
+
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:01:00Z",
+            &serde_json::json!({"max_seats": 2}),
+        );
+        let promoted = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(
+            promoted.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&promoted.body)
+        );
     }
 
     #[tokio::test]

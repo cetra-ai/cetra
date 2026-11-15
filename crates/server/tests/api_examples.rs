@@ -22,6 +22,7 @@ use llmobs_server::api::connections::{
 };
 use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
+use llmobs_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
 use llmobs_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult,
@@ -30,7 +31,12 @@ use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use llmobs_server::api::members::{OrgMember, ProjectMember};
 use llmobs_server::api::metrics::MetricsResponse;
+use llmobs_server::api::online_rules::{
+    CreateOnlineRuleRequest, OnlineRule, OnlineRulePage, OnlineRulePreview,
+    OnlineRulePreviewRequest, UpdateOnlineRuleRequest,
+};
 use llmobs_server::api::openapi::openapi;
+use llmobs_server::api::org_sso::OrgSso;
 use llmobs_server::api::payload::Payload;
 use llmobs_server::api::saved_views::SavedView;
 use llmobs_server::api::schema::SchemaResponse;
@@ -39,6 +45,7 @@ use llmobs_server::api::scores::{FeedbackRequest, ScoreBatch};
 use llmobs_server::api::sessions::{SessionDetail, SessionSummary};
 use llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult};
 use llmobs_server::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
+use llmobs_server::api::usage::OrgUsage;
 use llmobs_server::api::users::{EndUserDetail, EndUserSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -369,6 +376,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<OrgMembership>>("static/orgs.json");
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
+    roundtrip::<OrgUsage>("static/org-usage.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
@@ -407,6 +415,13 @@ fn static_files_match_their_types() {
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
+    roundtrip::<OnlineRulePage>("static/online-rules.json");
+    roundtrip::<OnlineRule>("static/online-rule.json");
+    roundtrip::<OnlineRule>("static/online-rule-resumed.json");
+    roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
+    roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
+    roundtrip::<EvalJob>("static/eval-job.json");
+    roundtrip::<EvalJob>("static/eval-job-queued.json");
 }
 
 #[test]
@@ -417,10 +432,26 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
+    let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateOnlineRuleRequest>(&update_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-update.json: {error}"));
+    // `OnlineRulePreviewRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    let preview_text = fs::read_to_string(api_dir().join("requests/online-rule-preview.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<OnlineRulePreviewRequest>(&preview_text)
+        .unwrap_or_else(|error| panic!("requests/online-rule-preview.json: {error}"));
     let test_text = fs::read_to_string(api_dir().join("requests/evaluator-test.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<EvaluatorTestRequest>(&test_text)
         .unwrap_or_else(|error| panic!("requests/evaluator-test.json: {error}"));
+    // `RunEvaluatorRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    let run_text = fs::read_to_string(api_dir().join("requests/evaluator-run.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<RunEvaluatorRequest>(&run_text)
+        .unwrap_or_else(|error| panic!("requests/evaluator-run.json: {error}"));
     let document = read_json::<Value>(&contract_document());
     let registry = jsonschema::Registry::new()
         .add(OPENAPI_URI, document.clone())
@@ -434,6 +465,13 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("run_sql", "requests/sql-query.json"),
         ("post_evaluator", "requests/evaluator-create.json"),
         ("post_evaluator_test", "requests/evaluator-test.json"),
+        ("post_evaluator_run", "requests/evaluator-run.json"),
+        ("post_online_rule", "requests/online-rule-create.json"),
+        ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "post_online_rule_preview",
+            "requests/online-rule-preview.json",
+        ),
         (
             "post_score_definition",
             "requests/score-definition-create.json",
@@ -506,6 +544,7 @@ fn generated_files_roundtrip() {
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
                 roundtrip::<Deletion>(&example.file);
             }
@@ -535,6 +574,7 @@ fn generated_files_roundtrip() {
             | "post_admin_user"
             | "get_admin_settings"
             | "get_admin_license" => {}
+            "get_org_sso" => roundtrip::<OrgSso>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);
@@ -544,8 +584,16 @@ fn generated_files_roundtrip() {
             "get_evaluator" | "post_evaluator" => roundtrip::<Evaluator>(&example.file),
             "list_evaluator_templates" => roundtrip::<EvaluatorTemplateList>(&example.file),
             "post_evaluator_test" => roundtrip::<EvaluatorTestResult>(&example.file),
+            "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
+                roundtrip::<OnlineRule>(&example.file);
+            }
+            "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
+            "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
+            "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }
@@ -573,10 +621,13 @@ fn manifest_covers_the_read_operations() {
                 .unwrap_or_else(|| panic!("operation id"));
             known.insert(id.to_owned());
             // Streams and the OAuth redirects have no JSON body to fixture.
+            // Internal operations are called by the control plane and have no examples.
             if method == "get"
+                && operation["tags"][0].as_str() != Some("internal")
                 && id != "stream_traces"
                 && id != "stream_trace"
                 && id != "get_oauth_authorize"
+                && id != "get_sso_authorize"
                 && id != "get_oauth_callback"
             {
                 gets.insert(id.to_owned());

@@ -44,6 +44,14 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("test.html", include_str!("templates/test.html")),
     ("alert.txt", include_str!("templates/alert.txt")),
     ("alert.html", include_str!("templates/alert.html")),
+    (
+        "usage_notice.txt",
+        include_str!("templates/usage_notice.txt"),
+    ),
+    (
+        "usage_notice.html",
+        include_str!("templates/usage_notice.html"),
+    ),
 ];
 
 /// One transactional message. The `url` is the link the later phase built.
@@ -83,6 +91,21 @@ pub(crate) enum Email {
         window: &'static str,
         rule_url: String,
         traces_url: String,
+    },
+    /// The month's usage reached 80 % or 100 % of `units_included` (D-P-38), sent to owners.
+    UsageNotice {
+        /// Org display name.
+        org_name: String,
+        /// `80` or `100`.
+        threshold: u8,
+        /// Units this month when the notice was recorded.
+        units: u64,
+        /// `units_included`.
+        included: u64,
+        /// The plan bills units past `included` (no cap, or a cap above it).
+        paid: bool,
+        /// `<public_url>/<org slug>/settings/plan`.
+        url: String,
     },
 }
 
@@ -283,6 +306,25 @@ impl Mailer {
                 context! { url => url },
             ),
             Email::Test => ("test.txt", "test.html", context! {}),
+            Email::UsageNotice {
+                org_name,
+                threshold,
+                units,
+                included,
+                paid,
+                url,
+            } => (
+                "usage_notice.txt",
+                "usage_notice.html",
+                context! {
+                    org_name => org_name,
+                    threshold => *threshold,
+                    units => *units,
+                    included => *included,
+                    paid => *paid,
+                    url => url,
+                },
+            ),
             Email::Alert {
                 state,
                 rule_name,
@@ -490,6 +532,11 @@ fn subject(email: &Email) -> String {
         Email::PasswordReset { .. } => format!("Reset your {PRODUCT} password"),
         Email::VerifyEmail { .. } => format!("Verify your email for {PRODUCT}"),
         Email::Test => format!("{PRODUCT} test email"),
+        Email::UsageNotice {
+            org_name,
+            threshold,
+            ..
+        } => format!("{PRODUCT}: {org_name} used {threshold}% of its monthly units"),
         Email::Alert {
             state, rule_name, ..
         } => format!("[{PRODUCT}] {state}: {rule_name}"),
@@ -503,6 +550,7 @@ fn template_name(email: &Email) -> &'static str {
         Email::VerifyEmail { .. } => "verify_email",
         Email::Test => "test",
         Email::Alert { .. } => "alert",
+        Email::UsageNotice { .. } => "usage_notice",
     }
 }
 
@@ -660,6 +708,66 @@ mod tests {
         assert!(!rendered.html.contains("<script>"), "{}", rendered.html);
         assert!(!rendered.html.contains("</script>"), "{}", rendered.html);
         assert!(rendered.text.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn usage_notice_renders_the_four_texts() {
+        let mailer = mailer();
+        let notice = |threshold: u8, paid: bool| {
+            mailer
+                .render(&Email::UsageNotice {
+                    org_name: "Acme".to_owned(),
+                    threshold,
+                    units: 85,
+                    included: 100,
+                    paid,
+                    url: "https://example.com/acme/settings/plan".to_owned(),
+                })
+                .unwrap()
+        };
+        let cases = [
+            (
+                80,
+                false,
+                "Your organization Acme has used 85 of its 100 monthly units. At 100 units, ingest stops until the 1st of next month (UTC).",
+            ),
+            (
+                100,
+                false,
+                "Your organization Acme reached its 100 monthly units. Ingest is paused until the 1st of next month (UTC).",
+            ),
+            (
+                80,
+                true,
+                "Your organization Acme has used 85 of the 100 units included in its plan this month. Additional units are billed as overage.",
+            ),
+            (
+                100,
+                true,
+                "Your organization Acme has used all 100 units included in its plan this month. Additional units are billed as overage.",
+            ),
+        ];
+        for (threshold, paid, sentence) in cases {
+            let rendered = notice(threshold, paid);
+            assert_eq!(
+                rendered.subject,
+                format!("llmobs: Acme used {threshold}% of its monthly units")
+            );
+            assert!(rendered.text.starts_with(sentence), "{}", rendered.text);
+            assert!(
+                rendered
+                    .text
+                    .ends_with("\nSee your plan: https://example.com/acme/settings/plan"),
+                "{}",
+                rendered.text
+            );
+            assert!(rendered.html.contains(sentence), "{}", rendered.html);
+            assert!(
+                rendered.html.contains("See your plan: <a href=\""),
+                "{}",
+                rendered.html
+            );
+        }
     }
 
     #[tokio::test]

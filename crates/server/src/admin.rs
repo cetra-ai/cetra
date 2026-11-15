@@ -1,12 +1,17 @@
 //! Local admin operations on an existing `meta.db` (spec 09 § CLI).
 //!
 //! These open the database without migrating and without the data-dir lock, so
-//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`
-//! is the exception: it takes the lock and needs the server stopped (D-I-3).
+//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`,
+//! `gc_orphans` and `migrate` are the exceptions: they take the lock (through
+//! `Maintenance::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
 
 use std::path::Path;
+use std::time::Duration;
 
 use llmobs_core::ids::OrgId;
+use llmobs_storage::Maintenance;
+use llmobs_storage::config::ObjectStoreUrl;
+use llmobs_storage::error::{OpenError, OrphanError, StorageError};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -28,6 +33,7 @@ use crate::meta::orgs::{org_by_id, org_by_slug};
 use crate::meta::password_resets::insert_reset;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaDb, MetaError};
+use crate::usage::flushed_month_units;
 
 /// A user created by [`create_user`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +77,8 @@ pub struct EntitlementsReport {
     /// The largest data window of the last 30 days (D-P-30). Omitted when unlimited.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_window_days: Option<u64>,
+    /// Units (spans + scores) this UTC month, flushed only (D-P-16).
+    pub month_units: u64,
 }
 
 /// Why an admin command failed. The text never includes an email, a password, or a token.
@@ -114,9 +122,31 @@ pub enum AdminError {
     /// SQLite failed. The text is [`MetaError`]'s display, which names no row values.
     #[error("{0}")]
     Database(String),
-    /// Another process holds `<data_dir>/LOCK`.
-    #[error("the server is running: stop it before rotating the key")]
+    /// Another process holds `<data_dir>/LOCK`: the server is running.
+    #[error("the server is running: stop it first")]
     Locked,
+    /// `catalog.db` is missing. Opening the storage would create an empty one, and every
+    /// object would then look like an orphan.
+    #[error("no catalog.db in the data directory: check the data directory setting")]
+    NoCatalog,
+    /// `meta.db` is missing. Opening the database would create an empty one, so a wrong
+    /// data directory would look like a fresh instance.
+    #[error("no meta.db in the data directory: check the data directory setting")]
+    NoMetaDb,
+    /// A real `gc-orphans` run in S3 mode needs `--rollback-bucket`.
+    #[error(
+        "in S3 mode this deletes every object written after the backup from the live bucket; run with --dry-run first, then add --rollback-bucket"
+    )]
+    RollbackNeedsConfirmation,
+    /// The storage did not open.
+    #[error("opening the storage: {0}")]
+    Storage(OpenError),
+    /// Listing the store, or deleting an orphan, failed.
+    #[error("{0}")]
+    Orphans(OrphanError),
+    /// Closing the storage failed.
+    #[error("closing the storage: {0}")]
+    Close(StorageError),
     /// The key could not be loaded, does not match, or a value did not open.
     #[error("{0}")]
     Crypto(String),
@@ -126,9 +156,10 @@ pub enum AdminError {
     /// `--from` holds no `meta.db`.
     #[error("no meta.db in the --from directory")]
     SourceNotInitialized,
-    /// The `--from` database is at another schema version.
+    /// The `--from` database is at an older schema version. A newer one is read as it is
+    /// (D-M-9).
     #[error(
-        "the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs serve` on a copy of it first"
+        "the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs admin migrate` on a copy of it first"
     )]
     SourceSchema {
         /// Migration version embedded in this binary.
@@ -263,9 +294,15 @@ async fn entitlements_in(
     let license =
         LicenseState::from_key(config.license_key.as_ref().map(|key| key.expose().as_str()));
     let defaults = Defaults::from_config(&config.entitlements.defaults);
-    let state = EntitlementsState::load(meta, license, defaults, config.public_url.origin())
-        .await
-        .map_err(map_meta)?;
+    let state = EntitlementsState::load(
+        meta,
+        license,
+        defaults,
+        config.public_url.origin(),
+        config.entitlements.control_plane,
+    )
+    .await
+    .map_err(map_meta)?;
     let now = Clock::System.now_ns();
     let resolved = state.resolve(row.id, now);
     let retention_window_days = state
@@ -279,7 +316,49 @@ async fn entitlements_in(
         features: resolved.features(),
         limits: resolved.limits.into(),
         retention_window_days,
+        month_units: flushed_month_units(meta.reader(), row.id, now)
+            .await
+            .map_err(map_meta)?,
     })
+}
+
+/// Turns an org's SSO off: the provider is disabled and not enforced (D-P-63). `org` is a slug
+/// or an id, as [`entitlements`] takes it. A running server applies it within 60 seconds.
+///
+/// Returns `false` when the org has no identity provider.
+///
+/// # Errors
+///
+/// Returns [`AdminError::OrgNotFound`] when no org has that id or slug, or another
+/// [`AdminError`] when the database is missing or unreadable.
+pub async fn org_sso_disable(config: &ServerConfig, org: &str) -> Result<bool, AdminError> {
+    let meta = open_meta(config).await?;
+    let outcome = org_sso_disable_in(&meta, org).await;
+    meta.close().await;
+    outcome
+}
+
+async fn org_sso_disable_in(meta: &MetaDb, org: &str) -> Result<bool, AdminError> {
+    let row = match org.parse::<OrgId>() {
+        Ok(id) => org_by_id(meta.reader(), id).await,
+        Err(_) => org_by_slug(meta.reader(), org).await,
+    }
+    .map_err(map_meta)?
+    .ok_or(AdminError::OrgNotFound)?;
+    let id = row.id;
+    let now = Clock::System.now_ns();
+    let changed = meta
+        .write(move |conn| {
+            Box::pin(async move {
+                crate::ee::org_sso::store::set_flags(conn, id, false, false, now).await
+            })
+        })
+        .await
+        .map_err(map_meta)?;
+    if changed {
+        tracing::info!(target: "audit", org_id = %id, actor = "cli", "org sso disabled");
+    }
+    Ok(changed)
 }
 
 /// What [`reapply_deletions`] did.
@@ -294,6 +373,9 @@ pub struct ReapplyReport {
 }
 
 /// Copies the deletions of `<from>/meta.db` that `config`'s `meta.db` lacks (D-M-9).
+///
+/// The source may be at this binary's schema or a newer one (a rollback: the old binary
+/// reapplies from the kept, already migrated directory). An older source is refused.
 ///
 /// Each copied row keeps its id, scope and cut-off and is opened again: the running
 /// (or next) `llmobs serve` registers or drops it through its worker. Each row is one
@@ -311,7 +393,8 @@ pub async fn reapply_deletions(
     from: &Path,
 ) -> Result<ReapplyReport, AdminError> {
     let target = open_meta(config).await?;
-    let source = match MetaDb::open_existing(from).await {
+    // A newer source is the rollback case (D-M-9): read it by column name.
+    let source = match MetaDb::open_existing_or_newer(from).await {
         Ok(db) => db,
         Err(error) => {
             target.close().await;
@@ -361,6 +444,96 @@ async fn copy_all(target: &MetaDb, source: &MetaDb) -> Result<ReapplyReport, Adm
         }
     }
     Ok(report)
+}
+
+/// What [`gc_orphans`] found: the storage's `OrphanReport`, as the CLI prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcOrphansReport {
+    /// Unknown objects older than `min_age` (deleted unless `dry_run`).
+    pub orphans: u64,
+    /// Bytes of the objects counted in `orphans`.
+    pub orphan_bytes: u64,
+    /// Unknown objects younger than `min_age`, left alone.
+    pub recent_unknown: u64,
+    /// Objects the catalog needs that the store does not have.
+    pub missing: u64,
+    /// Media blobs the catalog references that the store does not have.
+    pub missing_media: u64,
+    /// Whether the run only reported and deleted nothing.
+    pub dry_run: bool,
+}
+
+/// Deletes the objects under `tables/` and `media/` that the catalog does not know and that
+/// are older than `min_age`, and reports the ones the catalog needs but the store lacks
+/// (N M2, D-N-21). With `dry_run`, it deletes nothing. The server must be stopped.
+///
+/// In S3 mode a real run rolls the live bucket back to the restored catalog, so it needs
+/// `rollback_bucket`.
+///
+/// # Errors
+///
+/// [`AdminError::NoCatalog`] without `catalog.db`, [`AdminError::RollbackNeedsConfirmation`]
+/// in S3 mode without `rollback_bucket`, [`AdminError::Locked`] while the server runs,
+/// [`AdminError::Storage`] when the storage does not open, and [`AdminError::Orphans`] or
+/// [`AdminError::Close`] when the listing, a deletion or the close fails.
+pub async fn gc_orphans(
+    config: &ServerConfig,
+    min_age: Duration,
+    dry_run: bool,
+    rollback_bucket: bool,
+) -> Result<GcOrphansReport, AdminError> {
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    let s3 = matches!(config.storage.object_store_url(), ObjectStoreUrl::S3 { .. });
+    if s3 && !dry_run && !rollback_bucket {
+        return Err(AdminError::RollbackNeedsConfirmation);
+    }
+    let maintenance = Maintenance::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let outcome = maintenance.collect_orphans(min_age, dry_run).await;
+    let closed = maintenance.close().await;
+    let report = outcome.map_err(AdminError::Orphans)?;
+    closed.map_err(AdminError::Close)?;
+    Ok(GcOrphansReport {
+        orphans: report.orphans,
+        orphan_bytes: report.orphan_bytes,
+        recent_unknown: report.recent_unknown,
+        missing: report.missing,
+        missing_media: report.missing_media,
+        dry_run: report.dry_run,
+    })
+}
+
+/// Migrates `meta.db` and `catalog.db` to this binary's schema, with the server stopped, and
+/// closes them (N M2, D-N-22: the pre-migration copies are taken on the way). A restore of an
+/// older backup runs it before `reapply_deletions`.
+///
+/// Both files must already exist, so a wrong data directory never creates an empty instance.
+/// The maintenance open comes next: its `LOCK` refuses a running server before `meta.db` is
+/// touched.
+///
+/// # Errors
+///
+/// [`AdminError::NoCatalog`] or [`AdminError::NoMetaDb`] without the file,
+/// [`AdminError::Locked`] while the server runs, [`AdminError::Storage`] when the storage
+/// does not open, [`AdminError::Database`] or [`AdminError::Schema`] for `meta.db`.
+pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError> {
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    if !config.data_dir.join("meta.db").is_file() {
+        return Err(AdminError::NoMetaDb);
+    }
+    let maintenance = Maintenance::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let opened = MetaDb::open(&config.data_dir).await;
+    let closed = maintenance.close().await;
+    let meta = opened.map_err(map_meta)?;
+    meta.close().await;
+    closed.map_err(AdminError::Close)
 }
 
 const PAGE: u32 = 500;
@@ -641,6 +814,13 @@ fn source_row_error(id: Option<Uuid>, error: &MetaError) -> AdminError {
     ))
 }
 
+fn map_open(error: OpenError) -> AdminError {
+    match error {
+        OpenError::Locked { .. } => AdminError::Locked,
+        other => AdminError::Storage(other),
+    }
+}
+
 fn map_meta(error: MetaError) -> AdminError {
     match error {
         MetaError::NotInitialized => AdminError::NotInitialized,
@@ -690,6 +870,64 @@ mod tests {
         let mut config = app.state.config.clone();
         config.data_dir = dir.path().to_path_buf();
         (dir, config)
+    }
+
+    #[tokio::test]
+    async fn org_sso_disable_turns_a_provider_and_enforcement_off() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let write = crate::ee::org_sso::store::ProviderWrite {
+                    display_name: "Acme".to_owned(),
+                    issuer: "https://idp.example".to_owned(),
+                    client_id: "client".to_owned(),
+                    client_secret_enc: Some(vec![1]),
+                    jit_role: crate::api::org_sso::JitRole::Viewer,
+                };
+                crate::ee::org_sso::store::put_provider(conn, org, Uuid::now_v7(), write, 1)
+                    .await?;
+                crate::ee::org_sso::store::set_flags(conn, org, true, true, 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        let row = crate::ee::org_sso::store::provider(db.reader(), org)
+            .await
+            .unwrap()
+            .expect("provider kept");
+        assert!(!row.enabled && !row.enforced);
+        db.close().await;
+
+        // Disabling again finds the provider row, so it still reports a change.
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        assert!(matches!(
+            org_sso_disable(&config, "nobody").await,
+            Err(AdminError::OrgNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn migrate_without_a_meta_db_refuses_and_creates_nothing() {
+        let app = TestApp::new().await;
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("catalog.db"), b"").unwrap();
+        let mut config = app.state.config.clone();
+        config.data_dir = empty.path().to_path_buf();
+
+        let error = migrate(&config).await.unwrap_err();
+
+        assert!(matches!(error, AdminError::NoMetaDb), "{error}");
+        assert!(error.to_string().contains("data directory setting"));
+        assert!(!empty.path().join("meta.db").exists());
+        assert!(!empty.path().join("LOCK").exists());
     }
 
     #[tokio::test]
@@ -863,6 +1101,49 @@ mod tests {
             .unwrap();
         assert_eq!(row.id, created.id);
         assert!(created.reset_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn month_units_counts_the_flushed_rows_of_this_month() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        let (first, _) = crate::usage::month_bounds(Clock::System.now_ns());
+        let this_month = first.format("%Y-%m-%d").to_string();
+        let last_month = first.pred_opt().unwrap().format("%Y-%m-%d").to_string();
+        let project = ProjectId::new_v7().to_string();
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO usage_daily (org_id, project_id, day, spans, scores) \
+                     VALUES (?, ?, ?, 10, 5)",
+                )
+                .bind(org.to_string())
+                .bind(project.clone())
+                .bind(this_month)
+                .execute(&mut *conn)
+                .await
+                .map_err(MetaError::from)?;
+                sqlx::query(
+                    "INSERT INTO usage_daily (org_id, project_id, day, spans, scores) \
+                     VALUES (?, ?, ?, 100, 0)",
+                )
+                .bind(org.to_string())
+                .bind(project)
+                .bind(last_month)
+                .execute(&mut *conn)
+                .await
+                .map_err(MetaError::from)?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        let report = entitlements(&config, "acme").await.unwrap();
+        assert_eq!(report.month_units, 15);
     }
 
     async fn seed_org(db: &MetaDb) {
@@ -1945,21 +2226,20 @@ mod tests {
         assert!(matches!(error, AdminError::SourceNotInitialized), "{error}");
     }
 
-    #[tokio::test]
-    async fn source_at_another_schema_is_refused() {
-        let (_dir, config) = ready_config().await;
-        let source = tempfile::tempdir().unwrap();
-        let db = MetaDb::open(source.path()).await.unwrap();
-        let expected = crate::meta::expected_version();
-        let future = expected + 1;
+    /// Adds a fake migration row `version` to `db` (a source written by another binary).
+    async fn set_schema(db: &MetaDb, version: i64) {
         db.write(move |connection| {
             Box::pin(async move {
+                sqlx::query("DELETE FROM _sqlx_migrations WHERE version > ?")
+                    .bind(version)
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query(
-                    "INSERT INTO _sqlx_migrations \
+                    "INSERT OR IGNORE INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (?, 'future', 1, ?, 0)",
+                     VALUES (?, 'other binary', 1, ?, 0)",
                 )
-                .bind(future)
+                .bind(version)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -1968,14 +2248,46 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_at_an_older_schema_is_refused() {
+        let (_dir, config) = ready_config().await;
+        let source = tempfile::tempdir().unwrap();
+        let db = MetaDb::open(source.path()).await.unwrap();
+        let expected = crate::meta::expected_version();
+        let older = expected - 1;
+        set_schema(&db, older).await;
         db.close().await;
         let error = reapply_deletions(&config, source.path()).await.unwrap_err();
         assert!(
             matches!(
                 error,
-                AdminError::SourceSchema { expected: e, found } if e == expected && found == future
+                AdminError::SourceSchema { expected: e, found } if e == expected && found == older
             ),
             "{error}"
+        );
+        assert!(error.to_string().contains("older than"), "{error}");
+    }
+
+    /// The rollback case (D-M-9, cross-track review X18): the kept directory was migrated
+    /// by a newer binary, and this one reads its deletions by column name.
+    #[tokio::test]
+    async fn source_at_a_newer_schema_is_copied() {
+        let (_dir, config) = ready_config().await;
+        let ids = target_with_projects(&config).await;
+        let source = build_source(&ids).await;
+        let db = MetaDb::open_existing(source.path()).await.unwrap();
+        set_schema(&db, crate::meta::expected_version() + 1).await;
+        db.close().await;
+        let report = reapply_deletions(&config, source.path()).await.unwrap();
+        assert_eq!(
+            report,
+            ReapplyReport {
+                reopened: 5,
+                failed_copied: 1,
+                present: 0
+            }
         );
     }
 

@@ -238,7 +238,7 @@ async fn appender(
 /// One query over project C, of kind `which % 2`: R5.2's window count (it spills across files),
 /// or a trace list over day 0 to day 60. Returns the error kind of a refusal the child accepts.
 async fn run_query(storage: &Storage, which: usize) -> Result<(), &'static str> {
-    let query = match storage.query(filler(), QueryOptions::default()).await {
+    let query = match storage.query(filler(), QueryOptions::new(None, None)).await {
         Ok(query) => query,
         Err(QueryError::Busy) => return Err("busy"),
         Err(other) => panic!("query admission failed: {other}"),
@@ -267,6 +267,7 @@ async fn run_query(storage: &Storage, which: usize) -> Result<(), &'static str> 
                     include_eval: true,
                     include_experiments: true,
                 },
+                strict_exclusions: false,
                 sort: TraceSort::CostTotal,
                 order: SortOrder::Desc,
                 limit: 50,

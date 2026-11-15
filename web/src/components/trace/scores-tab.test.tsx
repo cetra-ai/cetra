@@ -25,6 +25,22 @@ describe("scores tab", () => {
     expect(within(scores).getByText("Resolved the question with tool data.")).toBeInTheDocument();
   });
 
+  it("links an evaluator score to its judge trace only", async () => {
+    await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}&span=${SPAN}`);
+    const panel = await screen.findByRole("region", { name: "Span" });
+    fireEvent.mouseDown(within(panel).getByRole("tab", { name: "Scores" }));
+    expect(await within(panel).findByText("tone")).toBeInTheDocument();
+
+    // Only the helpfulness score from the LLM judge carries a judge trace; the human, API and
+    // span-level judge scores do not.
+    const links = within(panel).getAllByRole("link", { name: "View judge trace" });
+    expect(links).toHaveLength(1);
+    expect(links[0]).toHaveAttribute(
+      "href",
+      "/acme/support-bot/traces/a1000000000000000000000000000005",
+    );
+  });
+
   it("says there are no scores when both groups are empty", async () => {
     server.use(
       http.get("/api/v1/projects/:project/scores", () =>

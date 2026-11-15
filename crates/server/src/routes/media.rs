@@ -12,6 +12,7 @@ use bytes::Bytes;
 use serde::Deserialize;
 
 use crate::auth::roles::ProjectPerm;
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -54,9 +55,10 @@ async fn get_media(
 ) -> Result<Response, ApiError> {
     let sha256 = parse_sha256(&path.sha256)?;
     // D-G-24: the whole blob is read, then sliced. The range is never sent to storage.
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
     let blob = state
         .storage
-        .get_media(access.project.id, &sha256, None)
+        .get_media(access.project.id, &sha256, None, visible_from)
         .await
         .map_err(|error| media_error(&error))?;
     let size = blob.size;
@@ -211,7 +213,9 @@ mod tests {
 
     use super::*;
     use crate::api::common::ProblemCode;
-    use crate::test_support::{Seeded, TestApp, TestResponse};
+    use bytesize::ByteSize;
+
+    use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
     /// The one blob of `fixtures/api/media`: 70 bytes of PNG.
     const SHA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
@@ -321,5 +325,112 @@ mod tests {
         assert_eq!(uppercase.status, StatusCode::NOT_FOUND);
         let unknown = fetch(&app, &seeded, &"0".repeat(64), None).await;
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    }
+
+    /// Rewrites every span's `startTimeUnixNano` in an OTLP JSON export to `start` (ns).
+    fn export_at(start: i64) -> Vec<u8> {
+        fn rewrite(value: &mut serde_json::Value, start: i64) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map.contains_key("startTimeUnixNano") {
+                        map.insert(
+                            "startTimeUnixNano".to_owned(),
+                            serde_json::Value::String(start.to_string()),
+                        );
+                        map.insert(
+                            "endTimeUnixNano".to_owned(),
+                            serde_json::Value::String((start + 998_000_000).to_string()),
+                        );
+                    }
+                    for child in map.values_mut() {
+                        rewrite(child, start);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        rewrite(item, start);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut export: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../fixtures/otlp/llmobs/sdk-media-bytes/input.json"
+        ))
+        .unwrap();
+        rewrite(&mut export, start);
+        serde_json::to_vec(&export).unwrap()
+    }
+
+    /// D-P-21: media of spans outside the org's data window is not found; a new span that
+    /// references the same blob makes it found again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn media_of_hidden_spans_is_not_found() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::with_config(|config| config.media.min_bytes = ByteSize::b(1)).await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let post = |body: Vec<u8>| {
+            app.request(Method::POST, "/v1/traces")
+                .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+        };
+
+        let response = post(export_at(now - 40 * DAY)).await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+        assert_eq!(fetch(&app, &seeded, SHA, None).await.status, StatusCode::OK);
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        assert_eq!(
+            fetch(&app, &seeded, SHA, None).await.status,
+            StatusCode::NOT_FOUND
+        );
+
+        let response = post(export_at(now)).await;
+        assert_eq!(response.status, StatusCode::OK, "{:?}", response.body);
+        assert_eq!(fetch(&app, &seeded, SHA, None).await.status, StatusCode::OK);
+    }
+
+    /// Deletes the stored object of `sha` in `project` under `dir`, as a lost file would.
+    /// Returns whether one was found.
+    fn remove_object(dir: &std::path::Path, project: &str, sha: &str) -> bool {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if remove_object(&path, project, sha) {
+                    return true;
+                }
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(sha)
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    == Some(project)
+            {
+                std::fs::remove_file(&path).unwrap();
+                return true;
+            }
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_blob_whose_object_cannot_be_read_is_503() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        app.load_example_dataset(seeded.project.id).await;
+        let project = seeded.project.id.to_string();
+        assert!(remove_object(&app.state.config.data_dir, &project, SHA));
+
+        let response = fetch(&app, &seeded, SHA, None).await;
+        assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.problem().code, ProblemCode::Busy);
     }
 }

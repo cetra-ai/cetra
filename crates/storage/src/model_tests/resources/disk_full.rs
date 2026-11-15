@@ -94,6 +94,7 @@ fn media_blob(len: usize) -> (MediaBlob, Bytes) {
         sha256,
         mime_type: "application/octet-stream".to_owned(),
         bytes: bytes.clone(),
+        newest_span_start: 0,
     };
     (blob, bytes)
 }
@@ -324,7 +325,7 @@ fn put_media_on_a_full_disk_fails_and_leaves_nothing() {
             ),
             other => panic!("a 3 MiB put on 1 MiB free is an object I/O error, got {other:?}"),
         }
-        let read = h.block_on(h.storage().get_media(P::A.id(), &sha256, None));
+        let read = h.block_on(h.storage().get_media(P::A.id(), &sha256, None, None));
         assert!(
             matches!(read, Err(MediaError::NotFound)),
             "a failed put leaves no media row"
@@ -353,7 +354,7 @@ fn put_media_on_a_full_disk_fails_and_leaves_nothing() {
         h.block_on(h.storage().put_media(P::A.id(), retry))
             .expect("the same put with space free is Ok");
         let read = h
-            .block_on(h.storage().get_media(P::A.id(), &sha256, None))
+            .block_on(h.storage().get_media(P::A.id(), &sha256, None, None))
             .expect("the blob reads back");
         assert_eq!(read.bytes, payload, "the blob reads back the same bytes");
 
@@ -479,7 +480,7 @@ fn spill_query(h: &Harness) -> Result<u64, RunError> {
     h.block_on(async {
         let query = h
             .storage()
-            .query(filler(), Default::default())
+            .query(filler(), crate::QueryOptions::new(None, None))
             .await
             .expect("query the filler project");
         let ctx = QueryContext::new(query, None)?;
@@ -1133,7 +1134,7 @@ fn count_and_bytes(h: &Harness) -> Result<(u64, u64), RunError> {
     h.block_on(async {
         let query = h
             .storage()
-            .query(filler(), Default::default())
+            .query(filler(), crate::QueryOptions::new(None, None))
             .await
             .expect("query the filler project");
         let ctx = QueryContext::new(query, None)?;

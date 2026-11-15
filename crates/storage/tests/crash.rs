@@ -11,6 +11,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use llmobs_storage::QueryOptions;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::OpenOptions;
 use std::io::{BufRead, Read, Write};
@@ -413,7 +414,7 @@ async fn check_dir(
         .map_err(|error| error.to_string())?;
     let stored = stored_rows(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )

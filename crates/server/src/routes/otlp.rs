@@ -13,12 +13,13 @@ use axum::routing::post;
 use llmobs_core::ids::ProjectId;
 
 use crate::auth::roles::KeyScope;
+use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::ApiError;
 use crate::ingest::body::{body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
-use crate::ingest::{Accepted, CommitTarget, IngestError, commit_in_task};
+use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
 
 /// The OTLP/HTTP route. Undocumented, so it stays out of `openapi.json` (D-G-6).
@@ -41,6 +42,15 @@ async fn export(
     body: Body,
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
+    if let Err(cap) = check_cap(&state, access.project.org_id).await {
+        tracing::debug!(
+            target: "ingest",
+            project_id = %access.project.id,
+            reason = "quota",
+            "request refused"
+        );
+        return Err(cap.into());
+    }
     match export_body(&state, &access.project, &headers, body, started).await {
         Ok(response) => Ok(response),
         Err(error) => {
@@ -65,6 +75,7 @@ async fn export_body(
         .await
         .map_err(IngestError::Body)?;
     let now_ns = state.clock.now_ns();
+    let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
         normalized,
         request_bytes,
@@ -73,8 +84,17 @@ async fn export_body(
         reservation,
     } = state
         .ingest
-        .accept(raw, reservation, format, encoding, project, now_ns)
+        .accept(
+            raw,
+            reservation,
+            format,
+            encoding,
+            project,
+            retention_cap,
+            now_ns,
+        )
         .await?;
+    check_rate(state, project.org_id, normalized.spans.len(), now_ns)?;
     let rejections = normalized.rejections.clone();
     let target = CommitTarget {
         org_id: project.org_id,
@@ -119,11 +139,16 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// One `warn` per refused request. A `500` is logged once by `ApiError::into_response`
-/// instead, so the internal variants return early. The reason is a static string: no
+/// One `warn` per refused request; a rate refusal is a `debug`, since a client over its rate
+/// is expected. A `500` is logged once by `ApiError::into_response` instead, so the internal
+/// variants return early. The reason is a static string: no
 /// header, key, body byte or attribute.
 fn log_refusal(project: ProjectId, error: &IngestError, started: Instant) {
     let reason = match error {
+        IngestError::RateLimited { .. } => {
+            tracing::debug!(target: "ingest", project_id = %project, reason = "rate", "request refused");
+            return;
+        }
         IngestError::Body(body) => match body {
             crate::ingest::body::BodyError::UnsupportedType => "unsupported_type",
             crate::ingest::body::BodyError::UnsupportedEncoding => "unsupported_encoding",
@@ -170,12 +195,12 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
     use bytesize::ByteSize;
     use datafusion::prelude::SessionContext;
     use llmobs_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
-    use llmobs_storage::QueryOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
     use prost::Message;
     use serde_json::Value;
@@ -183,7 +208,7 @@ mod tests {
     use super::*;
     use crate::api::common::ProblemCode;
     use crate::ingest::body::{BodyEncoding, BodyFormat};
-    use crate::test_support::{Seeded, TestApp, assert_logs_clean, capture_logs};
+    use crate::test_support::{Seeded, TestApp, assert_logs_clean, capture_logs, set_limits};
 
     const MARKER: &str = "SECRET-BODY-MARKER";
     const ATTRIBUTE_VALUE: &str = "attr-secret-value";
@@ -263,12 +288,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -282,12 +302,7 @@ mod tests {
 
     /// All stored span rows, formatted. Used to look at columns the tests need.
     async fn stored_rows(app: &TestApp, project: ProjectId) -> String {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -382,6 +397,35 @@ mod tests {
         let request = decode_json(&body).expect("fixture decodes");
         let expected = normalize(&request, &ctx, &prices).rejections.message();
         assert_eq!(partial["errorMessage"].as_str(), expected.as_deref());
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
+    }
+
+    /// D-P-22: under a 30-day window the age bound is 60 days (D85). A span 61 days old is
+    /// rejected; one 59 days old is stored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_plan_bounds_span_age() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let now = app.state.clock.now_ns();
+        let span = |id: usize, start: i64| {
+            format!(
+                "{{\"traceId\":\"{id:032x}\",\"spanId\":\"{id:016x}\",\"name\":\"span-{id}\",\"startTimeUnixNano\":\"{start}\",\"endTimeUnixNano\":\"{}\"}}",
+                start + 1_000_000_000
+            )
+        };
+        let body = export_json("", &[span(1, now - 61 * DAY), span(2, now - 59 * DAY)]);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(json_body(&response)["partialSuccess"]["rejectedSpans"], "1");
         assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
     }
 
@@ -663,6 +707,7 @@ mod tests {
                 BodyFormat::Json,
                 BodyEncoding::Identity,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -804,5 +849,86 @@ mod tests {
             .join("../../fixtures/otlp")
             .join(relative);
         std::fs::read(&path).expect("fixture is readable")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capped_org_gets_402() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            10,
+            0,
+            0,
+        );
+        let body = export_json("", &[span_json(0, "")]);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::PAYMENT_REQUIRED);
+        assert!(response.header("retry-after").is_some());
+        assert_eq!(response.problem().code, ProblemCode::QuotaExceeded);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_below_the_cap_is_accepted_whole() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 10}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            9,
+            0,
+            0,
+        );
+        let spans: Vec<String> = (0..5).map(|index| span_json(index, "")).collect();
+        let body = export_json("", &spans);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rate_limited_org_gets_429() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"ingest_spans_per_sec": 1, "ingest_burst": 2}),
+        );
+        let body = export_json("", &[span_json(0, "")]);
+        for _ in 0..2 {
+            let response = post_traces(&app, &seeded.ingest_key, "application/json", body.clone())
+                .send()
+                .await;
+            assert_eq!(response.status, StatusCode::OK);
+        }
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.header("retry-after"), Some("1"));
+        assert_eq!(response.problem().code, ProblemCode::RateLimited);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 2);
     }
 }

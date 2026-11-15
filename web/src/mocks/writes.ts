@@ -8,14 +8,19 @@ import deletionOrgDocument from "../../../fixtures/api/static/deletion-org.json"
 import deletionPreviewDocument from "../../../fixtures/api/static/deletion-preview.json";
 import deletionProjectDocument from "../../../fixtures/api/static/deletion-project.json";
 import deletionResolvingDocument from "../../../fixtures/api/static/deletion-resolving.json";
+import evalJobQueuedDocument from "../../../fixtures/api/static/eval-job-queued.json";
 import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
+import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
+import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
+import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
@@ -39,6 +44,7 @@ export interface WriteOperation {
 export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "post_login", method: "post", path: "/api/auth/login" },
   { operationId: "post_logout", method: "post", path: "/api/auth/logout" },
+  { operationId: "post_sso_discover", method: "post", path: "/api/auth/sso/discover" },
   { operationId: "post_signup", method: "post", path: "/api/auth/signup" },
   { operationId: "post_setup", method: "post", path: "/api/auth/setup" },
   { operationId: "post_password_forgot", method: "post", path: "/api/auth/password/forgot" },
@@ -61,6 +67,24 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
   { operationId: "delete_org_member", method: "delete", path: "/api/v1/orgs/{org}/members/{user}" },
   { operationId: "post_org_invite", method: "post", path: "/api/v1/orgs/{org}/invites" },
   { operationId: "delete_org_invite", method: "delete", path: "/api/v1/orgs/{org}/invites/{id}" },
+  { operationId: "put_org_sso_provider", method: "put", path: "/api/v1/orgs/{org}/sso/provider" },
+  {
+    operationId: "delete_org_sso_provider",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/provider",
+  },
+  { operationId: "post_org_sso_domain", method: "post", path: "/api/v1/orgs/{org}/sso/domains" },
+  {
+    operationId: "post_org_sso_domain_verify",
+    method: "post",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+  },
+  {
+    operationId: "delete_org_sso_domain",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/sso/domains/{id}",
+  },
+  { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -189,6 +213,36 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "delete",
     path: "/api/v1/projects/{project}/alert-rules/{id}",
   },
+  {
+    operationId: "post_online_rule",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules",
+  },
+  {
+    operationId: "patch_online_rule",
+    method: "patch",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "delete_online_rule",
+    method: "delete",
+    path: "/api/v1/projects/{project}/online-rules/{id}",
+  },
+  {
+    operationId: "post_online_rule_preview",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/preview",
+  },
+  {
+    operationId: "post_online_rule_resume",
+    method: "post",
+    path: "/api/v1/projects/{project}/online-rules/{id}/resume",
+  },
+  {
+    operationId: "post_evaluator_run",
+    method: "post",
+    path: "/api/v1/projects/{project}/evaluators/{id}/run",
+  },
 ];
 
 type Respond = (input: {
@@ -202,6 +256,7 @@ const PROJECT_OVERRIDES = ["admin", "member", "viewer", "none"] as const;
 const RESPONSES: Record<string, Respond> = {
   post_login: () => HttpResponse.json(meDocument),
   post_logout: () => noContent(),
+  post_sso_discover: () => HttpResponse.json({ sso: false }),
   post_signup: () => HttpResponse.json(signupResponseDocument, { status: 201 }),
   post_setup: () => HttpResponse.json(setupResponseDocument, { status: 201 }),
   post_password_forgot: () => noContent(),
@@ -261,6 +316,12 @@ const RESPONSES: Record<string, Respond> = {
   },
   delete_org_member: () => noContent(),
   delete_org_invite: () => noContent(),
+  put_org_sso_provider: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_provider: () => noContent(),
+  post_org_sso_domain: () => HttpResponse.json(orgSsoDocument, { status: 201 }),
+  post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
+  delete_org_sso_domain: () => noContent(),
+  patch_org_sso: () => HttpResponse.json(orgSsoDocument),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {
@@ -456,6 +517,15 @@ const RESPONSES: Record<string, Respond> = {
     return HttpResponse.json({ ...rule, ...body });
   },
   delete_alert_rule: () => noContent(),
+
+  post_online_rule: ({ body }) =>
+    HttpResponse.json({ ...onlineRuleDocument, ...named(body) }, { status: 201 }),
+  patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
+  delete_online_rule: () => noContent(),
+  post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
+  post_online_rule_resume: ({ params }) =>
+    HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
+  post_evaluator_run: () => HttpResponse.json(evalJobQueuedDocument, { status: 202 }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {

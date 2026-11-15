@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -31,20 +32,46 @@ pub(crate) struct MockLlm {
     task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Clone)]
 struct MockState {
     /// Replies still to serve. The last one repeats.
     replies: Arc<Mutex<Vec<Reply>>>,
     /// Each request's headers and parsed JSON body, in arrival order.
     requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
+    /// Runs on each request before its reply (a test moves the clock while a call is in flight).
+    hook: Box<dyn Fn() + Send + Sync>,
+    /// How long each reply waits before it is sent.
+    delay: Duration,
 }
 
 impl MockLlm {
     /// Binds the listener and serves it in the background.
     pub(crate) async fn start(replies: Vec<Reply>) -> Self {
+        Self::start_with_delay(replies, Duration::ZERO).await
+    }
+
+    /// [`Self::start`], and each reply is sent `delay` after its request arrives.
+    pub(crate) async fn start_with_delay(replies: Vec<Reply>, delay: Duration) -> Self {
+        Self::spawn(replies, Box::new(|| {}), delay).await
+    }
+
+    /// [`Self::start`], and `hook` runs on each request before its reply.
+    pub(crate) async fn start_with_hook(
+        replies: Vec<Reply>,
+        hook: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::spawn(replies, Box::new(hook), Duration::ZERO).await
+    }
+
+    async fn spawn(
+        replies: Vec<Reply>,
+        hook: Box<dyn Fn() + Send + Sync>,
+        delay: Duration,
+    ) -> Self {
         let state = Arc::new(MockState {
             replies: Arc::new(Mutex::new(replies)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            hook,
+            delay,
         });
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
@@ -88,19 +115,23 @@ async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: B
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((headers, parsed));
-    let mut replies = state.replies.lock().unwrap_or_else(PoisonError::into_inner);
-    // Replies are served in order; the last one repeats.
-    let reply = match replies.len() {
-        0 => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                r#"{"error":{"message":"no scripted reply"}}"#,
-            )
-                .into_response();
+    (state.hook)();
+    let reply = {
+        let mut replies = state.replies.lock().unwrap_or_else(PoisonError::into_inner);
+        // Replies are served in order; the last one repeats.
+        match replies.len() {
+            0 => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":{"message":"no scripted reply"}}"#,
+                )
+                    .into_response();
+            }
+            1 => clone_last(&replies),
+            _ => replies.remove(0),
         }
-        1 => clone_last(&replies),
-        _ => replies.remove(0),
     };
+    tokio::time::sleep(state.delay).await;
     let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let bytes = serde_json::to_vec(&reply.body).unwrap_or_default();
     (status, bytes).into_response()

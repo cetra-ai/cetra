@@ -95,6 +95,23 @@ pub(crate) enum ApiError {
         /// Static reason. Stores choose it (P6).
         detail: &'static str,
     },
+    /// A conflict that names the items in the way (D-I-19): each error's `field` is
+    /// `rules.<rule id>` and its message says why.
+    #[error("conflict")]
+    ConflictWith {
+        /// Static reason.
+        detail: &'static str,
+        /// The items in the way.
+        errors: Vec<FieldError>,
+    },
+    /// The org reached its monthly units cap (D-P-17). `Retry-After` is the seconds to the reset.
+    #[error("quota exceeded")]
+    QuotaExceeded {
+        /// Names the cap and the reset; never holds payload.
+        detail: String,
+        /// Seconds until the org's units reset. At least 1.
+        retry_after_s: u64,
+    },
     /// Too many requests.
     ///
     /// `RateLimit-Limit` and `RateLimit-Reset` are both this many seconds.
@@ -168,6 +185,11 @@ impl ApiError {
             Self::Conflict { detail } => {
                 Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()))
             }
+            Self::ConflictWith { detail, errors } => {
+                let mut problem = Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()));
+                problem.errors.clone_from(errors);
+                problem
+            }
             Self::TooManyTraces => Problem::new(
                 ProblemCode::TooManyTraces,
                 Some(
@@ -175,6 +197,9 @@ impl ApiError {
                         .to_owned(),
                 ),
             ),
+            Self::QuotaExceeded { detail, .. } => {
+                Problem::new(ProblemCode::QuotaExceeded, Some(detail.clone()))
+            }
             Self::RateLimited { .. } => Problem::new(ProblemCode::RateLimited, None),
             Self::RangeNotSatisfiable { .. } => {
                 Problem::new(ProblemCode::RangeNotSatisfiable, None)
@@ -234,11 +259,22 @@ impl From<QueryError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        self.to_response()
+    }
+}
+
+impl ApiError {
+    /// The problem response for this error, logged as [`Self::log`] does. Takes a reference, so
+    /// one error can answer every request that shared it (the metrics cache, D-M-11).
+    pub(crate) fn to_response(&self) -> Response {
         self.log();
         let mut headers = HeaderMap::new();
         match self {
+            Self::QuotaExceeded { retry_after_s, .. } => {
+                headers.insert(axum::http::header::RETRY_AFTER, header_u64(*retry_after_s));
+            }
             Self::RateLimited { retry_after_s } => {
-                let seconds = header_u64(retry_after_s);
+                let seconds = header_u64(*retry_after_s);
                 headers.insert(axum::http::header::RETRY_AFTER, seconds.clone());
                 headers.insert(header("ratelimit-limit"), seconds.clone());
                 headers.insert(header("ratelimit-remaining"), header_u64(0));
@@ -540,6 +576,30 @@ mod tests {
     }
 
     #[test]
+    fn conflict_with_names_the_items_in_the_way() {
+        let problem = ApiError::ConflictWith {
+            detail: "online rules use this evaluator",
+            errors: vec![FieldError {
+                field: "rules.01900000-0000-7000-8000-000000000700".to_owned(),
+                message: "Relevance on answers: uses this evaluator".to_owned(),
+                position: None,
+            }],
+        }
+        .problem();
+        assert_eq!(problem.status, 409);
+        assert_eq!(problem.code, ProblemCode::Conflict);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("online rules use this evaluator")
+        );
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(
+            problem.errors[0].field,
+            "rules.01900000-0000-7000-8000-000000000700"
+        );
+    }
+
+    #[test]
     fn invalid_request_is_bad_request() {
         let problem =
             ApiError::Query(RunError::InvalidRequest("from must be before to".into())).problem();
@@ -584,7 +644,7 @@ mod tests {
         assert_eq!(problem.code, ProblemCode::QueryTooLarge);
         assert_eq!(
             problem.detail.as_deref(),
-            Some("the query needed more memory than allowed")
+            Some("the query needed more memory or temporary disk space than allowed")
         );
     }
 
