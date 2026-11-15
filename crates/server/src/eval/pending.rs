@@ -13,8 +13,6 @@ pub(crate) const MAX_PENDING: usize = 200_000;
 /// A trace whose root ended is complete after this long without a new span (D-I-7).
 pub(crate) const ROOT_IDLE_NS: i64 = 5_000_000_000;
 /// Failed sweeps after which a trace is dropped (D-I-9).
-// I4.7 calls it.
-#[allow(dead_code)]
 pub(crate) const MAX_FAILED_READS: u8 = 5;
 /// The full-map warning is logged at most this often.
 const WARN_EVERY_NS: i64 = 60_000_000_000;
@@ -38,8 +36,6 @@ pub(crate) struct Entry {
 }
 
 /// A completed trace, as the sweeper saw it.
-// I4.7 calls it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Completed {
     pub(crate) trace_id: TraceId,
@@ -202,8 +198,6 @@ impl PendingTraces {
     /// [`ROOT_IDLE_NS`], or any trace idle for `timeout_ns`. At most `limit` of them, the earliest
     /// `min_start` first. The lock covers only the scan, which stops at `4 × limit` matches; the
     /// sort happens after it is released.
-    // I4.7 calls it.
-    #[allow(dead_code)]
     pub(crate) fn completed(
         &self,
         project: ProjectId,
@@ -243,8 +237,6 @@ impl PendingTraces {
     /// Removes each trace whose `last_seen` and span count still equal the completed one's: a
     /// trace that grew during the sweep's reads stays (D-I-9). A project left with no traces
     /// loses its map.
-    // I4.7 calls it.
-    #[allow(dead_code)]
     pub(crate) fn finish(&self, project: ProjectId, done: &[Completed]) {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;
@@ -270,8 +262,6 @@ impl PendingTraces {
 
     /// Counts a failed sweep for each trace still present. A trace that reaches
     /// [`MAX_FAILED_READS`] is removed. Returns how many were removed.
-    // I4.7 calls it.
-    #[allow(dead_code)]
     pub(crate) fn read_failed(&self, project: ProjectId, failed: &[Completed]) -> usize {
         let mut guard = lock(&self.inner);
         let inner = &mut *guard;

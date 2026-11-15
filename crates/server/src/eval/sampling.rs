@@ -13,8 +13,6 @@ const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
 /// Whether `rule` samples this target. `rate >= 1.0` always does; `rate` that is not above 0
 /// (or NaN) never does. Otherwise the first 8 bytes, big-endian, of SHA-256(tag ‖ rule id (16 bytes)
 /// ‖ trace id (16) ‖ span id (8, span rules only)) must be below `(rate · 2^64) as u64`.
-// I4.7 calls it.
-#[allow(dead_code)]
 pub(crate) fn sampled(rate: f64, rule: Uuid, trace: TraceId, span: Option<SpanId>) -> bool {
     if rate >= 1.0 {
         return true;

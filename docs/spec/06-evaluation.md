@@ -127,14 +127,11 @@ Rules are managed under `/online-rules` by project members (D-I-24). Saving a ru
 
 ### Triggering
 
-- **Span rules:** evaluated in the ingest path after WAL commit, against the span's light columns (the filter DSL is compiled once per rule into a DataFusion `PhysicalExpr` and evaluated on the committed `RecordBatch`). Matches are sampled and enqueued.
-- **Trace rules:** need the trace to be complete. The **trace-completion detector** tracks traces of projects that have at least one enabled trace rule:
-  - on every committed batch: upsert `pending_traces(project, trace_id, last_ingest_at, root_ended |= batch contains the root span)` (one SQLite transaction per batch);
-  - a sweeper (every 2 s) completes traces where `(root_ended AND now − last_ingest_at ≥ 5 s)` or `now − last_ingest_at ≥ project.settings.trace_completion_timeout_s` (default 60 s);
-  - on completion: load the merged trace row, evaluate each trace rule's filter, sample, enqueue, delete the pending row.
-- Spans/traces belonging to experiments (`metadata['llmobs.experiment_id']` present) and evaluation traces (`environment = 'llmobs-eval'`) are skipped by online rules. The check happens before the rule filter, so a user filter cannot override it.
+Trace and span rules fire when the trace is complete: its root span has ended and 5 s passed without a new span, or `trace_completion_timeout_s` (project setting, 10–3600 s, default 60) passed without one (D-I-7). `commit` records traces in memory for projects with an enabled, unpaused rule; evaluation and experiment spans are never recorded; a flusher persists the map every 5 s (D-I-8). Every 2 s a sweeper reads the enabled rules, takes each project's completed traces in batches of at most 500 (at most 2 000 per project per tick), and reads each rule's matches through storage (`trace_refresh` or `span_refresh`, at most 200 spans per trace) with strict exclusions, so a filter cannot reach evaluation or experiment traces (D-I-9, D-I-17). A read that fails is retried at the next tick; a trace is dropped after 5 failed ticks. Traces that complete while a rule is disabled, paused, or not yet created are not evaluated by it; backfill is the catch-up.
 
-**Sampling** is deterministic: `xxh3(rule_id ‖ trace_id[‖ span_id]) / 2^64 < sample_rate`, so re-processing never double-samples.
+**Sampling** is deterministic (D-I-10): SHA-256(`llmobs.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes big-endian, below `(rate · 2^64)`; a rate of 1 or more always samples. A span rule keeps the 50 earliest sampled spans of each trace, so re-processing never double-samples.
+
+Live enqueues are capped at 10 000 per rule per UTC hour; extra matches are dropped and shown as `dropped_last_hour` (D-I-11).
 
 ### Execution
 
