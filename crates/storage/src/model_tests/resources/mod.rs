@@ -2,6 +2,7 @@
 //! descriptors (docs/plans/r-hardening/05-m5-resources.md).
 #![allow(dead_code)] // removed in R5.8, once every item is used
 
+mod disk_full;
 mod fill;
 mod small_fs;
 

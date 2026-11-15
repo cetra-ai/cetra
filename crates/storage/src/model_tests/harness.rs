@@ -18,6 +18,7 @@ use crate::catalog::FileMeta;
 use crate::config::{
     CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
+use crate::error::OpenError;
 use crate::fs::lossy::{CrashReport, Lossy};
 use crate::objects::PutSizes;
 use crate::test_support::{ChaosStore, span_row, span_rows};
@@ -140,6 +141,18 @@ const CALM_AFTER: Duration = Duration::from_secs(3);
 /// the schedule is off while the open runs, and the previous setting is restored after it (a
 /// store error during the open fails it by design, R4.6).
 fn open_life(config: &StorageConfig, remote: Option<&Remote>, workers: usize) -> Life {
+    let (runtime, opened) = try_open_life(config, remote, workers);
+    let storage = opened.expect("open storage for a new life");
+    Life { storage, runtime }
+}
+
+/// [`open_life`] without the panic: the new life's runtime comes back with the open's result, so
+/// a failed open can still shut its runtime down (R5.3).
+fn try_open_life(
+    config: &StorageConfig,
+    remote: Option<&Remote>,
+    workers: usize,
+) -> (tokio::runtime::Runtime, Result<Storage, OpenError>) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_all()
@@ -159,8 +172,7 @@ fn open_life(config: &StorageConfig, remote: Option<&Remote>, workers: usize) ->
             opened
         }
     };
-    let storage = opened.expect("open storage for a new life");
-    Life { storage, runtime }
+    (runtime, opened)
 }
 
 impl Harness {
@@ -313,6 +325,36 @@ impl Harness {
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.set_ending(false);
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
+    }
+
+    /// Drop without shutdown, then try to open a new life. On `Err` there is no life until
+    /// [`Self::open_again`] (R5.3: a full disk can refuse the open).
+    pub(super) fn crash_then_try_open(&mut self) -> Result<(), OpenError> {
+        let Life { storage, runtime } = self.life.take().expect("a life");
+        self.set_ending(true);
+        drop(storage);
+        runtime.shutdown_timeout(Duration::from_secs(10));
+        self.set_ending(false);
+        let (runtime, opened) = try_open_life(&self.config, self.remote.as_ref(), self.workers);
+        match opened {
+            Ok(storage) => {
+                self.life = Some(Life { storage, runtime });
+                Ok(())
+            }
+            Err(error) => {
+                runtime.shutdown_timeout(Duration::from_secs(10));
+                Err(error)
+            }
+        }
+    }
+
+    /// Opens a life when there is none, after a failed [`Self::crash_then_try_open`].
+    pub(super) fn open_again(&mut self) {
+        assert!(
+            self.life.is_none(),
+            "open_again is for a harness whose open failed: it has a life"
+        );
         self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
