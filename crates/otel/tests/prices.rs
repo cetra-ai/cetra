@@ -5,19 +5,22 @@
 //!   with at least one of `input_cost_per_token` / `output_cost_per_token`.
 //! - The model name is the LiteLLM key with a leading `<litellm_provider>/` removed.
 //!   A key that still contains `/` after that is skipped (proxy routes such as `openrouter/…`).
-//! - When two kept entries give the same model name, keep the entry whose key has no `/`.
-//!   Otherwise keep the first in key order.
+//! - One row per `(model_name, provider)`. When two kept entries give the same pair, keep the
+//!   entry whose key has no `/`. Otherwise keep the first in key order.
 //! - `match_pattern` is `regex::escape(model_name)`.
-//! - `provider` is the canonical provider when `litellm_provider` maps to one of
-//!   `openai`, `anthropic`, `gcp.gemini` (`gemini`), `gcp.vertex_ai` (`vertex_ai*`),
-//!   `aws.bedrock` (`bedrock*`), `azure.ai.openai` (`azure*`), `mistral_ai` (`mistral`),
-//!   `x_ai` (`xai`), `groq`, `deepseek`, `cohere`. Anything else is null.
+//! - `provider` is `row_provider(litellm_provider)`, the semconv name of the publisher or
+//!   cloud platform (see `row_provider`). A LiteLLM provider with no mapping keeps its own
+//!   name, so its rows never price another provider's spans. A missing `litellm_provider`
+//!   gives null.
+//! - Rows are sorted by `(model_name lowercased, provider_rank, provider, model_name)` (see
+//!   `provider_rank`). The lookup matches names case-insensitively, so case variants of one
+//!   model are adjacent. A span with no provider takes the first matching row, so the
+//!   publisher's row wins.
 //! - Prices are per-token costs times 1e6: `input_cost_per_token` → `price_input`,
 //!   `output_cost_per_token` → `price_output`, `cache_read_input_token_cost` →
 //!   `price_cache_read`, `cache_creation_input_token_cost` → `price_cache_write`,
 //!   `output_cost_per_reasoning_token` → `price_reasoning`.
 //! - Tiers: `*_above_<N>k_tokens` → `min_input_tokens = N·1000`, with the matching prices.
-//! - Rows are sorted by `(model_name, provider)`.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -123,6 +126,7 @@ fn conversion_follows_the_litellm_rules() {
             "litellm_provider": "openai",
             "cache_read_input_token_cost": 1e-6
         },
+        "no-provider": { "mode": "chat", "input_cost_per_token": 1e-6 },
         "a.b": { "mode": "completion", "litellm_provider": "groq", "input_cost_per_token": 1e-6 },
         "embed-me": {
             "mode": "embedding",
@@ -131,6 +135,12 @@ fn conversion_follows_the_litellm_rules() {
             "output_cost_per_token": 0.0
         },
         "reply": { "mode": "responses", "litellm_provider": "gemini", "input_cost_per_token": 1e-6 },
+        "gemini-x": { "mode": "chat", "litellm_provider": "gemini", "input_cost_per_token": 5e-6 },
+        "gemini/gemini-x": {
+            "mode": "chat",
+            "litellm_provider": "gemini",
+            "input_cost_per_token": 4e-6
+        },
         "vertex": {
             "mode": "chat",
             "litellm_provider": "vertex_ai-language-models",
@@ -168,6 +178,11 @@ fn conversion_follows_the_litellm_rules() {
             "litellm_provider": "azure",
             "input_cost_per_token": 1e-6
         },
+        "azure_ai/shared": {
+            "mode": "chat",
+            "litellm_provider": "azure_ai",
+            "input_cost_per_token": 4e-6
+        },
         "openai/shared": {
             "mode": "chat",
             "litellm_provider": "openai",
@@ -176,32 +191,38 @@ fn conversion_follows_the_litellm_rules() {
     });
     let entries = raw.as_object().expect("object");
     let (rows, collisions) = convert(entries);
-    assert_eq!(collisions, 3);
+    // `openai/gpt-4o` and `gpt-4o`, and `gemini/gemini-x` and `gemini-x`, share a
+    // (model, provider) pair. The other keys differ in provider.
+    assert_eq!(collisions, 2);
     assert_eq!(
         rows.iter()
-            .map(|row| row.model_name.as_str())
+            .map(|row| (row.model_name.as_str(), row.provider.as_deref()))
             .collect::<Vec<_>>(),
         vec![
-            "a.b",
-            "azure-model",
-            "bedrock-model",
-            "cohere-model",
-            "deep",
-            "embed-me",
-            "gpt-4o",
-            "mistral-model",
-            "other",
-            "reply",
-            "shared",
-            "vertex",
-            "x-model",
+            ("a.b", Some("groq")),
+            ("azure-model", Some("azure.ai.inference")),
+            ("bedrock-model", Some("aws.bedrock")),
+            ("cohere-model", Some("cohere")),
+            ("deep", Some("deepseek")),
+            ("embed-me", Some("openai")),
+            ("gemini-x", Some("gcp.gemini")),
+            ("gpt-4o", Some("openai")),
+            ("gpt-4o", Some("azure.ai.openai")),
+            ("mistral-model", Some("mistral_ai")),
+            ("no-provider", None),
+            ("other", Some("fireworks_ai")),
+            ("reply", Some("gcp.gemini")),
+            ("shared", Some("openai")),
+            ("shared", Some("azure.ai.inference")),
+            ("shared", Some("azure.ai.openai")),
+            ("vertex", Some("gcp.vertex_ai")),
+            ("x-model", Some("x_ai")),
         ]
     );
 
-    let gpt = find(&rows, "gpt-4o");
+    let gpt = find(&rows, "gpt-4o", Some("openai"));
     assert_eq!(gpt.scope, PriceScope::Builtin);
     assert_eq!(gpt.valid_from, 0);
-    assert_eq!(gpt.provider.as_deref(), Some("openai"));
     assert_eq!(gpt.match_pattern, regex::escape("gpt-4o"));
     assert_eq!(gpt.price_input, Some(million(2.5e-6)));
     assert_eq!(gpt.price_output, Some(million(1e-5)));
@@ -229,38 +250,136 @@ fn conversion_follows_the_litellm_rules() {
             },
         ])
     );
+    assert_eq!(
+        find(&rows, "gpt-4o", Some("azure.ai.openai")).price_input,
+        Some(million(1e-6))
+    );
+    assert_eq!(
+        find(&rows, "gemini-x", Some("gcp.gemini")).price_input,
+        Some(million(5e-6))
+    );
 
-    let dotted = find(&rows, "a.b");
+    let dotted = find(&rows, "a.b", Some("groq"));
     assert_eq!(dotted.match_pattern, regex::escape("a.b"));
-    assert_eq!(dotted.provider.as_deref(), Some("groq"));
-    assert_eq!(find(&rows, "embed-me").price_output, Some(0.0));
-    assert_eq!(find(&rows, "reply").provider.as_deref(), Some("gcp.gemini"));
     assert_eq!(
-        find(&rows, "vertex").provider.as_deref(),
-        Some("gcp.vertex_ai")
+        find(&rows, "embed-me", Some("openai")).price_output,
+        Some(0.0)
     );
     assert_eq!(
-        find(&rows, "bedrock-model").provider.as_deref(),
-        Some("aws.bedrock")
+        find(&rows, "other", Some("fireworks_ai")).price_input,
+        Some(million(1e-6))
     );
     assert_eq!(
-        find(&rows, "azure-model").provider.as_deref(),
-        Some("azure.ai.openai")
+        find(&rows, "no-provider", None).price_input,
+        Some(million(1e-6))
     );
     assert_eq!(
-        find(&rows, "mistral-model").provider.as_deref(),
-        Some("mistral_ai")
+        find(&rows, "shared", Some("openai")).price_input,
+        Some(million(9e-6))
     );
-    assert_eq!(find(&rows, "x-model").provider.as_deref(), Some("x_ai"));
-    assert_eq!(find(&rows, "deep").provider.as_deref(), Some("deepseek"));
     assert_eq!(
-        find(&rows, "cohere-model").provider.as_deref(),
-        Some("cohere")
+        find(&rows, "shared", Some("azure.ai.inference")).price_input,
+        Some(million(4e-6))
     );
-    assert_eq!(find(&rows, "other").provider, None);
-    let shared = find(&rows, "shared");
-    assert_eq!(shared.provider.as_deref(), Some("azure.ai.openai"));
-    assert_eq!(shared.price_input, Some(million(1e-6)));
+    assert_eq!(
+        find(&rows, "shared", Some("azure.ai.openai")).price_input,
+        Some(million(1e-6))
+    );
+}
+
+/// `row_provider` maps each LiteLLM provider name to its semconv name. A name with no
+/// mapping keeps its own name, so its rows never price another provider's spans.
+#[test]
+fn provider_mapping_covers_the_litellm_names() {
+    let cases = [
+        ("openai", "openai"),
+        ("text-completion-openai", "openai"),
+        ("anthropic", "anthropic"),
+        ("gemini", "gcp.gemini"),
+        ("vertex_ai-anthropic_models", "gcp.vertex_ai"),
+        ("vertex_ai", "gcp.vertex_ai"),
+        ("bedrock", "aws.bedrock"),
+        ("bedrock_converse", "aws.bedrock"),
+        ("azure", "azure.ai.openai"),
+        ("azure_text", "azure.ai.openai"),
+        ("azure_ai", "azure.ai.inference"),
+        ("mistral", "mistral_ai"),
+        ("codestral", "mistral_ai"),
+        ("text-completion-codestral", "mistral_ai"),
+        ("xai", "x_ai"),
+        ("groq", "groq"),
+        ("deepseek", "deepseek"),
+        ("cohere", "cohere"),
+        ("cohere_chat", "cohere"),
+        ("perplexity", "perplexity"),
+        ("watsonx", "ibm.watsonx.ai"),
+        ("fireworks_ai", "fireworks_ai"),
+        ("azure_anthropic", "azure_anthropic"),
+    ];
+    for (litellm, expected) in cases {
+        assert_eq!(row_provider(litellm), expected, "{litellm}");
+    }
+}
+
+#[test]
+fn rows_put_the_publisher_first() {
+    let raw = serde_json::json!({
+        "vertex_ai/gemini-2.5-flash": {
+            "mode": "chat", "litellm_provider": "vertex_ai", "input_cost_per_token": 3e-7
+        },
+        "gemini/gemini-2.5-flash": {
+            "mode": "chat", "litellm_provider": "gemini", "input_cost_per_token": 3e-7
+        },
+        "bedrock/gemini-2.5-flash": {
+            "mode": "chat", "litellm_provider": "bedrock", "input_cost_per_token": 3e-7
+        },
+        "fireworks_ai/gemini-2.5-flash": {
+            "mode": "chat", "litellm_provider": "fireworks_ai", "input_cost_per_token": 3e-7
+        },
+        "gemini-2.5-flash": {
+            "mode": "chat", "input_cost_per_token": 3e-7
+        }
+    });
+    let (rows, collisions) = convert(raw.as_object().expect("object"));
+    // Four providers, so no collision. Cloud platforms sort by provider name.
+    assert_eq!(collisions, 0);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.provider.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("gcp.gemini"),
+            Some("aws.bedrock"),
+            Some("gcp.vertex_ai"),
+            Some("fireworks_ai"),
+            None,
+        ]
+    );
+}
+
+/// Case variants of one model sort together, so the publisher's row wins even when its
+/// name differs in case from a lower-ranked provider's row.
+#[test]
+fn case_variants_sort_by_provider_rank() {
+    let raw = serde_json::json!({
+        "sambanova/DeepSeek-R1": {
+            "mode": "chat", "litellm_provider": "sambanova", "input_cost_per_token": 5e-6
+        },
+        "deepseek/deepseek-r1": {
+            "mode": "chat", "litellm_provider": "deepseek", "input_cost_per_token": 5.5e-7
+        }
+    });
+    let (rows, collisions) = convert(raw.as_object().expect("object"));
+    assert_eq!(collisions, 0);
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.model_name.as_str(), row.provider.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("deepseek-r1", Some("deepseek")),
+            ("DeepSeek-R1", Some("sambanova")),
+        ]
+    );
 }
 
 /// Rewrites `prices/builtin.json` when `LLMOBS_LITELLM_JSON` points at a download.
@@ -286,7 +405,7 @@ fn refresh() {
 }
 
 fn convert(entries: &Map<String, Value>) -> (Vec<PriceRow>, usize) {
-    let mut winners: BTreeMap<String, Winner> = BTreeMap::new();
+    let mut winners: BTreeMap<(String, Option<String>), Winner> = BTreeMap::new();
     let mut collisions = 0;
     for (key, value) in entries {
         let Some(entry) = value.as_object() else {
@@ -296,8 +415,8 @@ fn convert(entries: &Map<String, Value>) -> (Vec<PriceRow>, usize) {
             continue;
         };
         let bare_key = !key.contains('/');
-        let model_name = row.model_name.clone();
-        if let Some(current) = winners.get_mut(&model_name) {
+        let id = (row.model_name.clone(), row.provider.clone());
+        if let Some(current) = winners.get_mut(&id) {
             collisions += 1;
             if !current.bare_key && bare_key {
                 *current = Winner {
@@ -306,12 +425,25 @@ fn convert(entries: &Map<String, Value>) -> (Vec<PriceRow>, usize) {
                 };
             }
         } else {
-            winners.insert(model_name, Winner { bare_key, row });
+            winners.insert(id, Winner { bare_key, row });
         }
     }
     let mut rows: Vec<PriceRow> = winners.into_values().map(|winner| winner.row).collect();
+    // The lookup matches names case-insensitively and takes the first row, so the sort
+    // groups a model's case variants together before the provider rank decides.
     rows.sort_by(|left, right| {
-        (&left.model_name, &left.provider).cmp(&(&right.model_name, &right.provider))
+        (
+            left.model_name.to_ascii_lowercase(),
+            provider_rank(left.provider.as_deref()),
+            &left.provider,
+            &left.model_name,
+        )
+            .cmp(&(
+                right.model_name.to_ascii_lowercase(),
+                provider_rank(right.provider.as_deref()),
+                &right.provider,
+                &right.model_name,
+            ))
     });
     (rows, collisions)
 }
@@ -338,9 +470,7 @@ fn convert_entry(key: &str, entry: &Map<String, Value>) -> Option<PriceRow> {
         scope: PriceScope::Builtin,
         model_name,
         match_pattern,
-        provider: litellm_provider
-            .and_then(canonical_provider)
-            .map(str::to_owned),
+        provider: litellm_provider.map(row_provider),
         valid_from: 0,
         price_input,
         price_output,
@@ -366,21 +496,45 @@ fn model_name(key: &str, provider: Option<&str>) -> Option<String> {
     }
 }
 
-fn canonical_provider(provider: &str) -> Option<&'static str> {
-    Some(match provider {
-        "openai" => "openai",
+/// The row provider for a LiteLLM `litellm_provider`. A name with no mapping keeps its
+/// LiteLLM name, lowercased. Exact names come before the prefix arms, so `azure_ai`
+/// is not an `azure` provider.
+fn row_provider(litellm_provider: &str) -> String {
+    let lower = litellm_provider.to_ascii_lowercase();
+    let mapped: &str = match lower.as_str() {
+        "openai" | "text-completion-openai" => "openai",
         "anthropic" => "anthropic",
         "gemini" => "gcp.gemini",
-        "mistral" => "mistral_ai",
+        "azure" | "azure_text" => "azure.ai.openai",
+        "azure_ai" => "azure.ai.inference",
+        "mistral" | "codestral" | "text-completion-codestral" => "mistral_ai",
         "xai" => "x_ai",
         "groq" => "groq",
         "deepseek" => "deepseek",
-        "cohere" => "cohere",
+        "cohere" | "cohere_chat" => "cohere",
+        "perplexity" => "perplexity",
+        "watsonx" => "ibm.watsonx.ai",
         other if other.starts_with("vertex_ai") => "gcp.vertex_ai",
         other if other.starts_with("bedrock") => "aws.bedrock",
-        other if other.starts_with("azure") => "azure.ai.openai",
-        _ => return None,
-    })
+        other => other,
+    };
+    mapped.to_owned()
+}
+
+/// 0 the model publisher's own API, 1 a cloud platform, 2 any other named provider,
+/// 3 no provider.
+fn provider_rank(provider: Option<&str>) -> u8 {
+    match provider {
+        None => 3,
+        Some(
+            "openai" | "anthropic" | "gcp.gemini" | "x_ai" | "mistral_ai" | "deepseek" | "cohere",
+        ) => 0,
+        Some(
+            "gcp.vertex_ai" | "aws.bedrock" | "azure.ai.openai" | "azure.ai.inference"
+            | "ibm.watsonx.ai",
+        ) => 1,
+        Some(_) => 2,
+    }
 }
 
 fn field_price(entry: &Map<String, Value>, field: &str) -> Option<f64> {
@@ -392,7 +546,9 @@ fn per_million(value: &Value) -> Option<f64> {
     if !number.is_finite() {
         return None;
     }
-    let price = number * 1_000_000.0;
+    // Per-token × 1e6 carries binary noise (3.96e-6 × 1e6 = 3.9600000000000004). LiteLLM
+    // prices have at most 15 significant digits, so round to those.
+    let price: f64 = format!("{:.14e}", number * 1_000_000.0).parse().ok()?;
     price.is_finite().then_some(price)
 }
 
@@ -505,9 +661,9 @@ fn check_price(price: Option<f64>) {
     }
 }
 
-fn find<'a>(rows: &'a [PriceRow], model: &str) -> &'a PriceRow {
+fn find<'a>(rows: &'a [PriceRow], model: &str, provider: Option<&str>) -> &'a PriceRow {
     rows.iter()
-        .find(|row| row.model_name == model)
+        .find(|row| row.model_name == model && row.provider.as_deref() == provider)
         .expect("row")
 }
 

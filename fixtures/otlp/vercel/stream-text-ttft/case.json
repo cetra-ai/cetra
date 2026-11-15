@@ -7,5 +7,5 @@
     "02 § Mapping tables / Model, provider, usage",
     "02 § Cost computation"
   ],
-  "notes": "hand-written from the ai package telemetry (getTracer(\"ai\")); re-check against a B2 capture"
+  "notes": "hand-written from the ai package telemetry. Confirmed for the doStream child by vercel/v5-stream-text and vercel/v6-stream-text (ai.response.msToFirstChunk). No capture has msToFirstChunk on the ai.streamText span, so the chain half is not covered."
 }

@@ -30,7 +30,7 @@ OpenLLMetry has been moving from `gen_ai.prompt.N.*` to the current GenAI conven
 | `openai-chat-tool` | The K10 conversation. |
 | `openai-chat-stream` | A streamed answer with `include_usage`. |
 | `openai-embeddings` | Two inputs, `dims` 8. |
-| `anthropic-cache-tokens` | As K12's, through OpenLLMetry. Covers D111 (OpenLLMetry Anthropic token semantics): report whether `gen_ai.usage.input_tokens` carried Anthropic's raw `input_tokens` (100) or the inclusive total (2100). |
+| `anthropic-cache-tokens` | As K12's, through OpenLLMetry. Covers D113 (OpenLLMetry Anthropic token semantics): report whether `gen_ai.usage.input_tokens` carried Anthropic's raw `input_tokens` (100) or the inclusive total (2100). |
 | `anthropic-stream-tool` | As K12's. |
 | `google-genai-multimodal` | As K11's, if the instrumentation supports it (above). |
 
@@ -66,7 +66,7 @@ OpenLLMetry has been moving from `gen_ai.prompt.N.*` to the current GenAI conven
 |---|---|
 | `openai-wrapper-chat` | The `langfuse.openai` drop-in client: one chat call, with usage including `cache_read`, and trace-level session, user, tags and one metadata key. |
 | `observe-nested` | An `@observe` function that calls an `@observe(as_type="tool")` function, then makes an OpenAI call through the drop-in client. |
-| `generation-usage-cost` | One OpenAI call through the plain `openai` client, wrapped in a manual generation observation that records `usage_details` (input, output, cached and reasoning keys), `cost_details`, `model_parameters` and `completion_start_time`. List `completion_start_time` in `timestamp_attributes` with the format it actually has. This pins B1 N21's usage, reported-cost (D107) and TTFT sources. |
+| `generation-usage-cost` | One OpenAI call through the plain `openai` client, wrapped in a manual generation observation that records `usage_details` (input, output, cached and reasoning keys), `cost_details`, `model_parameters` and `completion_start_time`. List `completion_start_time` in `timestamp_attributes` with the format it actually has. This pins B1 N21's usage, reported-cost (D109) and TTFT sources. |
 | `level-error` | An observation with level `ERROR` and a status message, with no OTLP error status set (B1 N21's new rule). It still needs one mock turn, because a scenario has at least one: make one OpenAI call inside it. |
 
 ## K19 — Laminar
@@ -103,7 +103,7 @@ OpenLLMetry has been moving from `gen_ai.prompt.N.*` to the current GenAI conven
 |---|---|
 | `google_adk/agent-tool` | An `Agent` with one Python function tool, run once with `Runner` and an in-memory session service. Two `gemini.generate_content` turns: a function call, then the answer. ADK's native spans only. |
 | `google_adk/agent-stream` | The same agent with SSE streaming enabled in the run config, so turns stream. |
-| `google_adk/agent-thoughts` | The agent with thinking enabled in its generate-content config, answered with reasoning plus text, usage `reasoning` > 0. Covers D111 (ADK token semantics): report whether `gen_ai.usage.output_tokens` includes the thoughts. |
+| `google_adk/agent-thoughts` | The agent with thinking enabled in its generate-content config, answered with reasoning plus text, usage `reasoning` > 0. Covers D113 (ADK token semantics): report whether `gen_ai.usage.output_tokens` includes the thoughts. |
 | `openinference/google-adk-agent-tool` | `agent-tool`'s scenario with `openinference-instrumentation-google-adk` enabled. Report how its spans relate to ADK's native ones: both present, nested, or duplicated. |
 
 **After K20**, report to the coordinating session that B2's matrix is complete. List every captured case with the B1 sub-phase that should bless it:

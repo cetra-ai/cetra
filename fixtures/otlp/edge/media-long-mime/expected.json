@@ -1,0 +1,33 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "f8b10000000000000000000000000001",
+      "span_id": "f8b1000000000001",
+      "name": "caption",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:51.000000000Z",
+      "status": "unset",
+      "input": "look media://ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb now",
+      "input_format": "text",
+      "input_preview": "look media://ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb now",
+      "media_refs": [
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+      ],
+      "conventions": [
+        "llmobs"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    }
+  ],
+  "media": [
+    {
+      "sha256": "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+      "mime_type": "application/octet-stream",
+      "size_bytes": 1
+    }
+  ],
+  "rejected_spans": 0
+}
