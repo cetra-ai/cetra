@@ -1,0 +1,26 @@
+{
+  "from": "2026-01-01",
+  "to": "2026-01-03",
+  "days": [
+    {
+      "day": "2026-01-01",
+      "spans": 1200,
+      "scores": 40,
+      "units": 1240,
+      "bytes": 3500000,
+      "judge_input_tokens": 52000,
+      "judge_output_tokens": 3100,
+      "judge_cost_usd": 0.42
+    },
+    {
+      "day": "2026-01-03",
+      "spans": 800,
+      "scores": 10,
+      "units": 810,
+      "bytes": 2100000,
+      "judge_input_tokens": 0,
+      "judge_output_tokens": 0,
+      "judge_cost_usd": 0.0
+    }
+  ]
+}

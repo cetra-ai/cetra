@@ -252,10 +252,10 @@ pub(crate) struct NewDeletion {
 /// The deletion guard's view of the recent deletions (M3, D-M-6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GuardEntries {
-    /// `(project, trace, created_at)` of every stored scope trace.
-    pub(crate) traces: Vec<(ProjectId, TraceId, i64)>,
-    /// `(project, user_id, created_at)` of every `user` deletion.
-    pub(crate) users: Vec<(ProjectId, String, i64)>,
+    /// `(project, trace, deletion id, created_at)` of every stored scope trace.
+    pub(crate) traces: Vec<(ProjectId, TraceId, Uuid, i64)>,
+    /// `(project, user_id, deletion id, created_at)` of every `user` deletion.
+    pub(crate) users: Vec<(ProjectId, String, Uuid, i64)>,
 }
 
 /// The private record that `sqlx` decodes. Field names are the column names.
@@ -965,8 +965,8 @@ pub(crate) async fn guard_entries(
     .await?;
     let mut traces = Vec::with_capacity(trace_rows.len());
     for (id, project, blob, created_at) in trace_rows {
-        match guard_trace(project, &blob) {
-            Ok((project, trace)) => traces.push((project, trace, created_at)),
+        match guard_id(&id).and_then(|deletion| Ok((deletion, guard_trace(project, &blob)?))) {
+            Ok((deletion, (project, trace))) => traces.push((project, trace, deletion, created_at)),
             Err(error) => log_undecodable(Uuid::parse_str(&id).ok(), &error),
         }
     }
@@ -980,12 +980,17 @@ pub(crate) async fn guard_entries(
     .await?;
     let mut users = Vec::with_capacity(user_rows.len());
     for (id, project, user, created_at) in user_rows {
-        match guard_user(project, user) {
-            Ok((project, user)) => users.push((project, user, created_at)),
+        match guard_id(&id).and_then(|deletion| Ok((deletion, guard_user(project, user)?))) {
+            Ok((deletion, (project, user))) => users.push((project, user, deletion, created_at)),
             Err(error) => log_undecodable(Uuid::parse_str(&id).ok(), &error),
         }
     }
     Ok(GuardEntries { traces, users })
+}
+
+/// The deletion id of one guard entry.
+fn guard_id(id: &str) -> Result<Uuid, MetaError> {
+    Uuid::parse_str(id).map_err(|_| corrupt("id"))
 }
 
 /// The project and trace of one guard trace entry.
@@ -1470,12 +1475,15 @@ mod tests {
         assert_eq!(
             entries.traces,
             vec![
-                (project_a(), trace(0), 100),
-                (project_a(), trace(1), 100),
-                (project_a(), trace(2), 200),
+                (project_a(), trace(0), Uuid::from_u128(1), 100),
+                (project_a(), trace(1), Uuid::from_u128(1), 100),
+                (project_a(), trace(2), Uuid::from_u128(2), 200),
             ]
         );
-        assert_eq!(entries.users, vec![(project_a(), "user-1".to_owned(), 200)]);
+        assert_eq!(
+            entries.users,
+            vec![(project_a(), "user-1".to_owned(), Uuid::from_u128(2), 200)]
+        );
     }
 
     #[tokio::test]
@@ -1702,7 +1710,13 @@ mod tests {
         add_traces(&db, Uuid::from_u128(4), vec![trace(6)]).await;
 
         let entries = guard_entries(db.reader(), 0).await.unwrap();
-        assert_eq!(entries.traces, vec![(project_b(), trace(6), 40)]);
-        assert_eq!(entries.users, vec![(project_a(), "user-1".to_owned(), 30)]);
+        assert_eq!(
+            entries.traces,
+            vec![(project_b(), trace(6), Uuid::from_u128(4), 40)]
+        );
+        assert_eq!(
+            entries.users,
+            vec![(project_a(), "user-1".to_owned(), Uuid::from_u128(3), 30)]
+        );
     }
 }

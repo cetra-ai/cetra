@@ -137,6 +137,34 @@ pub(crate) fn org_token(
     }))
 }
 
+/// Gives `org_id` a valid org token (issued at `issued_at`, valid until 2099) with these
+/// limits, through `grant_from_token` and `state.entitlements.put_grant`. `limits` is the
+/// JSON object of the `limits` claim; missing keys take the defaults. Use a later
+/// `issued_at` to lower a limit.
+pub(crate) fn set_limits(
+    app: &TestApp,
+    org_id: OrgId,
+    issued_at: &str,
+    limits: &serde_json::Value,
+) {
+    let token = org_token(
+        org_id,
+        issued_at,
+        "2099-01-01T00:00:00Z",
+        "2099-02-01T00:00:00Z",
+        &[],
+        limits,
+    );
+    let defaults = app.state.entitlements.defaults().limits;
+    let (org, grant) = crate::entitlements::tokens::grant_from_token(
+        &token,
+        app.state.config.public_url.origin(),
+        &defaults,
+    )
+    .expect("the test token verifies");
+    app.state.entitlements.put_grant(org, grant);
+}
+
 /// A `dev-1` control-plane token for the default test `public_url`, issued at the manual
 /// clock (2026-01-01T00:00:00Z), valid 5 minutes, with this scope.
 pub(crate) fn control_plane_token(scope: &str) -> String {
@@ -334,6 +362,7 @@ impl TestApp {
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
             entitlements,
+            ingest_rate: crate::entitlements::rate::IngestRate::default(),
             trace_loads: crate::eval::trace_load::TraceLoads::default(),
             definitions: crate::eval::definitions::DefinitionCache::default(),
             backup_slot: tokio::sync::Mutex::new(()),

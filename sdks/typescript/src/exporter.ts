@@ -14,6 +14,7 @@ import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace";
 
 import { warnOnce } from "./log.js";
+import { QuotaState } from "./quota.js";
 import { type FetchLike, getFetch, gzip, runtimeGlobals, timeoutSignal } from "./web.js";
 
 const DEFAULT_TIMEOUT_MILLIS = 10_000;
@@ -37,6 +38,8 @@ export interface FetchTraceExporterOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Tests inject a clock; the default is `Date.now`. */
   now?: () => number;
+  /** Shared with the score queue; the default is a new one on `now`. */
+  quota?: QuotaState;
 }
 
 export class FetchTraceExporter implements SpanExporter {
@@ -46,6 +49,7 @@ export class FetchTraceExporter implements SpanExporter {
   private readonly timeoutMillis: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly quota: QuotaState;
   private readonly inFlight = new Set<Promise<void>>();
   private stopped = false;
 
@@ -56,6 +60,7 @@ export class FetchTraceExporter implements SpanExporter {
     this.timeoutMillis = options.timeoutMillis ?? DEFAULT_TIMEOUT_MILLIS;
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
+    this.quota = options.quota ?? new QuotaState(this.now);
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -84,6 +89,10 @@ export class FetchTraceExporter implements SpanExporter {
   private async runExport(spans: ReadableSpan[]): Promise<ExportResult> {
     if (this.stopped) {
       return failure("shutdown");
+    }
+    if (this.quota.paused()) {
+      // D-P-34: spans are dropped while the org is over its units cap.
+      return { code: ExportResultCode.SUCCESS };
     }
     const fetch = this.fetcher;
     if (fetch === undefined) {
@@ -144,6 +153,11 @@ export class FetchTraceExporter implements SpanExporter {
         retryAfter = response.headers.get("Retry-After");
       } catch {
         status = undefined; // network error or timeout; retryable
+      }
+      if (status === 402) {
+        // D-P-34: pause every exporter, drop this batch, and report success.
+        this.quota.on402(retryAfter);
+        return { code: ExportResultCode.SUCCESS };
       }
       const reason = status === undefined ? "network" : `http ${String(status)}`;
       if (status !== undefined && !RETRYABLE_STATUSES.has(status)) {

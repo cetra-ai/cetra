@@ -26,6 +26,7 @@ from llmobs._instrument import enable_for, resolve
 from llmobs._log import logger, reset_warnings, warn_once
 from llmobs._mask import MaskingExporter
 from llmobs._processor import LlmobsSpanProcessor
+from llmobs._quota import QuotaPauseExporter, QuotaState, quota_session
 from llmobs._scores import ScoreQueue
 
 _INIT_TWICE_WARNING = "llmobs: init() was already called; this call is ignored"
@@ -59,17 +60,20 @@ class Runtime:
         id_generator: IdGenerator | None = None,
     ) -> "Runtime":
         """Build the runtime of D-F-4: our own provider, or the global one."""
+        quota = QuotaState()
         if exporter is None:
             exporter = OTLPSpanExporter(
                 endpoint=f"{config.base_url}/v1/traces",
                 headers={"Authorization": f"Bearer {config.api_key}"},
                 timeout=10,
                 compression=Compression.Gzip,
+                session=quota_session(quota),
             )
         if config.mask is not None or not config.capture_content:
             exporter = MaskingExporter(
                 exporter, mask=config.mask, capture_content=config.capture_content
             )
+        exporter = QuotaPauseExporter(quota, exporter)
         global_provider = trace.get_tracer_provider() if config.use_global_provider else None
         # The default export filter runs only in global mode (D-F-5): own mode
         # and the unsupported-provider branch export every span.
@@ -112,7 +116,7 @@ class Runtime:
         provider.add_span_processor(processor)
         # A disabled config never reaches Runtime.create, so the key is set;
         # ``or ""`` only satisfies the type checker.
-        scores = ScoreQueue(base_url=config.base_url, api_key=config.api_key or "")
+        scores = ScoreQueue(base_url=config.base_url, api_key=config.api_key or "", quota=quota)
         return cls(
             config=config,
             provider=provider,

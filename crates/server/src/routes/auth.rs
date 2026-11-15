@@ -20,6 +20,7 @@ use crate::auth::secret::{constant_time_eq, hash_token, is_opaque_token};
 use crate::auth::session::{clear_cookie, resolve_cookie_header, start_session};
 use crate::bootstrap::{self, BootstrapError};
 use crate::email::Email;
+use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
@@ -507,6 +508,13 @@ async fn resend_verification(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+enum InvitedSignup {
+    User(UserRow),
+    Missing,
+    /// The org's seat limit, which the invitation's role would exceed.
+    OverLimit(u64),
+}
+
 async fn pending_signup_invite(
     state: &AppState,
     token: &str,
@@ -585,16 +593,30 @@ async fn signup(
     if let Some(hash) = invited_hash {
         let email_for_insert = email;
         let name_for_insert = name;
+        let limits_state = state.clone();
         let created = state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
                     let Some((pending, _)) = invites::invite_by_hash_tx(conn, &hash, now).await?
                     else {
-                        return Ok(None);
+                        return Ok(InvitedSignup::Missing);
                     };
                     if pending.email != email_for_insert {
-                        return Ok(None);
+                        return Ok(InvitedSignup::Missing);
+                    }
+                    if pending.role != OrgRole::Viewer {
+                        let max_seats = limits_state
+                            .entitlements
+                            .resolve(pending.org_id, now)
+                            .limits
+                            .max_seats;
+                        if let Some(limit) = max_seats {
+                            let seats = members::seat_members_tx(conn, pending.org_id).await?;
+                            if over_limit(Some(limit), seats, 1) {
+                                return Ok(InvitedSignup::OverLimit(limit));
+                            }
+                        }
                     }
                     let user = users::insert_user(
                         conn,
@@ -611,12 +633,18 @@ async fn signup(
                     members::add_org_member(conn, pending.org_id, user.id, pending.role, now)
                         .await?;
                     invites::mark_accepted(conn, pending.id, now).await?;
-                    Ok(Some(user))
+                    Ok(InvitedSignup::User(user))
                 })
             })
             .await?;
-        let Some(user) = created else {
-            return Err(field_error("invite_token", "invalid or expired invitation"));
+        let user = match created {
+            InvitedSignup::User(user) => user,
+            InvitedSignup::Missing => {
+                return Err(field_error("invite_token", "invalid or expired invitation"));
+            }
+            InvitedSignup::OverLimit(limit) => {
+                return Err(plan_limit(limit, ("seat", "seats")));
+            }
         };
         let me = me_from(&state, &user).await?;
         let cookie = session_cookie(&state, user.id, &headers, Some(ip)).await?;
@@ -805,7 +833,7 @@ mod tests {
     use crate::meta::projects::project_by_slugs;
     use crate::meta::users::{count_users, user_by_email};
     use crate::test_support::{
-        TestApp, TestResponse, assert_logs_clean, capture_logs, license_key,
+        TestApp, TestResponse, assert_logs_clean, capture_logs, license_key, set_limits,
     };
 
     const PASSWORD: &str = "llmobs-ok1";
@@ -1918,6 +1946,57 @@ mod tests {
         assert_eq!(bad.status, 400);
         assert_eq!(bad.problem().errors[0].field, "invite_token");
         assert_eq!(count_users(open.state.meta.reader()).await.unwrap(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn signup_with_invite_respects_seats() {
+        let app = TestApp::new().await;
+        let (cookie, slug) = invite_owner(&app).await;
+        let member = invite_of(&app, &cookie, &slug, "guest@other.test", "member").await;
+        let viewer = invite_of(&app, &cookie, &slug, "viewer@other.test", "viewer").await;
+        let org = crate::meta::orgs::org_by_slug(app.state.meta.reader(), &slug)
+            .await
+            .unwrap()
+            .unwrap();
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_seats": 1}),
+        );
+
+        let refused = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&serde_json::json!({
+                "email": "guest@other.test",
+                "password": PASSWORD,
+                "invite_token": member.token,
+            }))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403, "{}", text(&refused));
+        assert_eq!(refused.problem().code, ProblemCode::PlanLimit);
+        assert_eq!(
+            refused.problem().detail.as_deref(),
+            Some("Your plan allows 1 seat.")
+        );
+        assert!(
+            user_by_email(app.state.meta.reader(), "guest@other.test")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let joined = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&serde_json::json!({
+                "email": "viewer@other.test",
+                "password": PASSWORD,
+                "invite_token": viewer.token,
+            }))
+            .send()
+            .await;
+        assert_eq!(joined.status, 201, "{}", text(&joined));
     }
 
     async fn invite_owner(app: &TestApp) -> (String, String) {

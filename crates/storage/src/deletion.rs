@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::compute::{filter_record_batch, not, prep_null_mask_filter};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use chrono::NaiveDate;
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::Operator;
+use datafusion::logical_expr::{ColumnarValue, Operator};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_expr::expressions::{BinaryExpr, Column, IsNotNullExpr, Literal, in_list};
 use llmobs_core::ids::{ProjectId, TraceId};
@@ -393,18 +393,102 @@ where
     Ok(Arc::new(BinaryExpr::new(guard, Operator::And, membership)))
 }
 
-/// [`in_term`] on a `Utf8` column.
+/// [`in_term`] on a `Utf8` column, wrapped in [`Redacted`]: the values are an
+/// erased person's identifiers (`user_id`, `session_id`), so the plan text never
+/// shows them.
 fn utf8_term(
     schema: &SchemaRef,
-    column: &str,
+    column: &'static str,
     values: &[&String],
 ) -> Result<Arc<dyn PhysicalExpr>, DataFusionError> {
-    in_term(
+    let inner = in_term(
         schema,
         column,
         |value| ScalarValue::Utf8(Some((*value).to_owned())),
         values,
-    )
+    )?;
+    Ok(Arc::new(Redacted {
+        inner,
+        column,
+        count: values.len(),
+    }))
+}
+
+/// A covered-row term whose literals are personal identifiers. It evaluates
+/// exactly as `inner`, but its `Display`, `Debug` and SQL forms print only the
+/// column and the number of values, so a plain `EXPLAIN` in the SQL console
+/// (spec 05, D96) does not reveal who asked to be erased (X17).
+struct Redacted {
+    inner: Arc<dyn PhysicalExpr>,
+    column: &'static str,
+    count: usize,
+}
+
+impl PartialEq for Redacted {
+    fn eq(&self, other: &Self) -> bool {
+        self.column == other.column && self.count == other.count && self.inner.eq(&other.inner)
+    }
+}
+
+impl Eq for Redacted {}
+
+impl std::hash::Hash for Redacted {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.hash(state);
+        self.column.hash(state);
+        self.count.hash(state);
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} IN (<{} redacted>)", self.column, self.count)
+    }
+}
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Redacted({self})")
+    }
+}
+
+impl PhysicalExpr for Redacted {
+    fn data_type(&self, input_schema: &Schema) -> Result<DataType, DataFusionError> {
+        self.inner.data_type(input_schema)
+    }
+
+    fn nullable(&self, input_schema: &Schema) -> Result<bool, DataFusionError> {
+        self.inner.nullable(input_schema)
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue, DataFusionError> {
+        self.inner.evaluate(batch)
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![&self.inner]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Result<Arc<dyn PhysicalExpr>, DataFusionError> {
+        let [inner] = <[Arc<dyn PhysicalExpr>; 1]>::try_from(children).map_err(|children| {
+            DataFusionError::Internal(format!(
+                "a redacted term has one child, got {}",
+                children.len()
+            ))
+        })?;
+        Ok(Arc::new(Self {
+            inner,
+            column: self.column,
+            count: self.count,
+        }))
+    }
+
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 fn or_together(terms: Vec<Arc<dyn PhysicalExpr>>) -> Option<Arc<dyn PhysicalExpr>> {

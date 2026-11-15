@@ -719,6 +719,83 @@
         "security": []
       }
     },
+    "/api/internal/v1/memberships/lookup": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Look up a user's memberships",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. The user is the one whose OIDC subject at the control plane's provider (`entitlements.control_plane_provider`) matches `subject`; when no identity has the subject, the user with `email`. Lists the user's active orgs sorted by slug. An unknown user answers 200 with no orgs; an invalid email answers 400 only when the subject finds no user.",
+        "operationId": "post_internal_membership_lookup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MembershipLookupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The user's active memberships.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembershipLookup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/v1/orgs": {
       "post": {
         "tags": [
@@ -894,6 +971,448 @@
         "security": []
       }
     },
+    "/api/internal/v1/orgs/{org_id}/members": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List an org's members",
+        "description": "Needs a `control_plane` bearer token with the `members` scope. Members ordered by email, with the email the control plane matches accounts by. `role` is a comma-separated list of `owner`, `admin`, `member` and `viewer`; without it every member is listed. An unknown or inactive org answers 404.",
+        "operationId": "list_internal_org_members",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "role",
+            "in": "query",
+            "description": "Comma-separated roles to keep: `owner`, `admin`, `member`, `viewer`. Absent lists every\nmember.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's members.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalMembers"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/usage": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "List org usage by day",
+        "description": "Needs a `control_plane` bearer token with the `usage` scope. Usage per UTC day and org, summed over the org's projects, ordered by day and then org id, keyset-paged. `from` and `to` are required inclusive days, and `to - from` is at most 92 days. Rows of deleted orgs stay.",
+        "operationId": "list_internal_usage",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive, `YYYY-MM-DD`. Required.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive, `YYYY-MM-DD`. Required. `to - from` is at most 92 days.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1–10 000. Default 1 000.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of org usage by day.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUsagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/delete": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Delete a user",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).",
+        "operationId": "post_internal_user_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The user is deleted, with the orgs it solely owned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalUserDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/disable": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Disable a user",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "operationId": "post_internal_user_disable",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The user is disabled and its access is revoked."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/users/revoke": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "End a user's sessions and personal tokens",
+        "description": "Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.",
+        "operationId": "post_internal_user_revoke",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalUserRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The user's sessions and tokens were revoked."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/public/feedback": {
       "post": {
         "tags": [
@@ -935,6 +1454,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3971,6 +4500,107 @@
           },
           "409": {
             "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/orgs/{org}/usage": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Read the org's usage by day",
+        "description": "Units, bytes and judge usage per UTC day, summed over the org's projects (D-P-42). `from` and `to` are inclusive days; the default is this month to today, and `to - from` is at most 365 days. Today's row counts flushed usage only, up to 10 seconds behind. Any org member.",
+        "operationId": "get_org_usage",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First day, inclusive, `YYYY-MM-DD` (UTC). Default: the 1st of this month.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last day, inclusive, `YYYY-MM-DD` (UTC). Default: today. `to - from` at most 365 days.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's usage by day.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgUsage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8472,6 +9102,16 @@
               }
             }
           },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "403": {
             "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
             "content": {
@@ -10301,6 +10941,16 @@
           },
           "401": {
             "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "The organization reached its monthly units cap (code quota_exceeded). Retry-After gives the seconds until it resets.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12693,6 +13343,50 @@
           }
         }
       },
+      "InternalMember": {
+        "type": "object",
+        "description": "One member of an org, as `GET /api/internal/v1/orgs/{org_id}/members` lists it.",
+        "required": [
+          "user_id",
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The user's email. Sent to the control plane only; never logged."
+          },
+          "name": {
+            "type": "string",
+            "description": "The user's display name, when it has one."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The member's org role."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user id."
+          }
+        }
+      },
+      "InternalMembers": {
+        "type": "object",
+        "description": "Answer of `GET /api/internal/v1/orgs/{org_id}/members`.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalMember"
+            },
+            "description": "The members, ordered by email."
+          }
+        }
+      },
       "InternalOrg": {
         "type": "object",
         "description": "The created or existing org.",
@@ -12726,6 +13420,121 @@
           "name": {
             "type": "string",
             "description": "Display name for a new user. Ignored when the user exists."
+          }
+        },
+        "additionalProperties": false
+      },
+      "InternalUsagePage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InternalUsageRow"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "InternalUsageRow": {
+        "type": "object",
+        "description": "One org's usage on one UTC day, summed over its projects (D-P-24).",
+        "required": [
+          "org_id",
+          "day",
+          "spans",
+          "scores",
+          "units",
+          "bytes",
+          "judge_input_tokens",
+          "judge_output_tokens",
+          "judge_cost_usd"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "description": "`YYYY-MM-DD`, UTC."
+          },
+          "judge_cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "judge_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "judge_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "scores": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spans": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`spans + scores`.",
+            "minimum": 0
+          }
+        }
+      },
+      "InternalUserDeleted": {
+        "type": "object",
+        "description": "Answer of `POST /api/internal/v1/users/delete`.",
+        "required": [
+          "sole_owner_of"
+        ],
+        "properties": {
+          "sole_owner_of": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Orgs the user was the only owner of. They are kept without an owner; the control\nplane resolves them."
+          }
+        }
+      },
+      "InternalUserRef": {
+        "type": "object",
+        "description": "Body of the `users` routes (D-P-39): the user's subject at the control plane's provider.",
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`."
           }
         },
         "additionalProperties": false
@@ -13145,6 +13954,70 @@
           }
         }
       },
+      "MembershipLookup": {
+        "type": "object",
+        "description": "Answer of `POST /api/internal/v1/memberships/lookup`.",
+        "required": [
+          "orgs"
+        ],
+        "properties": {
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MembershipOrg"
+            },
+            "description": "The user's active orgs, sorted by slug."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The user's id. Absent when no user matches."
+          }
+        }
+      },
+      "MembershipLookupRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;\nthe email only when no identity has the subject.",
+        "required": [
+          "subject",
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Email, normalized like every email (D136), for a user the subject does not find."
+          },
+          "subject": {
+            "type": "string",
+            "description": "The OIDC subject at `entitlements.control_plane_provider`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "MembershipOrg": {
+        "type": "object",
+        "description": "One active org the user belongs to.",
+        "required": [
+          "org_id",
+          "slug",
+          "role"
+        ],
+        "properties": {
+          "org_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org id."
+          },
+          "role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The user's role in the org."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The org slug."
+          }
+        }
+      },
       "Message": {
         "type": "object",
         "description": "One message in a conversation. Spec 01 § Canonical message format.",
@@ -13432,11 +14305,12 @@
       },
       "OrgEntitlements": {
         "type": "object",
-        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15). M3 adds the usage.",
+        "description": "`GET /api/v1/orgs/{org}/entitlements` (D-P-15).",
         "required": [
           "features",
           "plan",
-          "limits"
+          "limits",
+          "usage"
         ],
         "properties": {
           "features": {
@@ -13457,6 +14331,10 @@
           "upgrade_url": {
             "type": "string",
             "description": "Where an Upgrade button goes. Omitted when the instance sets none."
+          },
+          "usage": {
+            "$ref": "#/components/schemas/OrgMonthUsage",
+            "description": "The org's units this month (D-P-16)."
           }
         }
       },
@@ -13601,6 +14479,36 @@
           }
         }
       },
+      "OrgMonthUsage": {
+        "type": "object",
+        "description": "This UTC month's units (D-P-16, D-P-38).",
+        "required": [
+          "month",
+          "units",
+          "resets_at",
+          "notice"
+        ],
+        "properties": {
+          "month": {
+            "type": "string",
+            "description": "`YYYY-MM`."
+          },
+          "notice": {
+            "$ref": "#/components/schemas/UsageNotice"
+          },
+          "resets_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "00:00 UTC on the 1st of the next month."
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units so far this month, flushed or not.",
+            "minimum": 0
+          }
+        }
+      },
       "OrgPage": {
         "type": "object",
         "description": "One page of results. `next_cursor` is null when there is no next page.",
@@ -13678,6 +14586,30 @@
           "member",
           "viewer"
         ]
+      },
+      "OrgUsage": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/usage`.",
+        "required": [
+          "from",
+          "to",
+          "days"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            },
+            "description": "Days with usage, oldest first. Days without usage are absent."
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
       },
       "OutputScoreBody": {
         "type": "object",
@@ -13961,6 +14893,7 @@
           "unsupported_media_type",
           "range_not_satisfiable",
           "conflict",
+          "quota_exceeded",
           "rate_limited",
           "internal"
         ]
@@ -16547,6 +17480,70 @@
           }
         },
         "additionalProperties": true
+      },
+      "UsageDay": {
+        "type": "object",
+        "description": "One UTC day of an org's usage, summed over its projects.",
+        "required": [
+          "day",
+          "spans",
+          "scores",
+          "units",
+          "bytes",
+          "judge_input_tokens",
+          "judge_output_tokens",
+          "judge_cost_usd"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string",
+            "description": "`YYYY-MM-DD`."
+          },
+          "judge_cost_usd": {
+            "type": "number",
+            "format": "double"
+          },
+          "judge_input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "judge_output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "scores": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "spans": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "units": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`spans + scores`.",
+            "minimum": 0
+          }
+        }
+      },
+      "UsageNotice": {
+        "type": "string",
+        "description": "Usage level against `units_included`.",
+        "enum": [
+          "none",
+          "warning",
+          "reached"
+        ]
       },
       "User": {
         "type": "object",

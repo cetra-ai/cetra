@@ -181,7 +181,7 @@ mod tests {
     use crate::test_support::mock_idp::{
         CLIENT_ID, CLIENT_SECRET, GithubEmail, GithubUser, Grant, MockIdp,
     };
-    use crate::test_support::{TestApp, TestResponse, assert_logs_clean, capture_logs};
+    use crate::test_support::{TestApp, TestResponse, assert_logs_clean, capture_logs, set_limits};
 
     const OAUTH_NAME: &str = llmobs_core::llmobs_name!("_oauth");
     const SESSION_NAME: &str = llmobs_core::llmobs_name!("_session");
@@ -1410,6 +1410,52 @@ mod tests {
                 .await
                 .expect("count");
         assert_eq!(memberships, 1);
+    }
+
+    #[tokio::test]
+    async fn auto_provision_at_the_seat_limit_signs_in_without_a_membership() {
+        let idp = MockIdp::start().await;
+        let issuer = idp.issuer().to_owned();
+        let app = TestApp::with_config(move |config| {
+            config.auth.signup = SignupPolicy::InviteOnly;
+            let mut provider = oidc(&issuer);
+            provider.auto_provision = Some(AutoProvision {
+                org: "acme".to_owned(),
+                role: "member".to_owned(),
+            });
+            config.auth.oidc = vec![provider];
+        })
+        .await;
+        setup_admin(&app).await;
+        let org = crate::meta::orgs::org_by_slug(app.state.meta.reader(), "acme")
+            .await
+            .unwrap()
+            .unwrap();
+        // The owner from setup fills the only seat.
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_seats": 1}),
+        );
+        let pending = begin(&app, "oidc:mock", "/").await;
+        let code = idp.issue_code(grant(&pending, "grace@example.com", Some(true)));
+        let response = finish(
+            &app,
+            "oidc:mock",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&response), "/");
+        let user = me(&app, &one_cookie(&response, SESSION_NAME)).await;
+        let memberships: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE user_id = ?")
+                .bind(user.id.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("count");
+        assert_eq!(memberships, 0);
     }
 
     #[tokio::test]

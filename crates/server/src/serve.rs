@@ -48,6 +48,9 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// How often the 80 % and 100 % usage notices are checked (D-P-38).
+const NOTICES_EVERY: Duration = Duration::from_secs(60);
+
 /// How often expired web sessions are deleted.
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
@@ -331,6 +334,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         eval_runner,
         connections: crate::eval::connection::ConnectionCache::default(),
         entitlements,
+        ingest_rate: crate::entitlements::rate::IngestRate::default(),
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
         backup_slot: tokio::sync::Mutex::new(()),
@@ -390,6 +394,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
     tasks.push(spawn_usage(state.clone()));
+    tasks.push(spawn_notices(state.clone()));
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -572,6 +577,24 @@ fn spawn_usage(state: AppState) -> JoinHandle<()> {
             interval.tick().await;
             if let Err(error) = state.usage.flush(&state.meta).await {
                 tracing::error!(error = %error, "usage flush failed");
+            }
+        }
+    })
+}
+
+fn spawn_notices(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(NOTICES_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::entitlements::notices::notices_once(&state).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    tracing::info!(notices = count, "usage notices recorded");
+                }
+                Err(error) => tracing::warn!(error = %error, "usage notices failed"),
             }
         }
     })
