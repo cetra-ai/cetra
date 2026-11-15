@@ -1,8 +1,9 @@
 import { screen, waitFor } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { expect, it } from "vitest";
-import { NO_SIGN_IN_METHOD, oauthErrorMessage } from "@/components/auth/messages";
+import { afterEach, expect, it } from "vitest";
+import { NO_SIGN_IN_METHOD, oauthErrorMessage, RATE_LIMITED } from "@/components/auth/messages";
+import { setExternalNavigator } from "@/lib/external-navigation";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
@@ -351,3 +352,100 @@ it("hides the reset link when password sign-in is off", async () => {
   await screen.findByRole("heading", { name: "Sign in" });
   expect(screen.queryByRole("link", { name: "Forgot password?" })).toBeNull();
 });
+
+afterEach(() => {
+  setExternalNavigator(undefined);
+});
+
+function discoverAnswers(response: () => Response) {
+  const bodies: unknown[] = [];
+  server.use(
+    http.post("/api/auth/sso/discover", async ({ request }) => {
+      bodies.push(await request.json());
+      return response();
+    }),
+  );
+  return bodies;
+}
+
+it("sends an SSO email to its org's identity provider", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const bodies = discoverAnswers(() => HttpResponse.json({ sso: true }));
+  const navigated: string[] = [];
+  setExternalNavigator((url) => navigated.push(url));
+  const { user } = await renderApp("/login?redirect=%2Facme");
+  await user.type(await screen.findByLabelText("Email"), "ada@acme.com");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await waitFor(() =>
+    expect(navigated).toEqual(["/api/auth/sso/authorize?domain=acme.com&redirect=%2Facme"]),
+  );
+  expect(bodies).toEqual([{ email: "ada@acme.com" }]);
+  expect(screen.queryByLabelText("Password")).toBeNull();
+});
+
+it("shows the password form for another email and goes back on request", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  discoverAnswers(() => HttpResponse.json({ sso: false }));
+  const bodies = loginSucceeds();
+  const { router, user } = await renderApp("/login");
+  await user.type(await screen.findByLabelText("Email"), "ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.type(await screen.findByLabelText("Password"), "correct horse battery");
+  expect(screen.getByLabelText("Email")).toHaveValue("ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme"));
+  expect(bodies).toEqual([{ email: "ada@example.com", password: "correct horse battery" }]);
+});
+
+it("returns from the password step to the email step", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  discoverAnswers(() => HttpResponse.json({ sso: false }));
+  const { user } = await renderApp("/login");
+  await user.type(await screen.findByLabelText("Email"), "ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(await screen.findByRole("button", { name: "Use another email" }));
+  expect(screen.queryByLabelText("Password")).toBeNull();
+  expect(screen.getByLabelText("Email")).toHaveValue("ada@example.com");
+});
+
+it("skips the email step with ?password=1", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const bodies = discoverAnswers(() => HttpResponse.json({ sso: true }));
+  await renderApp("/login?password=1");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(bodies).toEqual([]);
+});
+
+it("explains a rate-limited email check", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  discoverAnswers(() => problemResponse(429, "rate_limited"));
+  const { user } = await renderApp("/login");
+  await user.type(await screen.findByLabelText("Email"), "ada@example.com");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(RATE_LIMITED);
+});
+
+it("asks for an email before checking it", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const bodies = discoverAnswers(() => HttpResponse.json({ sso: false }));
+  const { user } = await renderApp("/login");
+  await user.click(await screen.findByRole("button", { name: "Continue" }));
+  expect(screen.getByText("Enter your email address.")).toBeInTheDocument();
+  expect(bodies).toEqual([]);
+});
+
+it.each(["seat_limit", "sso_required", "sso_unavailable"] as const)(
+  "explains the %s error from the URL",
+  async (code) => {
+    signedOut();
+    withConfig({ sso_discovery: true });
+    await renderApp(`/login?error=${code}`);
+    expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
+  },
+);
