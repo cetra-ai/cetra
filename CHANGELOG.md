@@ -18,6 +18,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.
 - With S3, a multipart upload that fails is now aborted, so its parts no longer stay on the bucket (track R).
 - With S3, a file that passes verification has its read-cache blocks dropped, so a bad cached block no longer keeps failing queries (track R).

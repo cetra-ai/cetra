@@ -496,17 +496,24 @@ impl Objects {
     ) -> Result<u64, ObjectError> {
         match &self.kind {
             Kind::Local { root } => {
-                self.refuse_after_sync_failure()?;
+                if let Err(error) = self.refuse_after_sync_failure() {
+                    // The output is dropped here, so its temp file goes with it (R5.5).
+                    discard_temp(&target.temp);
+                    return Err(error);
+                }
                 let root = root.clone();
                 let key = target.key.clone();
                 let temp = target.temp.clone();
                 let hooks = clone_hooks(&self.hooks);
                 let sync_failed = Arc::clone(&self.sync_failed);
                 tokio::task::spawn_blocking(move || {
-                    let size = file
-                        .metadata()
-                        .map_err(|source| ObjectError::io("reading output size", &temp, source))?
-                        .len();
+                    let size = match file.metadata() {
+                        Ok(meta) => meta.len(),
+                        Err(source) => {
+                            discard_temp(&temp);
+                            return Err(ObjectError::io("reading output size", &temp, source));
+                        }
+                    };
                     publish_local(&root, &key, &temp, file, &hooks, &sync_failed)?;
                     Ok(size)
                 })
@@ -757,8 +764,10 @@ fn put_local(
         .create_new(true)
         .open(&temp_path)
         .map_err(|source| ObjectError::io("writing object", &temp_path, source))?;
-    file.write_all(bytes)
-        .map_err(|source| ObjectError::io("writing object", &temp_path, source))?;
+    if let Err(source) = file.write_all(bytes) {
+        discard_temp(&temp_path);
+        return Err(ObjectError::io("writing object", &temp_path, source));
+    }
 
     publish_local(root, key, &temp_path, file, hooks, sync_failed)
 }
@@ -766,6 +775,9 @@ fn put_local(
 /// The publication tail shared by `put_local` and `Objects::publish_output`:
 /// `sync_all`, refuse an existing final name (removing the temp file), rename,
 /// then fsync the directory. An `ObjectDirSync` fault renames the file back.
+///
+/// A failure before the rename removes the temp file (R5.5). A real `sync_dir`
+/// failure after the rename does not: the bytes are already under the final name.
 fn publish_local(
     root: &Path,
     key: &str,
@@ -781,6 +793,7 @@ fn publish_local(
 
     hooks.pause(HookPoint::ObjectSync);
     if let Some(source) = hooks.fail(HookPoint::ObjectSync) {
+        discard_temp(temp_path);
         return Err(sync_failure(
             sync_failed,
             "syncing object",
@@ -788,25 +801,41 @@ fn publish_local(
             source,
         ));
     }
-    file.sync_all()
-        .map_err(|source| sync_failure(sync_failed, "syncing object", temp_path, source))?;
+    if let Err(source) = file.sync_all() {
+        discard_temp(temp_path);
+        return Err(sync_failure(
+            sync_failed,
+            "syncing object",
+            temp_path,
+            source,
+        ));
+    }
     drop(file);
 
     hooks.pause(HookPoint::ObjectRename);
     if let Some(source) = hooks.fail(HookPoint::ObjectRename) {
+        discard_temp(temp_path);
         return Err(ObjectError::io("renaming object", &final_path, source));
     }
-    if try_exists(&final_path)? {
+    let exists = match try_exists(&final_path) {
+        Ok(exists) => exists,
+        Err(error) => {
+            discard_temp(temp_path);
+            return Err(error);
+        }
+    };
+    if exists {
         // Names are unique, so this is a retry that actually landed, or a
         // caller bug. Do not leave the temp file behind.
-        fs::remove_file(temp_path)
-            .map_err(|source| ObjectError::io("removing object temp file", temp_path, source))?;
+        discard_temp(temp_path);
         return Err(ObjectError::AlreadyExists {
             path: key.to_owned(),
         });
     }
-    fs::rename(temp_path, &final_path)
-        .map_err(|source| ObjectError::io("renaming object", &final_path, source))?;
+    if let Err(source) = fs::rename(temp_path, &final_path) {
+        discard_temp(temp_path);
+        return Err(ObjectError::io("renaming object", &final_path, source));
+    }
 
     hooks.pause(HookPoint::ObjectDirSync);
     if let Some(source) = hooks.fail(HookPoint::ObjectDirSync) {
@@ -951,6 +980,18 @@ fn delete_local(root: &Path, key: &str, sync_failed: &AtomicBool) -> Result<u64,
             parent,
             source,
         )),
+    }
+}
+
+/// Removes the temp file of a write that failed, so its space comes back now
+/// and not at the next start (R5.5). The caller returns the write's error;
+/// a failed removal is only logged, with no path. Not a fsync: a removal that
+/// a crash undoes is cleaned up at the next start.
+fn discard_temp(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => tracing::warn!("removing a failed object temp file failed"),
     }
 }
 
@@ -1370,14 +1411,40 @@ mod tests {
                 matches!(point, HookPoint::ObjectSync | HookPoint::ObjectDirSync),
                 "{point:?}"
             );
+            // A failed sync or rename removes its temp file (R5.5). A failed
+            // directory sync renames the file back on purpose, for the crash
+            // tests, so startup cleanup finds it.
             let removed = objects.remove_temp_files().unwrap();
-            if point == HookPoint::ObjectWrite {
-                assert_eq!(removed, 0, "{point:?}");
-            } else {
-                assert_eq!(removed, 1, "{point:?}");
-            }
+            let expected = u64::from(point == HookPoint::ObjectDirSync);
+            assert_eq!(removed, expected, "{point:?}");
             assert!(temps(&root).is_empty(), "{point:?}");
             assert!(!root.join(&key).exists());
+        }
+    }
+
+    /// R5.5: a write whose sync or rename fails removes its temp file at once,
+    /// not at the next start.
+    #[tokio::test]
+    async fn a_failed_local_write_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("objects");
+        for point in [HookPoint::ObjectSync, HookPoint::ObjectRename] {
+            let hooks = Hooks::default();
+            let objects = Objects::new(&local_config(dir.path()), hooks.clone())
+                .await
+                .unwrap();
+            hooks.arm_fail(point);
+            let (key, _) = Objects::table_file_path(FileTable::Scores, project(), day(), 1);
+            let error = objects
+                .put_durable(&key, Bytes::from_static(b"nope"))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, ObjectError::Io { .. }),
+                "{point:?} returned {error}"
+            );
+            assert!(temps(&root).is_empty(), "{point:?} left a temp file");
+            assert!(!root.join(&key).exists(), "{point:?} left the final file");
         }
     }
 
