@@ -1,6 +1,7 @@
 //! Dashboard metrics (spec 05 § Dashboard metrics, spec 09 § Observability data).
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{Extension, State};
@@ -8,6 +9,7 @@ use axum::http::Method;
 use axum::routing::get;
 use llmobs_core::ids::ProjectId;
 use llmobs_storage as storage;
+use tokio::sync::OnceCell;
 
 use crate::api::convert;
 use crate::api::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
@@ -20,13 +22,13 @@ use crate::routes::read::{READ_TIMEOUT, open_query};
 /// How long a `GET /metrics` answer is kept, in nanoseconds (spec 05).
 const TTL_NS: i64 = 10_000_000_000;
 
-/// Most cached answers. A full cache first drops the expired ones, then clears.
+/// Most cached answers. A full cache drops the expired ones, then the oldest.
 const MAX_ENTRIES: usize = 256;
 
 /// `GET /metrics` answers, kept for [`TTL_NS`] per project and parameters (spec 05 § Dashboard metrics).
 #[derive(Debug, Default)]
 pub(crate) struct MetricsCache {
-    entries: Mutex<HashMap<MetricsKey, Cached>>,
+    entries: Mutex<HashMap<MetricsKey, Slot>>,
 }
 
 /// Everything that changes the answer.
@@ -42,20 +44,56 @@ struct MetricsKey {
     include_experiments: bool,
 }
 
+/// One key's answer. The cell is filled once, so concurrent misses of the same key share one
+/// query (single-flight); a failed query leaves it empty and nothing is cached.
 #[derive(Debug)]
-struct Cached {
+struct Slot {
     expires_at: i64,
-    response: Arc<MetricsResponse>,
+    answer: Arc<OnceCell<Arc<MetricsResponse>>>,
 }
 
 impl MetricsCache {
-    /// The cached answer for `key`, when it has not expired at `now`.
-    fn get(&self, key: &MetricsKey, now: i64) -> Option<Arc<MetricsResponse>> {
-        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        entries
-            .get(key)
-            .filter(|cached| now < cached.expires_at)
-            .map(|cached| Arc::clone(&cached.response))
+    /// The answer for `key`: the cached one, or `compute`'s, which runs once even when
+    /// identical requests miss together.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of `compute`; nothing is cached for it.
+    async fn get_or_compute<F, Fut>(
+        &self,
+        key: MetricsKey,
+        now: i64,
+        compute: F,
+    ) -> Result<Arc<MetricsResponse>, ApiError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<MetricsResponse, ApiError>>,
+    {
+        let answer = self.slot(key, now);
+        let response = answer
+            .get_or_try_init(|| async { compute().await.map(Arc::new) })
+            .await?;
+        Ok(Arc::clone(response))
+    }
+
+    /// The cell of `key` while it is fresh at `now`. Otherwise a new empty one replaces it.
+    fn slot(&self, key: MetricsKey, now: i64) -> Arc<OnceCell<Arc<MetricsResponse>>> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(slot) = entries.get(&key).filter(|slot| now < slot.expires_at) {
+            return Arc::clone(&slot.answer);
+        }
+        if !entries.contains_key(&key) && entries.len() >= MAX_ENTRIES {
+            evict(&mut entries, now);
+        }
+        let answer = Arc::new(OnceCell::new());
+        entries.insert(
+            key,
+            Slot {
+                expires_at: now.saturating_add(TTL_NS),
+                answer: Arc::clone(&answer),
+            },
+        );
+        answer
     }
 
     /// Drops every cached answer of `project` (D-M-11).
@@ -63,23 +101,22 @@ impl MetricsCache {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         entries.retain(|key, _| key.project != project);
     }
+}
 
-    /// Stores `response` for `key`, expiring [`TTL_NS`] after `now`.
-    fn put(&self, key: MetricsKey, response: MetricsResponse, now: i64) {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        if entries.len() >= MAX_ENTRIES {
-            entries.retain(|_, cached| now < cached.expires_at);
-            if entries.len() >= MAX_ENTRIES {
-                entries.clear();
-            }
-        }
-        entries.insert(
-            key,
-            Cached {
-                expires_at: now.saturating_add(TTL_NS),
-                response: Arc::new(response),
-            },
-        );
+/// Makes room for one entry in a full cache: the expired entries go first, then the oldest.
+fn evict(entries: &mut HashMap<MetricsKey, Slot>, now: i64) {
+    entries.retain(|_, slot| now < slot.expires_at);
+    if entries.len() < MAX_ENTRIES {
+        return;
+    }
+    let excess = entries.len() + 1 - MAX_ENTRIES;
+    let mut by_age: Vec<(i64, MetricsKey)> = entries
+        .iter()
+        .map(|(key, slot)| (slot.expires_at, key.clone()))
+        .collect();
+    by_age.sort_unstable_by_key(|(expires_at, _)| *expires_at);
+    for (_, key) in by_age.into_iter().take(excess) {
+        entries.remove(&key);
     }
 }
 
@@ -115,27 +152,29 @@ async fn get_metrics(
         include_experiments: params.include_experiments,
     };
     let now = state.clock.now_ns();
-    if let Some(cached) = state.metrics_cache.get(&key, now) {
-        return Ok(error::Json((*cached).clone()));
-    }
-    let window = storage::TimeWindow::new(from, to)?;
-    let ctx = open_query(&state, access.project.id, None).await?;
-    let data = storage::metrics(
-        &ctx,
-        storage::MetricsRequest {
-            window,
-            bucket: bucket(params.bucket),
-            filter: params.filter.as_deref(),
-            group_by: params.group_by.map(storage_group_by),
-            include_eval: params.include_eval,
-            include_experiments: params.include_experiments,
-            timeout: READ_TIMEOUT,
-        },
-    )
-    .await?;
-    let response = convert::metrics_response(data, from, to, params.group_by);
-    state.metrics_cache.put(key, response.clone(), now);
-    Ok(error::Json(response))
+    let project = access.project.id;
+    let response = state
+        .metrics_cache
+        .get_or_compute(key, now, || async {
+            let window = storage::TimeWindow::new(from, to)?;
+            let ctx = open_query(&state, project, None).await?;
+            let data = storage::metrics(
+                &ctx,
+                storage::MetricsRequest {
+                    window,
+                    bucket: bucket(params.bucket),
+                    filter: params.filter.as_deref(),
+                    group_by: params.group_by.map(storage_group_by),
+                    include_eval: params.include_eval,
+                    include_experiments: params.include_experiments,
+                    timeout: READ_TIMEOUT,
+                },
+            )
+            .await?;
+            Ok(convert::metrics_response(data, from, to, params.group_by))
+        })
+        .await?;
+    Ok(error::Json((*response).clone()))
 }
 
 fn bucket(bucket: MetricsBucket) -> storage::Bucket {
@@ -167,6 +206,8 @@ fn storage_group_by(group_by: MetricsGroupBy) -> storage::MetricsGroupBy {
 mod tests {
     use std::str::FromStr;
     use std::time::Duration;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::{Method, StatusCode};
     use llmobs_core::batch::spans_to_record_batch;
@@ -258,21 +299,22 @@ mod tests {
         assert_eq!(body["code"], "bad_request");
     }
 
-    #[test]
-    fn clear_project_drops_only_that_project() {
-        let cache = MetricsCache::default();
-        let key = |project: ProjectId| MetricsKey {
+    /// A key of `project` that differs only in its start, `from`.
+    fn key_at(project: ProjectId, from: i64) -> MetricsKey {
+        MetricsKey {
             project,
-            from: 0,
-            to: 1,
+            from,
+            to: from + 1,
             bucket: MetricsBucket::Auto,
             filter: None,
             group_by: None,
             include_eval: false,
             include_experiments: false,
-        };
-        let (p, q) = (ProjectId::new_v7(), ProjectId::new_v7());
-        let response: MetricsResponse = serde_json::from_value(serde_json::json!({
+        }
+    }
+
+    fn empty_response() -> MetricsResponse {
+        serde_json::from_value(serde_json::json!({
             "from": "2026-01-01T10:00:00Z",
             "to": "2026-01-01T11:00:00Z",
             "bucket_ns": 600_000_000_000_i64,
@@ -280,13 +322,117 @@ mod tests {
             "series": [],
             "top_models": [],
         }))
-        .unwrap();
-        cache.put(key(p), response.clone(), 0);
-        cache.put(key(q), response, 0);
+        .unwrap()
+    }
+
+    fn cached_keys(cache: &MetricsCache) -> Vec<MetricsKey> {
+        let entries = cache.entries.lock().unwrap();
+        let mut keys: Vec<MetricsKey> = entries.keys().cloned().collect();
+        keys.sort_by_key(|key| (key.project, key.from));
+        keys
+    }
+
+    #[tokio::test]
+    async fn clear_project_drops_only_that_project() {
+        let cache = MetricsCache::default();
+        let (p, q) = (ProjectId::new_v7(), ProjectId::new_v7());
+        for key in [key_at(p, 0), key_at(q, 0)] {
+            cache
+                .get_or_compute(key, 0, || async { Ok(empty_response()) })
+                .await
+                .unwrap();
+        }
 
         cache.clear_project(p);
-        assert!(cache.get(&key(p), 1).is_none());
-        assert!(cache.get(&key(q), 1).is_some());
+        assert_eq!(cached_keys(&cache), vec![key_at(q, 0)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_identical_misses_run_the_query_once() {
+        let cache = Arc::new(MetricsCache::default());
+        let runs = Arc::new(AtomicUsize::new(0));
+        let key = key_at(ProjectId::new_v7(), 0);
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let (cache, runs, key) = (Arc::clone(&cache), Arc::clone(&runs), key.clone());
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .get_or_compute(key, 0, || async {
+                        runs.fetch_add(1, Ordering::SeqCst);
+                        // Long enough that the other requests arrive while this one runs.
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Ok(empty_response())
+                    })
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_query_is_not_cached() {
+        let cache = MetricsCache::default();
+        let key = key_at(ProjectId::new_v7(), 0);
+        let failed = cache
+            .get_or_compute(key.clone(), 0, || async {
+                Err(ApiError::Query(storage::RunError::Timeout))
+            })
+            .await;
+        assert!(failed.is_err());
+        let answered = cache
+            .get_or_compute(key, 0, || async { Ok(empty_response()) })
+            .await;
+        assert!(answered.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_full_cache_evicts_the_oldest_answers() {
+        let cache = MetricsCache::default();
+        let project = ProjectId::new_v7();
+        for from in 0..MAX_ENTRIES as i64 {
+            cache
+                .get_or_compute(key_at(project, from), from, || async {
+                    Ok(empty_response())
+                })
+                .await
+                .unwrap();
+        }
+        let newest = key_at(project, MAX_ENTRIES as i64);
+        cache
+            .get_or_compute(newest.clone(), MAX_ENTRIES as i64, || async {
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+
+        let keys = cached_keys(&cache);
+        assert_eq!(keys.len(), MAX_ENTRIES);
+        assert!(!keys.contains(&key_at(project, 0)), "the oldest stayed");
+        assert!(keys.contains(&key_at(project, 1)), "a newer answer went");
+        assert!(keys.contains(&newest));
+    }
+
+    #[tokio::test]
+    async fn a_full_cache_drops_expired_answers_before_live_ones() {
+        let cache = MetricsCache::default();
+        let project = ProjectId::new_v7();
+        for from in 0..MAX_ENTRIES as i64 {
+            cache
+                .get_or_compute(key_at(project, from), 0, || async { Ok(empty_response()) })
+                .await
+                .unwrap();
+        }
+        // Every answer above expires at TTL_NS, so none of them is live now.
+        cache
+            .get_or_compute(key_at(project, -1), TTL_NS, || async {
+                Ok(empty_response())
+            })
+            .await
+            .unwrap();
+        assert_eq!(cached_keys(&cache), vec![key_at(project, -1)]);
     }
 
     #[tokio::test(flavor = "multi_thread")]
