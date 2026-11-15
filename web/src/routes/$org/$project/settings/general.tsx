@@ -27,9 +27,9 @@ export const Route = createFileRoute("/$org/$project/settings/general")({
 
 type ProjectPatch = Schema<"UpdateProjectRequest">;
 
-/** `retention_days: null` keeps data forever. The OpenAPI type omits the null (contract gap CG5). */
+/** `retention_days: null` keeps data forever. */
 function projectPatch(name: string, retentionDays: number | null): ProjectPatch {
-  return { name, retention_days: retentionDays } as unknown as ProjectPatch;
+  return { name, retention_days: retentionDays };
 }
 
 function ProjectGeneralPage() {

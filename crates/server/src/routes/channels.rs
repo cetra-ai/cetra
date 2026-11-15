@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::ProjectId;
+use llmobs_core::ids::{OrgId, ProjectId};
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
 use crate::alerts::deliver::send_one;
 use crate::alerts::message::{self, MessageKind, Notice};
+use crate::api::account::SignupPolicy;
 use crate::api::alerts::{
     AlertMetric, AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
     CreateChannelRequest, DeliveryStatus, NotificationChannel, UpdateChannelRequest,
@@ -22,6 +23,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::alerts::{self, ChannelPatch, ChannelRow, LastDelivery, NewChannel};
+use crate::meta::members::verified_member_emails;
 use crate::meta::{MetaError, orgs};
 
 /// Channel routes. Reads need `view`; writes need `manage_alerts` (D-K-9).
@@ -122,6 +124,8 @@ async fn create_channel(
         detail: None,
         errors,
     })?;
+    let members = member_scope(&state, access.project.org_id, body.kind).await?;
+    check_members(&config, members.as_deref())?;
     let id = Uuid::now_v7();
     let config_enc = seal_config(&state.secrets, &id, &config)
         .map_err(|error| ApiError::Internal(Box::new(error)))?;
@@ -173,15 +177,29 @@ async fn update_channel(
     let user_id = principal::session_user(&principal)?.id;
     let project_id = access.project.id;
     let now = state.clock.now_ns();
+    let members = if body.recipients.is_some() {
+        member_scope(&state, access.project.org_id, ChannelKind::Email).await?
+    } else {
+        None
+    };
     // The read, the open, the apply, the validation, the seal and the write share one
     // transaction, so two PATCHes never start from the same stored config.
     let handle = state.clone();
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { patch_channel_on(conn, &handle, project_id, id, &body, now).await },
-            )
+            Box::pin(async move {
+                patch_channel_on(
+                    conn,
+                    &handle,
+                    project_id,
+                    id,
+                    &body,
+                    now,
+                    members.as_deref(),
+                )
+                .await
+            })
         })
         .await?;
     let row = outcome?.ok_or(ApiError::NotFound)?;
@@ -233,9 +251,25 @@ async fn test_channel(
 ) -> Result<error::Json<ChannelTestResult>, ApiError> {
     let user_id = principal::session_user(&principal)?.id;
     let project = &access.project;
+    let now = state.clock.now_ns();
+    // Five sends a minute per user and five per channel (D-K-19). The channel is looked up in
+    // this project first, so a channel of another project (a 404) spends no budget of its own.
+    let limited = |retry: crate::auth::limits::RetryAfter| ApiError::RateLimited {
+        retry_after_s: retry.0.as_secs().max(1),
+    };
+    state
+        .limits
+        .alert_tests_by_user
+        .check(&user_id, now)
+        .map_err(limited)?;
     let Some(channel) = alerts::channel_by_id(state.meta.reader(), project.id, id).await? else {
         return Err(ApiError::NotFound);
     };
+    state
+        .limits
+        .alert_tests_by_channel
+        .check(&channel.id, now)
+        .map_err(limited)?;
     let config = match open_config(&state.secrets, &channel.id, &channel.config_enc) {
         Ok(config) => config,
         Err(_) => {
@@ -248,7 +282,6 @@ async fn test_channel(
     let org = orgs::org_by_id(state.meta.reader(), project.org_id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let now = state.clock.now_ns();
     let window_from = now.saturating_sub(300_000_000_000);
     let public_url = &state.config.public_url;
     let notice = Notice {
@@ -277,7 +310,15 @@ async fn test_channel(
             None,
         ),
     };
-    let result = match Box::pin(send_one(&state, &config, &notice, Uuid::now_v7(), now)).await {
+    let sent = send_one(
+        &state,
+        project.org_id,
+        &config,
+        &notice,
+        Uuid::now_v7(),
+        now,
+    );
+    let result = match Box::pin(sent).await {
         Ok(()) => ChannelTestResult {
             ok: true,
             error: None,
@@ -414,11 +455,12 @@ async fn patch_channel_on(
     id: Uuid,
     body: &UpdateChannelRequest,
     now: i64,
+    members: Option<&[String]>,
 ) -> Result<Result<Option<ChannelRow>, ApiError>, MetaError> {
     let Some(current) = alerts::channel_by_id_on(conn, project_id, id).await? else {
         return Ok(Ok(None));
     };
-    let patch = match planned_patch(handle, &current, body) {
+    let patch = match planned_patch(handle, &current, body, members) {
         Ok(patch) => patch,
         Err(error) => return Ok(Err(error)),
     };
@@ -431,6 +473,7 @@ fn planned_patch(
     handle: &AppState,
     current: &ChannelRow,
     body: &UpdateChannelRequest,
+    members: Option<&[String]>,
 ) -> Result<ChannelPatch, ApiError> {
     let name = body.name.as_deref().map(checked_name).transpose()?;
     let config = if body.url.is_some()
@@ -445,6 +488,7 @@ fn planned_patch(
             detail: None,
             errors,
         })?;
+        check_members(&next, members)?;
         let sealed = seal_config(&handle.secrets, &current.id, &next)
             .map_err(|error| ApiError::Internal(Box::new(error)))?;
         Some((sealed, next.target_hint()))
@@ -452,6 +496,42 @@ fn planned_patch(
         None
     };
     Ok(ChannelPatch { name, config })
+}
+
+/// The verified member emails that the recipients of a `kind` channel must stay within, when
+/// open signup restricts them (D-K-19). `None` when any address is allowed.
+async fn member_scope(
+    state: &AppState,
+    org_id: OrgId,
+    kind: ChannelKind,
+) -> Result<Option<Vec<String>>, ApiError> {
+    if kind != ChannelKind::Email || state.config.auth.signup != SignupPolicy::Open {
+        return Ok(None);
+    }
+    Ok(Some(
+        verified_member_emails(state.meta.reader(), org_id).await?,
+    ))
+}
+
+/// Under open signup each recipient of an email config must be a verified member of the org
+/// (D-K-19). The error names the field, not the address.
+fn check_members(config: &ChannelConfig, members: Option<&[String]>) -> Result<(), ApiError> {
+    let (ChannelConfig::Email { recipients }, Some(members)) = (config, members) else {
+        return Ok(());
+    };
+    let all_members = recipients.iter().all(|recipient| {
+        members
+            .iter()
+            .any(|member| member.eq_ignore_ascii_case(recipient))
+    });
+    if all_members {
+        Ok(())
+    } else {
+        Err(field_error(
+            "recipients",
+            "must be verified members of this organization",
+        ))
+    }
 }
 
 /// A trimmed channel name of 1 to 100 characters.
@@ -528,6 +608,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::alerts::quota::DAILY_EMAIL_LIMIT;
+    use crate::api::account::SignupPolicy;
     use crate::api::alerts::{AlertCondition, AlertMetric, AlertWindow, Comparator};
     use crate::auth::roles::OrgRole;
     use crate::test_support::hook_receiver::HookReceiver;
@@ -1114,5 +1196,214 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// An email channel to `recipients`, as a create body.
+    fn email_body(name: &str, recipients: &[&str]) -> Value {
+        json!({"name": name, "kind": "email", "recipients": recipients})
+    }
+
+    /// Sends one test; the response with its status.
+    async fn test_send(app: &TestApp, id: Uuid, seeded: &Seeded, cookie: &str) -> TestResponse {
+        let path = format!("{}/{id}/test", channels(seeded));
+        send(app, Method::POST, &path, cookie, None).await
+    }
+
+    #[tokio::test]
+    async fn test_sends_are_rate_limited_per_user_and_per_channel() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let admin = app
+            .add_member(&seeded, "admin@example.com", OrgRole::Admin)
+            .await;
+        let first = create_ok(&app, &seeded, email_body("First", &["oncall@example.com"])).await;
+        let second = create_ok(&app, &seeded, email_body("Second", &["oncall@example.com"])).await;
+
+        // Five sends of the first channel, split between two users.
+        for _ in 0..3 {
+            let sent = test_send(&app, first.id, &seeded, &seeded.cookie).await;
+            assert_eq!(sent.status, 200);
+        }
+        for _ in 0..2 {
+            let sent = test_send(&app, first.id, &seeded, &admin.cookie).await;
+            assert_eq!(sent.status, 200);
+        }
+        // The sixth send of that channel is refused for whoever sends it (5 per channel).
+        let refused = test_send(&app, first.id, &seeded, &admin.cookie).await;
+        assert_eq!(refused.status, 429);
+        assert!(refused.headers.get("retry-after").is_some());
+
+        // The owner has spent three of five user sends; two more go, the next is refused (5 per
+        // user, across channels).
+        for _ in 0..2 {
+            let sent = test_send(&app, second.id, &seeded, &seeded.cookie).await;
+            assert_eq!(sent.status, 200);
+        }
+        let limited = test_send(&app, second.id, &seeded, &seeded.cookie).await;
+        assert_eq!(limited.status, 429);
+        assert!(limited.headers.get("retry-after").is_some());
+        // The app sent exactly the accepted ones.
+        assert_eq!(app.sent().len(), 7);
+    }
+
+    #[tokio::test]
+    async fn the_daily_cap_is_spent_one_message_at_a_time() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let channel = create_ok(
+            &app,
+            &seeded,
+            email_body("Two", &["oncall@example.com", "backup@example.com"]),
+        )
+        .await;
+        let now = app.state.clock.now_ns();
+        assert!(
+            app.state
+                .alert_email_count
+                .reserve(seeded.org_id, DAILY_EMAIL_LIMIT - 1, now)
+        );
+
+        // One message is left: the first recipient gets it, the second is refused at its own
+        // reservation rather than the whole send being refused up front.
+        let partial = test_send(&app, channel.id, &seeded, &seeded.cookie).await;
+        assert_eq!(
+            partial.json::<Value>(),
+            json!({"ok": false, "error": "daily alert email limit reached"})
+        );
+        assert_eq!(app.sent().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_channel_of_another_project_is_not_found_and_spends_no_budget() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let admin = app
+            .add_member(&seeded, "admin@example.com", OrgRole::Admin)
+            .await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let theirs = send(
+            &app,
+            Method::POST,
+            &format!("/api/v1/projects/{}/channels", other.id),
+            &seeded.cookie,
+            Some(email_body("Theirs", &["oncall@example.com"])),
+        )
+        .await;
+        assert_eq!(theirs.status, 201);
+        let theirs = theirs.json::<NotificationChannel>();
+
+        // The admin asks for the other project's channel through this project, five times (the
+        // user's own budget): each is a 404, and none uses that channel's five sends.
+        for _ in 0..5 {
+            let missing = test_send(&app, theirs.id, &seeded, &admin.cookie).await;
+            assert_eq!(missing.status, 404);
+        }
+        // The owner of that channel still has its full budget: five sends go, the sixth is 429.
+        let owner_path = format!("/api/v1/projects/{}/channels/{}/test", other.id, theirs.id);
+        for _ in 0..5 {
+            let sent = send(&app, Method::POST, &owner_path, &seeded.cookie, None).await;
+            assert_eq!(sent.status, 200);
+        }
+        let refused = send(&app, Method::POST, &owner_path, &seeded.cookie, None).await;
+        assert_eq!(refused.status, 429);
+        assert_eq!(app.sent().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_send_stops_at_the_daily_email_cap() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let channel = create_ok(&app, &seeded, email_body("Mail", &["oncall@example.com"])).await;
+        let now = app.state.clock.now_ns();
+        assert!(
+            app.state
+                .alert_email_count
+                .reserve(seeded.org_id, DAILY_EMAIL_LIMIT, now)
+        );
+
+        let refused = test_send(&app, channel.id, &seeded, &seeded.cookie).await;
+        assert_eq!(refused.status, 200);
+        assert_eq!(
+            refused.json::<Value>(),
+            json!({"ok": false, "error": "daily alert email limit reached"})
+        );
+        assert!(app.sent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_signup_limits_recipients_to_verified_members() {
+        let app =
+            TestApp::with_mailer_config(|config| config.auth.signup = SignupPolicy::Open).await;
+        let seeded = app.seed().await;
+        app.verify_email(seeded.user_id).await;
+        let ben = app
+            .add_member(&seeded, "ben@example.com", OrgRole::Member)
+            .await;
+        app.verify_email(ben.id).await;
+        // A member whose address is not verified does not count.
+        app.add_member(&seeded, "cy@example.com", OrgRole::Member)
+            .await;
+        let path = channels(&seeded);
+        let not_members = pairs(&[(
+            "recipients",
+            "must be verified members of this organization",
+        )]);
+
+        let outsider = send(
+            &app,
+            Method::POST,
+            &path,
+            &seeded.cookie,
+            Some(email_body("Mail", &["ada@example.com", "eve@example.com"])),
+        )
+        .await;
+        assert_eq!(outsider.status, 400);
+        assert_eq!(problem_of(&outsider), not_members);
+        let unverified = send(
+            &app,
+            Method::POST,
+            &path,
+            &seeded.cookie,
+            Some(email_body("Mail", &["cy@example.com"])),
+        )
+        .await;
+        assert_eq!(unverified.status, 400);
+        assert_eq!(problem_of(&unverified), not_members);
+
+        // Verified members pass, whatever the case of the address.
+        let created = create_ok(
+            &app,
+            &seeded,
+            email_body("Mail", &["ada@example.com", "BEN@example.com"]),
+        )
+        .await;
+        let patch = format!("{path}/{}", created.id);
+        let refused = send(
+            &app,
+            Method::PATCH,
+            &patch,
+            &seeded.cookie,
+            Some(json!({"recipients": ["ben@example.com", "eve@example.com"]})),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(problem_of(&refused), not_members);
+        let accepted = send(
+            &app,
+            Method::PATCH,
+            &patch,
+            &seeded.cookie,
+            Some(json!({"recipients": ["ben@example.com"]})),
+        )
+        .await;
+        assert_eq!(accepted.status, 200);
+    }
+
+    #[tokio::test]
+    async fn invite_only_allows_any_recipient() {
+        let app = TestApp::with_mailer().await;
+        let seeded = app.seed().await;
+        let channel = create_ok(&app, &seeded, email_body("Mail", &["eve@example.com"])).await;
+        assert_eq!(channel.recipients, vec!["eve@example.com".to_owned()]);
     }
 }

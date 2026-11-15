@@ -285,10 +285,10 @@ async fn classifies_each_status_and_does_not_follow_a_redirect() {
         (401, ErrorClass::Pause),
         (403, ErrorClass::Pause),
         (404, ErrorClass::Pause),
+        (402, ErrorClass::Pause),
         (410, ErrorClass::Pause),
         (301, ErrorClass::Permanent),
         (400, ErrorClass::Permanent),
-        (402, ErrorClass::Permanent),
         (422, ErrorClass::Permanent),
     ];
     for (status, class) in cases {

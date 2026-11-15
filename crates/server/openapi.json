@@ -5841,7 +5841,7 @@
           "alerts"
         ],
         "summary": "Create a notification channel",
-        "description": "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+        "description": "Needs role member. Email channels need SMTP. At most 20 channels per project (409). Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         "operationId": "create_channel",
         "parameters": [
           {
@@ -6027,6 +6027,7 @@
           "alerts"
         ],
         "summary": "Update a notification channel",
+        "description": "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         "operationId": "update_channel",
         "parameters": [
           {
@@ -6139,7 +6140,7 @@
           "alerts"
         ],
         "summary": "Send a test notification",
-        "description": "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+        "description": "Sends one sample message now and reports the result. Nothing is stored. Needs role member. At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         "operationId": "test_channel",
         "parameters": [
           {
@@ -12428,7 +12429,7 @@
           "threshold": {
             "type": "number",
             "format": "double",
-            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`."
+            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target)."
           },
           "window": {
             "$ref": "#/components/schemas/AlertWindow",
@@ -13603,14 +13604,18 @@
             "description": "Display name. Trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
-            "description": "Days to keep data, from 1 to 36500. Absent keeps data forever.",
-            "minimum": 0
+            "description": "Days to keep data, from 1 to 36500. Null or absent keeps data forever.",
+            "maximum": 36500,
+            "minimum": 1
           },
           "slug": {
             "type": "string",
-            "description": "URL slug. Absent derives one from the name. Project slugs are not reserved words."
+            "description": "URL slug. Absent derives one from the name. `settings` is reserved."
           }
         },
         "additionalProperties": false
@@ -19119,10 +19124,14 @@
             "description": "Display name. Absent leaves the name unchanged. A present value is trimmed to 1–100 characters."
           },
           "retention_days": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "description": "Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.",
-            "minimum": 0
+            "maximum": 36500,
+            "minimum": 1
           },
           "trace_completion_timeout_s": {
             "type": "integer",
@@ -19302,12 +19311,22 @@
         "required": [
           "id",
           "email",
-          "is_instance_admin"
+          "is_instance_admin",
+          "email_verified",
+          "has_password"
         ],
         "properties": {
           "email": {
             "type": "string",
             "description": "Email address."
+          },
+          "email_verified": {
+            "type": "boolean",
+            "description": "The address has been verified."
+          },
+          "has_password": {
+            "type": "boolean",
+            "description": "A password is set. SSO-only accounts are false."
           },
           "id": {
             "type": "string",

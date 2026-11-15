@@ -1003,7 +1003,7 @@ export interface paths {
         put?: never;
         /**
          * Create a notification channel
-         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409).
+         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409). Under open signup every email recipient must be a verified member of the org (400 on recipients).
          */
         post: operations["create_channel"];
         delete?: never;
@@ -1026,7 +1026,10 @@ export interface paths {
         delete: operations["delete_channel"];
         options?: never;
         head?: never;
-        /** Update a notification channel */
+        /**
+         * Update a notification channel
+         * @description Under open signup every email recipient must be a verified member of the org (400 on recipients).
+         */
         patch: operations["update_channel"];
         trace?: never;
     };
@@ -1041,7 +1044,7 @@ export interface paths {
         put?: never;
         /**
          * Send a test notification
-         * @description Sends one sample message now and reports the result. Nothing is stored. Needs role member.
+         * @description Sends one sample message now and reports the result. Nothing is stored. Needs role member. At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.
          */
         post: operations["test_channel"];
         delete?: never;
@@ -1947,7 +1950,8 @@ export interface components {
             target?: components["schemas"]["LatencyTarget"];
             /**
              * Format: double
-             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`.
+             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
+             *     (below the window length for a `trace` target).
              */
             threshold: number;
             /** @description Sliding window. */
@@ -2522,10 +2526,10 @@ export interface components {
             name: string;
             /**
              * Format: int32
-             * @description Days to keep data, from 1 to 36500. Absent keeps data forever.
+             * @description Days to keep data, from 1 to 36500. Null or absent keeps data forever.
              */
-            retention_days?: number;
-            /** @description URL slug. Absent derives one from the name. Project slugs are not reserved words. */
+            retention_days?: number | null;
+            /** @description URL slug. Absent derives one from the name. `settings` is reserved. */
             slug?: string;
         };
         /**
@@ -5488,7 +5492,7 @@ export interface components {
              * Format: int32
              * @description Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
              */
-            retention_days?: number;
+            retention_days?: number | null;
             /**
              * Format: int32
              * @description Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.
@@ -5587,6 +5591,10 @@ export interface components {
         User: {
             /** @description Email address. */
             email: string;
+            /** @description The address has been verified. */
+            email_verified: boolean;
+            /** @description A password is set. SSO-only accounts are false. */
+            has_password: boolean;
             /**
              * Format: uuid
              * @description User id.

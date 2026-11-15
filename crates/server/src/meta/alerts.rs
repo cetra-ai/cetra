@@ -991,6 +991,7 @@ pub(crate) struct DueDelivery {
     pub(crate) project_id: ProjectId,
     pub(crate) project_name: String,
     pub(crate) project_slug: String,
+    pub(crate) org_id: OrgId,
     pub(crate) org_slug: String,
 }
 
@@ -1027,6 +1028,7 @@ struct DueRecord {
     project_id: String,
     project_name: String,
     project_slug: String,
+    org_id: String,
     org_slug: String,
 }
 
@@ -1045,7 +1047,8 @@ pub(crate) async fn due_deliveries(
         "SELECT d.id, d.attempts, d.channel_id, c.kind AS channel_kind, c.config_enc, \
          e.id AS event_id, e.rule_id, e.kind AS event_kind, e.value, e.count, e.threshold, \
          e.window_from, e.window_to, e.details, e.created_at AS event_created_at, \
-         p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.slug AS org_slug \
+         p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.id AS org_id, \
+         o.slug AS org_slug \
          FROM notification_deliveries d \
          JOIN notification_channels c ON c.id = d.channel_id \
          JOIN alert_events e ON e.id = d.event_id \
@@ -1170,6 +1173,10 @@ fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
             .map_err(|_| corrupt(DELIVERIES, "id"))?,
         project_name: record.project_name,
         project_slug: record.project_slug,
+        org_id: record
+            .org_id
+            .parse()
+            .map_err(|_| corrupt(DELIVERIES, "org_id"))?,
         org_slug: record.org_slug,
     })
 }
