@@ -57,7 +57,7 @@ just check
 
 | # | Subject | What | After |
 |---|---|---|---|
-| P1 | `Make the control plane opt-in` | `entitlements.control_plane`; `/api/internal/v1/*` 404 and org/control-plane tokens refused when off (D-P-50) | M3 |
+| P1 | `Make the control plane opt-in` (**done**, bb36d4a) | `entitlements.control_plane`; `/api/internal/v1/*` 404 and org/control-plane tokens refused when off (D-P-50) | M3 |
 | P2 | `Add visible_from to storage queries` | `QueryOptions::new`, private fields, no `Default`; `ProjectQuery::visible_from`; the base views filter (D-P-44, D-P-47) | P1 |
 | P3 | `Read through the org's data window` | `entitlements::window` (`Visibility`, `query_options`); `open_query*` take the org/visibility; every caller; the invariant tests; the deletion exemption | P2 |
 | P4 | `Apply the window to streams, metrics, alerts and evaluators` | stream visibility, span-stream filter, metrics cache key, alert evaluator, `load_trace`; one test per surface | P3 |
@@ -80,6 +80,8 @@ P1–P11 run in order, one at a time (they edit the same server files and the ge
 
 ## P1 — The control plane is opt-in (D-P-50)
 
+**Done: commit bb36d4a.** The text below records what was built.
+
 Every release build trusts the `cloud-1` key for `org` and `control_plane` tokens. Without this phase, a leaked `cloud-1` key would let anyone mint tokens for any self-hosted instance (any `audience`): create orgs, delete users, unlock features. A cell now trusts those kinds only when configured to.
 
 ### Config (`crates/server/src/config.rs`)
@@ -99,11 +101,7 @@ Spec 12's config table already has the `entitlements.control_plane` row (added w
 
 ### Where it applies
 
-1. **Routes.** `http/access.rs`: `enforce` and `prepare` do not see the route's path today, and `prepare` returns early for `Access::Public`, which the org-token `PUT` uses. So:
-   - `build_router` (~line 176) also captures `let path = route.path;` (a `&'static str`) and calls `enforce(state, access, path, request, next)`.
-   - `enforce` gains the parameter `path: &'static str`. Its first step, **before** `prepare`: when `path.starts_with("/api/internal/") && !state.config.entitlements.control_plane`, build `ApiError::NotFound`, take its `denial_marker`, turn it into the response, `record_access(&mut response, marker)` and return it. The response therefore carries the `x-test-access: denied-404` marker in tests, like any other denial.
-   - `prepare` is unchanged. The route table and the OpenAPI document do not change.
-   - `http/access_suite.rs` runs with the default test config (opt-in on, below), so its expectations do not change. If one of its worlds is built with `TestApp::with_config` and a tweak that resets `entitlements`, keep `control_plane = true` there.
+1. **Routes.** `http/access.rs` has `pub(crate) fn hidden_without_control_plane(state: &AppState, path: &str) -> bool` (`path.starts_with("/api/internal/") && !state.config.entitlements.control_plane`). `build_router` passes `route.path` to `enforce`, which answers `ApiError::NotFound` (with its `denial_marker`, `x-test-access: denied-404` in tests) instead of calling `prepare` when the helper is true. This also covers the public org-token `PUT`, for which `prepare` would return early. `auth/principal.rs` `authenticate` calls the same helper on `request.uri().path()` and, when true, skips reading the bearer and the cookie, so no credential is checked (and no limiter touched) for a hidden route. The route table and the OpenAPI document do not change; `http/access_suite.rs` runs with the opt-in on.
 2. **Bearer tokens.** `auth/principal.rs` `control_plane_principal`: first line `if !state.config.entitlements.control_plane { return Err(ApiError::Unauthorized); }`.
 3. **Stored org tokens.** `EntitlementsState::load` gains a parameter `control_plane: bool` (after `public_url`). When false, it reads no stored token: it returns an empty `orgs` map, and when `all_tokens` would have returned rows it logs once `tracing::warn!(count, "stored org tokens ignored: entitlements.control_plane is off")` (read the rows to count them; never log a token). Callers: `serve.rs` (passes `config.entitlements.control_plane`) and `admin.rs` `entitlements_in` (passes `config.entitlements.control_plane`), plus any test that calls `load`.
 
@@ -321,6 +319,16 @@ pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQ
 }
 ```
 
+Also in `test_support/mod.rs`:
+
+```rust
+/// Spans of `project` in storage, no window: `SELECT count(*) FROM spans` over
+/// `QueryContext::new(raw_query(storage, project).await, None)`.
+pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64
+```
+
+(Run the SQL through the context's session the way `routes/read.rs` tests read batches, or with `llmobs_storage::sql_json` as the SQL route does; read the `count` column as `Int64` and convert with `u64::try_from(..).unwrap_or(0)`.)
+
 After this phase `QueryOptions` appears in `crates/server/src` only in `entitlements/window.rs`, and `Visibility::Window(` only there and in `test_support/mod.rs`.
 
 **P3 also makes the signature changes of P4 § Streams (the `TraceStream`/`refresh` part), § Alerts and § Evaluators**, so no interim `Window(None)` ever exists in server code; P4 adds the rest (the span-stream filter, the metrics key) and every per-surface test.
@@ -331,8 +339,8 @@ Scan the sources with `std::fs` from `concat!(env!("CARGO_MANIFEST_DIR"), "/src"
 1. `only_query_options_builds_query_options`: no file other than `entitlements/window.rs` contains `QueryOptions::new(` or `QueryOptions {` (also checked with whitespace removed: `QueryOptions{`). Name the offending files in the failure message.
 2. `exempt_reads_are_deletion_reads`: the files containing `Visibility::Exempt` are exactly a subset of `{"entitlements/window.rs", "deletion/resolve.rs", "deletion/mod.rs", "routes/deletions.rs"}`, and both `deletion/resolve.rs` and `routes/deletions.rs` are in the set (so a refactor that drops the exemption fails too).
 3. `no_unwindowed_visibility`: the files containing `Visibility::Window(` are a subset of `{"entitlements/window.rs", "test_support/mod.rs"}`. Server code gets its window only from `Visibility::window(state, org)`; tests that need no window use `test_support::raw_query`, or `Visibility::window` on an org without a limit. The scan cannot skip `#[cfg(test)]` modules, so no test module elsewhere may write `Visibility::Window(` either.
-4. `direct_storage_reads_are_listed`: remove all whitespace from each file's text, then look for `storage.query(` (this also matches the multi-line `state\n    .storage\n    .query(` form). The files containing it are a subset of `{"routes/read.rs", "deletion/resolve.rs", "eval/trace_load.rs", "test_support/mod.rs"}`. A new direct read (track I's sweeper and backfill, M's M8) adds its file to this list in the same change, and builds its options with `query_options`.
-5. `visible_from_saturates`: `visible_from(NOW, 30) == NOW − 30 × DAY_NS`; `visible_from(NOW, u64::MAX) == i64::MIN`; `visible_from(i64::MIN, 1) == i64::MIN`.
+4. `direct_storage_reads_are_listed`: remove all whitespace from each file's text, then look for the needle built as `concat!("storage", ".query(")` (so the test's own source in `entitlements/window.rs` does not match it; test 1's and 3's needles are built the same way, `concat!("QueryOptions", "::new(")`, `concat!("Visibility", "::Window(")`, or the scan skips `entitlements/window.rs` for them, since that file is allowed anyway) (this also matches the multi-line `state\n    .storage\n    .query(` form). The files containing it are a subset of `{"routes/read.rs", "deletion/resolve.rs", "eval/trace_load.rs", "test_support/mod.rs"}`. A new direct read (track I's sweeper and backfill, M's M8) adds its file to this list in the same change, and builds its options with `query_options`.
+5. `visible_from_saturates`: `visible_from(NOW, 30) == NOW − 30 × DAY_NS`; `visible_from(NOW, u64::MAX) == NOW.saturating_sub(i64::MAX)` (the span saturates at `i64::MAX`, then the subtraction); `visible_from(i64::MIN, 1) == i64::MIN`.
 6. `window_follows_the_org`: `TestApp`, seeded org: no limit → `Window(None)`; `set_limits(app, org, "2026-01-01T00:00:00Z", &json!({"data_access_days": 30}))` → `Window(Some(NOW − 30 × DAY_NS))`; advance the clock one hour → the bound moves one hour.
 
 ### Behaviour tests
@@ -340,10 +348,10 @@ Scan the sources with `std::fs` from `concat!(env!("CARGO_MANIFEST_DIR"), "/src"
 Helper for the next tests, in `test_support/mod.rs` (`impl TestApp`): `pub(crate) async fn commit_trace_at(&self, project: &ProjectRow, trace: TraceId, span_index: u8, start_time: i64)` builds `dataset_span(0)` with `trace_id = trace`, `span_id` = `SpanId` from the hex `format!("c4{span_index:014x}")`, `parent_span_id = None`, `start_time`, `end_time = start_time + 1_000_000_000`, `ingest_time = self.state.clock.now_ns()`, and calls `self.commit_spans(project, vec![span])` (which goes through `Ingest::commit`, so the span is appended, counted in usage **and published on the live bus**). The private `commit_at` copies in `retention.rs` and `routes/projects.rs` and `commit_span` in `routes/streams.rs` stay as they are (their span ids and fields differ); new tests in this plan use `commit_trace_at`.
 
 With `NOW` the clock and the org at `data_access_days: 30`: an "old" trace at `NOW − 40 × DAY_NS` and a "new" trace at `NOW − 1 × DAY_NS`.
-- `routes::traces::tests::the_window_hides_old_traces`: `GET …/traces?from=<NOW − 60 days>&to=<NOW>` lists the new trace only; `GET …/traces/<old>` → 404; `GET …/traces/<new>` → 200. Without a limit (another org) both are listed.
+- `routes::traces::tests::the_window_hides_old_traces`: `GET …/traces?from=<NOW − 60 days>&to=<NOW>` first, before any `set_limits`, lists both traces; then `set_limits(…, json!({"data_access_days": 30}))` and the same request lists the new trace only; `GET …/traces/<old>` → 404; `GET …/traces/<new>` → 200.
 - `routes::sql::tests::the_window_applies_to_sql`: `POST …/sql` `SELECT count(*) AS n FROM traces` → 1; same for the CSV export (one data row).
 - `mcp` test (follow an existing `search_traces` tool test in `mcp/traces.rs`): the old trace is not returned.
-- `routes::deletions::tests::deletion_counts_include_hidden_traces`: with the window in force, `POST …/deletions/preview` with a filter matching both traces and a window covering both → `count` 2; `POST …/deletions` with the same filter → 202, and after `deletion::run_once` the scope (`scope_traces`) holds both trace ids; after the deletion is applied, the old trace is gone from a no-window read (`raw_query`).
+- `routes::deletions::tests::deletion_counts_include_hidden_traces`: with the window in force, `POST …/deletions/preview` with a filter matching both traces and a window covering both → `count` 2; `POST …/deletions` with the same filter → 202, and after `deletion::run_once` the scope (`scope_traces`) holds both trace ids; before the deletion `raw_span_count` is 2; after it is applied, `raw_span_count` is 0.
 
 ### Done when
 
@@ -365,7 +373,7 @@ With `NOW` the clock and the org at `data_access_days: 30`: an "old" trace at `N
 
 ### Alerts (`alerts/evaluate.rs`, `meta/alerts.rs`)
 
-- (Code made in P3.) `meta::alerts::due_rules` returns `Result<Vec<(OrgId, RuleRow)>, MetaError>`: add `p.org_id AS org_id` to its `SELECT` and decode into a new private record `#[derive(sqlx::FromRow)] struct DueRecord { org_id: String, #[sqlx(flatten)] rule: RuleRecord }` (an `org_id` that does not parse is `MetaError::Corrupt { table: "projects", column: "org_id" }`). The sort becomes `due.sort_by_key(|(_, rule)| (rule.last_evaluated_at, rule.id));` and the channel loop `for (_, rule) in &mut due { rule.channel_ids = rule_channel_ids(pool, rule.id).await?; }` (`meta/alerts.rs` ~822–825).
+- (Code made in P3.) `meta::alerts::due_rules` returns `Result<Vec<(OrgId, RuleRow)>, MetaError>`: add `p.org_id AS org_id` to its `SELECT` and decode into a new private record `#[derive(sqlx::FromRow)] struct DueRecord { org_id: String, #[sqlx(flatten)] rule: RuleRecord }` (an `org_id` that does not parse is `MetaError::Corrupt { table: "projects", column: "org_id" }`). The decode loop becomes: `let records: Vec<DueRecord> = sqlx::query_as(…)…; let mut due: Vec<(OrgId, RuleRow)> = Vec::new(); for record in records { let org: OrgId = record.org_id.parse().map_err(|_| MetaError::Corrupt { table: "projects", column: "org_id" })?; let rule = rule_from(record.rule, Vec::new())?; let is_due = /* unchanged test on rule */; if is_due { due.push((org, rule)); } }`. The sort becomes `due.sort_by_key(|(_, rule)| (rule.last_evaluated_at, rule.id));` and the channel loop `for (_, rule) in &mut due { rule.channel_ids = rule_channel_ids(pool, rule.id).await?; }` (`meta/alerts.rs` ~822–825).
 - `evaluate_once` maps `(org, rule)` into `evaluate_rule(state, org, rule, now)`; `evaluate_rule` passes `org` to `measure_rule(state, org, project, …)`, which calls `open_query_on(&state.storage, project, Visibility::window(state, org), None, None)`.
 - Update `due_rules`' tests for the tuple. Test `alerts::evaluate::tests::alerts_do_not_count_hidden_spans`: a count rule over a window that starts before `visible_from` counts only the visible spans. Alert windows are at most 24 h and the smallest data window is 1 day, so the test calls `measure_rule` directly with a wider range: `set_limits({"data_access_days": 1})`, commit one span at `NOW − 2 h` and one at `NOW − 30 h`, then `measure_rule(state, org, project, &condition, NOW − 2 × DAY_NS, NOW)` with a span-count condition (build it as the module's tests build conditions) → count 1.
 
@@ -454,9 +462,9 @@ Test: `None` → `None`; 30 → 60; `u64::MAX` → `u32::MAX`; `u64::from(u32::M
 - A failed org counts **one** failure and all its projects are skipped: deleting nothing is the safe side. Other orgs still run. Replace the D-M-15 comment with: `// D-P-45: the largest window of the last 30 days, plus 30 days (D175).` and update the module doc's decision list to `(spec 03 § 8, D-M-10, D-M-15, D-P-45)`.
 
 Tests (`retention::tests`, using `commit_at`/`commit_trace_at`):
-- `the_plan_caps_retention`: org at `data_access_days: 30`, project without `retention_days`: spans at `NOW − 70 days` and `NOW − 50 days` → after `retention_once`, the 70-day span is dropped and the 50-day one kept (cap 60 days, day-granular via `keep_from`).
-- `a_downgrade_waits_30_days`: org's token history: record a window end of 1 825 days 1 day ago (`meta::entitlements::record_window_end`, as M2's tests do) and a current limit of 30 days → spans at `NOW − 70 days` are kept (cap = 1 825 + 30).
-- `a_window_read_error_skips_the_org`: two orgs. Org A has a 30-day limit (`set_limits`) and **two** projects, each with a span at `NOW − 70 days`; insert one corrupt window row for A only: `INSERT INTO org_window_ends (org_id, ended_at, data_access_days) VALUES (?, ?, -1)` with A's id and `NOW − DAY_NS` (a negative `data_access_days` makes `window_ends_since` return `MetaError::Corrupt`; read `meta/entitlements.rs` ~146 to confirm and use the table's exact columns). Org B (the seeded org) has a project with `retention_days = 1` and a span at `NOW − 3 days`. `retention_once` → `failures == 1` (one per org, not per project: this also proves the window is read once per org), both of A's spans are still readable with `raw_query`, and B's old span is gone.
+- `the_plan_caps_retention`: org at `data_access_days: 30`, project without `retention_days`: spans at `NOW − 70 days` and `NOW − 50 days` → after `retention_once`, `raw_span_count` goes from 2 to 1: the 70-day span is dropped and the 50-day one kept (cap 60 days, day-granular via `keep_from`).
+- `a_downgrade_waits_30_days`: org's token history: record a window end of 1 825 days 1 day ago (`meta::entitlements::record_window_end`, as M2's tests do) and a current limit of 30 days → spans at `NOW − 70 days` are kept (`raw_span_count` unchanged; cap = 1 825 + 30).
+- `a_window_read_error_skips_the_org`: two orgs. Create org A and its two projects in one write, as `http/access.rs` tests do (~line 795): `app.state.meta.write(move |conn| Box::pin(async move { let org = insert_org(conn, OrgId::new_v7(), "A", "a", now).await?; let p1 = insert_project(conn, org.id, "A1", "a1", None, now).await?; let p2 = insert_project(conn, org.id, "A2", "a2", None, now).await?; Ok((org, p1, p2)) })).await.unwrap()` (read `insert_org`/`insert_project`'s exact signatures and return types; you need the `ProjectRow`s). Org A gets a 30-day limit (`set_limits`) and each project a span at `NOW − 70 days` (`app.commit_trace_at(&p1, …)`, `app.commit_trace_at(&p2, …)`); insert one corrupt window row for A only: `INSERT INTO org_window_ends (org_id, ended_at, data_access_days) VALUES (?, ?, -1)` with A's id and `NOW − DAY_NS` (a negative `data_access_days` makes `window_ends_since` return `MetaError::Corrupt`; read `meta/entitlements.rs` ~146 to confirm and use the table's exact columns). Org B (the seeded org) has a project with `retention_days = 1` and a span at `NOW − 3 days`. `retention_once` → `failures == 1` (one per org, not per project: this also proves the window is read once per org), `raw_span_count` is 1 for each of A's projects, and 0 for B's project.
 - `the_cap_is_read_once_per_org`: covered by the `failures == 1` assertion above with two projects in A; no separate counter is added to production code.
 
 ### Ingest D85 bound (`ingest/mod.rs`, `routes/otlp.rs`, `ingest/grpc.rs`, `eval/test_run.rs`)
@@ -770,6 +778,11 @@ In the rule form's `403 plan_limit` branch, render `<UpgradeButton url={useOrgEn
 - No `// Track P M4:` dead-code attribute is left (`grep -rn "Track P M4" crates`); `just lint` clean.
 - Specs: 03 (§ 6 options, `media` DDL, § 9), 04 (usage of dropped orgs), 05 (point 7), 09 (`/api/internal/*` auth row, internal endpoints row, media row), 11 (picker, retention), 12 (config row, enforcement bullets) were updated in their phases; check each against the code.
 - `docs/plans/p-entitlements/00-design.md`: the M4 row says "written" in the plan list at the top.
+- `CHANGELOG.md` § `[Unreleased]` (D-N-5):
+  - `### Added`: "Plans with a data-access window hide older traces, spans, scores and media from every read (UI, API, SQL, MCP, alerts, evaluators); the time-range picker shows the limit." · "Control-plane org deletion (`DELETE /api/internal/v1/orgs/{org_id}`) and an applied-drops feed (`GET /api/internal/v1/deletions`) for cloud cells."
+  - `### Changed`: "A dropped organization's daily usage is kept 40 days after the drop, for billing, then deleted."
+  - `### Upgrade notes`: "Cloud cells must set `entitlements.control_plane = true`; without it, `/api/internal/v1/*` answers 404 and org and control-plane tokens are refused (D-P-50)."
+  Add each line in the sub-phase that ships it if the coordinator prefers; P16 checks they are all there.
 - The coordinator updates `docs/roadmap.md`; report what to write: "M1–M3 merged; M4 implemented: control plane opt-in, data window on every read (storage `visible_from`), media window, retention cap from the window history, D85 bound, alert and online-rule limits, dropped org usage kept 40 days, control-plane org delete and drops feed, admin month units, UI window lock and upgrade states."
 - `just check`, `just e2e`.
 
