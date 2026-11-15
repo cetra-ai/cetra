@@ -95,6 +95,15 @@ pub(crate) enum ApiError {
         /// Static reason. Stores choose it (P6).
         detail: &'static str,
     },
+    /// A conflict that names the items in the way (D-I-19): each error's `field` is
+    /// `rules.<rule id>` and its message says why.
+    #[error("conflict")]
+    ConflictWith {
+        /// Static reason.
+        detail: &'static str,
+        /// The items in the way.
+        errors: Vec<FieldError>,
+    },
     /// The org reached its monthly units cap (D-P-17). `Retry-After` is the seconds to the reset.
     #[error("quota exceeded")]
     QuotaExceeded {
@@ -175,6 +184,11 @@ impl ApiError {
             Self::NotFound => not_found_problem(),
             Self::Conflict { detail } => {
                 Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()))
+            }
+            Self::ConflictWith { detail, errors } => {
+                let mut problem = Problem::new(ProblemCode::Conflict, Some((*detail).to_owned()));
+                problem.errors.clone_from(errors);
+                problem
             }
             Self::TooManyTraces => Problem::new(
                 ProblemCode::TooManyTraces,
@@ -550,6 +564,30 @@ mod tests {
         assert_eq!(
             problem.errors[0].position,
             Some(TextPosition { line: 2, column: 7 })
+        );
+    }
+
+    #[test]
+    fn conflict_with_names_the_items_in_the_way() {
+        let problem = ApiError::ConflictWith {
+            detail: "online rules use this evaluator",
+            errors: vec![FieldError {
+                field: "rules.01900000-0000-7000-8000-000000000700".to_owned(),
+                message: "Relevance on answers: uses this evaluator".to_owned(),
+                position: None,
+            }],
+        }
+        .problem();
+        assert_eq!(problem.status, 409);
+        assert_eq!(problem.code, ProblemCode::Conflict);
+        assert_eq!(
+            problem.detail.as_deref(),
+            Some("online rules use this evaluator")
+        );
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(
+            problem.errors[0].field,
+            "rules.01900000-0000-7000-8000-000000000700"
         );
     }
 

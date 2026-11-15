@@ -4,5 +4,5 @@
   "spec_refs": [
     "02 § Token semantics"
   ],
-  "notes": "pinned by hand from LangWatch's finding; re-check against a B2 capture"
+  "notes": "pinned by hand from LangWatch's finding. Confirmed by vercel/v5-anthropic-cache: ai.usage and gen_ai.usage.input_tokens are both 100 (exclusive), and the cache read 1800 and cache write 200 are separate (D113)."
 }

@@ -185,6 +185,7 @@ async fn setup(
         Some(ip),
     )
     .await?;
+    let trace_completion_timeout_s = created.created.project.completion_timeout_s();
     let response = SetupResponse {
         user: user_view(&created.created.user),
         org: OrgMembership {
@@ -199,6 +200,7 @@ async fn setup(
             slug: created.created.project.slug,
             name: created.created.project.name,
             retention_days: created.created.project.retention_days,
+            trace_completion_timeout_s,
             role: Some(OrgRole::Owner),
             created_at: created.created.project.created_at,
         },
