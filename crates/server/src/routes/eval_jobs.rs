@@ -7,14 +7,13 @@ use std::collections::BTreeSet;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use llmobs_core::ids::{SpanId, TraceId};
 use llmobs_eval::VariableMapping;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
+use super::alert_rules::{decode_cursor, encode_cursor};
 use crate::api::common::{FieldError, Page};
 use crate::api::connections::TestErrorClass;
 use crate::api::eval_jobs::{
@@ -70,14 +69,6 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 
 #[derive(Debug, Deserialize)]
 struct IdPath {
-    id: Uuid,
-}
-
-/// The cursor of a job page: the `(created_at, id)` of the last job of the page.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct JobCursor {
-    created_at: i64,
     id: Uuid,
 }
 
@@ -309,22 +300,6 @@ fn error_class_of(text: &str) -> Result<TestErrorClass, ApiError> {
         "permanent" => Ok(TestErrorClass::Permanent),
         _ => Err(corrupt("error_class")),
     }
-}
-
-fn encode_cursor(created_at: i64, id: Uuid) -> Result<String, ApiError> {
-    let bytes = serde_json::to_vec(&JobCursor { created_at, id })
-        .map_err(|error| ApiError::Internal(Box::new(error)))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn decode_cursor(text: &str) -> Result<(i64, Uuid), ApiError> {
-    let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| cursor_error())?;
-    let cursor: JobCursor = serde_json::from_slice(&bytes).map_err(|_| cursor_error())?;
-    Ok((cursor.created_at, cursor.id))
-}
-
-fn cursor_error() -> ApiError {
-    bad_request(vec![field_error("cursor", "invalid cursor")])
 }
 
 fn bad_request(errors: Vec<FieldError>) -> ApiError {
@@ -623,6 +598,30 @@ mod tests {
             );
         }
         assert_eq!(job_count(&app).await, 0, "no case queued a job");
+    }
+
+    #[tokio::test]
+    async fn a_long_expression_does_not_hide_the_unmapped_variable() {
+        let (app, seeded) = test_app().await;
+        let evaluator = create_judge(&app, &seeded, fixture_judge_body()).await;
+        let mut body = run_body();
+        body["variable_mapping"] = json!({"input": "x".repeat(1025)});
+        let errors = field_errors(&run(&app, &seeded, evaluator, &body).await);
+        assert!(
+            errors.contains(&(
+                "variable_mapping.input".to_owned(),
+                "expression must be at most 1024 bytes".to_owned()
+            )),
+            "{errors:?}"
+        );
+        assert!(
+            errors.contains(&(
+                "variable_mapping.output".to_owned(),
+                "variable output is used by the prompt but not mapped".to_owned()
+            )),
+            "{errors:?}"
+        );
+        assert_eq!(job_count(&app).await, 0);
     }
 
     #[tokio::test]

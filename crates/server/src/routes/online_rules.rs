@@ -156,8 +156,11 @@ struct Update {
 
 /// What a create or PATCH transaction did.
 enum RuleWrite {
-    /// The row as stored.
-    Done(Box<RuleRow>),
+    /// The row as stored. `budget_resumed` says the write cleared a budget pause (D-I-15).
+    Done {
+        row: Box<RuleRow>,
+        budget_resumed: bool,
+    },
     /// The rule is missing.
     Missing,
     /// The evaluator a create names is missing.
@@ -268,7 +271,7 @@ async fn create_online_rule(
         .write(move |conn| Box::pin(async move { insert_checked(conn, insert, limit, now).await }))
         .await?;
     match outcome {
-        RuleWrite::Done(row) => {
+        RuleWrite::Done { row, .. } => {
             tracing::info!(
                 target: "audit",
                 rule_id = %id,
@@ -330,10 +333,26 @@ async fn update_online_rule(
         })
         .await?;
     match outcome {
-        RuleWrite::Done(row) => {
+        RuleWrite::Done {
+            row,
+            budget_resumed,
+        } => {
             if budget_changed {
                 // The reservations and spend of the old budget no longer apply (D-I-15).
                 state.eval.budgets.forget(id);
+            }
+            if budget_resumed {
+                // As a manual resume: the breaker starts over and the dispatcher wakes.
+                state.eval.breakers.reset(id);
+                state.eval.wake();
+                tracing::info!(
+                    target: "audit",
+                    rule_id = %id,
+                    project_id = %project,
+                    user_id = %user.id,
+                    reason = "budget changed",
+                    "online rule resumed"
+                );
             }
             tracing::info!(
                 target: "audit",
@@ -454,7 +473,10 @@ async fn insert_checked(
         }
     }
     let row = store::insert_rule(conn, insert.new, insert.fields, now).await?;
-    Ok(RuleWrite::Done(Box::new(row)))
+    Ok(RuleWrite::Done {
+        row: Box::new(row),
+        budget_resumed: false,
+    })
 }
 
 /// The PATCH's write: the rule and the evaluator must be the rows the checks ran against, then
@@ -489,19 +511,24 @@ async fn update_checked(
     let Some(row) = store::update_rule(conn, project, update.id, update.fields, now).await? else {
         return Ok(RuleWrite::Missing);
     };
-    let row = if update.budget_changed && row.paused_reason.as_deref() == Some(PAUSE_BUDGET) {
-        store::resume_rule(conn, project, update.id, now)
-            .await?
-            .unwrap_or(row)
-    } else {
-        row
-    };
-    Ok(RuleWrite::Done(Box::new(row)))
+    let (row, budget_resumed) =
+        if update.budget_changed && row.paused_reason.as_deref() == Some(PAUSE_BUDGET) {
+            match store::resume_rule(conn, project, update.id, now).await? {
+                Some(resumed) => (resumed, true),
+                None => (row, false),
+            }
+        } else {
+            (row, false)
+        };
+    Ok(RuleWrite::Done {
+        row: Box::new(row),
+        budget_resumed,
+    })
 }
 
 /// Runs § Rule validation for `draft` against `evaluator` (the stored row, or `None` when the
-/// id names none). Every field check runs and all errors come back together; the filter is
-/// checked last, by storage (check 3).
+/// id names none). Every check runs and all errors come back together; the filter is checked
+/// last, by storage (check 3).
 async fn validate(
     state: &AppState,
     org: OrgId,
@@ -517,17 +544,16 @@ async fn validate(
         Some(row) => {
             let subject = Subject::from_row(row).map_err(internal)?;
             let adapter = judge_adapter(state, org, &subject).await?;
-            if let Some(mapping) = &mapping {
-                let variables: BTreeSet<String> = draft.mapping.keys().cloned().collect();
-                let prices = state.ingest.prices();
-                let shape = RuleShape {
-                    target: draft.target,
-                    mapping,
-                    variables: &variables,
-                    budgeted: draft.budget_usd.is_some(),
-                };
-                errors.extend(check_rule(&shape, &subject, adapter, &prices, now));
-            }
+            // The checks on the mapping's keys run even when an expression does not parse.
+            let variables: BTreeSet<String> = draft.mapping.keys().cloned().collect();
+            let prices = state.ingest.prices();
+            let shape = RuleShape {
+                target: draft.target,
+                mapping: mapping.as_ref(),
+                variables: &variables,
+                budgeted: draft.budget_usd.is_some(),
+            };
+            errors.extend(check_rule(&shape, &subject, adapter, &prices, now));
         }
     }
     if !errors.is_empty() {
@@ -545,7 +571,7 @@ async fn validate(
 }
 
 /// The checks that need no store (checks 1, 4–7, 11–13, 16). Returns the parsed mapping when it
-/// parses, so the rule checks can run on it.
+/// parses, so the rule checks that need it can run on it.
 fn check_fields(draft: &Draft, errors: &mut Vec<FieldError>) -> Option<VariableMapping> {
     if !(1..=128).contains(&draft.name.chars().count()) {
         errors.push(field_error("name", "name must be 1 to 128 characters"));
@@ -777,11 +803,12 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::auth::roles::OrgRole;
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
-    use crate::test_support::{Seeded, TestApp, TestResponse};
+    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs};
 
     /// The judge's prompt maps `input` and `output`.
     const PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
@@ -1215,6 +1242,69 @@ mod tests {
                 "the judge model has no price, so the rule cannot have a budget".to_owned()
             ))
         );
+
+        // A check that compares needs `output` and `expected` (§ Rule validation, checks 8 and 14).
+        let exact = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/evaluators", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": "exact",
+                "kind": "check",
+                "config": {"check": "exact_match"},
+                "output_score": {"name": "same", "data_type": "boolean"}
+            }))
+            .send()
+            .await;
+        assert_eq!(exact.status, 201, "{}", text(&exact));
+        let exact = id_of(&exact.json::<Value>());
+        let mut body = rule_body(exact);
+        body.as_object_mut().unwrap().remove("budget_usd");
+        body.as_object_mut().unwrap().remove("budget_period");
+        body["variable_mapping"] = json!({"input": "trace.input"});
+        let errors = field_errors(&create(&app, &seeded, &body).await);
+        assert!(
+            errors.contains(&(
+                "variable_mapping.output".to_owned(),
+                "the check needs the output variable".to_owned()
+            )),
+            "{errors:?}"
+        );
+        assert!(
+            errors.contains(&(
+                "variable_mapping.expected".to_owned(),
+                "the check needs the expected variable".to_owned()
+            )),
+            "{errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_expression_does_not_hide_the_other_errors() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let mut body = rule_body(evaluator);
+        body.as_object_mut().unwrap().remove("budget_usd");
+        body.as_object_mut().unwrap().remove("budget_period");
+        body["variable_mapping"] = json!({"input": "x".repeat(1025)});
+        let errors = field_errors(&create(&app, &seeded, &body).await);
+        assert!(
+            errors.contains(&(
+                "variable_mapping.input".to_owned(),
+                "expression must be at most 1024 bytes".to_owned()
+            )),
+            "{errors:?}"
+        );
+        assert!(
+            errors.contains(&(
+                "variable_mapping.output".to_owned(),
+                "variable output is used by the prompt but not mapped".to_owned()
+            )),
+            "{errors:?}"
+        );
     }
 
     #[tokio::test]
@@ -1554,7 +1644,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(matches!(outcome, RuleWrite::Done(_)));
+        assert!(matches!(outcome, RuleWrite::Done { .. }));
         app.state
             .meta
             .write(move |conn| {
@@ -1640,7 +1730,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let RuleWrite::Done(disabled) = disabled else {
+        let RuleWrite::Done { row: disabled, .. } = disabled else {
             panic!("a disabled rule passes the limit");
         };
         let disabled_id = disabled.id;
@@ -1730,9 +1820,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(paused_reason(&app, id).await.as_deref(), Some(PAUSE_BUDGET));
-        let response = patch(&app, &seeded, id, &json!({"budget_usd": 9.0})).await;
+        let (response, logs) =
+            capture_logs(patch(&app, &seeded, id, &json!({"budget_usd": 9.0}))).await;
         assert_eq!(response.status, 200, "{}", text(&response));
         assert_eq!(paused_reason(&app, id).await, None);
+        assert!(
+            logs.contains("online rule resumed") && logs.contains("budget changed"),
+            "{logs}"
+        );
+        // A later budget change finds nothing to clear, so it audits no resume.
+        let (response, logs) =
+            capture_logs(patch(&app, &seeded, id, &json!({"budget_usd": 10.0}))).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(!logs.contains("budget changed"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn viewer_reads_member_writes_api_key_cannot_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let refused = app
+            .request(Method::POST, &path(seeded.project.id))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&rule_body(evaluator))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403, "{}", text(&refused));
+        let listed = app
+            .request(Method::GET, &path(seeded.project.id))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .send()
+            .await;
+        assert_eq!(listed.status, 200, "{}", text(&listed));
+        let created = app
+            .request(Method::POST, &path(seeded.project.id))
+            .header(header::COOKIE.as_str(), &member.cookie)
+            .json(&rule_body(evaluator))
+            .send()
+            .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let by_key = app
+            .request(Method::POST, &path(seeded.project.id))
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
+            .json(&rule_body(evaluator))
+            .send()
+            .await;
+        assert_eq!(by_key.status, 403, "{}", text(&by_key));
     }
 
     #[tokio::test]
