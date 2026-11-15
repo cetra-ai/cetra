@@ -30,7 +30,8 @@ const COMPLETED: i32 = 3;
 
 /// The default case count: the largest that runs in under 60 s in debug (52.8 s; 26 cases take
 /// 63.8 s, so the last pair of `last_ops` is not in the default run). Pairs are stratified over
-/// the cases, so a lossy crash needs `last_ops().len()` cases or more.
+/// the cases, and the odd pairs get lossy crashes within the first `last_ops().len()` cases, so
+/// the default run has both kinds (see [`is_lossy`]).
 const DEFAULT_CASES: u64 = 25;
 
 /// Cases per run: `LLMOBS_HOOK_CRASH_CASES`, else [`DEFAULT_CASES`]. A value that is not a count
@@ -145,11 +146,12 @@ fn primer(last: &Op) -> Vec<Op> {
     }
 }
 
-/// Whether case `n` gets a lossy crash: pairs are stratified, so each pair gets both kinds over the
-/// cases (`(n / len) % 2`).
+/// Whether case `n` gets a lossy crash. The first `len` cases give a lossy crash to the odd pairs,
+/// the next `len` to the even ones (`(n + n / len) % 2`), so every pair gets both kinds over
+/// `2 * len` cases and the default run mixes lossy and plain crashes.
 fn is_lossy(n: u64) -> bool {
     let len = u64::try_from(last_ops().len()).expect("a small number of pairs");
-    (n / len) % 2 == 1
+    (n + n / len) % 2 == 1
 }
 
 /// Case `n`. The pair is `last_ops()[n % len]`, so every pair is covered; the prefix is drawn from
