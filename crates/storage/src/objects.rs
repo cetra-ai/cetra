@@ -987,11 +987,9 @@ fn delete_local(root: &Path, key: &str, sync_failed: &AtomicBool) -> Result<u64,
 /// and not at the next start (R5.5). The caller returns the write's error;
 /// a failed removal is only logged, with no path. Not a fsync: a removal that
 /// a crash undoes is cleaned up at the next start.
-fn discard_temp(path: &Path) {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => tracing::warn!("removing a failed object temp file failed"),
+fn discard_temp(temp: &Path) {
+    if remove_temp_path(temp).is_err() {
+        tracing::warn!("removing a failed object temp file failed");
     }
 }
 

@@ -916,6 +916,14 @@ fn a_spilling_query_stops_at_min_free() {
             }),
             "the failed spill's files are removed within 10 s"
         );
+        // The failed query's memory goes back to the shared pool as its tasks wind down.
+        assert!(
+            wait_for(Duration::from_secs(10), Duration::from_millis(50), || {
+                h.storage().memory.used() == 0
+            }),
+            "the failed query's pool bytes are released within 10 s: {} bytes left",
+            h.storage().memory.used()
+        );
         let query_dir = h.dir().join("tmp").join("query");
         if let Ok(entries) = std::fs::read_dir(&query_dir) {
             for entry in entries {

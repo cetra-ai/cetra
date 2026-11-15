@@ -142,7 +142,7 @@ Environment:
 
 **M5-1, a failed local write left its temp file.** `objects.rs::put_local` returned on a `write_all` error and `publish_local` on a `sync_all` or rename error, without removing `.<name>.tmp-<uuid>`. On a full disk each flush retry left another partial file under a new name, so the freed space was eaten again until a restart. The earlier `SQLITE_FULL` in `collect_staged` on a full disk has the same cause. Confirmed by D8, D3 and D5. Fixed in 1f5e989 (R5.5).
 
-**M5-2, a spill-cap failure mid-merge stops later spills until restart (D6).** When the spill cap is hit during a merge, later queries stop spilling until the process restarts, under the D6 case. Cause under investigation. Not fixed in M5.
+**M5-2, a spill-cap failure mid-merge stops later spills until restart (D6).** Investigation found no leaked reservation: the disk counter and the per-query pools balance after a failed spill (see the new unit test `lib.rs` `a_spill_failure_leaves_no_reservation_behind`, and D6's assertions that the pool and the spill counter reach 0). The likely confounder is the 64 × 16 KiB filler appended between runs 2 and 3, which pushes the sort over the 32 MiB cap, so run 3 fails for a reason other than a leak. To confirm with a D6 run (deferred: it needs a small filesystem). Not fixed in M5.
 
 **M5-3, D5 stops at its free-space assertion.** D5 (compaction that meets `ENOSPC`) fails at its free-space assertion, after catalog writes that follow the ballast. Cause unconfirmed. Not fixed in M5.
 

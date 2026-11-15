@@ -360,11 +360,11 @@ impl Storage {
         let (query_memory, total_memory) = resolve_query_memory(&config.query);
         let budget = memory::budget_bytes(&config, u64::try_from(total_memory).unwrap_or(u64::MAX));
         let detected = memory::detected_memory();
-        if budget > detected {
+        if budgets_exceed_memory(budget, detected) {
             tracing::warn!(
                 budget,
                 detected,
-                "the storage memory budgets exceed the memory limit; the process can be killed under load (spec 03 § Resource limits)"
+                "the storage memory budgets exceed the memory limit; the process can be killed under load (spec 03 § 10, Resource needs)"
             );
         }
         let memory = Arc::new(memory::SharedPool::new(total_memory));
@@ -1644,6 +1644,12 @@ fn share_hooks(hooks: &Hooks) -> Hooks {
     hooks.clone()
 }
 
+/// Whether the memory budgets add up to more than the detected limit. A detected
+/// limit of 0 means the OS reported nothing, so there is nothing to compare with.
+fn budgets_exceed_memory(budget: u64, detected: u64) -> bool {
+    detected > 0 && budget > detected
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{File, OpenOptions};
@@ -2304,16 +2310,15 @@ mod tests {
         .map(drop)
     }
 
-    #[tokio::test]
-    async fn a_spill_past_the_cap_fails_as_too_large() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut config = config_with_query_memory(dir.path(), 32);
+    /// Opens storage holding 40,000 spans of one trace in a Parquet file, with a
+    /// 1 MiB floor. `spill_query` over them sorts all of them, which spills under 32 MiB.
+    async fn spilling_storage(dir: &Path) -> Storage {
+        let mut config = config_with_query_memory(dir, 32);
         config.query.initial_memory = ByteSize::mib(16);
         config.query.target_partitions = 1;
         config.min_free_bytes = ByteSize::mib(1);
         let storage = Storage::open(config.clone()).await.unwrap();
-        // 40,000 spans of one trace, each with a 1 KiB input: the window below sorts
-        // all of them, and 32 MiB of memory makes the sort spill.
+        // 40,000 spans of one trace, each with a 1 KiB input.
         let spans: Vec<_> = (1..=40_000_u64)
             .map(|index| {
                 let mut span = span_row(1, 0, i64::try_from(index).unwrap(), 1);
@@ -2328,8 +2333,64 @@ mod tests {
             .unwrap();
         // Shutdown flushes the memtable to a Parquet file.
         storage.shutdown().await.unwrap();
+        Storage::open(config).await.unwrap()
+    }
 
-        let storage = Storage::open(config).await.unwrap();
+    /// Waits until the spill files and the shared query memory are back to 0.
+    async fn wait_for_spill_release(storage: &Storage) {
+        let started = std::time::Instant::now();
+        while storage.runtime.disk_manager.used_disk_space() != 0 || storage.memory.used() != 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "spill bytes left: {}, pool bytes left: {}",
+                storage.runtime.disk_manager.used_disk_space(),
+                storage.memory.used()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spill_failure_leaves_no_reservation_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = spilling_storage(dir.path()).await;
+
+        // The free disk is at the threshold, so the spill limit is 0 and the first spill
+        // write fails.
+        storage.disk().set_free_for_test(Some(1 << 20));
+        let error = spill_query(&storage)
+            .await
+            .expect_err("the spill is past the cap");
+        assert!(matches!(error, RunError::TooLarge), "{error:?}");
+        wait_for_spill_release(&storage).await;
+        assert_eq!(storage.runtime.disk_manager.used_disk_space(), 0);
+        assert_eq!(storage.memory.used(), 0, "the failed query's pool bytes");
+
+        // A small query that does not spill succeeds once the disk has room again.
+        storage.disk().set_free_for_test(None);
+        let params = serde_json::Map::new();
+        let ctx = QueryContext::new(
+            storage.query(project(), Default::default()).await.unwrap(),
+            None,
+        )
+        .unwrap();
+        ctx.sql_json(SqlRequest {
+            query: "SELECT count(*) AS n FROM spans",
+            params: &params,
+            limit: 1,
+            timeout: Duration::from_secs(30),
+        })
+        .await
+        .expect("a small query after the failed spill succeeds");
+        drop(ctx);
+        wait_for_spill_release(&storage).await;
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_spill_past_the_cap_fails_as_too_large() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = spilling_storage(dir.path()).await;
 
         // Run 1, on the real free disk: the spill fits.
         spill_query(&storage)
@@ -2374,6 +2435,18 @@ mod tests {
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert!(entries[0].starts_with("datafusion-"), "{entries:?}");
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn the_budget_warning_needs_a_detected_limit_that_is_exceeded() {
+        // A detected limit of 0 means the OS reported nothing: no warning.
+        assert!(!budgets_exceed_memory(1 << 30, 0));
+        assert!(!budgets_exceed_memory(0, 0));
+        // Budgets within the limit, and exactly at it, do not warn.
+        assert!(!budgets_exceed_memory(1 << 30, 2 << 30));
+        assert!(!budgets_exceed_memory(2 << 30, 2 << 30));
+        // Budgets past a real limit warn.
+        assert!(budgets_exceed_memory((2 << 30) + 1, 2 << 30));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

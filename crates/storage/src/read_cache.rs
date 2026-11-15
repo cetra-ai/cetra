@@ -84,8 +84,12 @@ pub(crate) struct ReadCache {
     disk: Arc<Disk>,
     min_free: u64,
     state: Mutex<CacheState>,
-    /// Held by `write_blocks` from its free-disk check to its last write, so concurrent
-    /// calls cannot each pass the check and then write (D7).
+    /// Held by `write_blocks` for each block, from its free-disk check to its write, so the
+    /// check and the write are atomic per block: two concurrent calls cannot both pass the
+    /// check for the space one block leaves (D7). Taken per block, not per call, so a
+    /// call of up to 128 blocks does not hold it throughout. The concurrency of this lock
+    /// is not tested: the disk hook measures one constant value, so no test can make one
+    /// thread's write use up the space the other thread checked.
     write_lock: Mutex<()>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -311,16 +315,19 @@ impl ReadCache {
     /// object whose size is not recorded. Evicts the least recently used blocks while the
     /// cache is over capacity. Failures are logged at debug and skipped. Blocking.
     pub(crate) fn write_blocks(&self, name: &str, blocks: &[(u64, Bytes)]) {
-        let _writing = self
-            .write_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         let Some(size) = self.size(name) else {
             return;
         };
         let dir = self.dir.join(name);
         for (index, data) in blocks {
             let index = *index;
+            // The guard covers one block: the free-disk check and the write, so the
+            // check of one block is not spent by another call's write. Lock order:
+            // `write_lock`, then `state`.
+            let _writing = self
+                .write_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             // The monitor measures once a second, so the stored value can be stale, and one call
             // may write many blocks: measure before every block (one `statvfs` per 1 MiB block).
             // A failed measurement writes nothing.

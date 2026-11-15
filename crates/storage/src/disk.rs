@@ -81,7 +81,9 @@ impl Disk {
 
     /// Sets the spill limit to the bytes spilled now plus the free disk above `min_free`. Spill
     /// writes after a measurement move `spilled_now` and `free` by the same amount, so the cap
-    /// stays right until the next measurement (spec 03 §6).
+    /// stays right until the next measurement (spec 03 §6). The cap can be too high by at
+    /// most the bytes spilled during one measurement interval: spill written between the
+    /// `statvfs` and the read of the spilled total is in the total but not in `free`.
     fn apply_spill_cap(&self, free: u64) {
         let cap = self
             .spill
