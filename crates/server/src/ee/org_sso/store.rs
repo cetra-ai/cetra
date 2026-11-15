@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Storage of org SSO providers and domains (D-P-52, D-P-54, D-P-59).
-// Track P M5: P6–P10 use these outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 
@@ -233,7 +231,9 @@ pub(crate) async fn put_provider(
     if provider_tx(&mut *conn, org).await?.is_some() {
         sqlx::query(
             "UPDATE org_sso_providers SET display_name = ?, issuer = ?, client_id = ?, \
-             client_secret_enc = COALESCE(?, client_secret_enc), jit_role = ?, updated_at = ? \
+             client_secret_enc = COALESCE(?, client_secret_enc), jit_role = ?, updated_at = ?, \
+             last_login_at = CASE WHEN issuer != ? OR client_id != ? THEN NULL \
+                                  ELSE last_login_at END \
              WHERE org_id = ?",
         )
         .bind(&write.display_name)
@@ -242,6 +242,8 @@ pub(crate) async fn put_provider(
         .bind(write.client_secret_enc)
         .bind(write.jit_role.as_str())
         .bind(now)
+        .bind(&write.issuer)
+        .bind(&write.client_id)
         .bind(org.to_string())
         .execute(&mut *conn)
         .await?;
@@ -383,24 +385,6 @@ pub(crate) async fn domains_tx(
     records.into_iter().map(domain_row).collect()
 }
 
-/// One of the org's domains by id, in the write transaction.
-///
-/// # Errors
-///
-/// Returns [`MetaError`] when the query fails or a stored value is corrupt.
-pub(crate) async fn domain_tx(
-    conn: &mut SqliteConnection,
-    org: OrgId,
-    id: Uuid,
-) -> Result<Option<DomainRow>, MetaError> {
-    let record: Option<DomainRecord> = sqlx::query_as(DOMAIN_BY_ID)
-        .bind(org.to_string())
-        .bind(id.to_string())
-        .fetch_optional(&mut *conn)
-        .await?;
-    record.map(domain_row).transpose()
-}
-
 /// The same row on the read pool (P8's verify reads before the DNS lookup).
 ///
 /// # Errors
@@ -518,27 +502,6 @@ pub(crate) async fn mark_checked(
     Ok(())
 }
 
-/// Whether another org has `domain` verified.
-///
-/// # Errors
-///
-/// Returns [`MetaError::Db`] when the query fails.
-pub(crate) async fn verified_elsewhere_tx(
-    conn: &mut SqliteConnection,
-    org: OrgId,
-    domain: &str,
-) -> Result<bool, MetaError> {
-    let found: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM org_sso_domains \
-         WHERE domain = ? AND verified_at IS NOT NULL AND org_id != ?)",
-    )
-    .bind(domain)
-    .bind(org.to_string())
-    .fetch_one(&mut *conn)
-    .await?;
-    Ok(found == 1)
-}
-
 /// Deletes one of the org's domains. Returns whether it existed.
 ///
 /// # Errors
@@ -641,6 +604,35 @@ mod tests {
     use crate::meta::orgs::{delete_org, insert_org, mark_org_deleting};
     use crate::meta::test_db;
     use crate::meta::users::{NewUser, insert_user};
+
+    async fn domain_tx(
+        conn: &mut SqliteConnection,
+        org: OrgId,
+        id: Uuid,
+    ) -> Result<Option<DomainRow>, MetaError> {
+        let record: Option<DomainRecord> = sqlx::query_as(DOMAIN_BY_ID)
+            .bind(org.to_string())
+            .bind(id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+        record.map(domain_row).transpose()
+    }
+
+    async fn verified_elsewhere_tx(
+        conn: &mut SqliteConnection,
+        org: OrgId,
+        domain: &str,
+    ) -> Result<bool, MetaError> {
+        let found: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM org_sso_domains \
+             WHERE domain = ? AND verified_at IS NOT NULL AND org_id != ?)",
+        )
+        .bind(domain)
+        .bind(org.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(found == 1)
+    }
 
     fn write(enc: Option<Vec<u8>>) -> ProviderWrite {
         ProviderWrite {

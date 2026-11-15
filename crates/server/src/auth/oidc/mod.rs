@@ -28,6 +28,8 @@ pub(crate) enum ExchangeError {
     Unavailable,
     /// The provider rejected the code, or the token failed validation.
     Rejected,
+    /// The discovered authorization endpoint is not one the egress policy allows.
+    Refused,
 }
 
 /// Claims the login flow is allowed to read. `hd` is kept for the domain check.

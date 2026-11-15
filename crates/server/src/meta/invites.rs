@@ -370,14 +370,6 @@ fn parse_uuid(value: &str, table: &'static str, column: &'static str) -> Result<
     Uuid::parse_str(value).map_err(|_| MetaError::Corrupt { table, column })
 }
 
-/// Whether a pending, unexpired invitation exists for `email` in any org.
-///
-/// Pending means `accepted_at` is null and `expires_at` is still in the future.
-/// The caller runs this inside the login transaction. `email` is normalized.
-///
-/// # Errors
-///
-/// Returns [`MetaError`] when the query fails.
 /// The org's pending, unexpired invitation for `email` (D-P-56).
 ///
 /// # Errors
@@ -455,6 +447,14 @@ fn invite_row(record: InviteRecord) -> Result<InviteRow, MetaError> {
     })
 }
 
+/// Whether a pending, unexpired invitation exists for `email` in any org.
+///
+/// Pending means `accepted_at` is null and `expires_at` is still in the future.
+/// The caller runs this inside the login transaction. `email` is normalized.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
 pub(crate) async fn has_pending_invite(
     conn: &mut SqliteConnection,
     email: &str,

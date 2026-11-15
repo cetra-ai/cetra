@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! TXT lookups for domain verification (D-P-54, D-P-64).
-// Track P M5: P6 and P8 use these outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 use std::time::Duration;

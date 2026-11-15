@@ -1171,7 +1171,7 @@ pub(crate) fn issuer_problem(issuer: &str) -> Option<&'static str> {
     None
 }
 
-fn loopback_host(url: &url::Url) -> bool {
+pub(crate) fn loopback_host(url: &url::Url) -> bool {
     match url.host() {
         // `host_str` for IPv6 includes the brackets (`[::1]`). Match the parsed host.
         Some(url::Host::Domain("localhost")) => true,

@@ -1,6 +1,4 @@
 //! Per-org SSO types (track P M5, D-P-56). The settings routes are in `ee::org_sso::settings`.
-// Track P M5: P10 uses `JitRole::org_role` outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::fmt;
 

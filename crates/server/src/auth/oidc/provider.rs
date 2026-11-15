@@ -354,6 +354,9 @@ impl OidcProvider {
         now: i64,
     ) -> Result<(String, String), ExchangeError> {
         let metadata = self.metadata(now).await.map_err(exchange_unavailable)?;
+        if !self.authorization_endpoint_allowed(metadata.authorization_endpoint().url()) {
+            return Err(ExchangeError::Refused);
+        }
         let client = self.client(metadata, redirect_uri)?;
         let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
         let verifier = verifier.secret().clone();
@@ -437,6 +440,20 @@ impl OidcProvider {
                 .and_then(|localized| localized.get(None))
                 .map(|name| name.to_string()),
         })
+    }
+
+    /// Whether the browser may be sent to the discovered authorization endpoint. An org's
+    /// provider needs `https` (or `http` on a loopback host when private networks are allowed)
+    /// and an address its egress policy allows; operator providers are trusted.
+    fn authorization_endpoint_allowed(&self, url: &reqwest::Url) -> bool {
+        let Some(policy) = self.http.policy else {
+            return true;
+        };
+        let scheme_ok = url.scheme() == "https"
+            || (url.scheme() == "http"
+                && policy.allow_private_network
+                && crate::config::loopback_host(url));
+        scheme_ok && policy.allows_url(url)
     }
 
     fn client(

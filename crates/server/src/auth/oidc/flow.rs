@@ -153,6 +153,7 @@ pub(crate) async fn start(
             created_ns: now,
             org_id: None,
             test: false,
+            test_owner: None,
         },
         state.config.public_url.is_https(),
     )
@@ -626,7 +627,7 @@ async fn active(state: &AppState, user_id: Uuid) -> Result<Uuid, LoginError> {
 
 fn start_exchange(error: ExchangeError) -> StartError {
     match error {
-        ExchangeError::Unavailable => StartError::Unavailable,
+        ExchangeError::Unavailable | ExchangeError::Refused => StartError::Unavailable,
         ExchangeError::Rejected => internal_start(io::Error::new(
             io::ErrorKind::InvalidData,
             "oauth authorization url",
@@ -636,7 +637,7 @@ fn start_exchange(error: ExchangeError) -> StartError {
 
 pub(crate) fn login_exchange(error: ExchangeError) -> LoginError {
     match error {
-        ExchangeError::Unavailable => LoginError::ProviderUnavailable,
+        ExchangeError::Unavailable | ExchangeError::Refused => LoginError::ProviderUnavailable,
         ExchangeError::Rejected => LoginError::ProviderError,
     }
 }

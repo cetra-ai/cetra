@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Per-org SSO (track P M5, D-P-25, D-P-41): org OIDC providers, verified email domains,
 //! enforcement and login discovery. Self-hosted instances; works for any org with `org_sso`.
-// Track P M5: P7–P12 use these outside tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,7 +55,6 @@ impl fmt::Debug for ProviderConfig {
 /// An org's built provider. `Debug` omits the client secret (OidcProvider's own `Debug` does).
 #[derive(Debug)]
 pub(crate) struct OrgProvider {
-    pub(crate) org_id: OrgId,
     pub(crate) oidc: OidcProvider,
     pub(crate) jit_role: JitRole,
     config: ProviderConfig,
@@ -74,6 +71,8 @@ struct Index {
 #[derive(Debug)]
 pub(crate) struct OrgSso {
     index: RwLock<Arc<Index>>,
+    /// Held across a reload's reads and its store, so a stale reload cannot overwrite a newer one.
+    reload_lock: tokio::sync::Mutex<()>,
     /// `IdpHttp::guarded(identity_http_client(policy), policy)` (P2).
     http: IdpHttp,
     pub(crate) dns: dns::TxtResolver,
@@ -109,6 +108,7 @@ impl OrgSso {
         let client = llmobs_eval::identity_http_client(policy).map_err(|_| OrgSsoError::Client)?;
         Ok(Self {
             index: RwLock::new(Arc::new(Index::default())),
+            reload_lock: tokio::sync::Mutex::new(()),
             http: IdpHttp::guarded(client, policy),
             dns,
         })
@@ -126,6 +126,7 @@ impl OrgSso {
         secrets: &SecretBox,
         auth: &AuthSettings,
     ) -> Result<Reloaded, MetaError> {
+        let _serialized = self.reload_lock.lock().await;
         let mut claimed = 0;
         let mut domains = HashMap::new();
         for (domain, org_id, enabled, enforced) in store::routes(meta.reader()).await? {
@@ -187,7 +188,6 @@ impl OrgSso {
                     providers.insert(
                         row.org_id,
                         Arc::new(OrgProvider {
-                            org_id: row.org_id,
                             oidc,
                             jit_role: row.jit_role,
                             config,
@@ -579,7 +579,6 @@ mod tests {
         let renamed = app.state.org_sso.provider(org).expect("provider");
         assert!(!Arc::ptr_eq(&first, &renamed));
         assert_eq!(renamed.oidc.display_name(), "Renamed SSO");
-        assert_eq!(renamed.org_id, org);
         assert_eq!(renamed.jit_role, JitRole::Viewer);
     }
 

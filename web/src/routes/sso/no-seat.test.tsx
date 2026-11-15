@@ -9,6 +9,13 @@ it("says there is no seat in the org named in the URL", async () => {
   expect(screen.getByRole("link", { name: "Continue" })).toHaveAttribute("href", "/");
 });
 
+it("shows the generic text for an org value that is not slug-shaped", async () => {
+  await renderApp("/sso/no-seat?org=Visit%20evil.example%20now");
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "No seat available in this organization; ask an owner.",
+  );
+});
+
 it("says there is no seat in this organization without an org", async () => {
   await renderApp("/sso/no-seat");
   expect(screen.getByRole("status")).toHaveTextContent(

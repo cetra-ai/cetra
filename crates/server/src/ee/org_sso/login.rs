@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Sign-in through an org's provider (track P M5, D-P-55, D-P-56, D-P-57, D-P-65).
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::io;
 
@@ -124,21 +123,22 @@ async fn authorize(
     };
     // A disabled provider signs in only an owner's Test sign-in (D-P-57). The answer is the
     // same as for an unknown domain, so it does not reveal the provider.
-    let test = if route.enabled {
-        false
+    let test_owner = if route.enabled {
+        None
     } else {
         let owner = match resolve_cookie_header(&state, &headers, now).await? {
-            Some((row, _)) => {
-                members::org_role(state.meta.reader(), route.org_id, row.user.id).await?
-                    == Some(OrgRole::Owner)
-            }
-            None => false,
+            Some((row, _)) => (members::org_role(state.meta.reader(), route.org_id, row.user.id)
+                .await?
+                == Some(OrgRole::Owner))
+            .then_some(row.user.id),
+            None => None,
         };
-        if !owner {
+        if owner.is_none() {
             return unavailable();
         }
-        true
+        owner
     };
+    let test = test_owner.is_some();
     let redirect_uri = state.config.public_url.join("/api/auth/callback/sso");
     let csrf = new_opaque_token().map_err(internal)?.plaintext;
     let nonce = new_opaque_token().map_err(internal)?.plaintext;
@@ -151,6 +151,7 @@ async fn authorize(
         Err(ExchangeError::Unavailable) => {
             return redirect("/login?error=provider_unavailable", std::iter::empty());
         }
+        Err(ExchangeError::Refused) => return unavailable(),
         Err(ExchangeError::Rejected) => {
             return Err(internal(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -170,6 +171,7 @@ async fn authorize(
             created_ns: now,
             org_id: Some(route.org_id.as_uuid()),
             test,
+            test_owner,
         },
         state.config.public_url.is_https(),
     )
@@ -256,6 +258,7 @@ pub(crate) async fn finish(
         max_seats: state.entitlements.resolve(org, now).limits.max_seats,
         signup: state.config.auth.signup,
         test: saved.test,
+        test_owner: saved.test_owner,
         now,
     };
     let admitted = state
@@ -323,6 +326,8 @@ struct Admit {
     max_seats: Option<u64>,
     signup: SignupPolicy,
     test: bool,
+    /// The owner who started a Test sign-in; the resolved user must be exactly this one.
+    test_owner: Option<Uuid>,
     now: i64,
 }
 
@@ -377,9 +382,15 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
             if user.disabled_at.is_some() {
                 return Ok(Admitted::AccountDisabled);
             }
-            if input.test && members::org_role_tx(conn, org, user.id).await? != Some(OrgRole::Owner)
-            {
-                return Ok(Admitted::SsoUnavailable);
+            if input.test {
+                if input.test_owner != Some(user.id)
+                    || members::org_role_tx(conn, org, user.id).await? != Some(OrgRole::Owner)
+                {
+                    return Ok(Admitted::SsoUnavailable);
+                }
+            } else if user.is_instance_admin {
+                // A promoted admin is never signed in by an org provider (D-P-57).
+                return Ok(Admitted::LinkRefused);
             }
             Target::Known(user.id)
         }
@@ -389,7 +400,9 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                     return Ok(Admitted::AccountDisabled);
                 }
                 if input.test {
-                    if members::org_role_tx(conn, org, user.id).await? != Some(OrgRole::Owner) {
+                    if input.test_owner != Some(user.id)
+                        || members::org_role_tx(conn, org, user.id).await? != Some(OrgRole::Owner)
+                    {
                         return Ok(Admitted::SsoUnavailable);
                     }
                     if user.is_instance_admin {
@@ -1231,6 +1244,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_test_sign_in_is_bound_to_the_owner_who_started_it() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        let root = app
+            .add_member(&seeded, "root@acme.test", OrgRole::Owner)
+            .await;
+        make_instance_admin(&app, root.id).await;
+        let plain = app
+            .add_member(&seeded, "plain@acme.test", OrgRole::Owner)
+            .await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", false, false).await;
+        exec(&app, "UPDATE org_sso_providers SET last_login_at = NULL").await;
+        reload(&app).await;
+
+        for (subject, email) in [
+            ("root-sub", "root@acme.test"),
+            ("plain-sub", "plain@acme.test"),
+        ] {
+            let response = sign_in(&app, &idp, Some(&owner.cookie), subject, email, None).await;
+            assert_eq!(location(&response), "/login?error=sso_unavailable");
+        }
+        assert_eq!(
+            count(
+                &app,
+                "SELECT COUNT(*) FROM identities WHERE provider LIKE 'org:%'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &app,
+                "SELECT COUNT(*) FROM org_sso_providers WHERE last_login_at IS NOT NULL"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                &app,
+                "SELECT COUNT(*) FROM web_sessions WHERE sso_org_id IS NOT NULL"
+            )
+            .await,
+            0
+        );
+        let _ = plain;
+    }
+
+    #[tokio::test]
+    async fn a_promoted_admin_is_refused_by_the_org_provider() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let first = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
+        assert_eq!(location(&first), "/acme");
+        let ada: String = sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@acme.test'")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        make_instance_admin(&app, ada.parse().unwrap()).await;
+        let again = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
+        assert_eq!(location(&again), "/login?error=link_refused");
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_authorization_endpoint_is_sso_unavailable() {
+        let idp = MockIdp::start().await;
+        idp.set_authorization_endpoint("http://idp.example/authorize");
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let response = app.request(Method::GET, AUTHORIZE).send().await;
+        assert_eq!(location(&response), "/login?error=sso_unavailable");
+        assert!(response.headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
     async fn state_is_bound_to_the_org_flow() {
         let idp = MockIdp::start().await;
         let (app, seeded, _owner) = org_sso_app().await;
@@ -1248,6 +1337,7 @@ mod tests {
                 created_ns: now,
                 org_id: None,
                 test: false,
+                test_owner: None,
             },
             false,
         )

@@ -55,6 +55,9 @@ pub(crate) struct OAuthState {
     /// An owner's Test sign-in of a disabled provider (D-P-57).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) test: bool,
+    /// The owner who started the Test sign-in; only that user may complete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) test_owner: Option<uuid::Uuid>,
 }
 
 impl fmt::Debug for OAuthState {
@@ -66,6 +69,7 @@ impl fmt::Debug for OAuthState {
             .field("created_ns", &self.created_ns)
             .field("org_id", &self.org_id)
             .field("test", &self.test)
+            .field("test_owner", &self.test_owner)
             .finish_non_exhaustive()
     }
 }
@@ -217,6 +221,7 @@ mod tests {
             created_ns,
             org_id: None,
             test: false,
+            test_owner: None,
         }
     }
 

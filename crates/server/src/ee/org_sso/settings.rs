@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Org SSO settings: the identity provider and its domains (track P M5, D-P-51, D-P-61).
-#![cfg_attr(not(test), allow(dead_code))]
 
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
@@ -351,19 +350,43 @@ async fn patch_org_sso(
         }
     }
     let now = state.clock.now_ns();
-    let (users, hashes) = state
+    let snapshot = row;
+    let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::set_flags(conn, org, enabled, enforced, now).await?;
-                if enforced && !was_enforced {
-                    store::revoke_for_domains(conn, org, &domains, now).await
-                } else {
-                    Ok((0, Vec::new()))
+                // The provider may have been removed or changed since the read above.
+                let Some(current) = store::provider_tx(conn, org).await? else {
+                    return Ok(Patch::Missing);
+                };
+                if current.id != snapshot.id
+                    || current.enabled != snapshot.enabled
+                    || current.enforced != snapshot.enforced
+                    || current.last_login_at != snapshot.last_login_at
+                {
+                    return Ok(Patch::Changed);
                 }
+                if !store::set_flags(conn, org, enabled, enforced, now).await? {
+                    return Ok(Patch::Missing);
+                }
+                if enforced && !was_enforced {
+                    let (users, hashes) =
+                        store::revoke_for_domains(conn, org, &domains, now).await?;
+                    return Ok(Patch::Done(users, hashes));
+                }
+                Ok(Patch::Done(0, Vec::new()))
             })
         })
         .await?;
+    let (users, hashes) = match outcome {
+        Patch::Missing => return Err(ApiError::NotFound),
+        Patch::Changed => {
+            return Err(ApiError::Conflict {
+                detail: "The identity provider changed meanwhile; reload and try again.",
+            });
+        }
+        Patch::Done(users, hashes) => (users, hashes),
+    };
     for hash in &hashes {
         state.pat_cache.evict(hash);
     }
@@ -622,6 +645,16 @@ enum Save {
     Saved,
     /// The provider changed between the read and the write.
     Changed,
+}
+
+/// What a flags update found and did.
+enum Patch {
+    /// The provider no longer exists.
+    Missing,
+    /// The provider changed between the read and the write.
+    Changed,
+    /// The flags are set; the revoked users and token hashes.
+    Done(u64, Vec<String>),
 }
 
 /// What the delete found and did.
@@ -941,6 +974,57 @@ mod tests {
             .expect("open");
         assert_eq!(opened, CLIENT_SECRET.as_bytes());
         assert_eq!(row.display_name, "Acme Entra");
+    }
+
+    #[tokio::test]
+    async fn an_issuer_or_client_change_needs_a_new_test_sign_in() {
+        let first = MockIdp::start().await;
+        let second = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &first, "acme.test", true, false).await;
+        let last_login = |app: &TestApp| {
+            let reader = app.state.meta.reader().clone();
+            async move {
+                sqlx::query_scalar::<_, Option<i64>>("SELECT last_login_at FROM org_sso_providers")
+                    .fetch_one(&reader)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(last_login(&app).await.is_some());
+
+        let renamed = put(
+            &app,
+            &owner.cookie,
+            &body(first.issuer(), None, "Acme Entra"),
+        )
+        .await;
+        assert_eq!(renamed.status, StatusCode::OK);
+        assert!(last_login(&app).await.is_some());
+
+        let changed = put(
+            &app,
+            &owner.cookie,
+            &body(second.issuer(), Some(CLIENT_SECRET), "Acme Entra"),
+        )
+        .await;
+        assert_eq!(changed.status, StatusCode::OK);
+        assert!(last_login(&app).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn patching_a_deleted_provider_revokes_nothing() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;
+        run_sql(&app, "DELETE FROM org_sso_providers").await;
+        reload_org_sso(&app).await;
+        let response = patch_settings(&app, &owner_sso, &json!({"enforced": true})).await;
+        assert!(
+            response.status == StatusCode::NOT_FOUND || response.status == StatusCode::CONFLICT
+        );
+        assert_eq!(me_with_cookie(&app, &owner.cookie).await, StatusCode::OK);
     }
 
     #[tokio::test]
