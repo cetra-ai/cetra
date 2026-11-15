@@ -9,6 +9,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Per-org single sign-on (enterprise): an org's own OIDC provider, DNS-verified email domains,
+  email-first login, just-in-time membership and SSO enforcement; `llmobs admin org-sso disable`.
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).

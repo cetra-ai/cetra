@@ -517,7 +517,7 @@ Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s
 
 ## Per-org SSO (track P, `ee`)
 
-One OIDC provider and any number of email domains per org (D-P-52, D-P-54). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57).
+One OIDC provider and any number of email domains per org (D-P-52, D-P-54). The provider's client secret is sealed like an LLM connection key (§ Encryption of secrets); `org_sso_providers.client_secret_enc` is listed in `crypto::ENCRYPTED_COLUMNS`. The sealed value's associated data is the row's `id`, so a sealed secret is bound to its row. A domain is verified by at most one org at a time (the partial unique index). `jit_role` is the role of people who join through the provider (D-P-56). `last_login_at` is set by a successful sign-in through the provider and gates enforcement (D-P-57); changing the issuer or client id resets it, so a new Test sign-in is needed.
 
 ```sql
 CREATE TABLE org_sso_providers (
