@@ -8,6 +8,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import deletionProjectFixture from "../../../../../../fixtures/api/static/deletion-project.json";
 import meFixture from "../../../../../../fixtures/api/static/me.json";
+import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const projectNav = () => within(screen.getByRole("list", { name: "Project settings" }));
@@ -223,7 +224,7 @@ it("shows the org-admin message when the server refuses the deletion", async () 
   );
 });
 
-it("shows the Pro plan message when retention is refused by the plan", async () => {
+it("shows the Pro plan message and an Upgrade link when retention is refused by the plan", async () => {
   server.use(
     http.patch("/api/v1/projects/:project", () =>
       problemResponse(403, "plan_required", {
@@ -239,4 +240,37 @@ it("shows the Pro plan message when retention is refused by the plan", async () 
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Data retention management is part of the Pro plan.",
   );
+  expect(await screen.findByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+});
+
+it("states the plan's data window under the retention field", async () => {
+  await renderApp("/acme/support-bot/settings/general");
+
+  const days = await screen.findByLabelText("Retention (days)");
+  await waitFor(() =>
+    expect(days).toHaveAccessibleDescription(/Your plan shows the last 1825 days/),
+  );
+  expect(screen.queryByRole("note", { name: "Locked feature" })).toBeNull();
+});
+
+it("locks the retention days without retention_management and keeps Keep data forever", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () =>
+      HttpResponse.json({ ...entitlementsFixture, features: ["project_roles"] }),
+    ),
+  );
+
+  await renderApp("/acme/support-bot/settings/general");
+
+  const lock = await screen.findByRole("note", { name: "Locked feature" });
+  expect(lock).toHaveTextContent("Available on the Pro plan.");
+  expect(within(lock).getByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
+  expect(screen.getByLabelText("Retention (days)")).toBeDisabled();
+  expect(screen.getByRole("checkbox", { name: "Keep data forever" })).toBeEnabled();
 });
