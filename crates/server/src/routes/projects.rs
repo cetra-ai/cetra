@@ -181,7 +181,7 @@ async fn update_project(
         Some(None) => Some(None),
         Some(Some(days)) => Some(Some(checked_retention(days)?)),
     };
-    if retention_needs_entitlement(retention_days)
+    if retention_needs_entitlement(retention_days, access.project.retention_days)
         && !may_manage_retention(&state, access.project.org_id)
     {
         return Err(ApiError::PlanRequired {
@@ -250,10 +250,11 @@ fn may_manage_retention(state: &AppState, org: OrgId) -> bool {
 
 const RETENTION_PLAN: &str = "data retention management is part of the Pro plan";
 
-/// Whether a `PATCH` sets a retention value, which needs the entitlement (D177). Clearing it
-/// (`Some(None)`) and leaving it alone (`None`) do not.
-fn retention_needs_entitlement(value: Option<Option<u32>>) -> bool {
-    matches!(value, Some(Some(_)))
+/// Whether a `PATCH` changes retention to a set value, which needs the entitlement (D177).
+/// Clearing it (`Some(None)`), leaving it alone (`None`) and sending the stored value again
+/// do not: a rename that echoes the form's value must not be refused.
+fn retention_needs_entitlement(value: Option<Option<u32>>, stored: Option<u32>) -> bool {
+    matches!(value, Some(Some(days)) if Some(days) != stored)
 }
 
 fn checked_retention(days: u32) -> Result<u32, ApiError> {
@@ -304,9 +305,15 @@ mod tests {
 
     #[test]
     fn only_a_set_retention_needs_the_entitlement() {
-        assert!(retention_needs_entitlement(Some(Some(7))));
-        assert!(!retention_needs_entitlement(Some(None)));
-        assert!(!retention_needs_entitlement(None));
+        assert!(retention_needs_entitlement(Some(Some(7)), None));
+        assert!(retention_needs_entitlement(Some(Some(7)), Some(30)));
+        assert!(!retention_needs_entitlement(Some(None), Some(30)));
+        assert!(!retention_needs_entitlement(None, Some(30)));
+    }
+
+    #[test]
+    fn the_stored_retention_needs_no_entitlement() {
+        assert!(!retention_needs_entitlement(Some(Some(7)), Some(7)));
     }
 
     fn cookie_pair(set_cookie: &axum::http::HeaderValue) -> String {
@@ -748,6 +755,16 @@ mod tests {
     /// Sends `PATCH retention_days: 30` to a project of org `acme`, after the org holds a
     /// token with `features` (`None`: no token, so the instance defaults apply).
     async fn patch_retention_with(features: Option<&[&str]>) -> crate::test_support::TestResponse {
+        patch_with(features, None, serde_json::json!({ "retention_days": 30 })).await
+    }
+
+    /// Sends `body` as a `PATCH` to a project of org `acme` whose stored retention is `stored`
+    /// (set before the org holds a token with `features`).
+    async fn patch_with(
+        features: Option<&[&str]>,
+        stored: Option<u32>,
+        body: serde_json::Value,
+    ) -> crate::test_support::TestResponse {
         let app = TestApp::new().await;
         let (_, ada) = signed_in(&app, "ada@example.com").await;
         let org = app
@@ -764,6 +781,15 @@ mod tests {
             .send()
             .await;
         let created: Project = created.json();
+        if let Some(days) = stored {
+            let set = app
+                .request(Method::PATCH, &format!("/api/v1/projects/{}", created.id))
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "retention_days": days }))
+                .send()
+                .await;
+            assert_eq!(set.status, 200);
+        }
         if let Some(features) = features {
             let org_id = orgs::org_by_slug(app.state.meta.reader(), "acme")
                 .await
@@ -789,7 +815,7 @@ mod tests {
         }
         app.request(Method::PATCH, &format!("/api/v1/projects/{}", created.id))
             .header(header::COOKIE.as_str(), &ada)
-            .json(&serde_json::json!({ "retention_days": 30 }))
+            .json(&body)
             .send()
             .await
     }
@@ -805,5 +831,15 @@ mod tests {
 
         let defaults = patch_retention_with(None).await;
         assert_eq!(defaults.status, 200);
+    }
+
+    #[tokio::test]
+    async fn a_locked_org_may_rename_and_echo_the_stored_retention() {
+        let body = serde_json::json!({ "name": "Renamed", "retention_days": 30 });
+        let echoed = patch_with(Some(&[]), Some(30), body.clone()).await;
+        assert_eq!(echoed.status, 200);
+        let changed = patch_with(Some(&[]), Some(7), body).await;
+        assert_eq!(changed.status, 403);
+        assert_eq!(changed.problem().code, ProblemCode::PlanRequired);
     }
 }

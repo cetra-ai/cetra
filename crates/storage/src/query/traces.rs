@@ -3357,6 +3357,72 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
+    /// D-P-21, D-P-44: the bound hides rows that were flushed to Parquet too, not only the
+    /// memtable's: spans, traces and scores.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn visible_from_hides_flushed_rows() {
+        let (old_trace, new_trace) = (trace_id(1), trace_id(2));
+        let old = 20_000 * DAY + 100;
+        let new = old + 10_000_000_000;
+        let bound = old + 5_000_000_000;
+        let mut live = crate::test_support::live_scores(&crate::test_support::dataset_scores());
+        live.truncate(2);
+        assert_eq!(live.len(), 2, "the dataset has two live scores");
+        for (score, at) in live.iter_mut().zip([old, new]) {
+            score.project_id = project();
+            score.created_at = at;
+            score.updated_at = at;
+            score.deleted = false;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(
+                project(),
+                spans_batch(&[
+                    base_span(old_trace, span_id(1), old),
+                    base_span(new_trace, span_id(1), new),
+                ]),
+            )
+            .await
+            .unwrap();
+        storage
+            .append_scores(
+                project(),
+                llmobs_core::batch::scores_to_record_batch(&live).unwrap(),
+            )
+            .await
+            .unwrap();
+        // `shutdown` flushes the memtables to Parquet; the reopened storage has them empty.
+        storage = reopen(dir.path(), storage).await;
+
+        let all = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(all, None).unwrap();
+        for table in ["spans", "traces", "scores"] {
+            assert_eq!(
+                count_of(&collect(ctx.session(), &format!("SELECT count(*) FROM {table}")).await),
+                2,
+                "{table} unbounded"
+            );
+        }
+        let bounded = storage
+            .query(project(), QueryOptions::new(None, Some(bound)))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(bounded, None).unwrap();
+        for table in ["spans", "traces", "scores"] {
+            assert_eq!(
+                count_of(&collect(ctx.session(), &format!("SELECT count(*) FROM {table}")).await),
+                1,
+                "{table} bounded"
+            );
+        }
+        storage.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn query_options_carry_visible_from() {
         let dir = tempfile::tempdir().unwrap();

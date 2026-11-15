@@ -1076,9 +1076,9 @@ mod tests {
     #[tokio::test]
     async fn internal_routes_are_hidden_without_the_control_plane() {
         let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
-        let org = OrgId::new_v7();
-        let orgs = format!("Bearer {}", control_plane_token("orgs"));
-        let usage = format!("Bearer {}", control_plane_token("usage"));
+        let org = app.seed().await.org_id;
+        let before = crate::entitlements::of(&app.state, org);
+        let control_plane = format!("Bearer {}", control_plane_token("orgs"));
         let org_bearer = format!(
             "Bearer {}",
             org_token(
@@ -1087,43 +1087,53 @@ mod tests {
                 "2099-01-01T00:00:00Z",
                 "2099-02-01T00:00:00Z",
                 &[],
-                &json!({}),
+                &json!({"data_access_days": 1}),
             )
         );
 
-        let created = app
-            .request(Method::POST, "/api/internal/v1/orgs")
-            .header("authorization", &orgs)
-            .json(&json!({}))
-            .send()
-            .await;
-        assert_outcome(&created, StatusCode::NOT_FOUND, "denied-404", "create org");
-
-        let entitlements = app
-            .request(
-                Method::PUT,
-                &format!("/api/internal/v1/orgs/{org}/entitlements"),
-            )
-            .header("authorization", &org_bearer)
-            .json(&json!({}))
-            .send()
-            .await;
-        assert_outcome(
-            &entitlements,
-            StatusCode::NOT_FOUND,
-            "denied-404",
-            "org token",
+        let internal: Vec<RouteDef> = routes()
+            .into_iter()
+            .filter(|route| route.path.starts_with("/api/internal/"))
+            .collect();
+        assert!(!internal.is_empty(), "the route table has internal routes");
+        for route in internal {
+            let mut path = route
+                .path
+                .replace("{org_id}", &org.to_string())
+                .replace("{org}", &org.to_string());
+            if let Some(open) = path.find('{') {
+                let close = path[open..].find('}').expect("a closed parameter") + open;
+                path.replace_range(open..=close, "01900000-0000-7000-8000-000000009999");
+            }
+            let query = if route.path == "/api/internal/v1/usage" {
+                "?from=2026-01-01&to=2026-01-01"
+            } else {
+                ""
+            };
+            let bearer = if route.method == Method::PUT {
+                &org_bearer
+            } else {
+                &control_plane
+            };
+            let mut request = app
+                .request(route.method.clone(), &format!("{path}{query}"))
+                .header("authorization", bearer);
+            if route.method != Method::GET && route.method != Method::DELETE {
+                request = request.json(&json!({}));
+            }
+            let response = request.send().await;
+            assert_outcome(
+                &response,
+                StatusCode::NOT_FOUND,
+                "denied-404",
+                &format!("{} {}", route.method, route.path),
+            );
+        }
+        assert_eq!(
+            crate::entitlements::of(&app.state, org),
+            before,
+            "a refused org token changes nothing"
         );
-
-        let report = app
-            .request(
-                Method::GET,
-                "/api/internal/v1/usage?from=2026-01-01&to=2026-01-01",
-            )
-            .header("authorization", &usage)
-            .send()
-            .await;
-        assert_outcome(&report, StatusCode::NOT_FOUND, "denied-404", "usage");
     }
 
     #[tokio::test]

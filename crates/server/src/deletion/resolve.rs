@@ -30,7 +30,7 @@ pub(super) async fn resolve(
 ) -> Result<bool, Step> {
     let source = state
         .storage
-        .query(project, query_options(Visibility::Exempt, None))
+        .query(project, query_options(Visibility::exempt(), None))
         .await
         .map_err(|error| super::from_query(&error))?;
     let ctx = QueryContext::new(source, None).map_err(|error| super::from_run(&error, row.kind))?;

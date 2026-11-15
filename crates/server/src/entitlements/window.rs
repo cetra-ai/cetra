@@ -9,33 +9,48 @@ use crate::http::AppState;
 
 const DAY_NS: i64 = 86_400_000_000_000;
 
-/// Which rows a read may see.
+/// Which rows a read may see. Built only by [`Visibility::window`] and [`Visibility::exempt`]
+/// (D-P-44): the inner enum is private, so no other file can name a variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Visibility {
-    /// The org's window: rows before the instant (ns) are hidden. `Window(None)`: no window.
+pub(crate) struct Visibility(Inner);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Inner {
+    /// Rows before the instant (ns) are hidden. `Window(None)`: no window.
     Window(Option<i64>),
-    /// Every row. Deletion reads only (D-P-21): `deletion/resolve.rs`, `deletion/mod.rs` and
-    /// `routes/deletions.rs`.
+    /// Every row.
     Exempt,
 }
 
 impl Visibility {
-    /// The org's window now: `now − data_access_days`, or `Window(None)` without a limit.
+    /// The org's window now: `now − data_access_days`, or no bound without a limit.
     pub(crate) fn window(state: &AppState, org: OrgId) -> Self {
         let now = state.clock.now_ns();
-        Self::Window(
+        Self(Inner::Window(
             super::of(state, org)
                 .limits
                 .data_access_days
                 .map(|days| visible_from(now, days)),
-        )
+        ))
     }
 
-    /// The bound a query hides rows before; `None` for no window and for `Exempt`.
+    /// Every row, whatever the window. For deletion reads only (D-P-21): `deletion/resolve.rs`
+    /// and `routes/deletions.rs`. Never use it for a read that returns data to a caller.
+    pub(crate) fn exempt() -> Self {
+        Self(Inner::Exempt)
+    }
+
+    /// No window, for tests that read rows of a fixed past.
+    #[cfg(test)]
+    pub(crate) fn unlimited() -> Self {
+        Self(Inner::Window(None))
+    }
+
+    /// The bound a query hides rows before; `None` for no window and for an exempt read.
     pub(crate) fn visible_from(self) -> Option<i64> {
-        match self {
-            Self::Window(from) => from,
-            Self::Exempt => None,
+        match self.0 {
+            Inner::Window(from) => from,
+            Inner::Exempt => None,
         }
     }
 }
@@ -131,16 +146,15 @@ mod tests {
 
     #[test]
     fn exempt_reads_are_deletion_reads() {
-        let found = files_containing(concat!("Visibility", "::Exempt"));
+        let found = files_containing(concat!("Visibility", "::exempt("));
         assert_subset(
             &found,
             &[
                 "entitlements/window.rs",
                 "deletion/resolve.rs",
-                "deletion/mod.rs",
                 "routes/deletions.rs",
             ],
-            "Visibility::Exempt outside deletion reads",
+            "Visibility::exempt( outside deletion reads",
         );
         for required in ["deletion/resolve.rs", "routes/deletions.rs"] {
             assert!(
@@ -152,11 +166,11 @@ mod tests {
 
     #[test]
     fn no_unwindowed_visibility() {
-        let found = files_containing(concat!("Visibility", "::Window("));
+        let found = files_containing(concat!("Visibility", "::unlimited("));
         assert_subset(
             &found,
             &["entitlements/window.rs", "test_support/mod.rs"],
-            "Visibility::Window( outside window.rs and test_support",
+            "Visibility::unlimited( outside window.rs and test_support",
         );
     }
 
@@ -186,10 +200,7 @@ mod tests {
     async fn window_follows_the_org() {
         let app = TestApp::new().await;
         let org = app.seed().await.org_id;
-        assert_eq!(
-            Visibility::window(&app.state, org),
-            Visibility::Window(None)
-        );
+        assert_eq!(Visibility::window(&app.state, org), Visibility::unlimited());
 
         set_limits(
             &app,
@@ -198,7 +209,7 @@ mod tests {
             &serde_json::json!({"data_access_days": 30}),
         );
         let first = Visibility::window(&app.state, org);
-        assert_eq!(first, Visibility::Window(Some(NOW - 30 * DAY_NS)));
+        assert_eq!(first, Visibility(Inner::Window(Some(NOW - 30 * DAY_NS))));
 
         app.state.clock.advance(Duration::from_secs(3600));
         let later = Visibility::window(&app.state, org);

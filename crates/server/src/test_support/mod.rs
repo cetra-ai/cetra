@@ -658,7 +658,7 @@ pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQ
     storage
         .query(
             project,
-            crate::entitlements::query_options(crate::entitlements::Visibility::Window(None), None),
+            crate::entitlements::query_options(crate::entitlements::Visibility::unlimited(), None),
         )
         .await
         .expect("query opens")

@@ -28,8 +28,14 @@ export const Route = createFileRoute("/$org/$project/settings/general")({
 
 type ProjectPatch = Schema<"UpdateProjectRequest">;
 
-/** `retention_days: null` keeps data forever. The OpenAPI type omits the null (contract gap CG5). */
-function projectPatch(name: string, retentionDays: number | null): ProjectPatch {
+/**
+ * `retention_days: null` keeps data forever. The OpenAPI type omits the null (contract gap CG5).
+ * `undefined` leaves retention alone: a rename must not send it.
+ */
+function projectPatch(name: string, retentionDays: number | null | undefined): ProjectPatch {
+  if (retentionDays === undefined) {
+    return { name };
+  }
   return { name, retention_days: retentionDays } as unknown as ProjectPatch;
 }
 
@@ -60,6 +66,15 @@ function ProjectGeneralPage() {
   const [dropOpen, setDropOpen] = useState(false);
   const dropMutation = $api.useMutation("delete", "/api/v1/projects/{project}");
 
+  /** The retention to send: nothing when it is unchanged, or locked and not being cleared. */
+  function retentionChange(next: number | null): number | null | undefined {
+    const stored = data.retention_days ?? null;
+    if (next === stored || (retentionLocked && next !== null)) {
+      return undefined;
+    }
+    return next;
+  }
+
   function onSubmit(event: FormEvent) {
     event.preventDefault();
     setSaved(false);
@@ -88,7 +103,7 @@ function ProjectGeneralPage() {
     mutation.mutate(
       {
         params: { path: { project: ref } },
-        body: projectPatch(trimmed, forever ? null : Number(days.trim())),
+        body: projectPatch(trimmed, retentionChange(forever ? null : Number(days.trim()))),
       },
       {
         onSuccess: () => {

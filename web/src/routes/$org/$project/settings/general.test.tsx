@@ -274,3 +274,26 @@ it("locks the retention days without retention_management and keeps Keep data fo
   expect(screen.getByLabelText("Retention (days)")).toBeDisabled();
   expect(screen.getByRole("checkbox", { name: "Keep data forever" })).toBeEnabled();
 });
+
+it("renames a project without sending retention when it is locked and already set", async () => {
+  let body: unknown;
+  server.use(
+    http.get("/api/v1/orgs/:org/entitlements", () =>
+      HttpResponse.json({ ...entitlementsFixture, features: ["project_roles"] }),
+    ),
+    http.patch("/api/v1/projects/:project", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ...projectFixture, name: "Support" });
+    }),
+  );
+
+  const { user } = await renderApp("/acme/support-bot/settings/general");
+  await screen.findByRole("note", { name: "Locked feature" });
+  const name = screen.getByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "Support");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  expect(body).toEqual({ name: "Support" });
+});

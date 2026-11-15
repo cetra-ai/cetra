@@ -54,8 +54,8 @@ pub(crate) struct RetentionRun {
 pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, MetaError> {
     let now = state.clock.now_ns();
     let mut run = RetentionRun::default();
-    // The cap of each org, read once per run. A failed read counts once and skips the org's
-    // projects: deleting nothing is the safe side (D-P-45).
+    // The cap of each org, read once per run. A failed read counts once and skips only
+    // the cap: a project's own retention still applies (D-P-45).
     let mut caps: HashMap<OrgId, Result<Option<u32>, ()>> = HashMap::new();
     for (org, project, own) in
         crate::meta::projects::projects_for_retention(state.meta.reader()).await?
@@ -79,10 +79,10 @@ pub(crate) async fn retention_once(state: &AppState) -> Result<RetentionRun, Met
                 cap
             }
         };
-        // D-P-45: the largest window of the last 30 days, plus 30 days (D175).
-        let Ok(cap) = cap else {
-            continue;
-        };
+        // D-P-45: the largest window of the last 30 days, plus 30 days (D175). When the org's
+        // window read failed there is no cap: the project's own retention still applies and a
+        // project that relies on the cap is skipped (deleting nothing is the safe side).
+        let cap = cap.unwrap_or(None);
         let Some(days) = effective_days(own, cap) else {
             continue;
         };
@@ -323,10 +323,10 @@ mod tests {
         assert_eq!(raw_span_count(&app.state.storage, project).await, 1);
     }
 
-    /// D-P-45: a window that cannot be read skips that org's projects (counted once for the
-    /// org); the other orgs still apply their retention.
+    /// D-P-45: a window that cannot be read skips only the cap (counted once for the org):
+    /// a project's own retention still applies, one relying on the cap is skipped.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_window_read_error_skips_the_org() {
+    async fn a_window_read_error_skips_only_the_cap() {
         let app = TestApp::new().await;
         app.state.clock.set(NOW);
         let seeded = app.seed().await;
@@ -338,7 +338,7 @@ mod tests {
                 Box::pin(async move {
                     let org = OrgId::new_v7();
                     insert_org(conn, org, "A", "org-a", now).await?;
-                    let p1 = insert_project(conn, org, "A1", "a1", None, now).await?;
+                    let p1 = insert_project(conn, org, "A1", "a1", Some(7), now).await?;
                     let p2 = insert_project(conn, org, "A2", "a2", None, now).await?;
                     Ok((org, p1, p2))
                 })
@@ -380,7 +380,8 @@ mod tests {
             run.failures, 1,
             "one failure for the org, not one per project"
         );
-        assert_eq!(raw_span_count(&app.state.storage, a1.id).await, 1);
+        // A1's own 7 days still apply; A2 relies on the cap and is skipped.
+        assert_eq!(raw_span_count(&app.state.storage, a1.id).await, 0);
         assert_eq!(raw_span_count(&app.state.storage, a2.id).await, 1);
         assert_eq!(raw_span_count(&app.state.storage, short.id).await, 0);
     }

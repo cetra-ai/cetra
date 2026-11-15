@@ -443,7 +443,7 @@ async fn matching(
     selection: &FilterSelection,
 ) -> Result<Vec<TraceId>, ApiError> {
     let ctx: QueryContext =
-        read::open_query_on(&state.storage, project, Visibility::Exempt, None, None).await?;
+        read::open_query_on(&state.storage, project, Visibility::exempt(), None, None).await?;
     let ids = filter_trace_ids(
         &ctx,
         FilterDeletionRequest {
