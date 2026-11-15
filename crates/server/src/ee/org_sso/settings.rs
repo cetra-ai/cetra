@@ -604,7 +604,7 @@ async fn delete_org_sso_domain(
 
 /// Whether one of the TXT strings is `expected`, ignoring surrounding whitespace and one
 /// pair of quotes.
-fn has(values: &[String], expected: &str) -> bool {
+pub(super) fn has(values: &[String], expected: &str) -> bool {
     values.iter().any(|value| {
         let value = value.trim();
         let value = value
@@ -1209,6 +1209,69 @@ mod tests {
         format!("\"{value}\"")
     }
 
+    /// Auth review #15 (D-P-72): the domain proof is re-checked after a day, and a record that
+    /// is gone ends the verification. A failed lookup changes nothing.
+    #[tokio::test]
+    async fn a_lapsed_domain_stops_routing() {
+        use super::super::recheck::{Recheck, recheck_once};
+
+        let (app, seeded, owner) = org_sso_app().await;
+        seed_provider(&app, seeded.org_id, "https://idp.example").await;
+        let added = add_domain(&app, "acme", &owner.cookie, "acme.test").await;
+        let row = added.json::<OrgSsoView>().domains[0].clone();
+        app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
+        assert_eq!(
+            verify(&app, "acme", &owner.cookie, row.id).await.status,
+            StatusCode::OK
+        );
+        let routed = |app: &TestApp| {
+            app.state
+                .org_sso
+                .route("ada@acme.test")
+                .map(|route| route.org_id)
+        };
+        assert_eq!(routed(&app), Some(seeded.org_id));
+
+        // Not due yet.
+        let now = app.state.clock.now_ns();
+        assert_eq!(
+            recheck_once(&app.state, now).await.unwrap(),
+            Recheck::default()
+        );
+
+        // A day later the record is still there.
+        app.state
+            .clock
+            .advance(std::time::Duration::from_secs(25 * 3_600));
+        let now = app.state.clock.now_ns();
+        let kept = recheck_once(&app.state, now).await.unwrap();
+        assert_eq!((kept.kept, kept.lapsed, kept.failed), (1, 0, 0));
+        assert_eq!(routed(&app), Some(seeded.org_id));
+
+        // The next day the resolver fails: nothing changes.
+        app.state
+            .clock
+            .advance(std::time::Duration::from_secs(25 * 3_600));
+        let now = app.state.clock.now_ns();
+        app.dns_fail(true);
+        let failed = recheck_once(&app.state, now).await.unwrap();
+        assert_eq!((failed.kept, failed.lapsed, failed.failed), (0, 0, 1));
+        assert_eq!(routed(&app), Some(seeded.org_id));
+
+        // The record is gone: the domain is unverified and no longer routes.
+        app.dns_fail(false);
+        app.dns_txt(&row.txt_name, &["something else"]);
+        let lapsed = recheck_once(&app.state, now).await.unwrap();
+        assert_eq!((lapsed.kept, lapsed.lapsed, lapsed.failed), (0, 1, 0));
+        assert_eq!(routed(&app), None);
+        assert_eq!(
+            domain_of(&app, "acme", &owner.cookie, "acme.test")
+                .await
+                .status,
+            DomainStatus::Pending
+        );
+    }
+
     #[tokio::test]
     async fn add_verify_and_route() {
         let (app, seeded, owner) = org_sso_app().await;
@@ -1667,6 +1730,7 @@ mod tests {
                             user_agent: None,
                             ip: None,
                             sso_org_id: None,
+                            via_provider: false,
                         },
                         now,
                         now + 3_600_000_000_000,

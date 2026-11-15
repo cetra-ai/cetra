@@ -525,6 +525,26 @@
     "file": "static/api-keys.json"
   },
   {
+    "operation_id": "list_backfills",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000700"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/backfills.json"
+  },
+  {
+    "operation_id": "list_backfills",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000701"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/backfills.json"
+  },
+  {
     "operation_id": "list_channels",
     "path_params": {},
     "query": {},
@@ -747,6 +767,26 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/api-key-created.json"
+  },
+  {
+    "operation_id": "post_backfill",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000700"
+    },
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/backfill.json"
+  },
+  {
+    "operation_id": "post_backfill_estimate",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000700"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/backfill-estimate.json"
   },
   {
     "operation_id": "post_evaluator",

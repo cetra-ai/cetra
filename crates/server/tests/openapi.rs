@@ -469,6 +469,21 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills",
+        "list_backfills",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills",
+        "post_backfill",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/online-rules/{id}/backfills/estimate",
+        "post_backfill_estimate",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/score-definitions",
         "list_score_definitions",
     ),
@@ -524,6 +539,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_score_definitions",
     "list_online_rules",
     "post_online_rule_preview",
+    "post_backfill_estimate",
     "list_eval_jobs",
 ];
 
@@ -690,6 +706,8 @@ fn document_lint() {
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
+                | "delete_org"
+                | "delete_project"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -824,9 +842,11 @@ fn document_lint() {
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_online_rule" || *id == "patch_online_rule" {
+        } else if *id == "post_online_rule" || *id == "patch_online_rule" || *id == "post_backfill"
+        {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
+            || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"
             || *id == "get_eval_job"
@@ -836,6 +856,7 @@ fn document_lint() {
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
+            || *id == "post_backfill_estimate"
         {
             expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id != "get_auth_config" && QUERY_OR_BODY.contains(id) {
@@ -926,6 +947,7 @@ fn document_lint() {
         ("AlertEventPage", "AlertEvent"),
         ("OnlineRulePage", "OnlineRule"),
         ("EvalJobPage", "EvalJob"),
+        ("BackfillPage", "Backfill"),
     ];
     for (page, item) in pages {
         let schema = &schemas[page];
@@ -1198,6 +1220,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertEventPage",
         "OnlineRulePage",
         "EvalJobPage",
+        "BackfillPage",
         "InternalUsagePage",
         "InternalDropPage",
     ];

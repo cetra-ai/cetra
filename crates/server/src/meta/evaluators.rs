@@ -406,6 +406,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: None,
+                            email_verified_via: None,
                             is_instance_admin: false,
                         },
                         NOW,

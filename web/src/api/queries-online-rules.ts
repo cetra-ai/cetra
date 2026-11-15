@@ -30,6 +30,20 @@ export function onlineRuleKey(org: string, project: string, ruleId: string) {
   return onlineRuleQuery(org, project, ruleId).queryKey;
 }
 
+/** A rule's backfills, newest first (the latest 50). */
+export function backfillsQuery(org: string, project: string, ruleId: string) {
+  return $api.queryOptions(
+    "get",
+    "/api/v1/projects/{project}/online-rules/{id}/backfills",
+    onlineRuleInit(org, project, ruleId),
+  );
+}
+
+/** The key of one rule's backfill list, for invalidation. */
+export function backfillsKey(org: string, project: string, ruleId: string) {
+  return backfillsQuery(org, project, ruleId).queryKey;
+}
+
 export function evalJobsInit(
   org: string,
   project: string,

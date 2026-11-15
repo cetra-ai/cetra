@@ -42,6 +42,16 @@ export function scoreDefinitionsInit(org: string, project: string, includeArchiv
   };
 }
 
+/** Every live score definition of the project, for the annotation form (D-I-37). 1 000 is the project cap. */
+export function liveScoreDefinitionsQuery(org: string, project: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/score-definitions", {
+    params: {
+      path: { project: projectRef(org, project) },
+      query: { limit: 1000, include_archived: false },
+    },
+  });
+}
+
 /** Prefix of every score definition list query of the project, for invalidation. */
 export function scoreDefinitionsKey(org: string, project: string) {
   return $api.queryOptions("get", "/api/v1/projects/{project}/score-definitions", {

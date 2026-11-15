@@ -17,6 +17,7 @@ use crate::auth::secret::{constant_time_eq, new_opaque_token};
 use crate::entitlements::over_limit;
 use crate::http::AppState;
 use crate::meta::identities::{self, identity_user};
+use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaError, invites, members, orgs, personal_tokens, web_sessions};
 use llmobs_core::ids::OrgId;
@@ -487,6 +488,7 @@ async fn decide(
                 name,
                 password_hash: None,
                 email_verified_at: Some(now),
+                email_verified_via: Some(EmailVerifiedVia::Idp),
                 is_instance_admin: true,
             },
             now,
@@ -503,9 +505,9 @@ async fn decide(
             identities::insert_identity(conn, user.id, provider, subject, email, now).await?;
             web_sessions::delete_user_sessions(conn, user.id, None).await?;
             let revoked = personal_tokens::revoke_user_tokens(conn, user.id, now).await?;
-            if user.email_verified_at.is_none() {
+            if !user.email_proven() {
                 users::set_password_hash(conn, user.id, None, now).await?;
-                users::set_email_verified(conn, user.id, now).await?;
+                users::set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
             }
             return Ok(Outcome::Linked {
                 user_id: user.id,
@@ -534,6 +536,7 @@ async fn decide(
             name,
             password_hash: None,
             email_verified_at: Some(now),
+            email_verified_via: Some(EmailVerifiedVia::Idp),
             is_instance_admin: false,
         },
         now,

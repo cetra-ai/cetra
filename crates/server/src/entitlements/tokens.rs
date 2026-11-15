@@ -187,7 +187,7 @@ mod tests {
             OrgTokenError::Token(TokenError::WrongKind)
         );
         assert_eq!(
-            refuse(&control_plane_token("orgs")),
+            refuse(&control_plane_token("orgs", "GET", "/")),
             OrgTokenError::Token(TokenError::WrongKind)
         );
 

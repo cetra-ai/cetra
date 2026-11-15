@@ -10,7 +10,7 @@ import { useProject } from "@/components/shell/project-context";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 
 const EXPLANATION =
-  "Removes every span and score of this end user, with their traces, sessions and evaluation traces. The data is hidden within seconds and erased within 24 hours. This cannot be undone.";
+  "Removes every span and score of this end user, with their traces, sessions and evaluation traces. The data is hidden within seconds and removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone.";
 
 const MAX_USER_ID_BYTES = 255;
 
@@ -149,7 +149,7 @@ export function UserDeletionForm() {
         <FormSuccess
           message={
             saved
-              ? "Deletion requested. The data is hidden within seconds and erased within 24 hours."
+              ? "Deletion requested. The data is hidden within seconds and removed within 24 hours."
               : undefined
           }
         />

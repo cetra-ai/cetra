@@ -18,6 +18,9 @@ use crate::http::error::ApiError;
 /// trusted wins. Every entry trusted means the leftmost one. A malformed
 /// entry stops the walk and the last parsed address (or the peer) is used.
 fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
+    // A dual-stack listener reports an IPv4 peer as `::ffff:a.b.c.d`, which an IPv4
+    // `trusted_proxies` entry does not contain.
+    let peer = peer.to_canonical();
     if !is_trusted(peer, trusted) {
         return peer;
     }
@@ -63,7 +66,7 @@ fn parse_forwarded(token: &str) -> Option<IpAddr> {
     } else {
         token
     };
-    token.parse().ok()
+    token.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
 /// Socket peer, or the client named by a trusted proxy (D142).
@@ -182,5 +185,19 @@ mod tests {
             &[net("10.0.0.0/8")],
         );
         assert_eq!(got, ip("2001:db8::5"));
+    }
+
+    /// Review 2026-11-15 #6: an IPv4 proxy seen as `::ffff:a.b.c.d` was not trusted, so every
+    /// client behind it shared the proxy's address in rate limits.
+    #[test]
+    fn an_ipv4_mapped_peer_matches_an_ipv4_proxy() {
+        let got = client_ip(
+            ip("::ffff:10.0.0.8"),
+            &headers(&["203.0.113.9"]),
+            &[net("10.0.0.0/8")],
+        );
+        assert_eq!(got, ip("203.0.113.9"));
+        let mapped = client_ip(ip("::ffff:203.0.113.5"), &headers(&[]), &[]);
+        assert_eq!(mapped, ip("203.0.113.5"));
     }
 }
