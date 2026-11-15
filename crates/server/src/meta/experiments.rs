@@ -1,6 +1,6 @@
 //! `experiments` and `experiment_items` rows (spec 04 § Datasets & experiments, D-J-10).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 use futures::TryStreamExt;
@@ -17,11 +17,17 @@ const UPSERT_CHUNK: usize = 50;
 
 // The SQL text of this module is built from the constants here and fixed clauses only; every
 // caller value is bound, never spliced in.
-/// Columns of an experiment read, in the order [`ExperimentRecord`] declares them.
-/// The result count is a subquery, so the SQL view never reads it (J3.6).
+/// Columns of one experiment read, in the order [`ExperimentRecord`] declares them. The result
+/// count is a subquery, so the SQL view never reads it (J3.6).
 const EXPERIMENT_COLUMNS: &str = "e.id, e.project_id, e.dataset_id, e.dataset_name, \
     e.dataset_version, e.name, e.description, e.metadata, e.repetitions, e.item_count, \
     (SELECT count(*) FROM experiment_items i WHERE i.experiment_id = e.id) AS result_count, \
+    e.status, e.error, e.created_by, e.created_at, e.finished_at";
+/// [`EXPERIMENT_COLUMNS`] for a list: `result_count` is 0 here and [`result_counts`] fills it
+/// with one grouped query, since a subquery would run once per listed row.
+const LIST_EXPERIMENT_COLUMNS: &str = "e.id, e.project_id, e.dataset_id, e.dataset_name, \
+    e.dataset_version, e.name, e.description, e.metadata, e.repetitions, e.item_count, \
+    0 AS result_count, \
     e.status, e.error, e.created_by, e.created_at, e.finished_at";
 /// Columns of a full result, in the order [`ResultRecord`] declares them.
 const RESULT_COLUMNS: &str = "dataset_item_id, repetition, revision_id, input, \
@@ -375,7 +381,7 @@ pub(crate) async fn list(
     cursor: Option<Uuid>,
 ) -> Result<(Vec<ExperimentRow>, Option<Uuid>), MetaError> {
     let mut builder = QueryBuilder::<Sqlite>::new(format!(
-        "SELECT {EXPERIMENT_COLUMNS} FROM experiments e WHERE e.project_id = "
+        "SELECT {LIST_EXPERIMENT_COLUMNS} FROM experiments e WHERE e.project_id = "
     ));
     builder.push_bind(project.to_string());
     if let Some(dataset) = dataset {
@@ -403,7 +409,39 @@ pub(crate) async fn list(
     } else {
         None
     };
+    let ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let counts = result_counts(pool, &ids).await?;
+    for row in &mut rows {
+        row.result_count = counts.get(&row.id).copied().unwrap_or(0);
+    }
     Ok((rows, next))
+}
+
+/// The result count of each of `experiments` that has results, in one grouped query. An
+/// experiment without results is absent (its count is 0).
+async fn result_counts(
+    pool: &SqlitePool,
+    experiments: &[Uuid],
+) -> Result<HashMap<Uuid, i64>, MetaError> {
+    if experiments.is_empty() {
+        return Ok(HashMap::new());
+    }
+    check_ids(experiments)?;
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "SELECT experiment_id, count(*) FROM experiment_items WHERE experiment_id IN (",
+    );
+    push_ids(&mut builder, experiments);
+    builder.push(" GROUP BY experiment_id");
+    let records: Vec<(String, i64)> = builder.build_query_as().fetch_all(pool).await?;
+    records
+        .into_iter()
+        .map(|(text, count)| {
+            Ok((
+                parse_uuid(&text, "experiment_items", "experiment_id")?,
+                count,
+            ))
+        })
+        .collect()
 }
 
 /// The visible experiments of `project` among `ids`, in no order.
@@ -428,24 +466,25 @@ pub(crate) async fn get_many(
     records.into_iter().map(experiment_from).collect()
 }
 
-/// The ids among `ids` that are experiments of `project` (any status, hidden or not), for the
-/// score write check (D-J-12).
+/// The ids among `ids` that are experiments of `project` (any status, hidden or not), with each
+/// one's `created_at`, for the score write check (D-J-12) and the score time rule.
 pub(crate) async fn existing_ids(
     pool: &SqlitePool,
     project: ProjectId,
     ids: &[Uuid],
-) -> Result<HashSet<Uuid>, MetaError> {
+) -> Result<HashMap<Uuid, i64>, MetaError> {
     if ids.is_empty() {
-        return Ok(HashSet::new());
+        return Ok(HashMap::new());
     }
     check_ids(ids)?;
-    let mut builder = QueryBuilder::<Sqlite>::new("SELECT id FROM experiments WHERE project_id = ");
+    let mut builder =
+        QueryBuilder::<Sqlite>::new("SELECT id, created_at FROM experiments WHERE project_id = ");
     builder.push_bind(project.to_string()).push(" AND id IN (");
     push_ids(&mut builder, ids);
-    let texts: Vec<String> = builder.build_query_scalar().fetch_all(pool).await?;
-    texts
-        .iter()
-        .map(|text| parse_uuid(text, "experiments", "id"))
+    let records: Vec<(String, i64)> = builder.build_query_as().fetch_all(pool).await?;
+    records
+        .into_iter()
+        .map(|(text, created_at)| Ok((parse_uuid(&text, "experiments", "id")?, created_at)))
         .collect()
 }
 
@@ -507,7 +546,8 @@ pub(crate) async fn pinned_items_tx(
 }
 
 /// Inserts or replaces results of `experiment` (one row per item and repetition, D-J-10).
-/// `now` is each replaced or new row's `created_at`. Returns the rows written.
+/// `now` is a new row's `created_at`; a replaced row keeps its original one, so a resend does
+/// not move the row in the D101 window. Returns the rows written.
 pub(crate) async fn upsert_results_tx(
     conn: &mut SqliteConnection,
     experiment: Uuid,
@@ -537,8 +577,7 @@ pub(crate) async fn upsert_results_tx(
             " ON CONFLICT (experiment_id, dataset_item_id, repetition) DO UPDATE SET \
              revision_id = excluded.revision_id, input = excluded.input, \
              expected_output = excluded.expected_output, trace_id = excluded.trace_id, \
-             output = excluded.output, error = excluded.error, latency_ns = excluded.latency_ns, \
-             created_at = excluded.created_at",
+             output = excluded.output, error = excluded.error, latency_ns = excluded.latency_ns",
         );
         let done = builder.build().execute(&mut *conn).await?;
         written += done.rows_affected();
@@ -695,8 +734,11 @@ pub(crate) async fn results_page(
     records.into_iter().map(result_from).collect()
 }
 
-/// Every full result (all repetitions) of `experiment` for the given items, ordered by
-/// `dataset_item_id`, then `repetition`. At most 1,000 items (a compare page).
+/// The compare cell of each of `items` in `experiment`: one row per item, the one of its lowest
+/// repetition, read without the other repetitions (D-J-13). Its `error` is the lowest
+/// repetition's, or else the error of the lowest repetition that has one, so a cell reports a
+/// failure of any repetition. An item without a result is absent. Ordered by `dataset_item_id`.
+/// At most 1,000 items (a compare page).
 pub(crate) async fn item_rows(
     pool: &SqlitePool,
     experiment: Uuid,
@@ -706,13 +748,23 @@ pub(crate) async fn item_rows(
         return Ok(Vec::new());
     }
     check_ids(items)?;
-    let mut builder = QueryBuilder::<Sqlite>::new(format!(
-        "SELECT {RESULT_COLUMNS} FROM experiment_items WHERE experiment_id = "
-    ));
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "SELECT i.dataset_item_id, i.repetition, i.revision_id, i.input, i.expected_output, \
+         i.trace_id, i.output, \
+         COALESCE(i.error, (SELECT j.error FROM experiment_items j \
+             WHERE j.experiment_id = i.experiment_id AND j.dataset_item_id = i.dataset_item_id \
+             AND j.error IS NOT NULL ORDER BY j.repetition LIMIT 1)) AS error, \
+         i.latency_ns, i.created_at \
+         FROM experiment_items i WHERE i.experiment_id = ",
+    );
     builder.push_bind(experiment.to_string());
-    builder.push(" AND dataset_item_id IN (");
+    builder.push(" AND i.dataset_item_id IN (");
     push_ids(&mut builder, items);
-    builder.push(" ORDER BY dataset_item_id, repetition");
+    builder.push(
+        " AND i.repetition = (SELECT min(k.repetition) FROM experiment_items k \
+         WHERE k.experiment_id = i.experiment_id AND k.dataset_item_id = i.dataset_item_id) \
+         ORDER BY i.dataset_item_id",
+    );
     let records: Vec<ResultRecord> = builder.build_query_as().fetch_all(pool).await?;
     records.into_iter().map(result_from).collect()
 }
@@ -1306,7 +1358,8 @@ mod tests {
         assert_eq!(rows[0].repetition, 0);
         assert_eq!(rows[0].output.as_deref(), Some("\"new\""));
         assert_eq!(rows[0].trace_id, Some(trace));
-        assert_eq!(rows[0].created_at, NOW + 1);
+        // A resend keeps the row's original created_at.
+        assert_eq!(rows[0].created_at, NOW);
         assert_eq!(rows[1].repetition, 1);
 
         let row = get(db.reader(), project, id, None).await.unwrap().unwrap();
@@ -1457,7 +1510,7 @@ mod tests {
         let found = existing_ids(db.reader(), project, &[a1, a2, b1, Uuid::now_v7()])
             .await
             .unwrap();
-        assert_eq!(found, HashSet::from([a1, a2]));
+        assert_eq!(found, HashMap::from([(a1, NOW), (a2, NOW)]));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1578,9 +1631,14 @@ mod tests {
         );
         assert_eq!(errors[0].error.as_deref(), Some("failed here"));
 
+        // A compare cell is one row per item: the lowest repetition, with the error of any.
         let third = item_rows(db.reader(), id, &[item3]).await.unwrap();
-        assert_eq!(third.len(), 2);
-        assert!(third.iter().all(|row| row.dataset_item_id == item3));
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].repetition, 0);
+        let second = item_rows(db.reader(), id, &[item2]).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].repetition, 0);
+        assert_eq!(second[0].error.as_deref(), Some("failed here"));
 
         let keys = result_keys(db.reader(), id).await.unwrap();
         assert_eq!(keys.len(), 6);

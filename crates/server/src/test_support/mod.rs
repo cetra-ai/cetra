@@ -1098,7 +1098,8 @@ impl TestRequest {
         let (router, request) = self.build();
         let response = router.oneshot(request).await.unwrap();
         let (parts, body) = response.into_parts();
-        let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
+        // A results page may hold 16 MiB of text (D-J-13), so the cap is above that.
+        let body = axum::body::to_bytes(body, 32 * 1024 * 1024)
             .await
             .expect("response body");
         TestResponse {

@@ -31,15 +31,59 @@ pub(crate) fn visible_from(state: &AppState, org: OrgId) -> Option<i64> {
     Visibility::window(state, org).visible_from()
 }
 
-/// Everything the aggregation reads of one experiment (D-J-13).
+/// Everything the aggregation reads of one experiment (D-J-13). The scores and traces it was
+/// loaded from are kept only as the index: the kept scores and the row costs (rules 1 to 3),
+/// built once in [`Loaded::new`].
 pub(crate) struct Loaded {
     pub(crate) experiment: ExperimentRow,
     /// The light projection of every result, ordered by item, then repetition.
     pub(crate) keys: Vec<ResultKey>,
-    /// The live scores whose `experiment_id` is the experiment.
-    pub(crate) scores: Vec<ExperimentScore>,
-    /// The traces whose `llmobs.experiment_id` is the experiment.
-    pub(crate) traces: Vec<ExperimentTrace>,
+    index: Index,
+}
+
+impl Loaded {
+    /// Loads `experiment` from its reads: `keys` (every result), `scores` (the live scores whose
+    /// `experiment_id` is the experiment) and `traces` (the traces whose `llmobs.experiment_id`
+    /// is the experiment). Builds the index once.
+    pub(crate) fn new(
+        experiment: ExperimentRow,
+        keys: Vec<ResultKey>,
+        scores: &[ExperimentScore],
+        traces: &[ExperimentTrace],
+    ) -> Result<Self, ApiError> {
+        let index = build_index(&keys, scores, traces)?;
+        Ok(Self {
+            experiment,
+            keys,
+            index,
+        })
+    }
+}
+
+/// The byte budget of one results page and of one compare page: the summed `input`,
+/// `expected_output` and `output` text of its rows (D-J-13).
+pub(crate) const PAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The text bytes a stored row adds to a page (see [`PAGE_BYTES`]).
+pub(crate) fn page_bytes(row: &StoredResult) -> usize {
+    row.input.len()
+        + row.expected_output.as_ref().map_or(0, String::len)
+        + row.output.as_ref().map_or(0, String::len)
+}
+
+/// How many leading entries of a page fit: entries are added while their summed size is below
+/// [`PAGE_BYTES`], and the first entry is always kept. `sizes` gives each entry's bytes in order.
+pub(crate) fn page_len(sizes: impl IntoIterator<Item = usize>) -> usize {
+    let mut total = 0usize;
+    let mut kept = 0usize;
+    for size in sizes {
+        if kept > 0 && total >= PAGE_BYTES {
+            break;
+        }
+        total = total.saturating_add(size);
+        kept += 1;
+    }
+    kept
 }
 
 /// One score name on one trace after rules 2 and 3: the kept data type, the mean of the numeric
@@ -74,9 +118,12 @@ impl Index {
 }
 
 /// Rules 1 to 3: the kept type of each score name and the kept scores of each row trace.
-fn index(loaded: &Loaded) -> Result<Index, ApiError> {
-    let rows: HashSet<String> = loaded
-        .keys
+fn build_index(
+    keys: &[ResultKey],
+    scores: &[ExperimentScore],
+    traces: &[ExperimentTrace],
+) -> Result<Index, ApiError> {
+    let rows: HashSet<String> = keys
         .iter()
         .filter_map(|key| key.trace_id.map(|trace| trace.to_string()))
         .collect();
@@ -84,7 +131,7 @@ fn index(loaded: &Loaded) -> Result<Index, ApiError> {
     // Rule 2: the type with the most scores of a name, over the scores of the rows' traces. A
     // tie goes to the type that comes first in text order.
     let mut counts: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
-    for score in &loaded.scores {
+    for score in scores {
         if rows.contains(&score.trace_id) {
             *counts
                 .entry(score.name.as_str())
@@ -113,7 +160,7 @@ fn index(loaded: &Loaded) -> Result<Index, ApiError> {
 
     // Rule 3: the scores of one name on one trace, of the kept type.
     let mut groups: BTreeMap<(&str, &str), Vec<&ExperimentScore>> = BTreeMap::new();
-    for score in &loaded.scores {
+    for score in scores {
         let kept_type = chosen.get(score.name.as_str()).copied();
         if rows.contains(&score.trace_id) && kept_type == Some(score.data_type.as_str()) {
             groups
@@ -141,8 +188,7 @@ fn index(loaded: &Loaded) -> Result<Index, ApiError> {
         );
     }
 
-    let costs = loaded
-        .traces
+    let costs = traces
         .iter()
         .filter(|trace| rows.contains(&trace.trace_id))
         .map(|trace| (trace.trace_id.clone(), trace.cost_total))
@@ -191,13 +237,14 @@ fn to_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// The nearest-rank percentile `p` (0 to 1) of an ascending list.
-fn nearest_rank(sorted: &[i64], p: f64) -> Option<i64> {
+/// The nearest-rank percentile `percent` (0 to 100) of an ascending list: rank
+/// `ceil(percent * n / 100)`, in integer arithmetic.
+fn nearest_rank(sorted: &[i64], percent: usize) -> Option<i64> {
     let n = sorted.len();
     if n == 0 {
         return None;
     }
-    let rank = (p * n as f64).ceil() as usize;
+    let rank = (percent * n).div_ceil(100);
     sorted.get(rank.saturating_sub(1).min(n - 1)).copied()
 }
 
@@ -250,11 +297,11 @@ fn score_summary(
 
 /// The experiment's summary (rule 5 and rule 4).
 pub(crate) fn summary(loaded: &Loaded) -> Result<ExperimentSummary, ApiError> {
-    let index = index(loaded)?;
+    let index = &loaded.index;
     let scores = index
         .types
         .iter()
-        .map(|(name, data_type)| score_summary(loaded, &index, name, data_type))
+        .map(|(name, data_type)| score_summary(loaded, index, name, data_type))
         .collect();
     let mut latencies: Vec<i64> = loaded
         .keys
@@ -270,8 +317,8 @@ pub(crate) fn summary(loaded: &Loaded) -> Result<ExperimentSummary, ApiError> {
         result_count: to_i64(loaded.keys.len()),
         error_count: to_i64(errors),
         latency_mean_ns: latency_mean(&latencies),
-        latency_p50_ns: nearest_rank(&latencies, 0.5),
-        latency_p95_ns: nearest_rank(&latencies, 0.95),
+        latency_p50_ns: nearest_rank(&latencies, 50),
+        latency_p95_ns: nearest_rank(&latencies, 95),
         cost_total: (!costs.is_empty()).then(|| costs.iter().sum::<f64>()),
     })
 }
@@ -306,7 +353,7 @@ pub(crate) fn result_rows(
     loaded: &Loaded,
     page: &[StoredResult],
 ) -> Result<Vec<ResultRow>, ApiError> {
-    let index = index(loaded)?;
+    let index = &loaded.index;
     let mut rows = Vec::with_capacity(page.len());
     for row in page {
         let scores: BTreeMap<String, ResultScore> = index
@@ -351,8 +398,8 @@ struct Cell {
 }
 
 /// The cells of one experiment, by item. An item without a row has no cell.
-fn cells(loaded: &Loaded) -> Result<BTreeMap<Uuid, Cell>, ApiError> {
-    let index = index(loaded)?;
+fn cells(loaded: &Loaded) -> BTreeMap<Uuid, Cell> {
+    let index = &loaded.index;
     let mut per_item: BTreeMap<Uuid, (BTreeMap<String, Vec<f64>>, bool)> = BTreeMap::new();
     for key in &loaded.keys {
         let (values, has_error) = per_item.entry(key.dataset_item_id).or_default();
@@ -367,7 +414,7 @@ fn cells(loaded: &Loaded) -> Result<BTreeMap<Uuid, Cell>, ApiError> {
             }
         }
     }
-    Ok(per_item
+    per_item
         .into_iter()
         .map(|(item, (values, has_error))| {
             let scores = values
@@ -376,7 +423,7 @@ fn cells(loaded: &Loaded) -> Result<BTreeMap<Uuid, Cell>, ApiError> {
                 .collect();
             (item, Cell { scores, has_error })
         })
-        .collect())
+        .collect()
 }
 
 /// Rule 9: a candidate cell regressed against the baseline's when a score it shares with the
@@ -417,7 +464,7 @@ pub(crate) fn compare_items(
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<(Vec<Uuid>, Option<String>), ApiError> {
-    let per_experiment = loaded.iter().map(cells).collect::<Result<Vec<_>, _>>()?;
+    let per_experiment: Vec<BTreeMap<Uuid, Cell>> = loaded.iter().map(cells).collect();
     let after = cursor.map(parse_item_cursor).transpose()?;
     let Some((baseline, candidates)) = per_experiment.split_first() else {
         return Ok((Vec::new(), None));
@@ -480,7 +527,7 @@ pub(crate) fn compare(
     next_cursor: Option<String>,
 ) -> Result<ExperimentComparison, ApiError> {
     let experiments = loaded.iter().map(summary).collect::<Result<Vec<_>, _>>()?;
-    let per_experiment = loaded.iter().map(cells).collect::<Result<Vec<_>, _>>()?;
+    let per_experiment: Vec<BTreeMap<Uuid, Cell>> = loaded.iter().map(cells).collect();
     let Some((baseline, candidates)) = per_experiment.split_first() else {
         return Ok(ExperimentComparison {
             experiments,
@@ -516,7 +563,19 @@ pub(crate) fn compare(
         .map(|experiment| experiment.experiment.dataset_version)
         .collect();
     if versions.len() > 1 {
-        warnings.push("experiments use different dataset versions".to_owned());
+        let named: Vec<String> = loaded
+            .iter()
+            .map(|experiment| {
+                format!(
+                    "{} at version {}",
+                    experiment.experiment.id, experiment.experiment.dataset_version
+                )
+            })
+            .collect();
+        warnings.push(format!(
+            "experiments use different dataset versions: {}",
+            named.join(", ")
+        ));
     }
     let missing: BTreeSet<Uuid> = candidates
         .iter()
@@ -556,28 +615,17 @@ pub(crate) fn compare(
             let Some(cell) = experiment_cells.get(item) else {
                 continue;
             };
-            let stored: Vec<&StoredResult> = texts
+            let lowest = texts
                 .get(index)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|row| row.dataset_item_id == *item)
-                        .collect()
-                })
-                .unwrap_or_default();
-            let Some(lowest) = stored.first().copied() else {
-                return Err(corrupt("experiment_items", "dataset_item_id"));
-            };
+                .and_then(|rows| rows.iter().find(|row| row.dataset_item_id == *item))
+                .ok_or_else(|| corrupt("experiment_items", "dataset_item_id"))?;
             if source.is_none() {
                 source = Some(lowest);
             }
-            let error = lowest
-                .error
-                .clone()
-                .or_else(|| stored.iter().find_map(|row| row.error.clone()));
             cells.push(CompareCell {
                 experiment_id: experiment.experiment.id,
                 output: json_opt(lowest.output.as_deref(), "output")?,
-                error,
+                error: lowest.error.clone(),
                 trace_id: lowest.trace_id,
                 latency_ns: lowest.latency_ns,
                 scores: cell.scores.clone(),
@@ -652,46 +700,48 @@ mod tests {
     );
 
     fn loaded(rows: &[RowSpec], scores: &[ScoreSpec], traces: &[(u128, Option<f64>)]) -> Loaded {
-        Loaded {
-            experiment: experiment_row(0xe01, 1),
-            keys: rows
-                .iter()
-                .map(
-                    |&(item, repetition, trace_id, has_error, latency_ns)| ResultKey {
-                        dataset_item_id: uuid_of(item),
-                        repetition,
-                        trace_id: trace_id.map(trace),
-                        has_error,
-                        latency_ns,
-                    },
-                )
-                .collect(),
-            scores: scores
-                .iter()
-                .map(
-                    |&(trace_n, name, data_type, value_num, value_str)| ExperimentScore {
-                        trace_id: trace(trace_n).to_string(),
-                        dataset_item_id: None,
-                        name: name.to_owned(),
-                        data_type: data_type.to_owned(),
-                        value_num,
-                        value_str: value_str.map(str::to_owned),
-                    },
-                )
-                .collect(),
-            traces: traces
-                .iter()
-                .map(|&(trace_n, cost_total)| ExperimentTrace {
+        let keys: Vec<ResultKey> = rows
+            .iter()
+            .map(
+                |&(item, repetition, trace_id, has_error, latency_ns)| ResultKey {
+                    dataset_item_id: uuid_of(item),
+                    repetition,
+                    trace_id: trace_id.map(trace),
+                    has_error,
+                    latency_ns,
+                },
+            )
+            .collect();
+        let scores: Vec<ExperimentScore> = scores
+            .iter()
+            .map(
+                |&(trace_n, name, data_type, value_num, value_str)| ExperimentScore {
                     trace_id: trace(trace_n).to_string(),
-                    cost_total,
-                    duration_ns: 0,
-                    error_count: 0,
-                })
-                .collect(),
+                    dataset_item_id: None,
+                    name: name.to_owned(),
+                    data_type: data_type.to_owned(),
+                    value_num,
+                    value_str: value_str.map(str::to_owned),
+                },
+            )
+            .collect();
+        let traces: Vec<ExperimentTrace> = traces
+            .iter()
+            .map(|&(trace_n, cost_total)| ExperimentTrace {
+                trace_id: trace(trace_n).to_string(),
+                cost_total,
+                duration_ns: 0,
+                error_count: 0,
+            })
+            .collect();
+        match Loaded::new(experiment_row(0xe01, 1), keys, &scores, &traces) {
+            Ok(loaded) => loaded,
+            Err(_) => panic!("the index builds"),
         }
     }
 
-    /// The same loaded experiment with another id and dataset version.
+    /// The same loaded experiment with another id and dataset version. The index is built from
+    /// the same reads, so only the experiment row changes.
     fn named(mut experiment: Loaded, id: u128, version: i64) -> Loaded {
         experiment.experiment = experiment_row(id, version);
         experiment
@@ -720,12 +770,9 @@ mod tests {
     }
 
     fn cell_of(loaded: &Loaded, item: u128) -> Cell {
-        match cells(loaded) {
-            Ok(cells) => match cells.get(&uuid_of(item)) {
-                Some(cell) => cell.clone(),
-                None => panic!("no cell"),
-            },
-            Err(_) => panic!("cells failed"),
+        match cells(loaded).get(&uuid_of(item)) {
+            Some(cell) => cell.clone(),
+            None => panic!("no cell"),
         }
     }
 
@@ -975,11 +1022,13 @@ mod tests {
             Ok(comparison) => comparison,
             Err(_) => panic!("compare failed"),
         };
-        assert!(
-            comparison
-                .warnings
-                .contains(&"experiments use different dataset versions".to_owned())
+        // The warning names each experiment with its version.
+        let versions = format!(
+            "experiments use different dataset versions: {} at version 1, {} at version 2",
+            uuid_of(0xe01),
+            uuid_of(0xe02)
         );
+        assert!(comparison.warnings.contains(&versions));
         assert!(
             comparison
                 .warnings

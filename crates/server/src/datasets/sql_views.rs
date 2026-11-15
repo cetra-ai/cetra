@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Int64Array, LargeStringArray, StringArray, TimestampNanosecondArray};
+use arrow::array::{
+    ArrayRef, Int64Array, LargeStringArray, LargeStringBuilder, StringArray,
+    TimestampNanosecondArray,
+};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use datafusion::datasource::TableProvider;
@@ -67,6 +70,9 @@ async fn register_with(
     max_rows: usize,
     max_text_bytes: usize,
 ) -> Result<(), ApiError> {
+    // A case-insensitive substring test of the SQL text, before parsing. A view name inside a
+    // comment or a string literal also builds the view. That is accepted: the view is only read
+    // (one extra read), never wrong (D-J-15).
     let lower = sql.to_ascii_lowercase();
     if lower.contains("dataset_items") {
         let items =
@@ -288,15 +294,9 @@ fn dataset_items_table(items: &[ViewItem]) -> Result<Arc<dyn TableProvider>, Api
         Arc::new(StringArray::from(strings(items, |i| {
             Some(i.item_id.to_string())
         }))),
-        Arc::new(LargeStringArray::from(strings(items, |i| {
-            Some(i.input.clone())
-        }))),
-        Arc::new(LargeStringArray::from(strings(items, |i| {
-            i.expected_output.clone()
-        }))),
-        Arc::new(LargeStringArray::from(strings(items, |i| {
-            Some(i.metadata.clone())
-        }))),
+        Arc::new(large_strings(items, |i| Some(i.input.as_str()))),
+        Arc::new(large_strings(items, |i| i.expected_output.as_deref())),
+        Arc::new(large_strings(items, |i| Some(i.metadata.as_str()))),
         Arc::new(StringArray::from(strings(items, |i| {
             i.source_trace_id.map(|trace: TraceId| trace.to_string())
         }))),
@@ -347,14 +347,10 @@ fn experiment_items_table(rows: &[ViewRow]) -> Result<Arc<dyn TableProvider>, Ap
         Arc::new(StringArray::from(strings(rows, |r| {
             r.trace_id.map(|trace: TraceId| trace.to_string())
         }))),
-        Arc::new(LargeStringArray::from(strings(rows, |r| {
-            Some(r.input.clone())
-        }))),
-        Arc::new(LargeStringArray::from(strings(rows, |r| {
-            r.expected_output.clone()
-        }))),
-        Arc::new(LargeStringArray::from(strings(rows, |r| r.output.clone()))),
-        Arc::new(LargeStringArray::from(strings(rows, |r| r.error.clone()))),
+        Arc::new(large_strings(rows, |r| Some(r.input.as_str()))),
+        Arc::new(large_strings(rows, |r| r.expected_output.as_deref())),
+        Arc::new(large_strings(rows, |r| r.output.as_deref())),
+        Arc::new(large_strings(rows, |r| r.error.as_deref())),
         Arc::new(Int64Array::from(
             rows.iter().map(|r| r.latency_ns).collect::<Vec<_>>(),
         )),
@@ -366,6 +362,17 @@ fn experiment_items_table(rows: &[ViewRow]) -> Result<Arc<dyn TableProvider>, Ap
 /// The text of each row, from `value`.
 fn strings<T>(rows: &[T], value: impl Fn(&T) -> Option<String>) -> Vec<Option<String>> {
     rows.iter().map(value).collect()
+}
+
+/// A `LargeUtf8` column of the text `value` borrows from each row. The builder copies each text
+/// once, so no clone of the rows' text is made.
+fn large_strings<T>(rows: &[T], value: impl Fn(&T) -> Option<&str>) -> LargeStringArray {
+    let text_bytes: usize = rows.iter().filter_map(&value).map(str::len).sum();
+    let mut builder = LargeStringBuilder::with_capacity(rows.len(), text_bytes);
+    for row in rows {
+        builder.append_option(value(row));
+    }
+    builder.finish()
 }
 
 fn timestamp() -> DataType {

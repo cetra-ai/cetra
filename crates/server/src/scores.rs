@@ -189,14 +189,20 @@ pub(crate) async fn write(
         .collect();
     // Experiment ids must name an experiment of the project. The window does not apply: a late
     // flush of a hidden experiment's scores is accepted (D-J-14).
+    // An experiment deleted between this check and the write leaves its scores naming no
+    // experiment. Results ignore them, and no later check is made (D-J-12).
     let experiment_ids: BTreeSet<Uuid> =
         items.iter().filter_map(|item| item.experiment_id).collect();
+    let mut experiment_created: HashMap<Uuid, i64> = HashMap::new();
     if !experiment_ids.is_empty() {
         let ids: Vec<Uuid> = experiment_ids.into_iter().collect();
-        let known =
+        experiment_created =
             crate::meta::experiments::existing_ids(state.meta.reader(), project.id, &ids).await?;
         for (index, item) in items.iter().enumerate() {
-            if item.experiment_id.is_some_and(|id| !known.contains(&id)) {
+            if item
+                .experiment_id
+                .is_some_and(|id| !experiment_created.contains_key(&id))
+            {
                 errors.push(field(index, "experiment_id", "unknown experiment"));
             }
         }
@@ -255,8 +261,8 @@ pub(crate) async fn write(
     let rows: Vec<Score> = kept
         .into_iter()
         .map(|pending| {
-            let (created_at, updated_at) = times(pending.id, now, &live);
             let Pending { id, source, item } = pending;
+            let (derived, updated_at) = times(id, now, &live);
             let ScoreCreate {
                 target,
                 session_id,
@@ -269,6 +275,11 @@ pub(crate) async fn write(
                 dataset_item_id,
                 ..
             } = item;
+            // An experiment score is at least as old as its experiment (D-J-13): a client's
+            // clock may stamp a v7 id before the experiment was created.
+            let created_at = experiment_id
+                .and_then(|experiment| experiment_created.get(&experiment).copied())
+                .map_or(derived, |started| derived.max(started));
             let session_id = match target {
                 ScoreTarget::Session { .. } => None,
                 ScoreTarget::Span { .. } | ScoreTarget::Trace { .. } => session_id,

@@ -13,7 +13,10 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page};
-use llmobs_storage::{QueryContext, experiment_scores, experiment_traces};
+use llmobs_storage::{
+    MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, QueryContext, RunError, experiment_scores,
+    experiment_traces,
+};
 
 use crate::api::experiments::{
     CLOCK_SKEW_NS, CREATE_ITEMS_PAGE, CompareParams, CreateExperimentRequest,
@@ -27,7 +30,8 @@ use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::datasets::check_description;
 use crate::experiments::{
-    Loaded, compare, compare_items, parse_results_cursor, result_rows, summary, visible_from,
+    Loaded, PAGE_BYTES, compare, compare_items, page_bytes, page_len, parse_results_cursor,
+    result_rows, summary, visible_from,
 };
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
@@ -317,6 +321,9 @@ async fn get_experiment(
     Ok(error::Json(experiment_json(&row)?))
 }
 
+/// Creates an experiment (D-J-10). The first item page is read after the create transaction, so
+/// it may list fewer items than `item_count` if a cascade deleted a copied revision in between
+/// (accepted).
 async fn create_experiment(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -612,8 +619,9 @@ async fn post_results(
     }
 }
 
-/// The results write (D-J-10). The repetition check and the deletion guard run after the
-/// experiment is read, inside this transaction. A deletion's resolve write (D-J-9) is serialized
+/// The results write (D-J-10). Inside this transaction the experiment is read, then its status
+/// is checked (a finished one is a 409, before any other check), then the repetition check and
+/// the deletion guard run. A deletion's resolve write (D-J-9) is serialized
 /// with this transaction: a block recorded before the guard check below skips the result, and a
 /// deletion recorded after it runs its cascade after this commit, which removes these rows.
 async fn results_tx(
@@ -628,6 +636,9 @@ async fn results_tx(
     let Some(experiment) = store::get_tx(conn, project, id, visible).await? else {
         return Ok(Err(ResultsRefusal::NotFound));
     };
+    if experiment.status != "running" {
+        return Err(MetaError::Conflict("the experiment is finished"));
+    }
     let repetitions = experiment.repetitions;
     let mut errors = Vec::new();
     for result in &results {
@@ -656,9 +667,6 @@ async fn results_tx(
         } else {
             kept.push(result);
         }
-    }
-    if experiment.status != "running" {
-        return Err(MetaError::Conflict("the experiment is finished"));
     }
     let Some(dataset) = experiment.dataset_id else {
         return Err(MetaError::Conflict("the experiment's dataset was deleted"));
@@ -775,10 +783,28 @@ async fn finish_write(
     Ok(Some((current, false)))
 }
 
+/// The items a compare reads from storage at a time, so a page's text is never all in memory at
+/// once (D-J-13).
+const COMPARE_READ_CHUNK: usize = 50;
 /// The regression threshold of a comparison when the query names none (D-J-13).
 const DEFAULT_THRESHOLD: f64 = 0.1;
 /// The largest regression threshold a comparison takes (D-J-13).
 const MAX_THRESHOLD: f64 = 1_000.0;
+
+/// The 400 of an experiment that is too large to summarize. Storage refuses a read with
+/// `InvalidRequest` only past its score or trace cap (D-J-13), and the experiment id is a
+/// formatted UUID, so no other `InvalidRequest` reaches this mapping.
+fn too_large(error: RunError) -> ApiError {
+    match error {
+        RunError::InvalidRequest(_) => ApiError::BadRequest {
+            detail: Some(format!(
+                "the experiment is too large to summarize: it has more than {MAX_EXPERIMENT_SCORES} scores or {MAX_EXPERIMENT_TRACES} traces"
+            )),
+            errors: Vec::new(),
+        },
+        other => ApiError::from(other),
+    }
+}
 
 /// Loads one experiment: its result keys, and its scores and traces from storage, read from the
 /// experiment's `created_at` less the clock skew (D-J-13).
@@ -791,14 +817,13 @@ async fn load(
     let keys = store::result_keys(state.meta.reader(), row.id).await?;
     let since = row.created_at.saturating_sub(CLOCK_SKEW_NS);
     let id = row.id.to_string();
-    let scores = experiment_scores(ctx, &id, since, deadline.remaining()?).await?;
-    let traces = experiment_traces(ctx, &id, since, deadline.remaining()?).await?;
-    Ok(Loaded {
-        experiment: row,
-        keys,
-        scores,
-        traces,
-    })
+    let scores = experiment_scores(ctx, &id, since, deadline.remaining()?)
+        .await
+        .map_err(too_large)?;
+    let traces = experiment_traces(ctx, &id, since, deadline.remaining()?)
+        .await
+        .map_err(too_large)?;
+    Loaded::new(row, keys, &scores, &traces)
 }
 
 async fn get_results(
@@ -830,8 +855,10 @@ async fn get_results(
         i64::from(params.limit.get()) + 1,
     )
     .await?;
-    let more = page.len() > limit;
-    page.truncate(limit);
+    // The page holds at most `limit` rows and at most PAGE_BYTES of text (D-J-13).
+    let kept = page_len(page.iter().take(limit).map(page_bytes));
+    let more = kept < page.len();
+    page.truncate(kept);
     let next_cursor = if more {
         page.last()
             .map(|last| format!("{}:{}", last.dataset_item_id, last.repetition))
@@ -892,8 +919,18 @@ async fn compare_experiments(
     for id in &ids {
         rows.push(found.remove(id).ok_or(ApiError::NotFound)?);
     }
-    let dataset = rows.first().and_then(|row| row.dataset_id);
-    if dataset.is_none() || rows.iter().any(|row| row.dataset_id != dataset) {
+    // The experiments must share one dataset. Experiments of a deleted dataset have no id, so
+    // they share one when they have the same name (D-J-10).
+    let same_dataset = match rows.split_first() {
+        Some((first, rest)) => match first.dataset_id {
+            Some(dataset) => rest.iter().all(|row| row.dataset_id == Some(dataset)),
+            None => rest
+                .iter()
+                .all(|row| row.dataset_id.is_none() && row.dataset_name == first.dataset_name),
+        },
+        None => false,
+    };
+    if !same_dataset {
         return Err(ApiError::BadRequest {
             detail: None,
             errors: vec![field_error(
@@ -909,21 +946,56 @@ async fn compare_experiments(
         loaded.push(load(&state, &ctx, row, deadline).await?);
     }
     let limit = params.limit.get() as usize;
-    let (items, next_cursor) = compare_items(
+    let (items, mut next_cursor) = compare_items(
         &loaded,
         threshold,
         params.regressions_only,
         limit,
         params.cursor.as_deref(),
     )?;
-    let mut texts = Vec::with_capacity(loaded.len());
-    for experiment in &loaded {
-        texts.push(store::item_rows(state.meta.reader(), experiment.experiment.id, &items).await?);
+    // The rows are read a chunk of items at a time. The page keeps items while its text is under
+    // PAGE_BYTES (D-J-13), and its first item is always kept.
+    let mut kept: Vec<Uuid> = Vec::new();
+    let mut texts: Vec<Vec<crate::meta::experiments::ResultRow>> = vec![Vec::new(); loaded.len()];
+    let mut total = 0usize;
+    for chunk in items.chunks(COMPARE_READ_CHUNK) {
+        let mut chunk_rows = Vec::with_capacity(loaded.len());
+        for experiment in &loaded {
+            chunk_rows.push(
+                store::item_rows(state.meta.reader(), experiment.experiment.id, chunk).await?,
+            );
+        }
+        let mut cut = false;
+        for item in chunk {
+            if !kept.is_empty() && total >= PAGE_BYTES {
+                cut = true;
+                break;
+            }
+            let bytes: usize = chunk_rows
+                .iter()
+                .flatten()
+                .filter(|row| row.dataset_item_id == *item)
+                .map(page_bytes)
+                .sum();
+            total = total.saturating_add(bytes);
+            kept.push(*item);
+            for (index, rows) in chunk_rows.iter().enumerate() {
+                texts[index].extend(
+                    rows.iter()
+                        .filter(|row| row.dataset_item_id == *item)
+                        .cloned(),
+                );
+            }
+        }
+        if cut {
+            next_cursor = kept.last().map(Uuid::to_string);
+            break;
+        }
     }
     Ok(error::Json(compare(
         &loaded,
         &texts,
-        &items,
+        &kept,
         threshold,
         next_cursor,
     )?))
@@ -1060,6 +1132,16 @@ mod tests {
         )
         .header("cookie", &seeded.cookie)
         .json(&body)
+        .send()
+        .await
+    }
+
+    async fn delete_dataset(app: &TestApp, seeded: &Seeded, name: &str) -> TestResponse {
+        app.request(
+            Method::DELETE,
+            &format!("/api/v1/projects/{}/datasets/{name}", seeded.project.id),
+        )
+        .header("cookie", &seeded.cookie)
         .send()
         .await
     }
@@ -1632,6 +1714,242 @@ mod tests {
 
         let bad = results_get(&app, &seeded, experiment, "?cursor=x").await;
         assert_eq!(fields(&bad), vec!["cursor".to_owned()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_pages_stop_at_16_mib_of_text() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 10).await;
+        let id = create_ok(
+            &app,
+            &seeded,
+            json!({ "name": "run", "dataset": "faq", "repetitions": 10 }),
+        )
+        .await
+        .experiment
+        .id;
+        // 100 rows of 200 KiB output: 20 MiB, in two posts under the 32 MiB cap.
+        let big = "x".repeat(200 * 1024);
+        let results: Vec<Value> = (0..100usize)
+            .map(|i| result(ids[i % 10], (i / 10) as i64, &big))
+            .collect();
+        stored(&app, &seeded, id, json!(results[..50])).await;
+        stored(&app, &seeded, id, json!(results[50..])).await;
+
+        // Each row is 200 KiB plus its 17-byte input. The 82nd row takes the page past 16 MiB.
+        let first: Value = results_get(&app, &seeded, id, "?limit=100").await.json();
+        assert_eq!(rows_len(&first), 82);
+        let cursor = first["next_cursor"].as_str().unwrap_or_default().to_owned();
+        assert!(!cursor.is_empty());
+        let second: Value = results_get(&app, &seeded, id, &format!("?limit=100&cursor={cursor}"))
+            .await
+            .json();
+        assert_eq!(rows_len(&second), 18);
+        assert!(second["next_cursor"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_cells_hold_the_lowest_repetition_and_any_error() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 1).await;
+        let first = create_ok(
+            &app,
+            &seeded,
+            json!({ "name": "a", "dataset": "faq", "repetitions": 3 }),
+        )
+        .await
+        .experiment
+        .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        stored(
+            &app,
+            &seeded,
+            first,
+            json!([
+                result(ids[0], 0, "zero"),
+                result(ids[0], 1, "one"),
+                { "dataset_item_id": ids[0], "repetition": 2, "output": "two", "error": "boom" }
+            ]),
+        )
+        .await;
+        stored(&app, &seeded, second, json!([result(ids[0], 0, "b")])).await;
+
+        let body: Value = compare_get(&app, &seeded, &format!("?ids={first},{second}"))
+            .await
+            .json();
+        let cells = body["rows"][0]["cells"]
+            .as_array()
+            .expect("one row with cells");
+        assert_eq!(cells.len(), 2);
+        // The cell is the lowest repetition's output, with the error of the repetition that failed.
+        assert_eq!(cells[0]["output"], "zero");
+        assert_eq!(cells[0]["error"], "boom");
+        assert_eq!(cells[1]["output"], "b");
+        assert!(cells[1]["error"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiment_scores_are_not_older_than_their_experiment() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 1).await;
+        let experiment = create_ok(&app, &seeded, json!({ "name": "run", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        // A client's clock stamped the score id a day before the experiment existed.
+        const DAY_MS: u64 = 24 * 3600 * 1000;
+        let created_ms = (app.state.clock.now_ns() / 1_000_000) as u64;
+        let score_id =
+            uuid::Builder::from_unix_timestamp_millis(created_ms - DAY_MS, &[0; 10]).into_uuid();
+        let trace = trace_of(7);
+        let mut score = experiment_score(
+            trace,
+            experiment,
+            ids[0],
+            "exact",
+            ScoreValue::Boolean(true),
+        );
+        score.score_id = Some(score_id);
+        write_scores_of(&app, &seeded, vec![score]).await;
+        // The row has the score's trace, so the score joins it.
+        let posted = post_results(
+            &app,
+            &seeded,
+            experiment,
+            json!([{ "dataset_item_id": ids[0], "repetition": 0, "trace_id": trace, "output": "a" }]),
+        )
+        .await;
+        assert_eq!(posted.status, 200);
+
+        let body: Value = results_get(&app, &seeded, experiment, "").await.json();
+        assert_eq!(body["rows"][0]["scores"]["exact"]["value_num"], 1.0);
+        assert_eq!(body["summary"]["scores"][0]["count"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_after_finish_are_conflicts_before_the_repetition_check() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 1).await;
+        let experiment = create_ok(&app, &seeded, json!({ "name": "run", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let finished = finish(&app, &seeded, experiment, json!({})).await;
+        assert_eq!(finished.status, 200);
+        // Repetition 9 is out of range for a one-repetition experiment, but the finish comes first.
+        let posted = post_results(&app, &seeded, experiment, json!([result(ids[0], 9, "a")])).await;
+        assert_eq!(posted.status, 409);
+    }
+
+    #[test]
+    fn a_storage_cap_is_a_too_large_400() {
+        let error = too_large(RunError::InvalidRequest(
+            "experiment has more than 500000 scores".to_owned(),
+        ));
+        match error {
+            ApiError::BadRequest {
+                detail: Some(message),
+                ..
+            } => assert!(message.contains("too large to summarize")),
+            _ => panic!("a 400 with the too-large message"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_body_over_40_mib_is_413() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 1).await;
+        let experiment = create_ok(&app, &seeded, json!({ "name": "run", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let big = "x".repeat(41 * 1024 * 1024);
+        let posted =
+            post_results(&app, &seeded, experiment, json!([result(ids[0], 0, &big)])).await;
+        assert_eq!(posted.status, 413);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_of_deleted_datasets_needs_one_name() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        dataset_with_items(&app, &seeded, "other", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let third = create_ok(&app, &seeded, json!({ "name": "c", "dataset": "other" }))
+            .await
+            .experiment
+            .id;
+        assert_eq!(delete_dataset(&app, &seeded, "faq").await.status, 204);
+
+        // Both experiments of the deleted "faq" share its name, so they compare.
+        let same_name = compare_get(&app, &seeded, &format!("?ids={first},{second}")).await;
+        assert_eq!(
+            same_name.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&same_name.body)
+        );
+        // A deleted dataset and a live one do not mix.
+        let mixed = compare_get(&app, &seeded, &format!("?ids={first},{third}")).await;
+        assert_eq!(fields(&mixed), vec!["ids".to_owned()]);
+
+        assert_eq!(delete_dataset(&app, &seeded, "other").await.status, 204);
+        // Two deleted datasets with different names do not compare.
+        let other_names = compare_get(&app, &seeded, &format!("?ids={first},{third}")).await;
+        assert_eq!(fields(&other_names), vec!["ids".to_owned()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_counts_results_per_experiment() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 2).await;
+        let counted = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" })).await;
+        stored(
+            &app,
+            &seeded,
+            counted,
+            json!([result(ids[0], 0, "x"), result(ids[1], 0, "y")]),
+        )
+        .await;
+        let page: Value = app
+            .request(Method::GET, &base(&seeded))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await
+            .json();
+        let data = page["data"].as_array().expect("a page");
+        let row_of = |id: Uuid| {
+            data.iter()
+                .find(|row| row["id"] == json!(id))
+                .expect("the experiment is listed")
+        };
+        assert_eq!(row_of(counted)["result_count"], 2);
+        let other = data
+            .iter()
+            .find(|row| row["id"] != json!(counted))
+            .expect("the other experiment");
+        assert_eq!(other["result_count"], 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
