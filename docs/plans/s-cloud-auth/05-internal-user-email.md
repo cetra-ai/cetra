@@ -17,7 +17,7 @@
 
 **Check first:** `InternalUserRef` in `api/internal.rs` has the single field `pub subject: String`, and `managed_user` in `internal_users.rs` has the signature `async fn managed_user(state: &AppState, subject: &str) -> Result<Option<Uuid>, ApiError>`. If not, stop and report.
 
-S5 does not depend on S1–S4 and edits no file they edit except `docs/spec/09-api.md` (another row) and `CHANGELOG.md`; it runs last because it holds the track's closeout (step 7).
+S5 does not depend on S1–S4 and edits no file they edit except `docs/spec/09-api.md` (another row), `CHANGELOG.md`, and the generated `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (run `just openapi` on top of whatever S2 left); it runs last because it holds the track's closeout (step 7).
 
 ## Files
 
@@ -55,7 +55,7 @@ The field is required: the control plane always sends it (R21). There is no othe
 
 ### 2. `managed_user` (`routes/internal_users.rs`)
 
-1. Imports: add `use crate::meta::identities::user_identities;` (next to `identity_user`), `use crate::meta::users::{normalize_email, user_by_email};` (merge with the existing `use crate::meta::users::{self, user_by_id};` into `use crate::meta::users::{self, normalize_email, user_by_email, user_by_id};`), and `field_error` in `use crate::http::error::{self, ApiError, field_error};`.
+1. Imports: change `use crate::meta::identities::identity_user;` to `use crate::meta::identities::{identity_user, user_identities};`, `use crate::meta::users::{normalize_email, user_by_email};` (merge with the existing `use crate::meta::users::{self, user_by_id};` into `use crate::meta::users::{self, normalize_email, user_by_email, user_by_id};`), and `field_error` in `use crate::http::error::{self, ApiError, field_error};`.
 
 2. Add above `managed_user`:
 
@@ -169,7 +169,12 @@ The field is required: the control plane always sends it (R21). There is no othe
 
 ### 3. Tests (`routes/internal_users.rs`, `mod tests`)
 
-1. `post_user` gains an `email: &str` parameter and sends `json!({ "subject": subject, "email": email })`. Every existing call passes the email of the user it names (the `linked_user` email of that test, e.g. `"rev@example.com"` with `"sub-rev"`); calls with an unknown subject (`"nobody"`, `"sub-other"`) pass `"nobody@example.com"`. The two raw requests in `needs_the_users_scope` send `json!({ "subject": "sub-scope", "email": "scope@example.com" })`. All existing tests keep their assertions.
+1. `post_user` gains an `email: &str` parameter after `subject` and sends `json!({ "subject": subject, "email": email })`. Update every existing call with these emails (line numbers as of this plan):
+   - `"sub-rev"` → `"rev@example.com"` (revoke test); `"sub-dis"` → `"dis@example.com"`; both `"sub-twice"` calls → `"twice@example.com"`; both `"sub-del"` calls → `"del@example.com"`; `"sub-quiet"` → `"quiet@example.com"`; `"sub-admin"` (loop) → `"admin@example.com"`; `"sub-scope"` (loop, `usage` token) → `"scope@example.com"`;
+   - the three `"nobody"` calls of `unknown_subjects` → `"nobody@example.com"`;
+   - the `"sub-other"` call of `only_the_control_plane_provider_is_matched` → `"prov@example.com"`. That user is linked at the control plane's provider under `"sub-prov"`, so it also proves the email path refuses a user linked under another subject: the test's 404 must still hold.
+
+   The two raw requests in `needs_the_users_scope` send `json!({ "subject": "sub-scope", "email": "scope@example.com" })`. All existing tests keep their assertions.
 
 2. Add a helper (a user with no identity, as Q's `POST /api/internal/v1/orgs` creates one):
 
@@ -203,14 +208,14 @@ The field is required: the control plane always sends it (R21). There is no othe
 
 3. New tests:
    - `delete_falls_back_to_the_normalized_email`: `user = email_only_user(&app, "owner@example.com")`, `sole = own_org(&app, user, "Solo", "solo")`; `post_user(&app, "delete", &token, "sub-never-seen", "  Owner@Example.COM ")` answers 200 with `json!({ "sole_owner_of": [sole.to_string()] })`; `user_row(&app, user)` is `None`.
-   - `revoke_and_disable_fall_back_to_the_email`: an email-only user with a personal token (`app.personal_token(user, false)`) and an org; `revoke` with an unknown subject and the email answers 204 and the token then gets 401 on `orgs_with`; `disable` the same way answers 204 and `user_row(…).disabled_at` is `Some`.
+   - `revoke_and_disable_fall_back_to_the_email`: two email-only users, `rev-mail@example.com` and `dis-mail@example.com`, each owning an org and holding a personal token (`app.personal_token(user, false)`, which answers 200 on `orgs_with` first). `revoke` with subject `"sub-unknown"` and the first email answers 204, its token then gets 401 on `orgs_with`, and its `disabled_at` stays `None`. `disable` with `"sub-unknown"` and the second email answers 204, its token gets 401, and its `user_row(…).disabled_at` is `Some`.
    - `the_subject_wins_over_the_email`: `a = linked_user(&app, "a@example.com", "sub-a", false)`, `b = email_only_user(&app, "b@example.com")`; `delete` with `"sub-a"` and `"b@example.com"` deletes `a` and leaves `b`.
    - `an_email_linked_under_another_subject_is_unknown`: `linked_user(&app, "linked@example.com", "sub-real", false)`; `revoke` and `disable` with `"sub-wrong"` and `"linked@example.com"` answer 404; `delete` answers 200 with `{"sole_owner_of": []}`; the user still exists and its session (`session_me` with its cookie) still answers 200.
    - `an_email_linked_only_to_another_provider_is_found`: an email-only user given an identity at `"oidc:other"` (as `only_the_control_plane_provider_is_matched` inserts one); `revoke` with an unknown subject and its email answers 204.
    - `instance_admins_are_refused_by_email`: an email-only user made instance admin (`crate::test_support::make_instance_admin(&app, id)`, import it); each route with an unknown subject and its email answers 403 `forbidden`; the user is not disabled.
    - `an_invalid_email_is_refused_only_when_used`: with an unknown subject and `"not-an-email"`, each route answers 400 and `problem().errors[0].field == "email"`; with a known subject (`linked_user` …`"sub-ok"`) and `"not-an-email"`, `revoke` answers 204.
    - `the_email_is_required`: a raw request `json!({ "subject": "sub-x" })` to `users/revoke` with a `users` token answers 400.
-   - Extend `delete_logs_no_identity_details`: the logs also contain `matched`. Add `delete_by_email_logs_no_email`: an email-only user `quiet2@example.com` deleted with subject `"sub-unknown"` and its email, inside `capture_logs`; the logs contain `user deleted` and `matched`, and contain neither `quiet2@example.com` nor `sub-unknown`.
+   - Extend `delete_logs_no_identity_details`: the logs also contain `matched=subject`. Add `delete_by_email_logs_no_email`: an email-only user `quiet2@example.com` deleted with subject `"sub-unknown"` and its email, inside `capture_logs`; the logs contain `user deleted` and `matched=email`, and contain neither `quiet2@example.com` nor `sub-unknown`. (`matched = matched.as_str()` renders as `matched=email` in the captured fmt output; if the capture renders it quoted, assert on that exact form and say so in the report.)
 
 ### 4. OpenAPI descriptions (`api/openapi.rs`)
 
