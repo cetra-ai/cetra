@@ -1024,6 +1024,118 @@ async fn every_drop_hook_survives_a_lossy_crash() {
     }
 }
 
+/// Run alone by `just lazyfs` (R2.12), never by `just test`. Every child of the five groups
+/// runs on a LazyFS mount, and after each child exits LazyFS drops its unsynced writes, so the
+/// checks see what a power loss on the real binary leaves. Needs `LLMOBS_LAZYFS_DIR` (a
+/// directory on the mount), `LLMOBS_LAZYFS_FIFO` and `LLMOBS_LAZYFS_DONE`; without them it
+/// returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a LazyFS mount: `just lazyfs`"]
+async fn every_hook_survives_lazyfs() {
+    let (Some(root), Some(fifo), Some(done)) = (
+        std::env::var_os("LLMOBS_LAZYFS_DIR"),
+        std::env::var_os("LLMOBS_LAZYFS_FIFO"),
+        std::env::var_os("LLMOBS_LAZYFS_DONE"),
+    ) else {
+        return;
+    };
+    let (fifo, done) = (Path::new(&fifo), Path::new(&done));
+    for (name, _) in POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::child",
+            "LLMOBS_FLUSH_CRASH_DIR",
+            "LLMOBS_FLUSH_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_flush(dir.path(), name).await;
+    }
+    for (name, _) in COMPACTION_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::compaction_child",
+            "LLMOBS_COMPACTION_CRASH_DIR",
+            "LLMOBS_COMPACTION_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_compaction(dir.path(), name).await;
+    }
+    for (name, _) in DELETION_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::deletion_child",
+            "LLMOBS_DELETION_CRASH_DIR",
+            "LLMOBS_DELETION_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_deletion(dir.path(), name).await;
+    }
+    for (name, _) in MEDIA_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::media_child",
+            "LLMOBS_MEDIA_CRASH_DIR",
+            "LLMOBS_MEDIA_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_media(dir.path(), name).await;
+    }
+    for (name, _) in DROP_POINTS {
+        let dir = tempfile::tempdir_in(&root).unwrap();
+        run_child(
+            "crash_tests::drop_child",
+            "LLMOBS_DROP_CRASH_DIR",
+            "LLMOBS_DROP_CRASH_POINT",
+            name,
+            dir.path(),
+            &[],
+        );
+        lazyfs_clear_cache(fifo, done);
+        check_drop(dir.path(), name).await;
+    }
+}
+
+/// LazyFS's power loss (R2.12): writes `lazyfs::clear-cache` to `fifo` and waits, at most 30 s,
+/// for one line on `done`. The copy in `tests/crash.rs` does the same; integration tests cannot
+/// reach this module.
+fn lazyfs_clear_cache(fifo: &Path, done: &Path) {
+    let (fifo, done) = (fifo.to_owned(), done.to_owned());
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(send_clear_cache(&fifo, &done));
+    });
+    match received.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("lazyfs clear-cache failed: {error}"),
+        Err(_) => panic!("lazyfs did not acknowledge clear-cache within 30s"),
+    }
+}
+
+fn send_clear_cache(fifo: &Path, done: &Path) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(fifo)?
+        .write_all(b"lazyfs::clear-cache\n")?;
+    let mut line = String::new();
+    if BufReader::new(std::fs::File::open(done)?).read_line(&mut line)? == 0 {
+        return Err(std::io::Error::other("the done FIFO closed without a line"));
+    }
+    Ok(())
+}
+
 /// `obsolete` and `staged_objects` row counts of `catalog.db`.
 async fn catalog_counts(dir: &Path) -> (i64, i64) {
     let mut connection = connect_readonly(dir).await;

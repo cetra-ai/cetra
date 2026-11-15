@@ -4,13 +4,17 @@
 //! is ignored unless this parent starts it. After each kill the parent checks
 //! acknowledged rows, catalog files, and `flushed_seq`. A last open collects
 //! staged objects with a zero age.
+//!
+//! On a LazyFS mount (`just lazyfs`, R2.12), `LLMOBS_CRASH_DIR_ROOT` puts the
+//! directory on the mount, and `LLMOBS_CRASH_CLEAR_CACHE=<fifo>:<done fifo>`
+//! drops unsynced writes after each kill.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -236,7 +240,16 @@ fn crash_recovery() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_SEED);
-    let dir = tempfile::tempdir().unwrap();
+    let dir = match std::env::var_os("LLMOBS_CRASH_DIR_ROOT") {
+        Some(root) => tempfile::tempdir_in(root).unwrap(),
+        None => tempfile::tempdir().unwrap(),
+    };
+    let clear_cache = std::env::var("LLMOBS_CRASH_CLEAR_CACHE").ok().map(|value| {
+        let (fifo, done) = value
+            .split_once(':')
+            .expect("LLMOBS_CRASH_CLEAR_CACHE is <fifo>:<done fifo>");
+        (PathBuf::from(fifo), PathBuf::from(done))
+    });
     let mut state = seed;
     let mut flushed = (0_u64, 0_u64);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -272,6 +285,9 @@ fn crash_recovery() {
             status.code().is_none(),
             "crash child exited {status} at iteration {run}, seed {seed}"
         );
+        if let Some((fifo, done)) = &clear_cache {
+            clear_lazyfs_cache(fifo, done);
+        }
         let check = runtime.block_on(check_dir(dir.path(), &before, flushed, false));
         match check {
             Ok(next) => flushed = next,
@@ -284,6 +300,33 @@ fn crash_recovery() {
     runtime
         .block_on(finish_compaction(dir.path(), flushed))
         .unwrap_or_else(|error| panic!("final compaction after the crash run: {error}"));
+}
+
+/// LazyFS's power loss (R2.12): writes `lazyfs::clear-cache` to `fifo` and waits, at most 30 s,
+/// for one line on `done`. A copy of `crash_tests::lazyfs_clear_cache`, which integration tests
+/// cannot reach.
+fn clear_lazyfs_cache(fifo: &Path, done: &Path) {
+    let (fifo, done) = (fifo.to_owned(), done.to_owned());
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> std::io::Result<()> {
+            OpenOptions::new()
+                .write(true)
+                .open(&fifo)?
+                .write_all(b"lazyfs::clear-cache\n")?;
+            let mut line = String::new();
+            if std::io::BufReader::new(std::fs::File::open(&done)?).read_line(&mut line)? == 0 {
+                return Err(std::io::Error::other("the done FIFO closed without a line"));
+            }
+            Ok(())
+        })();
+        let _ = sent.send(result);
+    });
+    match received.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("lazyfs clear-cache failed: {error}"),
+        Err(_) => panic!("lazyfs did not acknowledge clear-cache within 30s"),
+    }
 }
 
 fn xorshift(state: &mut u64) -> u64 {
@@ -787,7 +830,7 @@ async fn finish_compaction(dir: &Path, flushed: (u64, u64)) -> Result<(), String
     Ok(())
 }
 
-fn temp_files(dir: &Path) -> Vec<std::path::PathBuf> {
+fn temp_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,

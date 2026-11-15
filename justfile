@@ -37,6 +37,11 @@ test:
 model cases="500":
     LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 
+# Cross-check the storage crash tests on LazyFS, which drops unsynced data at each crash (R2.12).
+# Needs FUSE 3 and `user_allow_other`: tools/lazyfs/README.md. Manual, not in `just test`.
+lazyfs:
+    tools/lazyfs/lazyfs.sh build && tools/lazyfs/lazyfs.sh run
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1

@@ -1,0 +1,22 @@
+# LazyFS config for tools/lazyfs/lazyfs.sh. `@WORK@` is the work directory.
+#
+# The keys are the ones R2.12 records from LazyFS's lazyfs/config/default.toml at the pinned
+# commit. They were not checked against that file when this was written: before the first
+# run, diff them with
+#   git -C "$LLMOBS_LAZYFS_HOME" show 3edad01aa936b81fed9bd64e47e725fc5ef6c977:lazyfs/config/default.toml
+# The template lists only the keys this check sets. A new pin needs the same diff.
+
+[faults]
+fifo_path="@WORK@/faults.fifo"
+fifo_path_completed="@WORK@/done.fifo"
+
+[cache]
+apply_eviction=false
+
+[cache.simple]
+custom_size="1gb"
+blocks_per_page=1
+
+[filesystem]
+log_all_operations=false
+logfile="@WORK@/lazyfs.log"
