@@ -128,6 +128,16 @@ fn check_map_layout(hot: &HotTail, hot_offset: u64) -> Result<()> {
     Ok(())
 }
 
+impl std::fmt::Debug for StrataFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StrataFile")
+            .field("path", &self.path)
+            .field("size", &self.size())
+            .field("row_count", &self.row_count())
+            .finish_non_exhaustive()
+    }
+}
+
 /// The items of one metadata wave, and where each item's bodies sit in the wave's segments.
 #[derive(Default)]
 pub(crate) struct MetadataPlan {

@@ -509,27 +509,30 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 ### S8. DataFusion integration
 
 **`StrataTable`.**
-- `StrataTable::new(store, files: Vec<Path>)` opens all files.
+- `StrataTable::open(store, paths, &Config)` opens the files concurrently; `StrataTable::new(files)` takes files already open. Every file must have the same schema and the same sort key.
 - `schema()` is the file schema with top-level Utf8 → Utf8View and Binary → BinaryView. This matches DataFusion's Parquet reader with `schema_force_view_types = true`; `StrataExec` casts its output.
 - `supports_filters_pushdown` returns, per filter expression:
 
-| Expression shape (after unwrapping `CAST`/`TRY_CAST` of a column or literal to a compatible type) | Result |
+| Expression shape | Result |
 |---|---|
-| `trace_id = <Binary/FixedSizeBinary literal of 16 B>`, `trace_id IN (…)` | `Exact` (key index + filter) |
-| `col {=,<,<=,>,>=,!=} literal`, `col IN (literals)`, `col IS [NOT] NULL`, `col BETWEEN`, with `col` a narrow column of a supported type, and timestamp literals of any timezone normalised to ns UTC | `Exact` |
+| `trace_id = <FixedSizeBinary literal of 16 B>` | `Exact` (key index + filter); lookup mode when it is the only filter |
+| `col {=,<,<=,>,>=,!=} literal` (either side), `col IN (literals)`, `col IS [NOT] NULL`, `col BETWEEN`, with `col` a narrow column of a comparable type, and timestamp literals of any timezone normalised to ns UTC | `Exact` |
 | `AND`, `OR`, `NOT` of `Exact` shapes | `Exact` |
-| `get_field(map_col, 'k') = literal`, with `k` promoted and `residual_hits = 0` in **every** file | `Exact` |
-| the same shape when some file has `k` in its residual (`residual_hits > 0`, or `k` not promoted) | `Inexact`: Strata prunes with the child column, and checks the residual for the rows that have one |
-| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Inexact` (DataFusion re-checks) |
-| anything else, `ILIKE` included | `Unsupported` |
+| `AND` or `OR` mixing `Exact` and `Inexact` terms | `Inexact` |
+| any `AND` or `OR` with a `No` term | `Unsupported` |
+| `get_field(map_col, 'k') = literal`, with `k` promoted and `residual_hits = 0` in **every** file | `Exact` (`MapKeyEq`): `get_field` returns the first entry with the key, so the same key in the residual would differ |
+| `get_field` in any other case, including `k` in some file's residual or not promoted | `Unsupported` |
+| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Inexact` (`Contains`; DataFusion re-checks) |
+| any `Cast` or `TRY_CAST` on the column, a non-literal operand, `ILIKE`, anything else | `Unsupported` (no unwrapping of casts) |
 
-- `scan()` translates the pushed filters to `Predicate`. For `trace_id` equality it calls `may_contain` on each file, drops the files whose filter says no, and then uses `lookup_scan`.
+- Literal types must match the column's file type exactly; a mismatched literal is `Unsupported`.
+- `scan()` translates the pushed filters to `Predicate` and leaves `Unsupported` filters to DataFusion. For `trace_id` equality it calls `may_contain` on each file and drops the files whose filter says no. It uses `lookup_scan` only when that filter is the only kept filter and there is no `limit`.
 - `scan()` needs the hot tails, so it opens the files (cached in `StrataTable`). Planning a lookup can therefore cost the open wave.
 
 **`StrataExec`.**
-- One partition per remaining file. When a `trace_id` filter leaves ≤ 1 file, it reports **1 partition**.
-- `output_ordering`: the sort key, truncated at the first sort column that is not in the projection.
-- `limit` is pushed into `scan`.
+- One partition per remaining file; with no file left, one partition that reads nothing. A `trace_id` lookup that leaves one file therefore reports 1 partition, as does one that leaves none.
+- `output_ordering`: the first sort-key column only, declared when that column is in the projection. Each partition reads at most one file, so the order holds per partition.
+- `limit` reaches `scan` only when DataFusion passes it, which it does only when every pushed filter is `Exact`.
 - Metrics, registered with `MetricBuilder`:
 
 | Metric | Kind |
@@ -539,8 +542,8 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 | `strata_bytes_fetched` | counter |
 | `strata_requests` | counter |
 | `strata_waves` | counter |
-| `strata_chunks_pruned` | counter |
-| `strata_frames_read` | counter |
+
+  The counters come from `IoStats` before and after each partition's read. Strata's `scan` does not report chunks pruned or frames read, so those two counters are dropped.
 
 ### S9. Fast paths (no DataFusion)
 

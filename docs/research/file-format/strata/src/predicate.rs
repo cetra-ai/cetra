@@ -256,7 +256,7 @@ pub(crate) const MAX_PREDICATE_NODES: usize = 4_096;
 /// Rejects a predicate deeper than [`MAX_PREDICATE_DEPTH`] or larger than
 /// [`MAX_PREDICATE_NODES`]. It walks the predicate with an explicit stack, so the check itself
 /// never recurses.
-fn check_size(p: &Predicate) -> Result<()> {
+pub(crate) fn check_size(p: &Predicate) -> Result<()> {
     let too_large = || StrataError::Unsupported {
         what: "predicate too large".to_string(),
     };

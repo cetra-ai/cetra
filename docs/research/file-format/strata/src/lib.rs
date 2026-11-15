@@ -17,7 +17,8 @@
 //! - predicates are bounded to depth 64 and 4,096 nodes; a column read returns at most 2^28
 //!   chunk ids; at most 64 ranged GETs of one wave are in flight; with a predicate, `limit`
 //!   does not bound the bytes fetched (M4F);
-//! - there is no DataFusion integration (M5).
+//! - a DataFusion `TableProvider` with exact filter pushdown, `Inexact` `LIKE` as `Contains`,
+//!   and `lookup_scan` for a `trace_id` equality (M5.1).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -40,6 +41,7 @@ mod segment;
 mod shred;
 
 mod config;
+mod datafusion;
 mod error;
 mod file;
 mod reader;
@@ -48,6 +50,7 @@ mod testgen;
 mod writer;
 
 pub use config::Config;
+pub use datafusion::{StrataExec, StrataTable, table_schema};
 pub use error::{Result, StrataError};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
