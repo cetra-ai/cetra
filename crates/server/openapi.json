@@ -13208,7 +13208,8 @@
         "enum": [
           "retention_management",
           "project_roles",
-          "sso_enforcement"
+          "sso_enforcement",
+          "org_sso"
         ]
       },
       "FeedbackRequest": {

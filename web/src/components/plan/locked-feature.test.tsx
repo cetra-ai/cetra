@@ -10,6 +10,14 @@ it("says what unlocks the feature", () => {
   );
 });
 
+it("says what unlocks single sign-on", () => {
+  render(<LockedFeature feature="org_sso" upgradeUrl={undefined} />);
+
+  expect(screen.getByRole("note", { name: "Locked feature" })).toHaveTextContent(
+    "Available with the Teams add-on or an enterprise licence.",
+  );
+});
+
 it("links to the upgrade page in a new tab", () => {
   render(<LockedFeature feature="sso_enforcement" upgradeUrl="https://up.example/billing" />);
 
