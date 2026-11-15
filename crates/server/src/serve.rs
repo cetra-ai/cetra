@@ -5,11 +5,12 @@
 //!
 //! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
 //! most [`DRAIN`], stops the usage loop (it finishes any flush in progress),
-//! aborts background tasks, waits at most [`COMMIT_WAIT`] for
-//! detached commits (D-G-38), flushes `last_used` and usage, gives storage
-//! [`STORAGE_SHUTDOWN`] (spec 12's 30 s flush budget; `Storage::shutdown` also
-//! caps each flush at 30 s), then closes `meta.db`. The worst case is 55 s,
-//! inside the 60 s grace period the packaging sets.
+//! aborts background tasks, waits at most [`COMMIT_WAIT`] for detached commits
+//! (D-G-38), and gives storage [`STORAGE_SHUTDOWN`] (spec 12's 30 s flush budget;
+//! `Storage::shutdown` also caps each flush at 30 s). The drain, the commit wait
+//! and the storage flush add up to 55 s, inside the 60 s grace period the
+//! packaging sets. The `last_used` and usage flushes and the `meta.db` close are
+//! short meta writes outside that bound.
 
 use std::future::Future;
 use std::io;

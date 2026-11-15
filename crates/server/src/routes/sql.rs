@@ -950,9 +950,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_query_past_its_timeout_is_422_query_timeout() {
         let (app, seeded) = loaded().await;
-        // Eight copies of the example's 14 spans, cross joined: about 1.5 * 10^9 rows, seconds of
-        // work against the 1 s limit. Summing a length keeps the engine from counting the join
-        // from statistics.
+        // Eight copies of the example's 14 spans, cross joined: about 1.5 * 10^9 rows, which takes
+        // minutes against the smallest limit the API accepts (1 s, `timeout_ms` is 1000..=60000).
+        // The join streams into a sum, so it stays within memory (a `query_too_large` would be a
+        // different answer). Summing a length keeps the engine from counting the join from
+        // statistics.
         let body = json!({
             "query": "SELECT sum(length(a.span_kind)) FROM spans AS a CROSS JOIN spans AS b \
                       CROSS JOIN spans AS c CROSS JOIN spans AS d CROSS JOIN spans AS e \
