@@ -47,6 +47,7 @@ base64.workspace = true
 openidconnect.workspace = true
 oauth2.workspace = true
 reqwest.workspace = true
+hickory-resolver.workspace = true
 hmac.workspace = true
 bytes.workspace = true
 flate2.workspace = true
