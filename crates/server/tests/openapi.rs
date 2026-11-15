@@ -573,6 +573,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_experiment",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/experiments/{id}/results",
+        "get_experiment_results",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/compare",
+        "compare_experiments",
+    ),
+    (
         "delete",
         "/api/v1/projects/{project}/experiments/{id}",
         "delete_experiment",
@@ -647,6 +657,8 @@ const READ_OPERATIONS: &[&str] = &[
     "get_user",
     "list_scores",
     "get_metrics",
+    "get_experiment_results",
+    "compare_experiments",
 ];
 
 const TAGS: &[&str] = &[
@@ -1341,8 +1353,10 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         .iter()
         .map(|page| format!("{page}.next_cursor"))
         .collect();
-    // An answer that is not a page, with an always-present cursor (D-J-10).
+    // Answers that are not pages, with an always-present cursor (D-J-10, D-J-13).
     expected.insert("CreateExperimentResponse.next_cursor".to_owned());
+    expected.insert("ExperimentResults.next_cursor".to_owned());
+    expected.insert("ExperimentComparison.next_cursor".to_owned());
     assert_eq!(required_nullable, expected);
 }
 

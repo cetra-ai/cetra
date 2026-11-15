@@ -67,9 +67,11 @@ use super::evaluators::{
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::experiments::{
-    CreateExperimentRequest, CreateExperimentResponse, Experiment, ExperimentListParams,
-    ExperimentResult, ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus,
-    FinishExperimentRequest,
+    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
+    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
+    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
+    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
+    ScoreSummary,
 };
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
@@ -320,6 +322,16 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<ExperimentResultsResponse>();
     set.insert::<FinishExperimentRequest>();
     set.insert_page::<Experiment>("ExperimentPage");
+    set.insert::<ExperimentSummary>();
+    set.insert::<ScoreSummary>();
+    set.insert::<ResultScore>();
+    set.insert::<ResultRow>();
+    set.insert::<ExperimentResults>();
+    set.insert::<CompareCell>();
+    set.insert::<CompareRow>();
+    set.insert::<ScoreDelta>();
+    set.insert::<ScoreDeltas>();
+    set.insert::<ExperimentComparison>();
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -3035,6 +3047,29 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 429],
         ))
         .build();
+    let experiment_results = operation("get_experiment_results", "experiments", "Get results")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ResultsParams>(vec![
+            project_param(),
+            id.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResults>("The summary of the experiment and one page of its rows."),
+            READ_ERRORS,
+        ))
+        .build();
+    let compare = operation("compare_experiments", "experiments", "Compare experiments")
+        .description(Some(
+            "Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.",
+        ))
+        .parameters(Some(with_query::<CompareParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentComparison>("The comparison and one page of its items."),
+            READ_ERRORS,
+        ))
+        .build();
     let finish = operation(
         "post_experiment_finish",
         "experiments",
@@ -3073,6 +3108,14 @@ fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/experiments/{{id}}/finish"),
             PathItem::new(HttpMethod::Post, finish),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/results"),
+            PathItem::new(HttpMethod::Get, experiment_results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/compare"),
+            PathItem::new(HttpMethod::Get, compare),
         )
 }
 

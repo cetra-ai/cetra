@@ -1,5 +1,15 @@
 [
   {
+    "operation_id": "compare_experiments",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000e01,01900000-0000-7000-8000-000000000e02"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-comparison.json"
+  },
+  {
     "operation_id": "create_deletion",
     "path_params": {},
     "query": {},
@@ -119,6 +129,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiment.json"
+  },
+  {
+    "operation_id": "get_experiment_results",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000e01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-results.json"
   },
   {
     "operation_id": "get_invite_preview",

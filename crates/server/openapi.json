@@ -10053,6 +10053,156 @@
         }
       }
     },
+    "/api/v1/projects/{project}/experiments/compare": {
+      "get": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Compare experiments",
+        "description": "Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.",
+        "operationId": "compare_experiments",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "Two to four distinct experiment ids, comma-separated; the first is the baseline.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "threshold",
+            "in": "query",
+            "description": "The regression threshold, absolute, 0 to 1000 (default 0.1).",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            }
+          },
+          {
+            "name": "regressions_only",
+            "in": "query",
+            "description": "Keep only the items with a regressed cell.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The comparison and one page of its items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentComparison"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/experiments/{id}": {
       "get": {
         "tags": [
@@ -10445,6 +10595,147 @@
           },
           "429": {
             "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/experiments/{id}/results": {
+      "get": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Get results",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_experiment_results",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Experiment id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "errors_only",
+            "in": "query",
+            "description": "Keep only the rows with an error.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of rows to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The summary of the experiment and one page of its rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentResults"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -16456,6 +16747,82 @@
           "lte"
         ]
       },
+      "CompareCell": {
+        "type": "object",
+        "description": "One experiment's answer for one item.",
+        "required": [
+          "experiment_id",
+          "scores",
+          "regressed"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "The error of the item, from its lowest repetition or another one. Omitted when none."
+          },
+          "experiment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The experiment."
+          },
+          "latency_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The latency of the item's lowest repetition, in nanoseconds. Omitted when unknown."
+          },
+          "output": {
+            "description": "Any JSON value."
+          },
+          "regressed": {
+            "type": "boolean",
+            "description": "Whether this cell regressed against the baseline's cell of the same item. Always false\nfor the baseline."
+          },
+          "scores": {
+            "type": "object",
+            "description": "The mean over repetitions, per score name.",
+            "additionalProperties": {
+              "type": "number",
+              "format": "double"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "trace_id": {
+            "$ref": "#/components/schemas/TraceId",
+            "description": "The trace of the item's lowest repetition. Omitted when none."
+          }
+        }
+      },
+      "CompareRow": {
+        "type": "object",
+        "description": "One dataset item, with each experiment's cell.",
+        "required": [
+          "dataset_item_id",
+          "input",
+          "cells"
+        ],
+        "properties": {
+          "cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompareCell"
+            },
+            "description": "One cell per experiment that has a result for the item, in request order. Match cells by\n`experiment_id`, never by position (D-J-13)."
+          },
+          "dataset_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The dataset item."
+          },
+          "expected_output": {
+            "description": "Any JSON value."
+          },
+          "input": {
+            "description": "Any JSON value."
+          }
+        }
+      },
       "ConnectionStatus": {
         "type": "string",
         "description": "Whether the connection's last test reached the provider.",
@@ -18356,6 +18723,54 @@
           }
         }
       },
+      "ExperimentComparison": {
+        "type": "object",
+        "description": "`GET …/experiments/compare`: two to four experiments of one dataset, the first the baseline.",
+        "required": [
+          "experiments",
+          "deltas",
+          "warnings",
+          "rows",
+          "next_cursor"
+        ],
+        "properties": {
+          "deltas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScoreDeltas"
+            },
+            "description": "The deltas of each candidate."
+          },
+          "experiments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentSummary"
+            },
+            "description": "The experiments in request order; the first is the baseline."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor of the next page, or null on the last page. Always present."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompareRow"
+            },
+            "description": "One page of items, by item id."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Notes on the comparison, such as differing dataset versions or items left out of the\ndeltas."
+          }
+        }
+      },
       "ExperimentPage": {
         "type": "object",
         "description": "One page of results. `next_cursor` is null when there is no next page.",
@@ -18417,6 +18832,35 @@
         },
         "additionalProperties": false
       },
+      "ExperimentResults": {
+        "type": "object",
+        "description": "`GET …/experiments/{id}/results`: the summary, and one page of rows.",
+        "required": [
+          "summary",
+          "rows",
+          "next_cursor"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor of the next page, or null on the last page. Always present."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResultRow"
+            },
+            "description": "One page of rows, by item id then repetition."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ExperimentSummary",
+            "description": "The aggregated experiment."
+          }
+        }
+      },
       "ExperimentResultsRequest": {
         "type": "object",
         "description": "`POST …/experiments/{id}/items` body: 1 to 500 results.",
@@ -18462,6 +18906,59 @@
           "completed",
           "failed"
         ]
+      },
+      "ExperimentSummary": {
+        "type": "object",
+        "description": "The results of one experiment, aggregated.",
+        "required": [
+          "experiment",
+          "scores",
+          "result_count",
+          "error_count"
+        ],
+        "properties": {
+          "cost_total": {
+            "type": "number",
+            "format": "double",
+            "description": "The sum of the traces' costs. Omitted when no trace has a cost."
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results with an error."
+          },
+          "experiment": {
+            "$ref": "#/components/schemas/Experiment",
+            "description": "The experiment."
+          },
+          "latency_mean_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The mean latency. Omitted when no result has one."
+          },
+          "latency_p50_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The median latency, by nearest rank. Omitted when no result has one."
+          },
+          "latency_p95_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The 95th percentile latency, by nearest rank. Omitted when no result has one."
+          },
+          "result_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results stored."
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScoreSummary"
+            },
+            "description": "One entry per score name, sorted by name."
+          }
+        }
       },
       "Feature": {
         "type": "string",
@@ -20903,6 +21400,87 @@
         },
         "additionalProperties": false
       },
+      "ResultRow": {
+        "type": "object",
+        "description": "One result of an experiment, with its input and output.",
+        "required": [
+          "dataset_item_id",
+          "repetition",
+          "input",
+          "scores"
+        ],
+        "properties": {
+          "cost_total": {
+            "type": "number",
+            "format": "double",
+            "description": "The cost of the trace. Omitted when unpriced."
+          },
+          "dataset_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The dataset item."
+          },
+          "error": {
+            "type": "string",
+            "description": "What went wrong. Omitted when none."
+          },
+          "expected_output": {
+            "description": "Any JSON value."
+          },
+          "input": {
+            "description": "Any JSON value."
+          },
+          "latency_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The time the task took, in nanoseconds. Omitted when unknown."
+          },
+          "output": {
+            "description": "Any JSON value."
+          },
+          "repetition": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The repetition, 0 to `repetitions` − 1."
+          },
+          "scores": {
+            "type": "object",
+            "description": "The row's scores by name.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResultScore"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "trace_id": {
+            "$ref": "#/components/schemas/TraceId",
+            "description": "The trace of the task run. Omitted when none."
+          }
+        }
+      },
+      "ResultScore": {
+        "type": "object",
+        "description": "One score of a result row. The design calls it `ScoreValue`; core already has that name.",
+        "required": [
+          "data_type"
+        ],
+        "properties": {
+          "data_type": {
+            "$ref": "#/components/schemas/ScoreDataType",
+            "description": "The kind of value the score carries."
+          },
+          "value_num": {
+            "type": "number",
+            "format": "double",
+            "description": "The mean of the row's numeric values of this score. Omitted when none."
+          },
+          "value_str": {
+            "type": "string",
+            "description": "The label of a categorical score or the text of a text score. Omitted when none."
+          }
+        }
+      },
       "RuleSpend": {
         "type": "object",
         "description": "Spend of a rule budget in the current period.",
@@ -21429,6 +22007,51 @@
           }
         }
       },
+      "ScoreDelta": {
+        "type": "object",
+        "description": "One score's delta of a candidate to the baseline.",
+        "required": [
+          "delta",
+          "n_compared"
+        ],
+        "properties": {
+          "delta": {
+            "type": "number",
+            "format": "double",
+            "description": "The candidate's mean minus the baseline's, over the items both ran without error."
+          },
+          "n_compared": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The items that were compared."
+          }
+        }
+      },
+      "ScoreDeltas": {
+        "type": "object",
+        "description": "The deltas of one candidate, per score name.",
+        "required": [
+          "experiment_id",
+          "scores"
+        ],
+        "properties": {
+          "experiment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The candidate."
+          },
+          "scores": {
+            "type": "object",
+            "description": "One delta per score name with at least one compared item.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ScoreDelta"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ScorePage": {
         "type": "object",
         "description": "One page of results. `next_cursor` is null when there is no next page.",
@@ -21465,6 +22088,67 @@
           "check",
           "webhook"
         ]
+      },
+      "ScoreSummary": {
+        "type": "object",
+        "description": "One score of an experiment, over its rows.",
+        "required": [
+          "name",
+          "data_type",
+          "count",
+          "labels"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows with at least one score of this name."
+          },
+          "data_type": {
+            "$ref": "#/components/schemas/ScoreDataType",
+            "description": "The data type the experiment's scores of this name mostly carry."
+          },
+          "labels": {
+            "type": "object",
+            "description": "Categoricals only: the rows per label.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest value. Omitted when none."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "Numeric and categorical scores: the mean over the rows that have a value. Omitted when none."
+          },
+          "median": {
+            "type": "number",
+            "format": "double",
+            "description": "The median of the same values. Omitted when none."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The smallest value. Omitted when none."
+          },
+          "name": {
+            "type": "string",
+            "description": "The score's name."
+          },
+          "pass_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Booleans only: the share of rows that passed (the mean of 0 and 1). Omitted otherwise."
+          }
+        }
       },
       "ScoreTarget": {
         "oneOf": [

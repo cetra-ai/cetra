@@ -1,10 +1,13 @@
 //! Experiments API types (spec 09 § Datasets & experiments, D-J-10 to D-J-13).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use llmobs_core::enums::ScoreDataType;
 use llmobs_core::ids::TraceId;
 
 use super::common::{Limit, any_json};
@@ -186,6 +189,232 @@ pub struct ExperimentListParams {
     /// Keep one dataset's experiments: its id or name.
     #[serde(default)]
     pub dataset: Option<String>,
+    /// Maximum number of items to return (1–1000, default 50).
+    #[serde(default)]
+    #[param(minimum = 1, maximum = 1000, default = 50)]
+    pub limit: Limit,
+    /// Opaque cursor from a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// One score of a result row. The design calls it `ScoreValue`; core already has that name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ResultScore {
+    /// The kind of value the score carries.
+    pub data_type: ScoreDataType,
+    /// The mean of the row's numeric values of this score. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_num: Option<f64>,
+    /// The label of a categorical score or the text of a text score. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_str: Option<String>,
+}
+
+/// One score of an experiment, over its rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ScoreSummary {
+    /// The score's name.
+    pub name: String,
+    /// The data type the experiment's scores of this name mostly carry.
+    pub data_type: ScoreDataType,
+    /// Rows with at least one score of this name.
+    pub count: i64,
+    /// Numeric and categorical scores: the mean over the rows that have a value. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mean: Option<f64>,
+    /// The median of the same values. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub median: Option<f64>,
+    /// The smallest value. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    /// The largest value. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    /// Booleans only: the share of rows that passed (the mean of 0 and 1). Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_rate: Option<f64>,
+    /// Categoricals only: the rows per label.
+    pub labels: BTreeMap<String, i64>,
+}
+
+/// The results of one experiment, aggregated.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentSummary {
+    /// The experiment.
+    pub experiment: Experiment,
+    /// One entry per score name, sorted by name.
+    pub scores: Vec<ScoreSummary>,
+    /// Results stored.
+    pub result_count: i64,
+    /// Results with an error.
+    pub error_count: i64,
+    /// The mean latency. Omitted when no result has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_mean_ns: Option<i64>,
+    /// The median latency, by nearest rank. Omitted when no result has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ns: Option<i64>,
+    /// The 95th percentile latency, by nearest rank. Omitted when no result has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p95_ns: Option<i64>,
+    /// The sum of the traces' costs. Omitted when no trace has a cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_total: Option<f64>,
+}
+
+/// One result of an experiment, with its input and output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ResultRow {
+    /// The dataset item.
+    pub dataset_item_id: Uuid,
+    /// The repetition, 0 to `repetitions` − 1.
+    pub repetition: i64,
+    /// The item's input, from the pinned version.
+    #[schema(schema_with = any_json)]
+    pub input: Value,
+    /// The item's expected output, from the pinned version. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = any_json)]
+    pub expected_output: Option<Value>,
+    /// What the task answered. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = any_json)]
+    pub output: Option<Value>,
+    /// What went wrong. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The trace of the task run. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<TraceId>,
+    /// The time the task took, in nanoseconds. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ns: Option<i64>,
+    /// The cost of the trace. Omitted when unpriced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_total: Option<f64>,
+    /// The row's scores by name.
+    pub scores: BTreeMap<String, ResultScore>,
+}
+
+/// `GET …/experiments/{id}/results`: the summary, and one page of rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentResults {
+    /// The aggregated experiment.
+    pub summary: ExperimentSummary,
+    /// One page of rows, by item id then repetition.
+    pub rows: Vec<ResultRow>,
+    /// The cursor of the next page, or null on the last page. Always present.
+    #[schema(required)]
+    pub next_cursor: Option<String>,
+}
+
+/// One experiment's answer for one item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CompareCell {
+    /// The experiment.
+    pub experiment_id: Uuid,
+    /// The item's output in this experiment (its lowest repetition). Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = any_json)]
+    pub output: Option<Value>,
+    /// The error of the item, from its lowest repetition or another one. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The trace of the item's lowest repetition. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<TraceId>,
+    /// The latency of the item's lowest repetition, in nanoseconds. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ns: Option<i64>,
+    /// The mean over repetitions, per score name.
+    pub scores: BTreeMap<String, f64>,
+    /// Whether this cell regressed against the baseline's cell of the same item. Always false
+    /// for the baseline.
+    pub regressed: bool,
+}
+
+/// One dataset item, with each experiment's cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct CompareRow {
+    /// The dataset item.
+    pub dataset_item_id: Uuid,
+    /// The item's input, from the first experiment that has a result for it.
+    #[schema(schema_with = any_json)]
+    pub input: Value,
+    /// The item's expected output. Omitted when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = any_json)]
+    pub expected_output: Option<Value>,
+    /// One cell per experiment that has a result for the item, in request order. Match cells by
+    /// `experiment_id`, never by position (D-J-13).
+    pub cells: Vec<CompareCell>,
+}
+
+/// One score's delta of a candidate to the baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ScoreDelta {
+    /// The candidate's mean minus the baseline's, over the items both ran without error.
+    pub delta: f64,
+    /// The items that were compared.
+    pub n_compared: i64,
+}
+
+/// The deltas of one candidate, per score name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ScoreDeltas {
+    /// The candidate.
+    pub experiment_id: Uuid,
+    /// One delta per score name with at least one compared item.
+    pub scores: BTreeMap<String, ScoreDelta>,
+}
+
+/// `GET …/experiments/compare`: two to four experiments of one dataset, the first the baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExperimentComparison {
+    /// The experiments in request order; the first is the baseline.
+    pub experiments: Vec<ExperimentSummary>,
+    /// The deltas of each candidate.
+    pub deltas: Vec<ScoreDeltas>,
+    /// Notes on the comparison, such as differing dataset versions or items left out of the
+    /// deltas.
+    pub warnings: Vec<String>,
+    /// One page of items, by item id.
+    pub rows: Vec<CompareRow>,
+    /// The cursor of the next page, or null on the last page. Always present.
+    #[schema(required)]
+    pub next_cursor: Option<String>,
+}
+
+/// `GET …/experiments/{id}/results` query.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ResultsParams {
+    /// Keep only the rows with an error.
+    #[serde(default)]
+    pub errors_only: bool,
+    /// Maximum number of rows to return (1–1000, default 50).
+    #[serde(default)]
+    #[param(minimum = 1, maximum = 1000, default = 50)]
+    pub limit: Limit,
+    /// Opaque cursor from a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// `GET …/experiments/compare` query.
+#[derive(Debug, Clone, PartialEq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct CompareParams {
+    /// Two to four distinct experiment ids, comma-separated; the first is the baseline.
+    pub ids: String,
+    /// The regression threshold, absolute, 0 to 1000 (default 0.1).
+    #[serde(default)]
+    pub threshold: Option<f64>,
+    /// Keep only the items with a regressed cell.
+    #[serde(default)]
+    pub regressions_only: bool,
     /// Maximum number of items to return (1–1000, default 50).
     #[serde(default)]
     #[param(minimum = 1, maximum = 1000, default = 50)]

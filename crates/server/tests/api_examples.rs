@@ -32,7 +32,8 @@ use llmobs_server::api::evaluators::{
     EvaluatorTestResult,
 };
 use llmobs_server::api::experiments::{
-    CreateExperimentResponse, Experiment, ExperimentResultsRequest,
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
+    ExperimentResultsRequest,
 };
 use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
@@ -423,6 +424,8 @@ fn static_files_match_their_types() {
     roundtrip::<Page<Experiment>>("static/experiments.json");
     roundtrip::<Experiment>("static/experiment.json");
     roundtrip::<CreateExperimentResponse>("static/experiment-created.json");
+    roundtrip::<ExperimentResults>("static/experiment-results.json");
+    roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
@@ -636,6 +639,8 @@ fn generated_files_roundtrip() {
             "list_experiments" => roundtrip::<Page<Experiment>>(&example.file),
             "get_experiment" => roundtrip::<Experiment>(&example.file),
             "post_experiment" => roundtrip::<CreateExperimentResponse>(&example.file),
+            "get_experiment_results" => roundtrip::<ExperimentResults>(&example.file),
+            "compare_experiments" => roundtrip::<ExperimentComparison>(&example.file),
             "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
             "post_backfill" => roundtrip::<Backfill>(&example.file),
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),

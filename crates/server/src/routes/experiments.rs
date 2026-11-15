@@ -13,17 +13,22 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page};
+use llmobs_storage::{QueryContext, experiment_scores, experiment_traces};
+
 use crate::api::experiments::{
-    CREATE_ITEMS_PAGE, CreateExperimentRequest, CreateExperimentResponse, Experiment,
-    ExperimentListParams, ExperimentResult, ExperimentResultsRequest, ExperimentResultsResponse,
+    CLOCK_SKEW_NS, CREATE_ITEMS_PAGE, CompareParams, CreateExperimentRequest,
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentListParams,
+    ExperimentResult, ExperimentResults, ExperimentResultsRequest, ExperimentResultsResponse,
     ExperimentStatus, FinishExperimentRequest, MAX_ERROR_CHARS, MAX_EXPERIMENT_ROWS,
     MAX_METADATA_BYTES, MAX_NAME_CHARS, MAX_OUTPUT_BYTES, MAX_OUTPUTS_PER_REQUEST, MAX_REPETITIONS,
-    MAX_RESULTS_PER_REQUEST, RESULTS_BODY_LIMIT,
+    MAX_RESULTS_PER_REQUEST, RESULTS_BODY_LIMIT, ResultsParams,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::datasets::check_description;
-use crate::experiments::visible_from;
+use crate::experiments::{
+    Loaded, compare, compare_items, parse_results_cursor, result_rows, summary, visible_from,
+};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -35,6 +40,7 @@ use crate::meta::experiments::{
 };
 
 use super::datasets::{created_by, find, item_json};
+use super::read::{Deadline, open_query};
 
 /// Body limit of `POST …/experiments`: the name, the description and 64 KiB of metadata.
 const CREATE_BODY_LIMIT: usize = 256 * 1024;
@@ -103,6 +109,26 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: post(finish_experiment),
         },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/experiments/{id}/results",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_results),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/experiments/compare",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(compare_experiments),
+        },
     ]
 }
 
@@ -128,7 +154,7 @@ fn invalid(errors: Vec<FieldError>) -> ApiError {
     }
 }
 
-fn invalid_cursor() -> ApiError {
+pub(crate) fn invalid_cursor() -> ApiError {
     ApiError::BadRequest {
         detail: None,
         errors: vec![field_error("cursor", "invalid cursor")],
@@ -144,7 +170,7 @@ fn corrupt(column: &'static str) -> ApiError {
 
 /// API form of a stored experiment. Stored metadata or status that does not decode is
 /// `MetaError::Corrupt`.
-fn experiment_json(row: &ExperimentRow) -> Result<Experiment, ApiError> {
+pub(crate) fn experiment_json(row: &ExperimentRow) -> Result<Experiment, ApiError> {
     let metadata: Map<String, Value> =
         serde_json::from_str(&row.metadata).map_err(|_| corrupt("metadata"))?;
     let status = match row.status.as_str() {
@@ -749,6 +775,160 @@ async fn finish_write(
     Ok(Some((current, false)))
 }
 
+/// The regression threshold of a comparison when the query names none (D-J-13).
+const DEFAULT_THRESHOLD: f64 = 0.1;
+/// The largest regression threshold a comparison takes (D-J-13).
+const MAX_THRESHOLD: f64 = 1_000.0;
+
+/// Loads one experiment: its result keys, and its scores and traces from storage, read from the
+/// experiment's `created_at` less the clock skew (D-J-13).
+async fn load(
+    state: &AppState,
+    ctx: &QueryContext,
+    row: ExperimentRow,
+    deadline: Deadline,
+) -> Result<Loaded, ApiError> {
+    let keys = store::result_keys(state.meta.reader(), row.id).await?;
+    let since = row.created_at.saturating_sub(CLOCK_SKEW_NS);
+    let id = row.id.to_string();
+    let scores = experiment_scores(ctx, &id, since, deadline.remaining()?).await?;
+    let traces = experiment_traces(ctx, &id, since, deadline.remaining()?).await?;
+    Ok(Loaded {
+        experiment: row,
+        keys,
+        scores,
+        traces,
+    })
+}
+
+async fn get_results(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(ExperimentPath { id }): error::Path<ExperimentPath>,
+    error::Query(params): error::Query<ResultsParams>,
+) -> Result<error::Json<ExperimentResults>, ApiError> {
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let visible = visible_from(&state, org);
+    let row = store::get(state.meta.reader(), project, id, visible)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let after = params
+        .cursor
+        .as_deref()
+        .map(parse_results_cursor)
+        .transpose()?;
+    let ctx = open_query(&state, org, project, None).await?;
+    let loaded = load(&state, &ctx, row, Deadline::start()).await?;
+    let experiment_summary = summary(&loaded)?;
+    let limit = params.limit.get() as usize;
+    let mut page = store::results_page(
+        state.meta.reader(),
+        id,
+        after,
+        params.errors_only,
+        i64::from(params.limit.get()) + 1,
+    )
+    .await?;
+    let more = page.len() > limit;
+    page.truncate(limit);
+    let next_cursor = if more {
+        page.last()
+            .map(|last| format!("{}:{}", last.dataset_item_id, last.repetition))
+    } else {
+        None
+    };
+    let rows = result_rows(&loaded, &page)?;
+    Ok(error::Json(ExperimentResults {
+        summary: experiment_summary,
+        rows,
+        next_cursor,
+    }))
+}
+
+/// The ids of a comparison: two to four distinct experiment ids, in request order (400
+/// otherwise).
+fn compare_ids(raw: &str) -> Result<Vec<Uuid>, ApiError> {
+    let invalid = || ApiError::BadRequest {
+        detail: None,
+        errors: vec![field_error("ids", "ids must be 2 to 4 experiment ids")],
+    };
+    let ids = raw
+        .split(',')
+        .map(|part| part.trim().parse::<Uuid>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
+    let distinct: HashSet<Uuid> = ids.iter().copied().collect();
+    if (2..=4).contains(&ids.len()) && distinct.len() == ids.len() {
+        Ok(ids)
+    } else {
+        Err(invalid())
+    }
+}
+
+async fn compare_experiments(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Query(params): error::Query<CompareParams>,
+) -> Result<error::Json<ExperimentComparison>, ApiError> {
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let ids = compare_ids(&params.ids)?;
+    let threshold = params.threshold.unwrap_or(DEFAULT_THRESHOLD);
+    if !(threshold.is_finite() && (0.0..=MAX_THRESHOLD).contains(&threshold)) {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors: vec![field_error("threshold", "threshold must be 0 to 1000")],
+        });
+    }
+    let visible = visible_from(&state, org);
+    let mut found: HashMap<Uuid, ExperimentRow> =
+        store::get_many(state.meta.reader(), project, &ids, visible)
+            .await?
+            .into_iter()
+            .map(|row| (row.id, row))
+            .collect();
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in &ids {
+        rows.push(found.remove(id).ok_or(ApiError::NotFound)?);
+    }
+    let dataset = rows.first().and_then(|row| row.dataset_id);
+    if dataset.is_none() || rows.iter().any(|row| row.dataset_id != dataset) {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors: vec![field_error(
+                "ids",
+                "the experiments must use the same dataset",
+            )],
+        });
+    }
+    let ctx = open_query(&state, org, project, None).await?;
+    let deadline = Deadline::start();
+    let mut loaded = Vec::with_capacity(rows.len());
+    for row in rows {
+        loaded.push(load(&state, &ctx, row, deadline).await?);
+    }
+    let limit = params.limit.get() as usize;
+    let (items, next_cursor) = compare_items(
+        &loaded,
+        threshold,
+        params.regressions_only,
+        limit,
+        params.cursor.as_deref(),
+    )?;
+    let mut texts = Vec::with_capacity(loaded.len());
+    for experiment in &loaded {
+        texts.push(store::item_rows(state.meta.reader(), experiment.experiment.id, &items).await?);
+    }
+    Ok(error::Json(compare(
+        &loaded,
+        &texts,
+        &items,
+        threshold,
+        next_cursor,
+    )?))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -757,9 +937,17 @@ mod tests {
 
     use super::*;
     use crate::api::datasets::AddItemsResponse;
+    use crate::api::scores::ScoreCreate;
     use crate::auth::roles::OrgRole;
     use crate::meta::experiments::ResultKey;
-    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, set_limits};
+    use crate::scores::{Writer, write as write_scores};
+    use crate::test_support::{
+        Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
+    };
+    use llmobs_core::ids::SpanId;
+    use llmobs_core::names::metadata_key;
+    use llmobs_core::score::{ScoreTarget, ScoreValue};
+    use std::collections::BTreeMap;
 
     fn base(seeded: &Seeded) -> String {
         format!("/api/v1/projects/{}/experiments", seeded.project.id)
@@ -1224,6 +1412,403 @@ mod tests {
         let rest: Page<Experiment> = list(&format!("?limit=1&cursor={cursor}")).await.json();
         assert_eq!(rest.data.len(), 1);
         assert!(rest.next_cursor.is_some());
+    }
+
+    /// A trace id of sixteen copies of `byte`.
+    fn trace_of(byte: u8) -> TraceId {
+        match TraceId::from_slice(&[byte; 16]) {
+            Ok(trace) => trace,
+            Err(_) => panic!("16 bytes"),
+        }
+    }
+
+    /// Commits one span of `trace` to the seeded project, stamped with `experiment` and priced at
+    /// `cost`: the trace the experiment's results point at.
+    async fn commit_experiment_trace(
+        app: &TestApp,
+        seeded: &Seeded,
+        trace: TraceId,
+        experiment: Uuid,
+        cost: f64,
+    ) {
+        let mut span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = match "d400000000000001".parse::<SpanId>() {
+            Ok(span_id) => span_id,
+            Err(_) => panic!("span id hex"),
+        };
+        span.parent_span_id = None;
+        span.start_time = app.state.clock.now_ns();
+        span.end_time = span.start_time + 1_000_000_000;
+        span.ingest_time = span.start_time;
+        span.cost_total = Some(cost);
+        span.metadata.insert(
+            metadata_key::EXPERIMENT_ID.to_owned(),
+            experiment.to_string(),
+        );
+        app.commit_spans(&seeded.project, vec![span]).await;
+    }
+
+    /// A score of `trace` that belongs to `experiment` and `item` (D-J-12).
+    fn experiment_score(
+        trace: TraceId,
+        experiment: Uuid,
+        item: Uuid,
+        name: &str,
+        value: ScoreValue,
+    ) -> ScoreCreate {
+        ScoreCreate {
+            score_id: None,
+            target: ScoreTarget::Trace { trace_id: trace },
+            session_id: None,
+            user_id: None,
+            name: name.to_owned(),
+            value,
+            reason: None,
+            source: None,
+            metadata: BTreeMap::new(),
+            experiment_id: Some(experiment),
+            dataset_item_id: Some(item),
+        }
+    }
+
+    /// Writes `scores` as the API writer (the score write checks the experiment ids).
+    async fn write_scores_of(app: &TestApp, seeded: &Seeded, scores: Vec<ScoreCreate>) {
+        let written = write_scores(
+            &app.state,
+            &seeded.project,
+            Writer::Api {
+                author: Uuid::from_u128(0xa0),
+            },
+            scores,
+        )
+        .await;
+        assert!(written.is_ok(), "score write refused");
+    }
+
+    async fn results_get(
+        app: &TestApp,
+        seeded: &Seeded,
+        experiment: Uuid,
+        query: &str,
+    ) -> TestResponse {
+        app.request(
+            Method::GET,
+            &format!("{}/{experiment}/results{query}", base(seeded)),
+        )
+        .header("cookie", &seeded.cookie)
+        .send()
+        .await
+    }
+
+    async fn compare_get(app: &TestApp, seeded: &Seeded, query: &str) -> TestResponse {
+        app.request(Method::GET, &format!("{}/compare{query}", base(seeded)))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await
+    }
+
+    fn rows_len(body: &Value) -> usize {
+        body["rows"].as_array().map_or(0, Vec::len)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_join_scores_and_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 3).await;
+        let experiment = create_ok(&app, &seeded, json!({ "name": "run", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let traces: Vec<TraceId> = (1..=3).map(trace_of).collect();
+        for trace in &traces {
+            commit_experiment_trace(&app, &seeded, *trace, experiment, 0.01).await;
+        }
+        let scores: Vec<ScoreCreate> = ids
+            .iter()
+            .zip(&traces)
+            .map(|(item, trace)| {
+                experiment_score(
+                    *trace,
+                    experiment,
+                    *item,
+                    "exact",
+                    ScoreValue::Boolean(true),
+                )
+            })
+            .collect();
+        write_scores_of(&app, &seeded, scores).await;
+        let results: Vec<Value> = ids
+            .iter()
+            .zip(&traces)
+            .map(|(item, trace)| {
+                json!({
+                    "dataset_item_id": item,
+                    "repetition": 0,
+                    "trace_id": trace,
+                    "output": "answer",
+                    "latency_ns": 1_000,
+                })
+            })
+            .collect();
+        let answer = stored(&app, &seeded, experiment, json!(results)).await;
+        assert_eq!(answer.stored, 3);
+
+        let response = results_get(&app, &seeded, experiment, "").await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        assert_eq!(body["summary"]["result_count"], 3);
+        assert_eq!(body["summary"]["scores"][0]["name"], "exact");
+        assert_eq!(rows_len(&body), 3);
+        assert_eq!(body["rows"][0]["scores"]["exact"]["value_num"], 1.0);
+        let cost = body["summary"]["cost_total"].as_f64().unwrap_or(0.0);
+        assert!((cost - 0.03).abs() < 1e-9, "cost {cost}");
+        assert!(body["next_cursor"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn results_pages_over_http() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 5).await;
+        let experiment = create_ok(&app, &seeded, json!({ "name": "run", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        // The second and the fourth results failed.
+        let results: Vec<Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let mut row = json!({ "dataset_item_id": item, "repetition": 0, "output": "a" });
+                if index == 1 || index == 3 {
+                    row["error"] = json!("boom");
+                }
+                row
+            })
+            .collect();
+        stored(&app, &seeded, experiment, json!(results)).await;
+
+        let first: Value = results_get(&app, &seeded, experiment, "?limit=2")
+            .await
+            .json();
+        assert_eq!(rows_len(&first), 2);
+        let cursor = first["next_cursor"].as_str().unwrap_or_default().to_owned();
+        assert!(!cursor.is_empty());
+        let second: Value = results_get(
+            &app,
+            &seeded,
+            experiment,
+            &format!("?limit=2&cursor={cursor}"),
+        )
+        .await
+        .json();
+        assert_eq!(rows_len(&second), 2);
+        let cursor = second["next_cursor"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let last: Value = results_get(
+            &app,
+            &seeded,
+            experiment,
+            &format!("?limit=2&cursor={cursor}"),
+        )
+        .await
+        .json();
+        assert_eq!(rows_len(&last), 1);
+        assert!(last["next_cursor"].is_null());
+
+        let errors: Value = results_get(&app, &seeded, experiment, "?errors_only=true")
+            .await
+            .json();
+        assert_eq!(rows_len(&errors), 2);
+
+        let bad = results_get(&app, &seeded, experiment, "?cursor=x").await;
+        assert_eq!(fields(&bad), vec!["cursor".to_owned()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_needs_the_same_dataset() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        dataset_with_items(&app, &seeded, "other", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "other" }))
+            .await
+            .experiment
+            .id;
+        let random = Uuid::now_v7();
+
+        let other_dataset = compare_get(&app, &seeded, &format!("?ids={first},{second}")).await;
+        assert_eq!(fields(&other_dataset), vec!["ids".to_owned()]);
+        let single = compare_get(&app, &seeded, &format!("?ids={first}")).await;
+        assert_eq!(fields(&single), vec!["ids".to_owned()]);
+        let five: Vec<String> = (0..5).map(|_| Uuid::now_v7().to_string()).collect();
+        let many = compare_get(&app, &seeded, &format!("?ids={}", five.join(","))).await;
+        assert_eq!(fields(&many), vec!["ids".to_owned()]);
+        let repeated = compare_get(&app, &seeded, &format!("?ids={first},{first}")).await;
+        assert_eq!(fields(&repeated), vec!["ids".to_owned()]);
+        let malformed = compare_get(&app, &seeded, &format!("?ids={first},nope")).await;
+        assert_eq!(fields(&malformed), vec!["ids".to_owned()]);
+        let unknown = compare_get(&app, &seeded, &format!("?ids={first},{random}")).await;
+        assert_eq!(unknown.status, 404);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_threshold_bounds() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        for bad in ["-0.1", "1000.5", "NaN", "inf"] {
+            let response = compare_get(
+                &app,
+                &seeded,
+                &format!("?ids={first},{second}&threshold={bad}"),
+            )
+            .await;
+            assert_eq!(fields(&response), vec!["threshold".to_owned()], "{bad}");
+        }
+        for good in ["0", "1000"] {
+            let response = compare_get(
+                &app,
+                &seeded,
+                &format!("?ids={first},{second}&threshold={good}"),
+            )
+            .await;
+            assert_eq!(response.status, 200, "{good}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compare_marks_regressions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let ids = dataset_with_items(&app, &seeded, "faq", 3).await;
+        let baseline = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let candidate = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let baseline_traces: Vec<TraceId> = (0x10..0x13).map(trace_of).collect();
+        let candidate_traces: Vec<TraceId> = (0x20..0x23).map(trace_of).collect();
+        let candidate_values = [1.0, 0.0, 1.0];
+        let mut scores = Vec::new();
+        for (index, item) in ids.iter().enumerate() {
+            scores.push(experiment_score(
+                baseline_traces[index],
+                baseline,
+                *item,
+                "exact",
+                ScoreValue::Numeric(1.0),
+            ));
+            scores.push(experiment_score(
+                candidate_traces[index],
+                candidate,
+                *item,
+                "exact",
+                ScoreValue::Numeric(candidate_values[index]),
+            ));
+        }
+        write_scores_of(&app, &seeded, scores).await;
+        for (experiment, traces) in [(baseline, &baseline_traces), (candidate, &candidate_traces)] {
+            let results: Vec<Value> = ids
+                .iter()
+                .zip(traces.iter())
+                .map(|(item, trace)| {
+                    json!({ "dataset_item_id": item, "repetition": 0, "trace_id": trace, "output": "a" })
+                })
+                .collect();
+            stored(&app, &seeded, experiment, json!(results)).await;
+        }
+
+        let response = compare_get(&app, &seeded, &format!("?ids={baseline},{candidate}")).await;
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        let delta = &body["deltas"][0]["scores"]["exact"];
+        assert_eq!(delta["n_compared"], 3);
+        let value = delta["delta"].as_f64().unwrap_or(0.0);
+        assert!((value - (-1.0 / 3.0)).abs() < 1e-9, "delta {value}");
+        let row = body["rows"].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|row| row["dataset_item_id"] == json!(ids[1]))
+        });
+        let cell = row
+            .and_then(|row| row["cells"].as_array())
+            .and_then(|cells| {
+                cells
+                    .iter()
+                    .find(|cell| cell["experiment_id"] == json!(candidate))
+            });
+        assert_eq!(
+            cell.map(|cell| cell["regressed"].clone()),
+            Some(json!(true))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_experiments_cannot_be_compared() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        dataset_with_items(&app, &seeded, "faq", 1).await;
+        let first = create_ok(&app, &seeded, json!({ "name": "a", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        let second = create_ok(&app, &seeded, json!({ "name": "b", "dataset": "faq" }))
+            .await
+            .experiment
+            .id;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({ "data_access_days": 30 }),
+        );
+        // The session cookie expires with the clock, so the reads after the advance use a key.
+        let key = format!("Bearer {}", app.write_key(&seeded).await);
+        app.state.clock.advance(Duration::from_secs(31 * 24 * 3600));
+        let compared = app
+            .request(
+                Method::GET,
+                &format!("{}/compare?ids={first},{second}", base(&seeded)),
+            )
+            .header("authorization", &key)
+            .send()
+            .await;
+        assert_eq!(compared.status, 404);
+        let results = app
+            .request(Method::GET, &format!("{}/{first}/results", base(&seeded)))
+            .header("authorization", &key)
+            .send()
+            .await;
+        assert_eq!(results.status, 404);
     }
 
     #[tokio::test(flavor = "multi_thread")]
