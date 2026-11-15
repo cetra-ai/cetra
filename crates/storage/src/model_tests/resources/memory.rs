@@ -8,7 +8,7 @@ use std::future::Future;
 use std::io::Read;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -180,7 +180,7 @@ fn profile_config(profile: Profile, data_dir: &Path) -> StorageConfig {
 struct Killed;
 
 /// `target/`, from the test binary at `target/<profile>/deps/<exe>`.
-fn target_dir() -> PathBuf {
+pub(super) fn target_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("the test binary's path");
     exe.ancestors()
         .nth(3)
@@ -193,17 +193,10 @@ fn target_dir() -> PathBuf {
 fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
     // The data directory is on disk, not tmpfs: tmpfs pages would count against the cgroup and
     // could not be reclaimed without swap, while a disk file's page cache can be.
-    let root = target_dir().join("llmobs-resources");
-    fs::create_dir_all(&root).expect("create target/llmobs-resources");
-    let dir = tempfile::TempDir::new_in(&root).expect("a data directory under target/");
-    let stat = rustix::fs::statfs(dir.path()).expect("statfs of the data directory");
-    assert_ne!(
-        i128::from(stat.f_type),
-        TMPFS_MAGIC,
-        "the memory run's data directory must not be on tmpfs"
-    );
+    let dir = data_dir_under_target();
     let exe = std::env::current_exe().expect("the test binary's path");
-    let mut child = Command::new("systemd-run")
+    let mut command = Command::new("systemd-run");
+    command
         .args(["--user", "--scope", "--quiet", "--collect"])
         .arg("-p")
         .arg(format!("MemoryMax={limit}"))
@@ -218,35 +211,13 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
         ])
         .env(DIR_ENV, dir.path())
         .env(LIMIT_ENV, limit.to_string())
-        .env(PROFILE_ENV, profile.name())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start systemd-run (the memory runs need a systemd user session)");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
-    let out_reader = thread::spawn(move || read_all(stdout));
-    let err_reader = thread::spawn(move || read_all(stderr));
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("poll the memory child") {
-            break status;
-        }
-        if started.elapsed() > CHILD_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the memory child ran past {CHILD_TIMEOUT:?}");
-        }
-        thread::sleep(Duration::from_millis(100));
-    };
-    let stdout = out_reader.join().expect("stdout reader");
-    let stderr = err_reader.join().expect("stderr reader");
-    eprint!("{stderr}");
-    let lines: Vec<&str> = stdout
-        .lines()
-        .filter(|line| line.starts_with("LLMOBS_MEMORY"))
-        .collect();
+        .env(PROFILE_ENV, profile.name());
+    let Finished {
+        status,
+        stdout,
+        stderr,
+    } = run_to_end(&mut command, CHILD_TIMEOUT);
+    let lines = marked_lines(&stdout, "LLMOBS_MEMORY");
     if status.signal() == Some(9) || status.code() == Some(137) {
         println!(
             "LLMOBS_MEMORY profile={} limit={limit} killed=true",
@@ -271,20 +242,87 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed> {
     Ok(lines.join("\n"))
 }
 
+/// A fresh directory under `target/llmobs-resources`, removed when the returned guard drops. It is
+/// on disk (not tmpfs), so its pages are reclaimable (R5.6).
+pub(super) fn data_dir_under_target() -> tempfile::TempDir {
+    let root = target_dir().join("llmobs-resources");
+    fs::create_dir_all(&root).expect("create target/llmobs-resources");
+    let dir = tempfile::TempDir::new_in(&root).expect("a data directory under target/");
+    let stat = rustix::fs::statfs(dir.path()).expect("statfs of the data directory");
+    assert_ne!(
+        i128::from(stat.f_type),
+        TMPFS_MAGIC,
+        "the resource runs' data directory must not be on tmpfs"
+    );
+    dir
+}
+
+/// How a child process ended and what it printed.
+pub(super) struct Finished {
+    pub(super) status: ExitStatus,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
+}
+
+/// Runs `command` with stdin closed and stdout and stderr piped, and waits for it. stderr is also
+/// copied to this process's stderr. Panics when the child runs past `timeout`; the child is killed.
+pub(super) fn run_to_end(command: &mut Command, timeout: Duration) -> Finished {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start a child process");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let out_reader = thread::spawn(move || read_all(stdout));
+    let err_reader = thread::spawn(move || read_all(stderr));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the child process") {
+            break status;
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the child process ran past {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let stdout = out_reader.join().expect("stdout reader");
+    let stderr = err_reader.join().expect("stderr reader");
+    eprint!("{stderr}");
+    Finished {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
 fn read_all(mut reader: impl Read) -> String {
     let mut text = String::new();
     let _ = reader.read_to_string(&mut text);
     text
 }
 
-fn tail(text: &str, lines: usize) -> String {
+/// The text from `marker` to the end of each line that holds it. With `--nocapture`, libtest writes
+/// the test's name before a test's first output on the same line, so a marker is not always at the
+/// start of its line.
+pub(super) fn marked_lines(output: &str, marker: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.find(marker).map(|at| line[at..].to_owned()))
+        .collect()
+}
+
+pub(super) fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     all[all.len().saturating_sub(lines)..].join("\n")
 }
 
 /// The value of `key=` in the child's output: the first whitespace-separated token that starts
 /// with it.
-fn field<'a>(output: &'a str, key: &str) -> Option<&'a str> {
+pub(super) fn field<'a>(output: &'a str, key: &str) -> Option<&'a str> {
     output
         .split_whitespace()
         .find_map(|token| token.strip_prefix(key))
@@ -330,7 +368,11 @@ impl Counts {
 
 /// Resolves `loops` unless `limit` passes first; then `stop` is set and the loops are awaited to
 /// their end, so no call is cut off in flight.
-async fn until_stopped<T>(stop: &AtomicBool, limit: Duration, loops: impl Future<Output = T>) -> T {
+pub(super) async fn until_stopped<T>(
+    stop: &AtomicBool,
+    limit: Duration,
+    loops: impl Future<Output = T>,
+) -> T {
     tokio::pin!(loops);
     tokio::select! {
         output = &mut loops => output,
