@@ -1,4 +1,4 @@
-//! Model prices (spec 09 § Pricing & GDPR, D-T-6, D-T-7). Project routes here; org routes in T5.
+//! Model prices (spec 09 § Pricing & GDPR, D-T-6, D-T-7): project routes and org routes.
 
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -13,9 +13,9 @@ use crate::api::model_prices::{
     ModelPriceResolveParams,
 };
 use crate::auth::principal::{self, Principal};
-use crate::auth::roles::ProjectPerm;
+use crate::auth::roles::{OrgPerm, ProjectPerm};
 use crate::http::AppState;
-use crate::http::access::{Access, ProjectAccess, RouteDef};
+use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::meta::model_prices as store;
 use crate::prices::{self, PriceChange, WriteOutcome, builtin_json, record_json};
@@ -75,6 +75,53 @@ pub(crate) fn project_routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: delete(delete_model_price),
+        },
+    ]
+}
+
+/// Model price routes of an org (D-T-6, D-T-7). Reads need org view; writes need
+/// [`OrgPerm::ManagePrices`] (org admins). Not session-only: a PAT of an admin may script them.
+pub(crate) fn org_routes() -> Vec<RouteDef> {
+    vec![
+        RouteDef {
+            method: axum::http::Method::GET,
+            path: "/api/v1/orgs/{org}/models",
+            access: Access::Org {
+                perm: OrgPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_org_model_prices),
+        },
+        RouteDef {
+            method: axum::http::Method::POST,
+            path: "/api/v1/orgs/{org}/models",
+            access: Access::Org {
+                perm: OrgPerm::ManagePrices,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(create_org_model_price),
+        },
+        RouteDef {
+            method: axum::http::Method::PATCH,
+            path: "/api/v1/orgs/{org}/models/{id}",
+            access: Access::Org {
+                perm: OrgPerm::ManagePrices,
+                session_only: false,
+            },
+            documented: true,
+            handler: patch(update_org_model_price),
+        },
+        RouteDef {
+            method: axum::http::Method::DELETE,
+            path: "/api/v1/orgs/{org}/models/{id}",
+            access: Access::Org {
+                perm: OrgPerm::ManagePrices,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(delete_org_model_price),
         },
     ]
 }
@@ -207,7 +254,7 @@ async fn create_model_price(
     let user = principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
-    let row = validated(&body)?;
+    let row = validated(&body, PriceScope::Project)?;
     let id = Uuid::now_v7();
     let outcome =
         prices::write(&state, org, Some(project), PriceChange::Insert { id, row }).await?;
@@ -237,7 +284,7 @@ async fn update_model_price(
     let user = principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
-    let row = validated(&body)?;
+    let row = validated(&body, PriceScope::Project)?;
     let outcome =
         prices::write(&state, org, Some(project), PriceChange::Update { id, row }).await?;
     match outcome {
@@ -282,9 +329,96 @@ async fn delete_model_price(
     }
 }
 
-/// The row of a body, or the field errors of D-T-4 as `400`.
-fn validated(body: &ModelPriceInput) -> Result<PriceRow, ApiError> {
-    prices::validate_input(body, PriceScope::Project).map_err(|errors| ApiError::BadRequest {
+async fn list_org_model_prices(
+    State(state): State<AppState>,
+    Extension(access): Extension<OrgAccess>,
+) -> Result<error::Json<Page<ModelPrice>>, ApiError> {
+    let rows = store::list_org_rows(state.meta.reader(), access.org.id).await?;
+    Ok(error::Json(Page {
+        data: rows.iter().map(record_json).collect(),
+        next_cursor: None,
+    }))
+}
+
+async fn create_org_model_price(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<ModelPriceInput>,
+) -> Result<(StatusCode, error::Json<ModelPrice>), ApiError> {
+    let user = principal::session_user(&principal)?;
+    let org = access.org.id;
+    let row = validated(&body, PriceScope::Org)?;
+    let id = Uuid::now_v7();
+    let outcome = prices::write(&state, org, None, PriceChange::Insert { id, row }).await?;
+    match outcome {
+        WriteOutcome::Done(Some(record)) => {
+            tracing::info!(
+                target: "audit",
+                price_id = %id,
+                org_id = %org,
+                user_id = %user.id,
+                "org model price created"
+            );
+            Ok((StatusCode::CREATED, error::Json(record_json(&record))))
+        }
+        other => Err(outcome_error(other)),
+    }
+}
+
+async fn update_org_model_price(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Path(PricePath { id }): error::Path<PricePath>,
+    error::Json(body): error::Json<ModelPriceInput>,
+) -> Result<error::Json<ModelPrice>, ApiError> {
+    let user = principal::session_user(&principal)?;
+    let org = access.org.id;
+    let row = validated(&body, PriceScope::Org)?;
+    let outcome = prices::write(&state, org, None, PriceChange::Update { id, row }).await?;
+    match outcome {
+        WriteOutcome::Done(Some(record)) => {
+            tracing::info!(
+                target: "audit",
+                price_id = %id,
+                org_id = %org,
+                user_id = %user.id,
+                "org model price updated"
+            );
+            Ok(error::Json(record_json(&record)))
+        }
+        other => Err(outcome_error(other)),
+    }
+}
+
+async fn delete_org_model_price(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Path(PricePath { id }): error::Path<PricePath>,
+) -> Result<StatusCode, ApiError> {
+    let user = principal::session_user(&principal)?;
+    let org = access.org.id;
+    let outcome = prices::write(&state, org, None, PriceChange::Delete { id }).await?;
+    match outcome {
+        WriteOutcome::Done(None) => {
+            tracing::info!(
+                target: "audit",
+                price_id = %id,
+                org_id = %org,
+                user_id = %user.id,
+                "org model price deleted"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        other => Err(outcome_error(other)),
+    }
+}
+
+/// The row of a body in `scope`, or the field errors of D-T-4 as `400`.
+fn validated(body: &ModelPriceInput, scope: PriceScope) -> Result<PriceRow, ApiError> {
+    prices::validate_input(body, scope).map_err(|errors| ApiError::BadRequest {
         detail: None,
         errors,
     })
@@ -308,7 +442,7 @@ fn outcome_error(outcome: WriteOutcome) -> ApiError {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, header};
-    use llmobs_core::ids::ProjectId;
+    use llmobs_core::ids::{OrgId, ProjectId};
     use llmobs_otel::exact_pattern;
     use serde_json::{Value, json};
 
@@ -317,9 +451,14 @@ mod tests {
     use crate::ingest::body::{BodyEncoding, BodyFormat};
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+    use crate::meta::members::add_org_member;
     use crate::meta::model_prices;
     use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+    use crate::meta::orgs::insert_org;
+    use crate::meta::projects::insert_project;
+    use crate::meta::users::{NewUser, insert_user};
     use crate::test_support::capture_logs;
+    use crate::test_support::session_cookie_via;
     use crate::test_support::{Seeded, TestApp, TestResponse};
     use llmobs_core::span::Span;
 
@@ -1015,6 +1154,470 @@ mod tests {
             .await
             .expect("500 rows");
         let response = post(&app, &seeded, project, &body("over-cap", 1.0, 1.0)).await;
+        assert_eq!(response.status, 409);
+    }
+
+    /// The org's price path of `acme` (the seeded org).
+    const ORG: &str = "/api/v1/orgs/acme/models";
+
+    async fn call(
+        app: &TestApp,
+        cookie: &str,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+    ) -> TestResponse {
+        let request = app
+            .request(method, url)
+            .header(header::COOKIE.as_str(), cookie);
+        match body {
+            Some(body) => request.json(body).send().await,
+            None => request.send().await,
+        }
+    }
+
+    async fn project_get(app: &TestApp, cookie: &str, project: ProjectId, query: &str) -> Value {
+        call(
+            app,
+            cookie,
+            Method::GET,
+            &format!("{}{query}", path(project)),
+            None,
+        )
+        .await
+        .json()
+    }
+
+    /// A user with `role` in `org`, signed in: the session cookie.
+    async fn member_cookie(app: &TestApp, org: OrgId, email: &str, role: OrgRole) -> String {
+        let now = app.state.clock.now_ns();
+        let email = email.to_owned();
+        let user = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let user = insert_user(
+                        conn,
+                        NewUser {
+                            email,
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
+                            is_instance_admin: false,
+                        },
+                        now,
+                    )
+                    .await?;
+                    add_org_member(conn, org, user.id, role, now).await?;
+                    Ok(user)
+                })
+            })
+            .await
+            .expect("member");
+        session_cookie_via(app, user.id, None).await
+    }
+
+    /// A budgeted judge rule in `project`, with its judge's connection, and the rule id. Its
+    /// judge model needs a price when the rule is created (D-I-15).
+    async fn budgeted_rule(app: &TestApp, seeded: &Seeded, project: ProjectId) -> String {
+        let (org, now) = (seeded.org_id, app.state.clock.now_ns());
+        let judge = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_connection(
+                        conn,
+                        connection,
+                        org,
+                        ConnectionFields {
+                            name: format!("judge {connection}"),
+                            adapter: "openai".to_owned(),
+                            base_url: None,
+                            secret_enc: vec![1],
+                            api_key_hint: "WXYZ".to_owned(),
+                            extra_headers_enc: None,
+                            extra_header_names: Vec::new(),
+                            default_model: None,
+                            structured_output: "native".to_owned(),
+                            max_concurrency: 4,
+                            requests_per_minute: 300,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_evaluator(
+                        conn,
+                        judge,
+                        project,
+                        "llm_judge",
+                        EvaluatorFields {
+                            name: format!("judge {judge}"),
+                            config: json!({
+                                "connection_id": connection,
+                                "model": "llama3.1:8b",
+                                "prompt": "{{ input }} {{ output }}",
+                                "output": {"type": "boolean"},
+                                "include_reason": false,
+                                "temperature": null,
+                                "max_output_tokens": 1024,
+                                "timeout_ms": 60000
+                            })
+                            .to_string(),
+                            output_score: json!({"name": "relevance", "data_type": "boolean"})
+                                .to_string(),
+                            connection_id: Some(connection),
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("connection and judge");
+        let rule = json!({
+            "name": "Relevance on answers",
+            "evaluator_id": judge,
+            "target": "trace",
+            "filter": "status = 'ok'",
+            "variable_mapping": {"input": "trace.input", "output": "trace.output"},
+            "sample_rate": 0.25,
+            "budget_usd": 5.0,
+            "budget_period": "day",
+            "enabled": true
+        });
+        let created = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{project}/online-rules"),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&rule)
+            .send()
+            .await;
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        created.json::<Value>()["id"]
+            .as_str()
+            .expect("rule id")
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn org_round_trip() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+
+        let created = call(
+            &app,
+            &cookie,
+            Method::POST,
+            ORG,
+            Some(&body("llama3.1:8b", 0.0, 0.0)),
+        )
+        .await;
+        let id = created_id(&created);
+        assert_eq!(created.json::<Value>()["scope"], "org");
+
+        let page: Value = call(&app, &cookie, Method::GET, ORG, None).await.json();
+        assert_eq!(page["data"].as_array().map(Vec::len), Some(1));
+        assert_eq!(page["next_cursor"], Value::Null);
+
+        let url = format!("{ORG}/{id}");
+        let replaced = body("llama3.1:8b", 0.1, 0.2);
+        let patched = call(&app, &cookie, Method::PATCH, &url, Some(&replaced)).await;
+        assert_eq!(
+            patched.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&patched.body)
+        );
+        assert_eq!(patched.json::<Value>()["price_input"], 0.1);
+
+        let deleted = call(&app, &cookie, Method::DELETE, &url, None).await;
+        assert_eq!(deleted.status, 204);
+        let page: Value = call(&app, &cookie, Method::GET, ORG, None).await.json();
+        assert_eq!(page["data"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn an_org_row_reaches_every_project() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let id = created_id(
+            &call(
+                &app,
+                &cookie,
+                Method::POST,
+                ORG,
+                Some(&body("llama3.1:8b", 0.0, 0.0)),
+            )
+            .await,
+        );
+
+        for project in [seeded.project.id, other.id] {
+            let page = project_get(&app, &cookie, project, "?scope=org").await;
+            assert_eq!(page["data"].as_array().map(Vec::len), Some(1));
+            let found = project_get(&app, &cookie, project, "/resolve?model=llama3.1:8b").await;
+            assert_eq!(found["price"]["id"], id);
+            assert_eq!(found["price"]["scope"], "org");
+        }
+
+        // A project of another org never sees these rows.
+        let now = app.state.clock.now_ns();
+        let (foreign_org, foreign_project) = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org = insert_org(conn, OrgId::new_v7(), "Other", "other-org", now).await?;
+                    let project =
+                        insert_project(conn, org.id, "Other", "other-project", None, now).await?;
+                    Ok((org.id, project.id))
+                })
+            })
+            .await
+            .expect("another org");
+        let table = app
+            .state
+            .ingest
+            .prices()
+            .for_project(foreign_org, foreign_project);
+        assert!(
+            table
+                .price_for("llama3.1:8b", None, now)
+                .is_none_or(|row| row.scope != PriceScope::Org)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_row_beats_the_org_row() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let org_id = created_id(
+            &call(
+                &app,
+                &cookie,
+                Method::POST,
+                ORG,
+                Some(&body("llama3.1:8b", 1.0, 1.0)),
+            )
+            .await,
+        );
+        let project_id = created_id(
+            &post(
+                &app,
+                &seeded,
+                seeded.project.id,
+                &body("llama3.1:8b", 2.0, 2.0),
+            )
+            .await,
+        );
+
+        let mine = project_get(
+            &app,
+            &cookie,
+            seeded.project.id,
+            "/resolve?model=llama3.1:8b",
+        )
+        .await;
+        assert_eq!(mine["price"]["id"], project_id);
+        assert_eq!(mine["price"]["scope"], "project");
+
+        let theirs = project_get(&app, &cookie, other.id, "/resolve?model=llama3.1:8b").await;
+        assert_eq!(theirs["price"]["id"], org_id);
+        assert_eq!(theirs["price"]["scope"], "org");
+    }
+
+    #[tokio::test]
+    async fn org_writes_guard_rules_in_every_project() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let org_price = created_id(
+            &call(
+                &app,
+                &cookie,
+                Method::POST,
+                ORG,
+                Some(&body("llama3.1:8b", 0.0, 0.0)),
+            )
+            .await,
+        );
+        let rule_id = budgeted_rule(&app, &seeded, other.id).await;
+
+        let url = format!("{ORG}/{org_price}");
+        let deleted = call(&app, &cookie, Method::DELETE, &url, None).await;
+        assert_eq!(
+            deleted.status,
+            409,
+            "{}",
+            String::from_utf8_lossy(&deleted.body)
+        );
+        let errors = deleted.problem().errors;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, format!("rules.{rule_id}"));
+
+        // A project row prices the model in that project, so the org row can go.
+        created_id(&post(&app, &seeded, other.id, &body("llama3.1:8b", 0.0, 0.0)).await);
+        let deleted = call(&app, &cookie, Method::DELETE, &url, None).await;
+        assert_eq!(
+            deleted.status,
+            204,
+            "{}",
+            String::from_utf8_lossy(&deleted.body)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_permissions_and_scopes() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+        let org = seeded.org_id;
+        let price = created_id(
+            &call(
+                &app,
+                &cookie,
+                Method::POST,
+                ORG,
+                Some(&body("llama3.1:8b", 0.0, 0.0)),
+            )
+            .await,
+        );
+        let url = format!("{ORG}/{price}");
+        let viewer = member_cookie(&app, org, "viewer@example.com", OrgRole::Viewer).await;
+        let member = member_cookie(&app, org, "member@example.com", OrgRole::Member).await;
+        let admin = member_cookie(&app, org, "admin@example.com", OrgRole::Admin).await;
+        let new_row = body("gpt-4o", 1.0, 1.0);
+
+        for reader in [&viewer, &member] {
+            let listed = call(&app, reader, Method::GET, ORG, None).await;
+            assert_eq!(listed.status, 200);
+            let created = call(&app, reader, Method::POST, ORG, Some(&new_row)).await;
+            assert_eq!(created.status, 403);
+            let patched = call(&app, reader, Method::PATCH, &url, Some(&new_row)).await;
+            assert_eq!(patched.status, 403);
+            let deleted = call(&app, reader, Method::DELETE, &url, None).await;
+            assert_eq!(deleted.status, 403);
+        }
+
+        let created = call(&app, &admin, Method::POST, ORG, Some(&new_row)).await;
+        assert_eq!(created.status, 201);
+        let extra = created_id(&created);
+        let deleted = call(
+            &app,
+            &admin,
+            Method::DELETE,
+            &format!("{ORG}/{extra}"),
+            None,
+        )
+        .await;
+        assert_eq!(deleted.status, 204);
+
+        // A row of another org is not found through this org.
+        let other = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &cookie)
+            .json(&json!({"name": "Elsewhere"}))
+            .send()
+            .await;
+        assert_eq!(
+            other.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&other.body)
+        );
+        let slug = other.json::<Value>()["slug"]
+            .as_str()
+            .expect("slug")
+            .to_owned();
+        let foreign = created_id(
+            &call(
+                &app,
+                &cookie,
+                Method::POST,
+                &format!("/api/v1/orgs/{slug}/models"),
+                Some(&body("llama3.1:8b", 0.0, 0.0)),
+            )
+            .await,
+        );
+        let patched = call(
+            &app,
+            &cookie,
+            Method::PATCH,
+            &format!("{ORG}/{foreign}"),
+            Some(&new_row),
+        )
+        .await;
+        assert_eq!(patched.status, 404);
+
+        // Scopes do not cross: a project row is not an org row, and the reverse.
+        let project_row = created_id(&post(&app, &seeded, seeded.project.id, &new_row).await);
+        let patched = call(
+            &app,
+            &cookie,
+            Method::PATCH,
+            &format!("{ORG}/{project_row}"),
+            Some(&new_row),
+        )
+        .await;
+        assert_eq!(patched.status, 404);
+        let patched = call(
+            &app,
+            &cookie,
+            Method::PATCH,
+            &format!("{}/{price}", path(seeded.project.id)),
+            Some(&new_row),
+        )
+        .await;
+        assert_eq!(patched.status, 404);
+    }
+
+    #[tokio::test]
+    async fn the_501st_org_row_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let cookie = seeded.cookie.clone();
+        for index in 0..500 {
+            let created = call(
+                &app,
+                &cookie,
+                Method::POST,
+                ORG,
+                Some(&body(&format!("org-cap-{index}"), 0.0, 0.0)),
+            )
+            .await;
+            assert_eq!(created.status, 201, "row {index}");
+        }
+        let response = call(
+            &app,
+            &cookie,
+            Method::POST,
+            ORG,
+            Some(&body("over-cap", 1.0, 1.0)),
+        )
+        .await;
         assert_eq!(response.status, 409);
     }
 }

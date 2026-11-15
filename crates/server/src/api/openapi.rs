@@ -755,6 +755,7 @@ fn paths() -> Paths {
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = model_price_paths(paths);
+    let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
@@ -2858,6 +2859,87 @@ fn model_price_paths(paths: PathsBuilder) -> PathsBuilder {
         )
         .path(
             format!("{PROJECT}/models/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn org_model_price_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let id = path_uuid("id", "Price row id.");
+    let read = "Any org member can read.";
+    let write = "Org admins and owners. A PATCH replaces the whole row. A write that would leave a budgeted online rule of any project of the org without a price is 409.";
+    let list = operation(
+        "list_org_model_prices",
+        "model_prices",
+        "List org model prices",
+    )
+    .description(Some(read))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "ModelPricePage",
+            "The org's own price rows (at most 500), without paging.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_org_model_price",
+        "model_prices",
+        "Create an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "201",
+        json_of::<ModelPrice>("The created price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let patch = operation(
+        "patch_org_model_price",
+        "model_prices",
+        "Replace an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org.clone(), id.clone()]))
+    .request_body(Some(json_body("ModelPriceInput")))
+    .responses(responses(
+        "200",
+        json_of::<ModelPrice>("The replaced price."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_model_price",
+        "model_prices",
+        "Delete an org model price",
+    )
+    .description(Some(write))
+    .parameters(Some(vec![org, id]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models",
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            "/api/v1/orgs/{org}/models/{id}",
             PathItem::new(HttpMethod::Delete, delete),
         )
 }

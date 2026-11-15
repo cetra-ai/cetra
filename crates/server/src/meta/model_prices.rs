@@ -1,6 +1,4 @@
 //! `model_prices` rows: custom prices of an org or a project (spec 04 § Pricing, D-T-2, D-T-4).
-// Used by tests only until T3 loads the rows and T4/T5 serve them; T5 removes this line.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use llmobs_core::ids::{OrgId, ProjectId};
 use llmobs_otel::{PriceRow, PriceScope, PriceTier};

@@ -190,6 +190,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/llm-connections/{id}/test",
         "post_llm_connection_test",
     ),
+    ("get", "/api/v1/orgs/{org}/models", "list_org_model_prices"),
+    ("post", "/api/v1/orgs/{org}/models", "post_org_model_price"),
+    (
+        "patch",
+        "/api/v1/orgs/{org}/models/{id}",
+        "patch_org_model_price",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/models/{id}",
+        "delete_org_model_price",
+    ),
     ("get", "/api/v1/orgs/{org}/projects", "list_projects"),
     ("post", "/api/v1/orgs/{org}/projects", "post_project"),
     ("get", "/api/v1/projects/{project}", "get_project"),
@@ -560,6 +572,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_score_definitions",
     "list_models",
     "resolve_model_price",
+    "list_org_model_prices",
     "list_online_rules",
     "post_online_rule_preview",
     "post_backfill_estimate",
@@ -862,6 +875,9 @@ fn document_lint() {
             || *id == "post_model_price"
             || *id == "patch_model_price"
             || *id == "delete_model_price"
+            || *id == "post_org_model_price"
+            || *id == "patch_org_model_price"
+            || *id == "delete_org_model_price"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_evaluator" || *id == "delete_score_definition" {

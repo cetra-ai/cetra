@@ -538,6 +538,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         ),
         example_status("post_api_key", "static/api-key-created.json", 201),
         example(
+            "list_org_model_prices",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-model-prices.json",
+            "application/json",
+        ),
+        example(
             "list_llm_connections",
             params(&[("org", "acme")]),
             BTreeMap::new(),

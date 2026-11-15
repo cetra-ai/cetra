@@ -641,6 +641,16 @@
     "file": "static/org-members.json"
   },
   {
+    "operation_id": "list_org_model_prices",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-model-prices.json"
+  },
+  {
     "operation_id": "list_orgs",
     "path_params": {},
     "query": {},

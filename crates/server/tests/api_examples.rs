@@ -418,6 +418,7 @@ fn static_files_match_their_types() {
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<Page<ModelPrice>>("static/model-prices.json");
+    roundtrip::<Page<ModelPrice>>("static/org-model-prices.json");
     roundtrip::<ModelPrice>("static/model-price.json");
     roundtrip::<ModelPriceResolution>("static/model-price-resolution.json");
     roundtrip::<OnlineRulePage>("static/online-rules.json");
@@ -614,6 +615,7 @@ fn generated_files_roundtrip() {
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
+            "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
             "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
