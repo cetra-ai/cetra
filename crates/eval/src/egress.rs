@@ -281,6 +281,8 @@ fn denied_v4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_broadcast()
+        || a == 0
+        || a >= 240
         || (a == 100 && (64..128).contains(&b))
         || (a == 192 && b == 0 && c == 0)
         || (a == 198 && (b == 18 || b == 19))
@@ -296,13 +298,18 @@ fn denied_v6(ip: Ipv6Addr) -> bool {
     if let Some(v4) = nat64_v4(ip) {
         return denied_v4(v4);
     }
-    let [first, second, ..] = ip.segments();
+    let segments = ip.segments();
+    let [first, second, third, ..] = segments;
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || first & 0xffc0 == 0xfe80
         || first & 0xfe00 == 0xfc00
         || (first == 0x2001 && second == 0x0db8)
+        || first & 0xffc0 == 0xfec0
+        || first == 0x2002
+        || (first == 0x0064 && second == 0xff9b && third == 1)
+        || segments[..6].iter().all(|&segment| segment == 0)
 }
 
 /// The IPv4 address embedded in `64:ff9b::/96`, the well-known NAT64 prefix.
@@ -383,6 +390,18 @@ mod tests {
             "::ffff:0.0.0.0",
             "::ffff:192.0.2.1",
             "::ffff:169.254.169.254",
+            "0.0.0.1",
+            "0.255.255.255",
+            "240.0.0.0",
+            "255.255.255.254",
+            "::1.2.3.4",
+            "::8.8.8.8",
+            "64:ff9b:1::7f00:1",
+            "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+            "2002::",
+            "2002:808:808::1",
+            "fec0::",
+            "feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "64:ff9b::7f00:1",
             "64:ff9b::a00:0",
             "64:ff9b::ffff:ffff",
@@ -402,9 +421,8 @@ mod tests {
             "100.128.0.0",
             "169.253.255.255",
             "169.255.0.0",
-            "0.0.0.1",
+            "1.0.0.0",
             "223.255.255.255",
-            "240.0.0.0",
             "192.0.1.0",
             "198.17.255.255",
             "198.20.0.0",
@@ -413,14 +431,16 @@ mod tests {
             "203.0.114.0",
             "2001:4860:4860::8888",
             "fe7f:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
-            "fec0::",
             "fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
             "fe00::",
             "2001:db7:ffff:ffff:ffff:ffff:ffff:ffff",
             "2001:db9::",
             "::ffff:1.1.1.1",
             "64:ff9b::101:101",
-            "64:ff9b:1::7f00:1",
+            "64:ff9b:2::1",
+            "2003::",
+            "fe7f::1",
+            "::1:0:0:1",
         ];
         for text in denied {
             assert!(is_denied(addr(text)), "{text} is allowed");
