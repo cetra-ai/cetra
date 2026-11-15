@@ -42,6 +42,7 @@ it("signs out and opens the login page", async () => {
   await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
 
   await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+  expect(router.state.location.search).toMatchObject({ signed_out: true });
   expect(signedOut).toBe(true);
   expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
 });

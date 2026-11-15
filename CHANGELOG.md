@@ -67,6 +67,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   days; run `llmobs login` again when it does.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
   `api_key` again (400 on `api_key`), so a new host never receives the stored key.
+- Web UI: with password sign-in off and exactly one sign-in provider, the login page goes
+  straight to that provider; signing out lands on a page that does not. Instance admins sign in
+  with their password at `/login?password=1`, which the login page links to (D-S-4, D-S-5, D-S-6).
 
 ### Fixed
 
