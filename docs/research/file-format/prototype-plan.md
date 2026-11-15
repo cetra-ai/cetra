@@ -548,21 +548,21 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 ### S9. Fast paths (no DataFusion)
 
 ```rust
-pub async fn trace_detail(files: &[StrataFile], trace_id: [u8; 16], projection: &[&str]) -> Result<RecordBatch>;
-pub async fn trace_list(files: &[StrataFile], time: Range<i64>, predicate: Option<Predicate>, k: usize, projection: &[&str]) -> Result<RecordBatch>;
+pub async fn trace_detail(files: &[Arc<StrataFile>], trace_id: [u8; 16], projection: &[&str]) -> Result<RecordBatch>;
+pub async fn trace_list(files: &[Arc<StrataFile>], time: Range<i64>, predicate: Option<Predicate>, k: usize, projection: &[&str]) -> Result<RecordBatch>;
 ```
 
-Both return batches in the file schema, cast to the `StrataTable` schema.
+Both return batches in the `StrataTable` schema (`table_schema` of the file schema), so they match DataFusion's rows. An empty result is an empty batch of that schema.
 
 **`trace_list` ordering.** Rows are ordered by `(start_time DESC, trace_id DESC, span_id DESC)`. The bench query `list_llm_1h` is changed to use the same tie-break, so DataFusion and the fast path agree.
 
 **`trace_list` algorithm:**
-1. Read the `start_time` block table and order its chunks by `max` descending.
-2. Evaluate the predicate per chunk, keeping a top-k heap.
-3. Stop when the next chunk's `max` is below the heap's minimum and the heap is full.
-4. Fetch the projection for the k rows.
+1. Read the `start_time` block table of every file. Keep the chunks whose zone overlaps `time`, and order them by `max` descending.
+2. Scan the kept chunks one at a time, in that order, with the window and the predicate, and the projection of each chunk. Keep a top-k heap of the rows seen.
+3. Stop when the heap holds `k` rows and the next chunk's `max` is strictly below the heap's minimum `start_time`. Equal times still continue, because of the tie-break.
+4. Build the output columns from the kept chunks with `interleave`, in heap order.
 
-Zone pruning on `start_time` works only if chunks cover narrow time ranges. Files sorted by `trace_id` within a time slice give wide `start_time` zones, so the report states which dataset layout the gain depends on.
+Each visited chunk costs at least one wave. The early stop only helps when `start_time` zones are narrow, that is, when the file is sorted by time. Zone pruning on `start_time` works only if chunks cover narrow time ranges. Files sorted by `trace_id` within a time slice give wide `start_time` zones, so the report states which dataset layout the gain depends on.
 
 ### S10. Merge
 

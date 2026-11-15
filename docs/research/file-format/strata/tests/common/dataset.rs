@@ -4,8 +4,12 @@
 //! DataFusion tests. It copies the data steps of `bench/src/main.rs`'s `generate`: the rare
 //! needle, the trace-id sample, the time slices, and the sort by `(trace_id, start_time)`.
 
-use arrow::array::RecordBatch;
-use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
+use std::sync::Arc;
+
+use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
+use arrow::compute::{SortColumn, cast, concat_batches, lexsort_to_indices, take_record_batch};
+use arrow::datatypes::{DataType, Float32Type, Float64Type};
+use arrow::util::display::{ArrayFormatter, FormatOptions};
 use fmt_testdata::datagen;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::schema::spans_schema;
@@ -108,4 +112,50 @@ pub fn spans_dataset(traces: usize, files: usize) -> Dataset {
         user_id,
         customer_id,
     }
+}
+
+/// The displayed text of each column of `column`, one entry per row. Views become plain strings
+/// first, and floats are printed with nine significant digits, so that sums in another order
+/// compare equal.
+fn column_strings(column: &ArrayRef) -> Vec<String> {
+    let column: ArrayRef = match column.data_type() {
+        DataType::Utf8View | DataType::LargeUtf8 => cast(column, &DataType::Utf8).unwrap(),
+        DataType::BinaryView => cast(column, &DataType::Binary).unwrap(),
+        _ => Arc::clone(column),
+    };
+    match column.data_type() {
+        DataType::Float32 => column
+            .as_primitive::<Float32Type>()
+            .iter()
+            .map(|v| v.map_or_else(|| "<null>".to_string(), |v| format!("{v:.9e}")))
+            .collect(),
+        DataType::Float64 => column
+            .as_primitive::<Float64Type>()
+            .iter()
+            .map(|v| v.map_or_else(|| "<null>".to_string(), |v| format!("{v:.9e}")))
+            .collect(),
+        _ => {
+            let formatter = ArrayFormatter::try_new(
+                column.as_ref(),
+                &FormatOptions::default().with_null("<null>"),
+            )
+            .unwrap();
+            (0..column.len())
+                .map(|i| formatter.value(i).to_string())
+                .collect()
+        }
+    }
+}
+
+/// One string per row: the values of its columns, joined.
+pub fn rows(batches: &[RecordBatch]) -> Vec<String> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let columns: Vec<Vec<String>> = batch.columns().iter().map(column_strings).collect();
+        for r in 0..batch.num_rows() {
+            let row: Vec<&str> = columns.iter().map(|c| c[r].as_str()).collect();
+            out.push(row.join(" | "));
+        }
+    }
+    out
 }

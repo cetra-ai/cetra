@@ -668,7 +668,7 @@ fn read_back_f64(lit: &ArrayRef) -> Option<f64> {
 
 /// The first eight bytes of a zone bound, as a little-endian integer, or `None` when there are
 /// fewer than eight bytes (which the 16-byte zone never has).
-fn zone_i64(bound: &[u8; 16]) -> Option<i64> {
+pub(crate) fn zone_i64(bound: &[u8; 16]) -> Option<i64> {
     bound
         .split_first_chunk::<8>()
         .map(|(head, _)| i64::from_le_bytes(*head))

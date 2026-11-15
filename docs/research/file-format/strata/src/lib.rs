@@ -18,7 +18,8 @@
 //!   chunk ids; at most 64 ranged GETs of one wave are in flight; with a predicate, `limit`
 //!   does not bound the bytes fetched (M4F);
 //! - a DataFusion `TableProvider` with exact filter pushdown, `Inexact` `LIKE` as `Contains`,
-//!   and `lookup_scan` for a `trace_id` equality (M5.1).
+//!   and `lookup_scan` for a `trace_id` equality (M5.1);
+//! - `trace_detail` and `trace_list` fast paths, without DataFusion (M5.2).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -43,6 +44,7 @@ mod shred;
 mod config;
 mod datafusion;
 mod error;
+mod fast;
 mod file;
 mod reader;
 #[cfg(test)]
@@ -52,6 +54,7 @@ mod writer;
 pub use config::Config;
 pub use datafusion::{StrataExec, StrataTable, table_schema};
 pub use error::{Result, StrataError};
+pub use fast::{trace_detail, trace_list};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
 pub use payload::PayloadStats;

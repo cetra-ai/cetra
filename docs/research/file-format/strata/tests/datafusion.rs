@@ -9,64 +9,17 @@ mod dataset;
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
-use arrow::compute::cast;
-use arrow::datatypes::{DataType, Float32Type, Float64Type, Int64Type};
-use arrow::util::display::{ArrayFormatter, FormatOptions};
+use arrow::array::{AsArray, RecordBatch};
+use arrow::datatypes::Int64Type;
 use datafusion::physical_plan::displayable;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
+use dataset::rows;
 use llmobs_core::schema::spans_schema;
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use parquet::arrow::ArrowWriter;
 use strata::{Config, StrataTable, StrataWriter};
-
-/// The displayed text of each column of `column`, one entry per row. Views become plain strings
-/// first, and floats are printed with nine significant digits, so that sums in another order
-/// compare equal.
-fn column_strings(column: &ArrayRef) -> Vec<String> {
-    let column: ArrayRef = match column.data_type() {
-        DataType::Utf8View | DataType::LargeUtf8 => cast(column, &DataType::Utf8).unwrap(),
-        DataType::BinaryView => cast(column, &DataType::Binary).unwrap(),
-        _ => Arc::clone(column),
-    };
-    match column.data_type() {
-        DataType::Float32 => column
-            .as_primitive::<Float32Type>()
-            .iter()
-            .map(|v| v.map_or_else(|| "<null>".to_string(), |v| format!("{v:.9e}")))
-            .collect(),
-        DataType::Float64 => column
-            .as_primitive::<Float64Type>()
-            .iter()
-            .map(|v| v.map_or_else(|| "<null>".to_string(), |v| format!("{v:.9e}")))
-            .collect(),
-        _ => {
-            let formatter = ArrayFormatter::try_new(
-                column.as_ref(),
-                &FormatOptions::default().with_null("<null>"),
-            )
-            .unwrap();
-            (0..column.len())
-                .map(|i| formatter.value(i).to_string())
-                .collect()
-        }
-    }
-}
-
-/// One string per row: the values of its columns, joined.
-fn rows(batches: &[RecordBatch]) -> Vec<String> {
-    let mut out = Vec::new();
-    for batch in batches {
-        let columns: Vec<Vec<String>> = batch.columns().iter().map(column_strings).collect();
-        for r in 0..batch.num_rows() {
-            let row: Vec<&str> = columns.iter().map(|c| c[r].as_str()).collect();
-            out.push(row.join(" | "));
-        }
-    }
-    out
-}
 
 /// The first value of the first column of a one-row `count(*)` result.
 fn first_count(batches: &[RecordBatch]) -> i64 {
