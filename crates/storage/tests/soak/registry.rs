@@ -292,12 +292,6 @@ fn compare(
             .map_or("null".to_owned(), |t| t.to_string()),
         number(int_at(row, traces::TOTAL_TOKENS)),
     );
-    let cost = float_at(row, traces::COST_TOTAL)
-        .map(|v| v.map_or("null".to_owned(), |c| format!("{c:.12}")));
-    let expected_cost = summary
-        .cost_total
-        .map_or("null".to_owned(), |c| format!("{c:.12}"));
-    check("cost_total", expected_cost, cost);
     check(
         "session_id",
         summary
@@ -311,6 +305,14 @@ fn compare(
         summary.user_id.clone().unwrap_or_else(|| "null".to_owned()),
         text(string_at(row, traces::USER_ID)),
     );
+    match (float_at(row, traces::COST_TOTAL), summary.cost_total) {
+        (Ok(Some(got)), Some(expected)) if (got - expected).abs() <= 1e-9 => {}
+        (Ok(None), None) => {}
+        (Ok(got), expected) => out.push(format!(
+            "{hex}: cost_total expected {expected:?} got {got:?}"
+        )),
+        (Err(error), _) => out.push(format!("{hex}: cost_total unreadable: {error}")),
+    }
     let stored_spans: usize = detail.spans.iter().map(RecordBatch::num_rows).sum();
     if stored_spans as i64 != summary.span_count {
         out.push(format!(

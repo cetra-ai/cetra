@@ -1,9 +1,9 @@
 //! The S3 target of the benches and the soak (D119, track R M7).
 
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use llmobs_storage::config::{ObjectStoreUrl, S3Config};
 use object_store::aws::AmazonS3Builder;
-use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
+use object_store::{ObjectMeta, ObjectStore};
 
 /// The S3 target of a benchmark (D119), from the environment.
 #[derive(Debug, Clone)]
@@ -82,7 +82,7 @@ impl S3Env {
             .map_err(|error| error.to_string())
     }
 
-    /// Deletes every object under `prefix`.
+    /// Deletes every object under `prefix`, in one bulk request stream.
     pub(crate) async fn delete_prefix(&self, prefix: &str) -> Result<(), String> {
         let store = self.store()?;
         let root = object_store::path::Path::from(prefix);
@@ -92,11 +92,11 @@ impl S3Env {
             .try_collect()
             .await
             .map_err(|error| error.to_string())?;
-        for location in locations {
-            store
-                .delete(&location)
-                .await
-                .map_err(|error| error.to_string())?;
+        let input =
+            futures::stream::iter(locations.into_iter().map(Ok::<_, object_store::Error>)).boxed();
+        let mut deleted = store.delete_stream(input);
+        while let Some(result) = deleted.next().await {
+            result.map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -117,11 +117,19 @@ impl S3Env {
     }
 }
 
-/// Whether the endpoint's host is 127.0.0.1 or localhost.
-fn is_loopback(endpoint: &str) -> bool {
+/// The host of an endpoint URL: IPv6 literals keep their brackets' contents, without the port.
+pub(crate) fn endpoint_host(endpoint: &str) -> &str {
     let rest = endpoint
         .split_once("://")
         .map_or(endpoint, |(_, rest)| rest);
-    let host = rest.split(['/', ':']).next().unwrap_or("");
-    host == "127.0.0.1" || host == "localhost"
+    let authority = rest.split('/').next().unwrap_or("");
+    match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    }
+}
+
+/// Whether the endpoint's host is 127.0.0.1, localhost or ::1.
+fn is_loopback(endpoint: &str) -> bool {
+    matches!(endpoint_host(endpoint), "127.0.0.1" | "localhost" | "::1")
 }

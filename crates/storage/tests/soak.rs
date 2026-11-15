@@ -49,6 +49,7 @@ use common::rng::{Rng, mix};
 use common::s3::S3Env;
 use config::{QueryKind, SoakConfig, parse_mix, prepare_data_dir};
 use driver::{Shared, is_sampled};
+use failures::FailureKind;
 use llmobs_core::ids::TraceId;
 use llmobs_storage::Storage;
 use redact::Redactor;
@@ -83,6 +84,8 @@ struct FailuresOut {
 #[ignore = "run by hand: LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT, see `just soak`"]
 async fn soak() {
     let config = SoakConfig::from_env().expect("the soak configuration");
+    // The corpus is read before any directory is touched or the clock starts.
+    let payloads = Arc::new(Payloads::new(Corpus::from_env()));
     let out = config.out.clone();
     if out.exists() {
         assert!(
@@ -142,7 +145,6 @@ async fn soak() {
             .await
             .expect("the storage opens"),
     );
-    let payloads = Arc::new(Payloads::new(Corpus::from_env()));
     let shared = Arc::new(Shared::new(storage, Arc::clone(&payloads), config.clone()));
 
     // Project i gets the share 2^(n-1-i) / (2^n - 1) of the rate.
@@ -192,10 +194,12 @@ async fn soak() {
     let end = start + Duration::from_secs_f64(config.hours * 3600.0);
     while Instant::now() < end {
         tokio::time::sleep(Duration::from_secs(config.sample_secs)).await;
-        let sample = sampler.sample(&shared).await;
-        writeln!(samples_file, "{}", serde_json::to_string(&sample).unwrap()).unwrap();
-        samples_file.flush().unwrap();
-        samples.push(sample);
+        check_tasks(&mut tasks).await;
+        if let Some(sample) = take_sample(&mut sampler, &shared).await {
+            writeln!(samples_file, "{}", serde_json::to_string(&sample).unwrap()).unwrap();
+            samples_file.flush().unwrap();
+            samples.push(sample);
+        }
     }
 
     // 1. Stop: the ingest tasks append their pending late groups first.
@@ -203,9 +207,10 @@ async fn soak() {
     for task in tasks {
         task.await.unwrap();
     }
-    let last = sampler.sample(&shared).await;
-    writeln!(samples_file, "{}", serde_json::to_string(&last).unwrap()).unwrap();
-    samples.push(last);
+    if let Some(last) = take_sample(&mut sampler, &shared).await {
+        writeln!(samples_file, "{}", serde_json::to_string(&last).unwrap()).unwrap();
+        samples.push(last);
+    }
     drop(sampler);
 
     // 2. Restart: shut down, drop, and open again, timed. WAL replay runs in the open.
@@ -279,29 +284,38 @@ async fn soak() {
     }
 
     // 5. Settled state: one more sample, with the conditions of R7.6.
-    let settled_sample = sampler.sample(&shared).await;
-    if settled_sample.staged_objects != 0 {
-        settled.push(format!("{} staged objects", settled_sample.staged_objects));
+    if let Some(settled_sample) = take_sample(&mut sampler, &shared).await {
+        if settled_sample.staged_objects != 0 {
+            settled.push(format!("{} staged objects", settled_sample.staged_objects));
+        }
+        if settled_sample.overdue_partitions != 0 {
+            settled.push(format!(
+                "{} overdue partitions",
+                settled_sample.overdue_partitions
+            ));
+        }
+        if settled_sample.files.get("spans").map_or(0, |f| f.l0) != 0 {
+            settled.push("a spans partition still has L0 files".to_owned());
+        }
+        if settled_sample.memtable_bytes != 0 {
+            settled.push(format!(
+                "{} memtable bytes left",
+                settled_sample.memtable_bytes
+            ));
+        }
+        if sampler.suspect_count() != 0 {
+            settled.push(format!("{} orphan suspects", sampler.suspect_count()));
+        }
+        writeln!(
+            samples_file,
+            "{}",
+            serde_json::to_string(&settled_sample).unwrap()
+        )
+        .unwrap();
+        samples.push(settled_sample);
+    } else {
+        settled.push("the settled sample could not be taken".to_owned());
     }
-    if settled_sample.overdue_partitions != 0 {
-        settled.push(format!(
-            "{} overdue partitions",
-            settled_sample.overdue_partitions
-        ));
-    }
-    if settled_sample.files.get("spans").map_or(0, |f| f.l0) != 0 {
-        settled.push("a spans partition still has L0 files".to_owned());
-    }
-    if sampler.suspect_count() != 0 {
-        settled.push(format!("{} orphan suspects", sampler.suspect_count()));
-    }
-    writeln!(
-        samples_file,
-        "{}",
-        serde_json::to_string(&settled_sample).unwrap()
-    )
-    .unwrap();
-    samples.push(settled_sample);
 
     // 6. Check again.
     check_sample(
@@ -339,6 +353,9 @@ async fn soak() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .pending
         .len() as u64;
+    if let Err(error) = shared.storage.shutdown().await {
+        settled.push(format!("shutdown failed: {error}"));
+    }
     let end_checks = EndChecks {
         settled,
         pending_deletions,
@@ -350,20 +367,13 @@ async fn soak() {
         .iter()
         .all(|(_, verdict)| !matches!(verdict, Verdict::Fail(_)));
 
-    // 7. Clean up: shut down, and drop the S3 prefix of a passing run.
-    shared
-        .storage
-        .shutdown()
-        .await
-        .expect("the storage shuts down");
+    // 7. Clean up: drop the S3 prefix of a passing run.
     if passed
         && !config.keep
         && let Some(target) = &s3
+        && let Err(error) = target.delete_prefix(&prefix).await
     {
-        target
-            .delete_prefix(&prefix)
-            .await
-            .expect("the S3 prefix is deleted");
+        println!("could not delete the S3 prefix: {error}");
     }
 
     // 8. Write and fail.
@@ -426,7 +436,7 @@ fn failing_rules(verdicts: &[(String, Verdict)]) -> Vec<&str> {
 }
 
 /// One settle round: flush, explicit compaction and deletion passes, GC. Returns
-/// whether the round changed anything. `settled` collects failed conditions.
+/// whether the round changed anything. A failed call is recorded in `settled`.
 async fn settle_round(
     shared: &Shared,
     flush_wait: Duration,
@@ -439,34 +449,35 @@ async fn settle_round(
     let now = sample::now_ns() + 3 * 24 * HOUR_NS;
     let mut last_report = None;
     for _ in 0..50 {
-        let report = shared
-            .storage
-            .compact(now)
-            .await
-            .expect("a compaction pass runs");
+        let report = match shared.storage.compact(now).await {
+            Ok(report) => report,
+            Err(error) => {
+                settled.push(format!("compaction failed: {error}"));
+                return changed;
+            }
+        };
         *compaction_passes += 1;
         changed |= report.jobs > 0;
-        let done = report.jobs == 0 && report.failed == 0;
         last_report = Some((report.jobs, report.failed));
-        if done {
+        if report.jobs == 0 && report.failed == 0 {
             break;
         }
     }
     if let Some((jobs, failed)) = last_report
         && (jobs != 0 || failed != 0)
     {
-        {
-            settled.push(format!(
-                "compaction still busy after 50 passes: {jobs} jobs, {failed} failed"
-            ));
-        }
+        settled.push(format!(
+            "compaction still busy after 50 passes: {jobs} jobs, {failed} failed"
+        ));
     }
     for _ in 0..20 {
-        let report = shared
-            .storage
-            .apply_deletions(now)
-            .await
-            .expect("a deletion pass runs");
+        let report = match shared.storage.apply_deletions(now).await {
+            Ok(report) => report,
+            Err(error) => {
+                settled.push(format!("deletion pass failed: {error}"));
+                return changed;
+            }
+        };
         changed |= report.applied > 0;
         driver::poll_status(shared).await;
         let pending = shared
@@ -479,17 +490,42 @@ async fn settle_round(
             break;
         }
     }
-    shared
-        .storage
-        .collect_obsolete(Duration::ZERO)
-        .await
-        .expect("GC of obsolete files runs");
-    shared
-        .storage
-        .collect_staged(Duration::ZERO)
-        .await
-        .expect("GC of staged objects runs");
+    if let Err(error) = shared.storage.collect_obsolete(Duration::ZERO).await {
+        settled.push(format!("GC of obsolete files failed: {error}"));
+    }
+    if let Err(error) = shared.storage.collect_staged(Duration::ZERO).await {
+        settled.push(format!("GC of staged objects failed: {error}"));
+    }
     changed
+}
+
+/// One sample, retried once. A second failure is recorded as a `Sample` failure
+/// and the run goes on without that sample.
+async fn take_sample(sampler: &mut Sampler, shared: &Shared) -> Option<Sample> {
+    for attempt in 0..2 {
+        match sampler.sample(shared).await {
+            Ok(sample) => return Some(sample),
+            Err(error) if attempt == 1 => {
+                shared.failures.record(FailureKind::Sample, error);
+            }
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
+    None
+}
+
+/// Stops the run with the task's panic when a driver task ended before the stop.
+async fn check_tasks(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+    if let Some(index) = tasks.iter().position(|task| task.is_finished()) {
+        let dead = tasks.swap_remove(index);
+        for task in tasks.iter() {
+            task.abort();
+        }
+        match dead.await {
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            other => panic!("a soak task ended before the stop: {other:?}"),
+        }
+    }
 }
 
 /// One rule as summary.json writes it.
@@ -549,7 +585,12 @@ fn summary_json(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (stats.registered, stats.pending.len())
     };
-    let appended = samples.last().map_or(0, |s| s.appended_spans_total);
+    let run_end = config.hours * 3600.0 + config.sample_secs as f64;
+    let appended = samples
+        .iter()
+        .rev()
+        .find(|s| s.elapsed_s <= run_end)
+        .map_or(0, |s| s.appended_spans_total);
     let generated = shared
         .counters
         .generated_spans
@@ -781,37 +822,61 @@ fn sampling_is_independent_of_the_app() {
 
 #[test]
 fn redactor_replaces_secrets() {
-    let s3 = S3Env {
-        endpoint: "https://fsn1.your-objectstorage.com".to_owned(),
-        bucket: "acme-prod".to_owned(),
-        region: "fsn1".to_owned(),
-        path_style: false,
-    };
-    let redactor = Redactor::for_run(Some(&s3));
-    let home = std::env::var("HOME").unwrap();
-    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .unwrap()
-        .trim()
-        .to_owned();
-    let text = format!(
-        r#"{{"bucket":"acme-prod","endpoint":"fsn1.your-objectstorage.com","home":"{home}/soak","host":"{host}","local":"http://127.0.0.1:7070"}}"#
-    );
-    let out = redactor.apply(&text);
+    let redactor = Redactor::new(vec![
+        ("acme-prod".to_owned(), "<bucket>"),
+        ("fsn1.your-objectstorage.com".to_owned(), "<endpoint>"),
+        ("/home/tester".to_owned(), "~"),
+        ("workstation".to_owned(), "<host>"),
+    ]);
+    let text = r#"{"bucket":"acme-prod","endpoint":"fsn1.your-objectstorage.com","home":"/home/tester/soak","host":"workstation","local":"http://127.0.0.1:7070"}"#;
+    let out = redactor.apply(text);
     assert!(
         out.contains("<bucket>") && out.contains("<endpoint>"),
         "{out}"
     );
-    assert!(out.contains("~/soak"), "{out}");
-    assert!(out.contains("<host>"), "{out}");
+    assert!(out.contains("~/soak") && out.contains("<host>"), "{out}");
     assert!(out.contains("127.0.0.1:7070"), "loopback stays: {out}");
-    assert!(!out.contains("acme-prod"), "{out}");
-    assert!(!out.contains("fsn1.your-objectstorage.com"), "{out}");
-    assert!(!out.contains(&host), "{out}");
+    assert!(
+        !out.contains("acme-prod") && !out.contains("fsn1.your") && !out.contains("workstation"),
+        "{out}"
+    );
     // A secret inside a longer word is left alone.
     assert_eq!(
         redactor.apply("acme-prod-2 and acme-prod"),
         "acme-prod-2 and <bucket>"
     );
+}
+
+#[test]
+#[should_panic(expected = "shorter than 4 bytes")]
+fn redactor_refuses_short_secrets() {
+    let _ = Redactor::new(vec![("ws".to_owned(), "<host>")]);
+}
+
+#[test]
+fn unacknowledged_trace_is_not_deleted() {
+    // Registered before its groups are acknowledged: a deletion must skip it, never mark it deleted.
+    let mut registry = registry::Registry::default();
+    let id = TraceId::from_bytes([9_u8; 16]).unwrap();
+    registry.insert(
+        0,
+        TraceSummary {
+            trace_id: id,
+            name: "chat".to_owned(),
+            start_time: 1_000,
+            end_time: 2_000,
+            span_count: 8,
+            error_count: 0,
+            llm_count: 1,
+            total_tokens: Some(10),
+            cost_total: Some(0.1),
+            session_id: None,
+            user_id: Some("u".to_owned()),
+        },
+        false,
+    );
+    registry.apply_deletion(0, &[id], None, i64::MAX);
+    assert_eq!(registry.state(0, id), Some(registry::Expect::Skip));
 }
 
 #[test]

@@ -443,3 +443,13 @@ fn column_sizes_reads_parquet_metadata() {
         "repetitive text compresses"
     );
 }
+
+#[test]
+fn describe_shows_an_ipv6_loopback_target() {
+    let local = S3Env::from_lookup(env(&[
+        ("LLMOBS_TEST_S3_ENDPOINT", "http://[::1]:7070"),
+        ("LLMOBS_TEST_S3_BUCKET", "llmobs-bench"),
+    ]))
+    .unwrap();
+    assert!(local.describe("trace-bench").contains("llmobs-bench"));
+}

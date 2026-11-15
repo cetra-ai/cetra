@@ -1,7 +1,7 @@
 //! Secrets out of every committed file (track R M7, R7.5): the bucket, the S3
 //! endpoint host, `$HOME` and the hostname are replaced by placeholders.
 
-use crate::common::s3::S3Env;
+use crate::common::s3::{S3Env, endpoint_host};
 
 /// Shortest secret accepted: a shorter one would rewrite ordinary words.
 const MIN_SECRET_BYTES: usize = 4;
@@ -20,12 +20,8 @@ impl Redactor {
         let mut pairs = Vec::new();
         if let Some(s3) = s3 {
             pairs.push((s3.bucket.clone(), "<bucket>"));
-            let rest = s3
-                .endpoint
-                .split_once("://")
-                .map_or(s3.endpoint.as_str(), |(_, rest)| rest);
-            let host = rest.split(['/', ':']).next().unwrap_or("");
-            if host != "127.0.0.1" && host != "localhost" {
+            let host = endpoint_host(&s3.endpoint);
+            if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
                 pairs.push((host.to_owned(), "<endpoint>"));
             }
         }
@@ -35,6 +31,12 @@ impl Redactor {
         if let Ok(host) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
             pairs.push((host.trim().to_owned(), "<host>"));
         }
+        Self::new(pairs)
+    }
+
+    /// Builds from explicit (secret, placeholder) pairs. Empty secrets are
+    /// skipped, a secret shorter than 4 bytes panics, and the longest comes first.
+    pub(crate) fn new(mut pairs: Vec<(String, &'static str)>) -> Self {
         pairs.retain(|(secret, _)| !secret.is_empty());
         for (secret, _) in &pairs {
             assert!(

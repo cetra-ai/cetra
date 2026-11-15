@@ -18,6 +18,8 @@ pub(crate) enum FailureKind {
     DeletionVisible,
     /// The oracle read a trace that does not match the registry.
     Oracle,
+    /// A sample could not be taken (object listing or catalog read), even on retry.
+    Sample,
 }
 
 impl FailureKind {

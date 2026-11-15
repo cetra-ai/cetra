@@ -119,17 +119,21 @@ fn ingest_rate(samples: &[Sample], config: &SoakConfig) -> Verdict {
     }
 }
 
-/// The growth rules, computed after `warmup_hours`. Enforced only when the run
-/// is long enough past the growth warm-up; otherwise Pass and Fail become Info.
+/// One growth rule over the samples `post`. `value` returns `None` for a
+/// sample that has nothing to say about the series (for example a query kind
+/// with no queries in that interval).
 fn growth(
     name: &str,
     post: &[&Sample],
     enforced: bool,
     rel: f64,
     abs: f64,
-    value: impl Fn(&Sample) -> f64,
+    value: impl Fn(&Sample) -> Option<f64>,
 ) -> (String, Verdict) {
-    let series: Vec<(f64, f64)> = post.iter().map(|s| (s.elapsed_s, value(s))).collect();
+    let series: Vec<(f64, f64)> = post
+        .iter()
+        .filter_map(|s| value(s).map(|v| (s.elapsed_s, v)))
+        .collect();
     let verdict = match grows(&series, rel, abs) {
         verdict @ Verdict::Skipped(_) => verdict,
         verdict if enforced => verdict,
@@ -144,6 +148,11 @@ fn harness(name: &str, failed: Option<String>) -> (String, Verdict) {
 }
 
 /// Every rule of R7.6's table, in order: the growth rules first, then the harness rules.
+///
+/// Samples after the run's end (`hours` plus one sample interval) are the stop and
+/// the settle; they are not growth, lag or RSS evidence. Enforced growth reads from
+/// `max(warmup_hours, (retention_days + 1) × 24)`, informational growth from
+/// `warmup_hours`. `compaction_lag` always reads from `warmup_hours`.
 pub(crate) fn evaluate(
     samples: &[Sample],
     failures: &BTreeMap<FailureKind, u64>,
@@ -155,18 +164,33 @@ pub(crate) fn evaluate(
         .warmup_hours
         .max(f64::from(config.retention_days + 1) * 24.0);
     let enforced = config.hours >= growth_warmup_h + 24.0;
-    let post: Vec<&Sample> = samples
+    let run_end = config.hours * 3600.0 + config.sample_secs as f64;
+    let during: Vec<&Sample> = samples.iter().filter(|s| s.elapsed_s <= run_end).collect();
+    let from_h = if enforced {
+        growth_warmup_h
+    } else {
+        config.warmup_hours
+    };
+    let post: Vec<&Sample> = during
         .iter()
+        .copied()
+        .filter(|s| s.elapsed_s >= from_h * 3600.0)
+        .collect();
+    let after_warmup: Vec<&Sample> = during
+        .iter()
+        .copied()
         .filter(|s| s.elapsed_s >= config.warmup_hours * 3600.0)
         .collect();
     let count = |kind: FailureKind| failures.get(&kind).copied().unwrap_or(0);
     let mut rules = vec![
         growth("rss_growth", &post, enforced, 0.10, 256.0 * MIB, |s| {
-            s.rss_bytes as f64
+            Some(s.rss_bytes as f64)
         }),
-        growth("fd_growth", &post, enforced, 0.10, 64.0, |s| s.fds as f64),
+        growth("fd_growth", &post, enforced, 0.10, 64.0, |s| {
+            Some(s.fds as f64)
+        }),
         growth("thread_growth", &post, enforced, 0.10, 8.0, |s| {
-            s.threads as f64
+            Some(s.threads as f64)
         }),
         growth(
             "wal_growth",
@@ -174,7 +198,7 @@ pub(crate) fn evaluate(
             enforced,
             0.5,
             2.0 * limits.wal_segment_bytes,
-            |s| s.wal_bytes as f64,
+            |s| Some(s.wal_bytes as f64),
         ),
         growth(
             "memtable_growth",
@@ -182,10 +206,10 @@ pub(crate) fn evaluate(
             enforced,
             0.5,
             limits.flush_max_bytes,
-            |s| s.memtable_bytes as f64,
+            |s| Some(s.memtable_bytes as f64),
         ),
         growth("l0_growth", &post, enforced, 0.5, limits.l0_files, |s| {
-            s.files.get("spans").map_or(0.0, |f| f.l0 as f64)
+            Some(s.files.get("spans").map_or(0.0, |f| f.l0 as f64))
         }),
     ];
     for kind in QueryKind::ALL {
@@ -195,11 +219,16 @@ pub(crate) fn evaluate(
             enforced,
             0.5,
             50.0,
-            |s| s.queries.get(kind.name()).map_or(0.0, |q| q.p95_ms),
+            |s| {
+                s.queries
+                    .get(kind.name())
+                    .filter(|q| q.n > 0)
+                    .map(|q| q.p95_ms)
+            },
         ));
     }
 
-    let max_rss = samples
+    let max_rss = during
         .iter()
         .map(|s| s.rss_bytes as f64)
         .fold(0.0, f64::max);
@@ -214,7 +243,10 @@ pub(crate) fn evaluate(
         }),
     ));
     rules.push(("ingest_rate".to_owned(), ingest_rate(samples, config)));
-    let max_lag = post.iter().map(|s| s.l0_oldest_age_s).fold(0.0, f64::max);
+    let max_lag = after_warmup
+        .iter()
+        .map(|s| s.l0_oldest_age_s)
+        .fold(0.0, f64::max);
     rules.push(harness(
         "compaction_lag",
         (max_lag > (config.max_l0_age_min * 60) as f64).then(|| {
@@ -264,6 +296,11 @@ pub(crate) fn evaluate(
             .iter()
             .any(|s| s.wal_failed)
             .then(|| "a WAL writer stopped".to_owned()),
+    ));
+    rules.push(harness(
+        "sampling",
+        (count(FailureKind::Sample) > 0)
+            .then(|| format!("{} samples could not be taken", count(FailureKind::Sample))),
     ));
     rules.push(harness(
         "appends",

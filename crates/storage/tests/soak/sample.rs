@@ -193,13 +193,19 @@ impl Sampler {
         s3: Option<(S3Env, String)>,
         start: Instant,
     ) -> Result<Self, String> {
-        let connection = sqlx::sqlite::SqliteConnectOptions::new()
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(dir.join("catalog.db"))
-            .read_only(true)
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .connect()
-            .await
-            .map_err(|error| error.to_string())?;
+            .busy_timeout(std::time::Duration::from_secs(5));
+        // Read-only first. If the `-shm` file cannot be opened read-only while the
+        // storage runs, open read-write: the sampler only runs SELECTs.
+        let connection = match options.clone().read_only(true).connect().await {
+            Ok(connection) => connection,
+            Err(_) => options
+                .read_only(false)
+                .connect()
+                .await
+                .map_err(|error| error.to_string())?,
+        };
         Ok(Self {
             connection,
             dir: dir.to_path_buf(),
@@ -211,7 +217,7 @@ impl Sampler {
 
     /// Objects under the run's tables: (path relative to the objects directory,
     /// modification second), with the count and bytes.
-    async fn list_objects(&self) -> (Vec<(String, i64)>, u64, u64) {
+    async fn list_objects(&self) -> Result<(Vec<(String, i64)>, u64, u64), String> {
         match &self.s3 {
             None => {
                 let objects = self.dir.join("objects");
@@ -243,13 +249,10 @@ impl Sampler {
                     }
                 }
                 let count = listed.len() as u64;
-                (listed, bytes, count)
+                Ok((listed, bytes, count))
             }
             Some((s3, prefix)) => {
-                let metas = s3
-                    .list(&format!("{prefix}/tables"))
-                    .await
-                    .expect("the S3 listing succeeds");
+                let metas = s3.list(&format!("{prefix}/tables")).await?;
                 let strip = format!("{prefix}/");
                 let mut bytes = 0;
                 let listed: Vec<(String, i64)> = metas
@@ -262,51 +265,51 @@ impl Sampler {
                     })
                     .collect();
                 let count = listed.len() as u64;
-                (listed, bytes, count)
+                Ok((listed, bytes, count))
             }
         }
     }
 
     /// The rows of one transaction, so the sample sees one catalog state.
-    async fn catalog(&mut self) -> CatalogRows {
+    async fn catalog(&mut self) -> Result<CatalogRows, String> {
         let mut tx = self
             .connection
             .begin()
             .await
-            .expect("the catalog transaction begins");
+            .map_err(|error| error.to_string())?;
         let groups: Vec<GroupTuple> = sqlx::query_as(
             "SELECT table_name, project_id, day, level, COUNT(*), SUM(size_bytes), MIN(created_at), MAX(created_at)
              FROM data_files WHERE state = 'active' GROUP BY table_name, project_id, day, level",
         )
         .fetch_all(&mut *tx)
         .await
-        .expect("the partition query runs");
+        .map_err(|error| error.to_string())?;
         let states: Vec<(String, i64)> =
             sqlx::query_as("SELECT state, COUNT(*) FROM data_files GROUP BY state")
                 .fetch_all(&mut *tx)
                 .await
-                .expect("the state query runs");
+                .map_err(|error| error.to_string())?;
         let paths: Vec<(String,)> = sqlx::query_as("SELECT path FROM data_files")
             .fetch_all(&mut *tx)
             .await
-            .expect("the path query runs");
+            .map_err(|error| error.to_string())?;
         let staged: Vec<(String,)> = sqlx::query_as("SELECT path FROM staged_objects")
             .fetch_all(&mut *tx)
             .await
-            .expect("the staged query runs");
+            .map_err(|error| error.to_string())?;
         let watermarks: Vec<(String, String)> =
             sqlx::query_as("SELECT project_id, keep_from FROM retention_watermarks")
                 .fetch_all(&mut *tx)
                 .await
-                .expect("the watermark query runs");
+                .map_err(|error| error.to_string())?;
         let pending: (i64, Option<i64>) = sqlx::query_as(
             "SELECT COUNT(*), MIN(registered_at) FROM deletions WHERE status = 'pending'",
         )
         .fetch_one(&mut *tx)
         .await
-        .expect("the deletion query runs");
-        tx.commit().await.expect("the catalog transaction commits");
-        CatalogRows {
+        .map_err(|error| error.to_string())?;
+        tx.commit().await.map_err(|error| error.to_string())?;
+        Ok(CatalogRows {
             groups: groups
                 .into_iter()
                 .map(
@@ -327,7 +330,7 @@ impl Sampler {
             staged: staged.into_iter().map(|(path,)| path).collect(),
             watermarks,
             pending,
-        }
+        })
     }
 
     /// Orphan suspects of the last sample.
@@ -336,11 +339,11 @@ impl Sampler {
     }
 
     /// Takes one sample. Counters are cumulative; query latencies are since the last sample.
-    pub(crate) async fn sample(&mut self, shared: &Shared) -> Sample {
+    pub(crate) async fn sample(&mut self, shared: &Shared) -> Result<Sample, String> {
         let now = now_ns();
         let now_s = now / 1_000_000_000;
-        let (listed, objects_bytes, objects_files) = self.list_objects().await;
-        let rows = self.catalog().await;
+        let (listed, objects_bytes, objects_files) = self.list_objects().await?;
+        let rows = self.catalog().await?;
         let mut sample = Sample {
             t: now_s,
             elapsed_s: self.start.elapsed().as_secs_f64(),
@@ -399,7 +402,7 @@ impl Sampler {
             .map(|(kind, count)| (kind.name(), count))
             .collect();
         sample.queries = shared.take_query_stats();
-        sample
+        Ok(sample)
     }
 }
 

@@ -462,7 +462,8 @@ pub(crate) async fn ingest(
                     .registry
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(index, generated.summary.clone(), generated.late.is_empty());
+                    // Not complete until its groups are acknowledged (flush_spans).
+                    .insert(index, generated.summary.clone(), false);
             }
             let candidate = Candidate {
                 trace_id: generated.summary.trace_id,
