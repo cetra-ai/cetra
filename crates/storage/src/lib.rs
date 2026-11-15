@@ -36,7 +36,7 @@ use crate::flush::FlushHandle;
 use crate::hooks::{HookPoint, Hooks};
 use crate::media::MediaGc;
 use crate::memtable::{MemSnapshot, Memtable};
-use crate::objects::Objects;
+use crate::objects::{Objects, PutSizes};
 use crate::read_state::{Published, ReadState};
 use crate::verify::{Suspects, VerifyQueue};
 use crate::wal::Table;
@@ -246,18 +246,19 @@ impl Storage {
         Self::open_inner(config, None).await
     }
 
-    /// [`Self::open`] with a remote store standing in for S3.
+    /// [`Self::open`] with a remote store standing in for S3, uploading with `put_sizes`.
     #[cfg(test)]
     pub(crate) async fn open_with_store(
         config: StorageConfig,
         store: Arc<dyn object_store::ObjectStore>,
+        put_sizes: PutSizes,
     ) -> Result<Self, OpenError> {
-        Self::open_inner(config, Some(store)).await
+        Self::open_inner(config, Some((store, put_sizes))).await
     }
 
     async fn open_inner(
         config: StorageConfig,
-        remote: Option<Arc<dyn object_store::ObjectStore>>,
+        remote: Option<(Arc<dyn object_store::ObjectStore>, PutSizes)>,
     ) -> Result<Self, OpenError> {
         config.validate()?;
         let data_dir = config.data_dir.clone();
@@ -1395,14 +1396,15 @@ fn recover_table(
 async fn open_objects(
     config: &StorageConfig,
     hooks: &Hooks,
-    remote: Option<Arc<dyn object_store::ObjectStore>>,
+    remote: Option<(Arc<dyn object_store::ObjectStore>, PutSizes)>,
 ) -> Result<Objects, OpenError> {
     #[cfg(test)]
-    if let Some(store) = remote {
+    if let Some((store, put_sizes)) = remote {
         return Ok(Objects::remote_for_test(
             store,
             &config.data_dir,
             share_hooks(hooks),
+            put_sizes,
         )?);
     }
     #[cfg(not(test))]
@@ -2487,7 +2489,7 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
-        let storage = Storage::open_with_store(config, Arc::new(fault))
+        let storage = Storage::open_with_store(config, Arc::new(fault), PutSizes::S3)
             .await
             .unwrap();
         storage
@@ -2519,7 +2521,7 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
-        let storage = Storage::open_with_store(config, Arc::new(fault))
+        let storage = Storage::open_with_store(config, Arc::new(fault), PutSizes::S3)
             .await
             .unwrap();
         storage
@@ -2600,7 +2602,7 @@ mod tests {
         let mut config = config_in(dir.path());
         config.flush.max_age = Duration::from_millis(100);
         config.flush.upload_concurrency = 1;
-        let storage = Storage::open_with_store(config, Arc::new(fault))
+        let storage = Storage::open_with_store(config, Arc::new(fault), PutSizes::S3)
             .await
             .unwrap();
         storage
@@ -2656,7 +2658,7 @@ mod tests {
         config.flush.max_bytes = ByteSize::mib(1);
         config.flush.max_age = Duration::from_secs(60 * 60);
         config.flush.upload_concurrency = 1;
-        let storage = Storage::open_with_store(config, Arc::new(fault.clone()))
+        let storage = Storage::open_with_store(config, Arc::new(fault.clone()), PutSizes::S3)
             .await
             .unwrap();
         let payload = incompressible(1024 * 1024);
@@ -2725,7 +2727,7 @@ mod tests {
     async fn a_flushed_file_is_cached_on_write() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let storage = Storage::open_with_store(cached_config(dir.path()), inner)
+        let storage = Storage::open_with_store(cached_config(dir.path()), inner, PutSizes::S3)
             .await
             .unwrap();
         storage
@@ -2763,7 +2765,7 @@ mod tests {
     async fn verification_reads_the_store_not_the_cache() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let storage = Storage::open_with_store(cached_config(dir.path()), inner)
+        let storage = Storage::open_with_store(cached_config(dir.path()), inner, PutSizes::S3)
             .await
             .unwrap();
         storage

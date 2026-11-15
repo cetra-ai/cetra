@@ -776,4 +776,4 @@ fn collect_object_keys(dir: &Path, objects: &Path, keys: &mut Vec<String>) {
 }
 
 mod chaos;
-pub(crate) use chaos::{Call, ChaosStore, Fault, Status};
+pub(crate) use chaos::{Call, ChaosStore, Fault, Status, UploadState};

@@ -18,6 +18,7 @@ use crate::catalog::{FileId, FileMeta, FileTable, now_ns};
 use crate::compaction::job::tests::{at, config_in, flush_cycle, project, quiet_compaction};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::hooks::HookPoint;
+use crate::objects::PutSizes;
 use crate::test_support::{Call, ChaosStore, rows, span_row, span_rows};
 use crate::verify::{Verdict, verify_file};
 use crate::views::QueryContext;
@@ -323,7 +324,7 @@ async fn a_store_outage_requeues() {
     let dir = tempfile::tempdir().unwrap();
     let config = config_in(dir.path(), quiet_compaction(10), Duration::from_secs(3_600));
     let fault = Arc::new(ChaosStore::new(Arc::new(InMemory::new())));
-    let storage = Storage::open_with_store(config.clone(), fault.clone())
+    let storage = Storage::open_with_store(config.clone(), fault.clone(), PutSizes::S3)
         .await
         .unwrap();
     storage
@@ -334,7 +335,7 @@ async fn a_store_outage_requeues() {
         .await
         .unwrap();
     storage.shutdown().await.unwrap();
-    let storage = Storage::open_with_store(config, fault.clone())
+    let storage = Storage::open_with_store(config, fault.clone(), PutSizes::S3)
         .await
         .unwrap();
     let file = storage.catalog_files(FileTable::Spans)[0].id;

@@ -114,6 +114,8 @@ Per table: `active` (accepting inserts) and at most one `frozen` (being flushed)
    - S3: the PUT or multipart upload has completed.
 
    An upload that fails ambiguously (error, but the object may exist) is retried under a new name; the old name stays staged and GC removes it.
+
+   A multipart upload that fails after it started (a part, the part source or `complete`) is aborted, best effort. An abort cannot remove an object that `complete` did create, so this is safe after an ambiguous `complete`. Uploads that no abort reached remain on the bucket: those whose abort failed, those whose `CreateMultipartUpload` answer was lost, and those cut by a crash or a cancelled task. The bucket's lifecycle rule removes them (`docs/self-hosting/s3.md`).
 5. **Commit.** One catalog transaction, through the committer (§4):
    - insert the new `data_files` rows as `active`, and the `file_sources` rows;
    - remove the `staged_objects` rows;
@@ -270,7 +272,7 @@ Times below are wall-clock nanoseconds (`now`). A file's age is `now` minus its 
 
 **Resources:**
 - A merge streams its inputs (one batch per input at a time) instead of sorting a whole slice in memory. Merge memory across running jobs is capped by `compaction.max_memory` (default 1 GiB), a DataFusion memory pool of its own.
-- Each `spans` and `scores` output is written while it is merged, into a temp file, then published durably. On local disk the temp file sits in the target directory and is synced and renamed like any object write. With S3 it is `<data_dir>/tmp/compaction/<uuidv7>.parquet`, uploaded, then removed. `traces` outputs are small and are built in memory (D-A1-2).
+- Each `spans` and `scores` output is written while it is merged, into a temp file, then published durably. On local disk the temp file sits in the target directory and is synced and renamed like any object write. With S3 it is `<data_dir>/tmp/compaction/<uuidv7>.parquet`, uploaded, then removed. A failed upload is aborted as at flush (§2). `traces` outputs are small and are built in memory (D-A1-2).
 - Before it reads anything, every job (merges and rewrites, local and S3 mode alike, since outputs stream through a local temp file in both) reserves the sum of its `spans`/`scores` input sizes against free disk minus the other running jobs' reservations. A job that doesn't fit fails as deferred and a later pass retries it (§10, D-A1-9).
 
 **Commit:** one catalog edit (§4) adds the outputs (`spans` with their `traces`, or `scores`) and the `file_sources` rows of the new pairs, and marks the inputs and the `traces` files derived from them `obsolete` with `obsoleted_at` = the committer's wall clock at commit. Shutdown stops compaction between slices or before a commit, never inside one. The committer refuses an edit that removes a `spans` file without its active `traces` file, or a `traces` file without every one of its sources.
@@ -456,7 +458,7 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Local object fsync error (publish, delete, startup walk) | the job fails; every later local object write and delete fails with `SyncFailed`, so every flush attempt fails on each retry, and the compaction and deletion passes do nothing (an empty report) until a restart; health reports it (`/readyz` 503); restart required. Reads continue (D-R-6) |
 | `catalog.db` I/O error at a commit | the committer stops; every flush attempt fails on each retry, the compaction and deletion passes do nothing (an empty report) until a restart, and retention, drop and GC runs fail; appends continue until backpressure; health reports it (`/readyz` 503); restart required (D-R-6) |
 | Object store errors during flush | retry after 1 s, doubling up to 60 s (§2), while the memtable keeps the data and backpressure applies past the hard limit |
-| Ambiguous upload (error reported, object may exist) | retried under a new name; the old one is collected from `staged_objects` (§2) |
+| Ambiguous upload (error reported, object may exist) | retried under a new name; the old one is collected from `staged_objects` (§2); a failed multipart upload is aborted (§2) |
 | Crash | WAL replay before ingestion opens; staged objects are GC'd |
 | Corrupted Parquet file | A read that fails with a decode error makes the files it read **suspects**: compaction and rewrite jobs (their inputs), the deletion pass's check scan, the anchor rebuild at open (which skips the file instead of failing), the media GC and queries (every file the query scanned). After each deletion pass, a verify pass reads each suspect again, whole, from the object store (never the read cache). A store error puts it back in the queue; a file read whole with the catalog's row count is healthy and isn't re-verified for an hour; a decode error, a wrong size or row count, or a missing object makes it **corrupt**, logged as an error. A corrupt `spans` file is quarantined with its `traces` file, a corrupt `scores` file alone: state `quarantined`, out of every snapshot, object kept for inspection, its rows lost. A corrupt `traces` file is rebuilt from its `spans` file by a rewrite job instead; nothing is lost. Quarantined files become `obsolete` (and GC deletes them) when retention drops their day, when their project is dropped, or when a pending deletion may cover them (§7). There is no periodic scrub (D-A1-10) |
 

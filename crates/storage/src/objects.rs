@@ -45,11 +45,22 @@ use tokio::io::AsyncReadExt;
 /// File URLs used by the providers are `llmobs://objects/tables/...`.
 pub(crate) const OBJECT_STORE_URL: &str = "llmobs://objects";
 
-/// `put` is used up to this size, inclusive. Larger objects use multipart.
-const SINGLE_PUT_MAX: usize = 64 * 1024 * 1024;
+/// When an upload switches to multipart, and the part size (spec 03 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PutSizes {
+    /// `put` up to this size, inclusive; multipart above.
+    pub(crate) single_max: usize,
+    /// Size of every part except the last.
+    pub(crate) part: usize,
+}
 
-/// Size of every multipart part except the last.
-const MULTIPART_PART: usize = 16 * 1024 * 1024;
+impl PutSizes {
+    /// What S3 gets: 64 MiB single puts, 16 MiB parts (S3's minimum part is 5 MiB).
+    pub(crate) const S3: PutSizes = PutSizes {
+        single_max: 64 * 1024 * 1024,
+        part: 16 * 1024 * 1024,
+    };
+}
 
 /// Object storage for one opened data directory.
 #[derive(Debug)]
@@ -69,6 +80,8 @@ pub(crate) struct Objects {
     /// Set by the first failed local fsync. Local writes and deletes check it
     /// first (D-R-6). Never set in remote mode.
     sync_failed: Arc<AtomicBool>,
+    /// The multipart thresholds of remote uploads. [`PutSizes::S3`] outside tests.
+    put_sizes: PutSizes,
 }
 
 #[derive(Debug)]
@@ -111,6 +124,7 @@ impl Objects {
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
+                    put_sizes: PutSizes::S3,
                 })
             }
             ObjectStoreUrl::S3 { bucket, prefix } => {
@@ -124,6 +138,7 @@ impl Objects {
                     spill_dir,
                     hooks,
                     sync_failed: Arc::new(AtomicBool::new(false)),
+                    put_sizes: PutSizes::S3,
                 })
             }
         }
@@ -159,6 +174,7 @@ impl Objects {
         store: Arc<dyn ObjectStore>,
         data_dir: &Path,
         hooks: Hooks,
+        put_sizes: PutSizes,
     ) -> Result<Self, ObjectError> {
         Ok(Self {
             kind: Kind::Remote,
@@ -169,6 +185,7 @@ impl Objects {
             spill_dir: data_dir.join("tmp").join("compaction"),
             hooks,
             sync_failed: Arc::new(AtomicBool::new(false)),
+            put_sizes,
         })
     }
 
@@ -258,7 +275,7 @@ impl Objects {
             Kind::Remote => {
                 let through = self.write_through(path);
                 let copy = through.as_ref().map(|_| bytes.clone());
-                put_remote(&self.store, path, bytes).await?;
+                put_remote(&self.store, path, bytes, self.put_sizes).await?;
                 if let (Some((cache, name)), Some(copy)) = (through, copy) {
                     // Best effort: an unwritten block is fetched from S3 later.
                     let _ =
@@ -320,7 +337,7 @@ impl Objects {
                 Err(ObjectError::AlreadyExists { .. }) => Ok(()),
                 Err(error) => Err(error),
             },
-            Kind::Remote => put_remote(&self.store, path, bytes).await,
+            Kind::Remote => put_remote(&self.store, path, bytes, self.put_sizes).await,
         }
     }
 
@@ -508,6 +525,7 @@ impl Objects {
                 let temp_for_cleanup = target.temp.clone();
                 let store = Arc::clone(&self.store);
                 let through = self.write_through(&key);
+                let sizes = self.put_sizes;
                 let upload = async move {
                     let size = file
                         .metadata()
@@ -516,7 +534,7 @@ impl Objects {
                     let mut file = file;
                     file.seek(SeekFrom::Start(0))
                         .map_err(|source| ObjectError::io("rewinding output", &temp, source))?;
-                    if usize::try_from(size).is_ok_and(|size| size <= SINGLE_PUT_MAX) {
+                    if usize::try_from(size).is_ok_and(|size| size <= sizes.single_max) {
                         let mut buffer = vec![0_u8; usize::try_from(size).unwrap_or(usize::MAX)];
                         file.read_exact(&mut buffer)
                             .map_err(|source| ObjectError::io("reading output", &temp, source))?;
@@ -536,7 +554,7 @@ impl Objects {
                             let reader = Arc::clone(&reader);
                             let temp = temp.clone();
                             async move {
-                                let mut buffer = vec![0_u8; MULTIPART_PART];
+                                let mut buffer = vec![0_u8; sizes.part];
                                 let mut file = reader.lock().await;
                                 let read =
                                     read_part(&mut *file, &mut buffer).await.map_err(|source| {
@@ -826,9 +844,10 @@ async fn put_remote(
     store: &Arc<dyn ObjectStore>,
     path: &str,
     bytes: Bytes,
+    sizes: PutSizes,
 ) -> Result<(), ObjectError> {
     let location = object_key(path)?;
-    if bytes.len() <= SINGLE_PUT_MAX {
+    if bytes.len() <= sizes.single_max {
         return store
             .put(&location, PutPayload::from(bytes))
             .await
@@ -840,7 +859,7 @@ async fn put_remote(
             None
         } else {
             Some(PutPayload::from(
-                remaining.split_to(MULTIPART_PART.min(remaining.len())),
+                remaining.split_to(sizes.part.min(remaining.len())),
             ))
         };
         std::future::ready(Ok(part))
@@ -848,9 +867,9 @@ async fn put_remote(
     .await
 }
 
-/// One multipart upload, taking one part at a time from `next`. The first part
-/// failure aborts the upload. A failed `complete` is not aborted: the object
-/// may be visible, which is ambiguous.
+/// One multipart upload, taking one part at a time from `next`. Any error after
+/// the upload started (a part, the part source or `complete`) aborts it, best
+/// effort, and returns the original error (spec 03 §2).
 async fn put_multi<F, Fut>(
     store: &Arc<dyn ObjectStore>,
     path: &str,
@@ -865,17 +884,38 @@ where
         .put_multipart(&location)
         .await
         .map_err(|source| ObjectError::upload(path, source))?;
+    let outcome = send_parts(upload.as_mut(), path, &mut next).await;
+    if outcome.is_err() {
+        // A failed `complete` may still have created the object. Aborting cannot
+        // remove a completed object (S3 answers NoSuchUpload); it only frees the
+        // parts when the upload really failed. The name stays staged either way,
+        // and GC removes it (spec 03 §2).
+        let _ = upload.abort().await;
+    }
+    outcome
+}
+
+/// Sends every part from `next` to `upload`, then completes it.
+async fn send_parts<F, Fut>(
+    upload: &mut dyn MultipartUpload,
+    path: &str,
+    next: &mut F,
+) -> Result<(), ObjectError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<PutPayload>, ObjectError>>,
+{
     while let Some(part) = next().await? {
-        if let Err(source) = upload.put_part(part).await {
-            let _ = upload.abort().await;
-            return Err(ObjectError::upload(path, source));
-        }
+        upload
+            .put_part(part)
+            .await
+            .map_err(|source| ObjectError::upload(path, source))?;
     }
     upload
         .complete()
         .await
-        .map_err(|source| ObjectError::upload(path, source))?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|source| ObjectError::upload(path, source))
 }
 
 /// Unlinks the local object `key` under `root` and returns its size before the
@@ -1173,7 +1213,7 @@ mod tests {
     use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
 
-    use super::{MULTIPART_PART, OBJECT_STORE_URL, SINGLE_PUT_MAX, is_temp_name};
+    use super::{OBJECT_STORE_URL, PutSizes, is_temp_name, put_multi};
     use crate::catalog::FileTable;
     use crate::config::{
         FlushConfig, MemtableConfig, ObjectStoreUrl, QueryConfig, S3Config, StorageConfig,
@@ -1183,7 +1223,29 @@ mod tests {
     use crate::fs::lossy::{CrashMode, Lossy};
     use crate::hooks::{HookPoint, Hooks};
     use crate::objects::Objects;
-    use crate::test_support::{Call, ChaosStore, Fault, Status};
+    use crate::test_support::{Call, ChaosStore, Fault, Status, UploadState};
+
+    /// Multipart from 1 KiB, in 512-byte parts: small stand-ins for the S3 sizes, so the tests
+    /// never allocate 64 MiB.
+    const SIZES: PutSizes = PutSizes {
+        single_max: 1024,
+        part: 512,
+    };
+
+    /// A remote `Objects` over `chaos`, uploading with [`SIZES`].
+    fn remote_objects(chaos: &ChaosStore, dir: &std::path::Path) -> Objects {
+        Objects::remote_for_test(Arc::new(chaos.clone()), dir, Hooks::default(), SIZES).unwrap()
+    }
+
+    /// Six parts under [`SIZES`]: five of 512 bytes and one of 440.
+    fn multipart_bytes() -> Bytes {
+        Bytes::from(vec![5_u8; 3000])
+    }
+
+    /// The states of the uploads in `chaos`'s ledger, in order.
+    fn states(chaos: &ChaosStore) -> Vec<UploadState> {
+        chaos.uploads().iter().map(|record| record.state).collect()
+    }
 
     fn local_config(dir: &std::path::Path) -> StorageConfig {
         StorageConfig {
@@ -1323,7 +1385,7 @@ mod tests {
         let inner = Arc::new(InMemory::new());
         let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
         let objects =
-            Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default())
+            Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default(), SIZES)
                 .unwrap();
         let small = Bytes::from_static(b"small");
         objects
@@ -1335,10 +1397,10 @@ mod tests {
             small
         );
 
-        let mut large = vec![0_u8; SINGLE_PUT_MAX + 1];
+        let mut large = vec![0_u8; SIZES.single_max + 1];
         large[0] = 1;
-        large[MULTIPART_PART] = 2;
-        large[SINGLE_PUT_MAX] = 3;
+        large[SIZES.part] = 2;
+        large[SIZES.single_max] = 3;
         let large = Bytes::from(large);
         objects
             .put_durable("tables/spans/b.parquet", large.clone())
@@ -1389,7 +1451,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, ObjectError::Upload { .. }));
         let landed = read_registered(&objects, "tables/spans/f.parquet").await;
-        assert_eq!(landed.len(), SINGLE_PUT_MAX + 1);
+        assert_eq!(landed.len(), SIZES.single_max + 1);
         assert_eq!(objects.remove_temp_files().unwrap(), 0);
         assert_eq!(OBJECT_STORE_URL, "llmobs://objects");
     }
@@ -1474,6 +1536,7 @@ mod tests {
             Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>,
             dir.path(),
             Hooks::default(),
+            SIZES,
         )
         .unwrap();
         let spill = dir.path().join("tmp").join("compaction");
@@ -1495,10 +1558,10 @@ mod tests {
         assert!(!temp.exists());
         assert!(std::fs::read_dir(&spill).unwrap().next().is_none());
 
-        let mut large = vec![0_u8; SINGLE_PUT_MAX + 1];
+        let mut large = vec![0_u8; SIZES.single_max + 1];
         large[0] = 1;
-        large[MULTIPART_PART] = 2;
-        large[SINGLE_PUT_MAX] = 3;
+        large[SIZES.part] = 2;
+        large[SIZES.single_max] = 3;
         let (target, mut file) = objects
             .create_output("tables/spans/large.parquet")
             .await
@@ -1529,7 +1592,7 @@ mod tests {
         let inner = Arc::new(InMemory::new());
         let fault = ChaosStore::new(Arc::clone(&inner) as Arc<dyn object_store::ObjectStore>);
         let objects =
-            Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default())
+            Objects::remote_for_test(Arc::new(fault.clone()), dir.path(), Hooks::default(), SIZES)
                 .unwrap();
         fault.push(Call::MultipartStart, Fault::Before(Status::SlowDown));
         let (target, mut file) = objects
@@ -1537,7 +1600,7 @@ mod tests {
             .await
             .unwrap();
         let temp = target.temp.clone();
-        let payload = vec![9_u8; SINGLE_PUT_MAX + 1];
+        let payload = vec![9_u8; SIZES.single_max + 1];
         file.write_all(&payload).unwrap();
         let error = objects.publish_output(target, file).await.unwrap_err();
         assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
@@ -1547,6 +1610,102 @@ mod tests {
             inner.get(&missing).await.unwrap_err(),
             object_store::Error::NotFound { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_part_aborts_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let chaos = ChaosStore::new(Arc::new(InMemory::new()));
+        let objects = remote_objects(&chaos, dir.path());
+        chaos.push(Call::PutPart, Fault::Before(Status::SlowDown));
+        let error = objects
+            .put_durable("tables/spans/part.parquet", multipart_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
+        assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        assert!(chaos.leaked_uploads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_complete_aborts_the_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let chaos = ChaosStore::new(Arc::new(InMemory::new()));
+        let objects = remote_objects(&chaos, dir.path());
+        chaos.push(Call::Complete, Fault::Before(Status::SlowDown));
+        let error = objects
+            .put_durable("tables/spans/complete.parquet", multipart_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
+        assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        let missing = object_store::path::Path::parse("tables/spans/complete.parquet").unwrap();
+        assert!(matches!(
+            chaos.inner().head(&missing).await.unwrap_err(),
+            object_store::Error::NotFound { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_complete_aborts_and_keeps_the_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let chaos = ChaosStore::new(Arc::new(InMemory::new()));
+        let objects = remote_objects(&chaos, dir.path());
+        chaos.push(Call::Complete, Fault::After(Status::SlowDown));
+        let error = objects
+            .put_durable("tables/spans/ambiguous.parquet", multipart_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
+        assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+        // Abort cannot remove an object that `complete` created (S3 answers NoSuchUpload).
+        let landed = object_store::path::Path::parse("tables/spans/ambiguous.parquet").unwrap();
+        assert_eq!(chaos.inner().head(&landed).await.unwrap().size, 3000);
+    }
+
+    #[tokio::test]
+    async fn a_failed_part_read_aborts_the_upload() {
+        let chaos = ChaosStore::new(Arc::new(InMemory::new()));
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(chaos.clone());
+        // One part, then the part source fails.
+        let mut reads = 0;
+        let next = || {
+            reads += 1;
+            std::future::ready(if reads == 1 {
+                Ok(Some(object_store::PutPayload::from(Bytes::from(vec![
+                    1_u8;
+                    512
+                ]))))
+            } else {
+                Err(ObjectError::InvalidPath)
+            })
+        };
+        let error = put_multi(&store, "tables/spans/read.parquet", next)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::InvalidPath), "{error}");
+        assert_eq!(states(&chaos), vec![UploadState::Aborted]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_abort_is_reported_as_abandoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let chaos = ChaosStore::new(Arc::new(InMemory::new()));
+        let objects = remote_objects(&chaos, dir.path());
+        chaos.push(Call::PutPart, Fault::Before(Status::SlowDown));
+        chaos.push(Call::Abort, Fault::Before(Status::SlowDown));
+        let error = objects
+            .put_durable("tables/spans/stuck.parquet", multipart_bytes())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Upload { .. }), "{error}");
+        let abandoned: Vec<String> = chaos
+            .abandoned_uploads()
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
+        assert_eq!(abandoned, vec!["tables/spans/stuck.parquet".to_owned()]);
+        assert!(chaos.leaked_uploads().is_empty());
     }
 
     #[test]
