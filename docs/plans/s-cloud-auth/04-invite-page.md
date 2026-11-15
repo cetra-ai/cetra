@@ -1,8 +1,8 @@
-# S4 — The invite page starts the only provider; closeout (R7)
+# S4 — The invite page starts the only provider (R7)
 
 **Commit subject:** `web: start the only sign-in provider from the invite page`
 
-**Goal:** under the same condition as the login page (`onlyProvider`, D-S-5), the invite page leaves at once for the provider when the visitor has no session, with `redirect` back to `/invite/<token>`, so an invitee without an account signs up through the provider and comes back to click "Join <org>" (D-S-7). It does not when sign-up is `disabled` and the invited email has no account, and not after the visitor signed out of another account on this page (D-S-6). Then the track is closed out.
+**Goal:** under the same condition as the login page (`onlyProvider`, D-S-5), the invite page leaves at once for the provider when the visitor has no session, with `redirect` back to `/invite/<token>`, so an invitee without an account signs up through the provider and comes back to click "Join <org>" (D-S-7). It does not when sign-up is `disabled` and the invited email has no account, and not after the visitor signed out of another account on this page (D-S-6). S5 closes the track out.
 
 ## Read first
 
@@ -22,8 +22,6 @@
 | `web/src/routes/invite/$token.test.tsx` | tests |
 | `docs/spec/11-ui.md` | the invite page under R7 |
 | `CHANGELOG.md` | extend S3's `Changed` line |
-| `docs/plans/s-cloud-auth/README.md` | status line |
-| `docs/roadmap.md` | the S row: Done |
 
 ## Steps
 
@@ -137,11 +135,6 @@ In § "**Signed out (D-L-1).**", after the sentence S3 added about `/login` leav
 ### 4. CHANGELOG
 
 Extend S3's `### Changed` line `- Web UI: with password sign-in off and exactly one sign-in provider, the login page goes straight to that provider; …` so its first sentence reads `…, the login page and, for a visitor without a session, the invite page go straight to that provider;` (keep the rest).
-
-### 5. Closeout
-
-1. `docs/plans/s-cloud-auth/README.md`: the first line becomes `Status: S1–S4 done on <today, YYYY-MM-DD>`.
-2. `docs/roadmap.md`, the row that starts `| **S** Cloud auth |`: the status cell becomes `**Done.** S1–S4: R16 (\`LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET\`), R13 (instance admins' password at \`/login?password=1\`), R7 (login and invite pages start the only provider). Q's Q2.27 can move its pin.` Append the merged PR numbers to that cell when you know them (the table has no PR column).
 
 ## Check
 
