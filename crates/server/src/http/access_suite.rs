@@ -117,7 +117,7 @@ impl Outcome {
 
 #[tokio::test(flavor = "current_thread")]
 async fn every_route_against_every_principal() {
-    let ((needles, checked), logs) = capture_logs(suite()).await;
+    let ((needles, checked), logs) = Box::pin(capture_logs(suite())).await;
     for needle in &needles {
         assert!(!logs.contains(needle), "log contains {needle}: {logs}");
     }

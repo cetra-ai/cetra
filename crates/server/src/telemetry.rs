@@ -27,6 +27,7 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
+use llmobs_storage::StorageStats;
 use llmobs_storage::error::{AppendError, MediaError};
 
 use crate::api::alerts::ChannelKind;
@@ -54,6 +55,31 @@ fn advance(counter: &Counter, last: &AtomicU64, now: u64) {
     }
 }
 
+/// The float variant of [`advance`] for `llmobs_storage_flush_seconds_total`. `now_nanos` is a
+/// cumulative total in nanoseconds; the growth is added to `counter` in seconds.
+fn advance_seconds(counter: &Counter<f64, AtomicU64>, last: &AtomicU64, now_nanos: u64) {
+    let prev = last.fetch_max(now_nanos, Ordering::Relaxed);
+    if now_nanos > prev {
+        counter.inc_by(Duration::from_nanos(now_nanos - prev).as_secs_f64());
+    }
+}
+
+/// The tables of the storage metrics, in the index order of [`StorageStats`].
+const TABLES: [Table; 2] = [Table::spans, Table::scores];
+
+/// The last storage totals copied into the storage counters, so each total only grows by its
+/// growth. Each array is indexed like [`TABLES`] or like the compaction outcomes in
+/// [`Telemetry::refresh_storage_counters`].
+#[derive(Debug, Default)]
+struct StorageSeen {
+    flushes_ok: [AtomicU64; 2],
+    flushes_failed: [AtomicU64; 2],
+    flush_nanos: [AtomicU64; 2],
+    compactions: [AtomicU64; 4],
+    compaction_bytes_written: AtomicU64,
+    gc_objects_deleted: AtomicU64,
+}
+
 /// The Prometheus registry and every metric of the `/metrics` table (N M3).
 ///
 /// Fields are `pub(crate)` so the request, ingest, eval, alert and email code can count
@@ -77,6 +103,24 @@ pub(crate) struct Telemetry {
     read_cache_seen_hits: AtomicU64,
     /// The last misses total copied into [`Self::read_cache_misses`], so it only grows.
     read_cache_seen_misses: AtomicU64,
+    /// `llmobs_storage_disk_free_bytes`, from `StorageHealth`.
+    disk_free_bytes: Gauge,
+    /// `llmobs_storage_disk_min_free_bytes`, from `StorageHealth`.
+    disk_min_free_bytes: Gauge,
+    /// `llmobs_storage_wal_bytes{table}`, from `StorageStats`.
+    wal_bytes: Family<TableLabel, Gauge>,
+    /// `llmobs_storage_flushes_total{table,outcome}`, from `StorageStats`.
+    storage_flushes: Family<FlushLabels, Counter>,
+    /// `llmobs_storage_flush_seconds_total{table}`, from `StorageStats`.
+    storage_flush_seconds: Family<TableLabel, Counter<f64, AtomicU64>>,
+    /// `llmobs_storage_compactions_total{outcome}`, from `StorageStats`.
+    storage_compactions: Family<CompactionLabel, Counter>,
+    /// `llmobs_storage_compaction_bytes_written_total`, from `StorageStats`.
+    storage_compaction_bytes_written: Counter,
+    /// `llmobs_storage_gc_objects_deleted_total`, from `StorageStats`.
+    storage_gc_objects_deleted: Counter,
+    /// The last storage totals copied into the storage counters above.
+    storage_seen: StorageSeen,
     /// `llmobs_eval_jobs{status}`, from `meta.db`, cached for [`EVAL_COUNT_TTL`].
     eval_jobs: Family<EvalStatusLabel, Gauge>,
     /// The last queue count attempt and when it was made, in `state.clock` nanoseconds. The
@@ -198,6 +242,54 @@ impl Telemetry {
             "Bytes of the read cache on disk, CRCs included",
             read_cache_bytes.clone(),
         );
+        let disk_free_bytes = Gauge::default();
+        sub.register(
+            "storage_disk_free_bytes",
+            "Least free bytes of the data directory and the local object root, from the last measurement",
+            disk_free_bytes.clone(),
+        );
+        let disk_min_free_bytes = Gauge::default();
+        sub.register(
+            "storage_disk_min_free_bytes",
+            "The free disk floor under which ingestion is refused, in bytes",
+            disk_min_free_bytes.clone(),
+        );
+        let wal_bytes = Family::<TableLabel, Gauge>::default();
+        sub.register(
+            "storage_wal_bytes",
+            "Bytes of WAL segment files on disk, by table",
+            wal_bytes.clone(),
+        );
+        let storage_flushes = Family::<FlushLabels, Counter>::default();
+        sub.register(
+            "storage_flushes",
+            "Storage flushes by table and outcome",
+            storage_flushes.clone(),
+        );
+        let storage_flush_seconds = Family::<TableLabel, Counter<f64, AtomicU64>>::default();
+        sub.register(
+            "storage_flush_seconds",
+            "Wall time of committed storage flushes in seconds, by table",
+            storage_flush_seconds.clone(),
+        );
+        let storage_compactions = Family::<CompactionLabel, Counter>::default();
+        sub.register(
+            "storage_compactions",
+            "Storage compaction jobs by outcome",
+            storage_compactions.clone(),
+        );
+        let storage_compaction_bytes_written = Counter::default();
+        sub.register(
+            "storage_compaction_bytes_written",
+            "Bytes of Parquet objects written by committed compaction jobs",
+            storage_compaction_bytes_written.clone(),
+        );
+        let storage_gc_objects_deleted = Counter::default();
+        sub.register(
+            "storage_gc_objects_deleted",
+            "Obsolete data files and staged objects deleted by GC; media blobs are not counted",
+            storage_gc_objects_deleted.clone(),
+        );
         let eval_jobs = Family::<EvalStatusLabel, Gauge>::default();
         sub.register(
             "eval_jobs",
@@ -282,6 +374,15 @@ impl Telemetry {
             read_cache_bytes,
             read_cache_seen_hits: AtomicU64::new(0),
             read_cache_seen_misses: AtomicU64::new(0),
+            disk_free_bytes,
+            disk_min_free_bytes,
+            wal_bytes,
+            storage_flushes,
+            storage_flush_seconds,
+            storage_compactions,
+            storage_compaction_bytes_written,
+            storage_gc_objects_deleted,
+            storage_seen: StorageSeen::default(),
             eval_jobs,
             eval_open: Mutex::new(None),
             process_resident_memory_bytes,
@@ -302,7 +403,7 @@ impl Telemetry {
     /// Refreshes the scrape-time gauges from `state`, then encodes the registry. `None` when the
     /// encoding fails; the `/metrics` handler then answers 500.
     pub(crate) async fn render(&self, state: &AppState) -> Option<String> {
-        self.refresh_storage(state);
+        self.refresh_storage(state).await;
         self.refresh_eval_jobs(state).await;
         self.refresh_process();
         let mut out = String::new();
@@ -315,11 +416,15 @@ impl Telemetry {
         }
     }
 
-    fn refresh_storage(&self, state: &AppState) {
+    async fn refresh_storage(&self, state: &AppState) {
         let health = state.storage.health();
         self.memtable_bytes.set(gauge_value(health.memtable_bytes));
         self.memtable_hard_limit_bytes
             .set(gauge_value(health.memtable_hard_limit));
+        self.disk_free_bytes
+            .set(gauge_value(health.disk_free_bytes));
+        self.disk_min_free_bytes
+            .set(gauge_value(health.disk_min_free_bytes));
         let checks = [
             (StorageCheck::spans_wal, health.spans_wal_failed),
             (StorageCheck::scores_wal, health.scores_wal_failed),
@@ -344,6 +449,70 @@ impl Telemetry {
             );
             self.read_cache_bytes.set(gauge_value(stats.bytes));
         }
+        self.refresh_storage_counters(&state.storage.stats().await);
+    }
+
+    /// Copies the storage totals into the storage counters and gauges. Totals since open only
+    /// grow, so each series adds its growth since the last scrape ([`advance`]).
+    fn refresh_storage_counters(&self, stats: &StorageStats) {
+        for (index, table) in TABLES.into_iter().enumerate() {
+            self.wal_bytes
+                .get_or_create(&TableLabel { table })
+                .set(gauge_value(stats.wal_bytes[index]));
+            let flushes = [
+                (
+                    Outcome::ok,
+                    stats.flushes_ok[index],
+                    &self.storage_seen.flushes_ok[index],
+                ),
+                (
+                    Outcome::failed,
+                    stats.flushes_failed[index],
+                    &self.storage_seen.flushes_failed[index],
+                ),
+            ];
+            for (outcome, now, last) in flushes {
+                advance(
+                    &self
+                        .storage_flushes
+                        .get_or_create(&FlushLabels { table, outcome }),
+                    last,
+                    now,
+                );
+            }
+            advance_seconds(
+                &self
+                    .storage_flush_seconds
+                    .get_or_create(&TableLabel { table }),
+                &self.storage_seen.flush_nanos[index],
+                stats.flush_nanos[index],
+            );
+        }
+        let compactions = [
+            (CompactionOutcome::ok, stats.compactions_ok),
+            (CompactionOutcome::failed, stats.compactions_failed),
+            (CompactionOutcome::deferred, stats.compactions_deferred),
+            (CompactionOutcome::conflict, stats.compactions_conflict),
+        ];
+        for (index, (outcome, now)) in compactions.into_iter().enumerate() {
+            advance(
+                &self
+                    .storage_compactions
+                    .get_or_create(&CompactionLabel { outcome }),
+                &self.storage_seen.compactions[index],
+                now,
+            );
+        }
+        advance(
+            &self.storage_compaction_bytes_written,
+            &self.storage_seen.compaction_bytes_written,
+            stats.compaction_bytes_written,
+        );
+        advance(
+            &self.storage_gc_objects_deleted,
+            &self.storage_seen.gc_objects_deleted,
+            stats.gc_objects_deleted,
+        );
     }
 
     async fn refresh_eval_jobs(&self, state: &AppState) {
@@ -578,6 +747,25 @@ pub(crate) struct CheckLabel {
     pub(crate) check: StorageCheck,
 }
 
+/// The `table` label of the storage WAL, flush and flush-time metrics.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub(crate) struct TableLabel {
+    pub(crate) table: Table,
+}
+
+/// `llmobs_storage_flushes_total` labels.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub(crate) struct FlushLabels {
+    pub(crate) table: Table,
+    pub(crate) outcome: Outcome,
+}
+
+/// The `outcome` label of `llmobs_storage_compactions_total`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub(crate) struct CompactionLabel {
+    pub(crate) outcome: CompactionOutcome,
+}
+
 /// The `status` label of `llmobs_eval_jobs`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub(crate) struct EvalStatusLabel {
@@ -779,6 +967,24 @@ pub(crate) enum Outcome {
     failed,
 }
 
+/// The `table` label of the storage metrics: the order of [`StorageStats`] arrays.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub(crate) enum Table {
+    spans,
+    scores,
+}
+
+/// The outcome label of `llmobs_storage_compactions_total`.
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+pub(crate) enum CompactionOutcome {
+    ok,
+    failed,
+    deferred,
+    conflict,
+}
+
 /// The `channel` label of `llmobs_alert_deliveries_total`.
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
@@ -819,6 +1025,16 @@ mod tests {
             line.strip_prefix(series)?
                 .strip_prefix(' ')?
                 .parse::<i64>()
+                .ok()
+        })
+    }
+
+    /// The value of a float series line, such as `llmobs_storage_flush_seconds_total{..} 0.5`.
+    fn sample_f64(text: &str, series: &str) -> Option<f64> {
+        text.lines().find_map(|line| {
+            line.strip_prefix(series)?
+                .strip_prefix(' ')?
+                .parse::<f64>()
                 .ok()
         })
     }
@@ -914,6 +1130,76 @@ mod tests {
         );
         assert_eq!(text.matches("# EOF").count(), 1, "{text}");
         assert!(text.trim_end().ends_with("# EOF"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn storage_counters_follow_a_flush() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let trace = "a1000000000000000000000000000091"
+            .parse()
+            .expect("trace id");
+        app.commit_trace_at(&seeded.project, trace, 0, now).await;
+        app.state
+            .storage
+            .flush_now(Duration::from_secs(30))
+            .await
+            .expect("flush");
+
+        let flushed = "llmobs_storage_flushes_total{table=\"spans\",outcome=\"ok\"}";
+        let seconds = "llmobs_storage_flush_seconds_total{table=\"spans\"}";
+        let first = render(&app).await;
+        assert!(sample(&first, flushed).is_some_and(|n| n >= 1), "{first}");
+        assert!(
+            sample_f64(&first, seconds).is_some_and(|s| s > 0.0),
+            "{first}"
+        );
+
+        // No new flush: the deltas add nothing, so the values do not move.
+        let second = render(&app).await;
+        assert_eq!(
+            sample(&second, flushed),
+            sample(&first, flushed),
+            "{second}"
+        );
+        assert_eq!(
+            sample_f64(&second, seconds),
+            sample_f64(&first, seconds),
+            "{second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disk_gauges_are_exported() {
+        let app = TestApp::new().await;
+        let text = render(&app).await;
+        assert!(
+            sample(&text, "llmobs_storage_disk_free_bytes").is_some_and(|bytes| bytes > 0),
+            "{text}"
+        );
+        // The test app sets `storage.min_free_bytes` to 0 (`test_support`).
+        assert_eq!(
+            sample(&text, "llmobs_storage_disk_min_free_bytes"),
+            Some(0),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_bytes_are_exported() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let trace = "a1000000000000000000000000000092"
+            .parse()
+            .expect("trace id");
+        app.commit_trace_at(&seeded.project, trace, 0, now).await;
+        let text = render(&app).await;
+        assert!(
+            sample(&text, "llmobs_storage_wal_bytes{table=\"spans\"}").is_some_and(|b| b > 0),
+            "{text}"
+        );
     }
 
     #[tokio::test]
