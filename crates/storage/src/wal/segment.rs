@@ -234,6 +234,11 @@ fn open_segment(path: &Path) -> Result<File, WalError> {
                 .open(path)
                 .map_err(|source| WalError::io("creating WAL segment", path, source))?;
             if bytes.len() == SEGMENT_HEADER_LEN {
+                // A header left by a creation whose sync failed may not be
+                // durable yet: sync it before records land behind it. A sync
+                // needs no free space.
+                file.sync_data()
+                    .map_err(|source| WalError::io("syncing WAL segment", path, source))?;
                 return Ok(file);
             }
             file.set_len(0)
@@ -382,6 +387,27 @@ mod tests {
             fs::read(&path).unwrap(),
             segment_header(),
             "the header was lost with the crash"
+        );
+    }
+
+    #[test]
+    fn a_reused_unsynced_header_is_synced() {
+        // A creation whose header sync failed leaves the header unsynced; the
+        // retry reuses the file and must make the header durable.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let lossy = crate::fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+        let path = data.join(segment_name(1));
+        crate::fs::write(&path, segment_header()).unwrap();
+        crate::fs::sync_dir(&data).unwrap();
+        let writer = SegmentWriter::create(&data, 1, 1024, Hooks::default()).unwrap();
+        drop(writer);
+        lossy.crash_with(crate::fs::lossy::CrashMode::DropAll, 0);
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            segment_header(),
+            "the reused header was lost with the crash"
         );
     }
 
