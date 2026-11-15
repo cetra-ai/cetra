@@ -923,14 +923,12 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_dataset"
-            || *id == "patch_dataset"
-            || *id == "post_dataset_items"
-            || *id == "patch_dataset_item"
-        {
+        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "patch_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
-            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_dataset_import_preview" {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {

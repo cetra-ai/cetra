@@ -6308,13 +6308,16 @@ export interface components {
              */
             webhook_secret?: string;
         };
-        /** @description `PATCH …/items/{item_id}` body. Absent keeps; `expected_output: null` clears it. */
+        /**
+         * @description `PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears
+         *     it. `input` and `metadata` must not be null (400).
+         */
         UpdateItemRequest: {
             /** @description Any JSON value. */
             expected_output?: unknown;
-            /** @description Any JSON value. */
+            /** @description Any JSON value but null. */
             input?: unknown;
-            /** @description New metadata, when present. A JSON object. */
+            /** @description New metadata, when present. A JSON object; must not be null. */
             metadata?: Record<string, never>;
         };
         /**
@@ -13020,15 +13023,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The request conflicts with the current state. */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Too many requests. */
             429: {
                 headers: {
@@ -13098,15 +13092,6 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The request conflicts with the current state. */
-            409: {
                 headers: {
                     [name: string]: unknown;
                 };

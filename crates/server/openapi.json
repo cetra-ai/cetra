@@ -8434,16 +8434,6 @@
               }
             }
           },
-          "409": {
-            "description": "The request conflicts with the current state.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
           "429": {
             "description": "Too many requests.",
             "content": {
@@ -8546,16 +8536,6 @@
           },
           "404": {
             "description": "The resource does not exist.",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The request conflicts with the current state.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22748,17 +22728,17 @@
       },
       "UpdateItemRequest": {
         "type": "object",
-        "description": "`PATCH …/items/{item_id}` body. Absent keeps; `expected_output: null` clears it.",
+        "description": "`PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears\nit. `input` and `metadata` must not be null (400).",
         "properties": {
           "expected_output": {
             "description": "Any JSON value."
           },
           "input": {
-            "description": "Any JSON value."
+            "description": "Any JSON value but null."
           },
           "metadata": {
             "type": "object",
-            "description": "New metadata, when present. A JSON object."
+            "description": "New metadata, when present. A JSON object; must not be null."
           }
         },
         "additionalProperties": false

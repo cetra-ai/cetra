@@ -54,7 +54,10 @@ const ITEMS_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const ITEM_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Page size of the live-item read when a new schema is checked.
-const SCHEMA_PAGE: u32 = 1_000;
+const SCHEMA_PAGE: u32 = 100;
+
+/// Field errors listed by a refused batch add (D-J-2). The first ones, in request order.
+const MAX_LISTED_ERRORS: usize = 100;
 
 /// The preview body: the head of the file (D-J-6).
 const PREVIEW_BODY_LIMIT: usize = import::MAX_PREVIEW_BYTES;
@@ -392,21 +395,11 @@ async fn list_datasets(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<DatasetListParams>,
 ) -> Result<error::Json<Page<Dataset>>, ApiError> {
-    let rows = store::list_datasets(state.meta.reader(), access.project.id).await?;
-    let needle = params
-        .q
-        .as_deref()
-        .filter(|q| !q.trim().is_empty())
-        .map(str::to_lowercase);
-    let mut items = Vec::new();
+    let needle = params.q.as_deref().filter(|q| !q.trim().is_empty());
+    let rows = store::list_datasets(state.meta.reader(), access.project.id, needle).await?;
+    let mut items = Vec::with_capacity(rows.len());
     for row in rows {
         let lower = row.name.to_lowercase();
-        if needle
-            .as_deref()
-            .is_some_and(|needle| !lower.contains(needle))
-        {
-            continue;
-        }
         items.push((lower, row.id.to_string(), dataset_json(&row)?));
     }
     Ok(error::Json(page_named(
@@ -516,7 +509,9 @@ async fn update_tx(
             table: "datasets",
             column,
         })?;
-        if let Some(errors) = check_live_items(conn, row.id, field, &schemas).await? {
+        if let Some(errors) =
+            check_live_items(conn, row.id, field, &schemas, MAX_SCHEMA_CHECK_BYTES).await?
+        {
             return Ok(Err(WriteOutcome::Invalid(errors)));
         }
     }
@@ -528,15 +523,29 @@ async fn update_tx(
     )
 }
 
+/// The one error of a schema change whose live items hold more than [`MAX_SCHEMA_CHECK_BYTES`].
+fn too_large_for_schema(field: &str) -> FieldError {
+    field_error(
+        field,
+        "the dataset is too large to validate against a new schema",
+    )
+}
+
 /// Checks the live items of the dataset against `schemas`. `Some(errors)` lists the first
-/// [`MAX_SCHEMA_FAILURES`] failures, or the one "too large" error when the items hold more than
-/// [`MAX_SCHEMA_CHECK_BYTES`] of JSON. `field` names the schema that changed.
+/// [`MAX_SCHEMA_FAILURES`] failures, or the one "too large" error when the live items hold more
+/// than `max_bytes` of JSON. The size is summed in SQL before any item is read, so an oversized
+/// dataset is refused without parsing it (D-J-2). `field` names the schema that changed.
 async fn check_live_items(
     conn: &mut SqliteConnection,
     dataset: Uuid,
     field: &str,
     schemas: &Schemas,
+    max_bytes: usize,
 ) -> Result<Option<Vec<FieldError>>, MetaError> {
+    let total = store::live_json_bytes_tx(conn, dataset).await?;
+    if total > i64::try_from(max_bytes).unwrap_or(i64::MAX) {
+        return Ok(Some(vec![too_large_for_schema(field)]));
+    }
     let mut errors = Vec::new();
     let mut bytes = 0usize;
     let mut after = None;
@@ -546,12 +555,8 @@ async fn check_live_items(
         page.truncate(SCHEMA_PAGE as usize);
         for item in &page {
             bytes += json_bytes(&item.input, item.expected_output.as_ref(), &item.metadata);
-            if bytes > MAX_SCHEMA_CHECK_BYTES {
-                return Ok(Some(vec![FieldError {
-                    field: field.to_owned(),
-                    message: "the dataset is too large to validate against a new schema".to_owned(),
-                    position: None,
-                }]));
+            if bytes > max_bytes {
+                return Ok(Some(vec![too_large_for_schema(field)]));
             }
             let values = ItemValues {
                 input: item.input.clone(),
@@ -621,12 +626,12 @@ fn invalid_cursor() -> ApiError {
     bad_request(vec![field_error("cursor", "invalid cursor")])
 }
 
-/// `?version=`: 0 and the default both mean the current version. Any other value must be
-/// between 1 and the current version.
+/// `?version=`: the default is the current version. 0 is the empty version, before the first
+/// write (D-J-3). Any other value must be between 0 and the current version.
 fn version_of(row: &DatasetRow, requested: Option<i64>) -> Result<i64, ApiError> {
     match requested {
-        None | Some(0) => Ok(row.current_version),
-        Some(version) if (1..=row.current_version).contains(&version) => Ok(version),
+        None => Ok(row.current_version),
+        Some(version) if (0..=row.current_version).contains(&version) => Ok(version),
         Some(_) => Err(bad_request(vec![field_error(
             "version",
             format!("must be between 0 and {}", row.current_version),
@@ -813,6 +818,7 @@ async fn add_items_tx(
         values.push(item_values);
     }
     if !errors.is_empty() {
+        errors.truncate(MAX_LISTED_ERRORS);
         return Ok(Err(WriteOutcome::Invalid(errors)));
     }
     let mut item_ids = Vec::with_capacity(values.len());
@@ -840,6 +846,41 @@ async fn add_items_tx(
     Ok(Ok((row.id, AddItemsResponse { version, item_ids })))
 }
 
+/// An item edit after the `null` check: `None` keeps the field (D-J-3). `expected_output`
+/// keeps its `null`, which clears it.
+struct ItemPatch {
+    input: Option<Value>,
+    expected_output: Option<Option<Value>>,
+    metadata: Option<serde_json::Map<String, Value>>,
+}
+
+/// `input` and `metadata` must not be null (`expected_output` may be, and clears it).
+fn check_item_patch(body: UpdateItemRequest) -> Result<ItemPatch, Vec<FieldError>> {
+    let mut errors = Vec::new();
+    let input = match body.input {
+        Some(None) => {
+            errors.push(field_error("input", "must not be null"));
+            None
+        }
+        other => other.flatten(),
+    };
+    let metadata = match body.metadata {
+        Some(None) => {
+            errors.push(field_error("metadata", "must not be null"));
+            None
+        }
+        other => other.flatten(),
+    };
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    Ok(ItemPatch {
+        input,
+        expected_output: body.expected_output,
+        metadata,
+    })
+}
+
 async fn update_item(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -847,37 +888,53 @@ async fn update_item(
     error::Path(ItemPath { dataset, item_id }): error::Path<ItemPath>,
     error::Json(body): error::Json<UpdateItemRequest>,
 ) -> Result<error::Json<DatasetItem>, ApiError> {
+    let patch = check_item_patch(body).map_err(bad_request)?;
     let project = access.project.id;
     let key = DatasetKey::parse(&dataset);
     let now = state.clock.now_ns();
-    let created_by = created_by(&principal);
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                update_item_tx(conn, project, key, item_id, body, created_by, now).await
+                update_item_tx(conn, project, key, item_id, patch, created_by, now).await
             })
         })
         .await?;
     match outcome {
-        Ok(item) => Ok(error::Json(item_json(&item))),
+        Ok((item, version)) => {
+            if let Some(version) = version {
+                tracing::info!(
+                    target: "audit",
+                    item_id = %item.item_id,
+                    dataset_id = %item.dataset_id,
+                    project_id = %project,
+                    actor = %actor.as_deref().unwrap_or("-"),
+                    version,
+                    "dataset item edited"
+                );
+            }
+            Ok(error::Json(item_json(&item)))
+        }
         Err(WriteOutcome::NotFound) => Err(ApiError::NotFound),
         Err(WriteOutcome::Invalid(errors)) => Err(bad_request(errors)),
     }
 }
 
 /// The item edit's write transaction. A body that changes nothing writes no version and answers
-/// the live revision (D-J-3). Otherwise the live revision closes and its replacement is
-/// inserted in one new version; the source ids of the item are kept (D-J-9).
+/// the live revision with `None` (D-J-3). Otherwise the live revision closes and its replacement
+/// is inserted in one new version, which is answered with the revision and the version; the
+/// source ids of the item are kept (D-J-9).
 async fn update_item_tx(
     conn: &mut SqliteConnection,
     project: ProjectId,
     key: DatasetKey,
     item: Uuid,
-    body: UpdateItemRequest,
+    patch: ItemPatch,
     created_by: Option<String>,
     now: i64,
-) -> Result<Result<ItemRow, WriteOutcome>, MetaError> {
+) -> Result<Result<(ItemRow, Option<i64>), WriteOutcome>, MetaError> {
     let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
         return Ok(Err(WriteOutcome::NotFound));
     };
@@ -885,18 +942,18 @@ async fn update_item_tx(
         return Ok(Err(WriteOutcome::NotFound));
     };
     let values = ItemValues {
-        input: body.input.unwrap_or_else(|| live.input.clone()),
-        expected_output: match body.expected_output {
+        input: patch.input.unwrap_or_else(|| live.input.clone()),
+        expected_output: match patch.expected_output {
             None => live.expected_output.clone(),
             Some(value) => value,
         },
-        metadata: body.metadata.unwrap_or_else(|| live.metadata.clone()),
+        metadata: patch.metadata.unwrap_or_else(|| live.metadata.clone()),
     };
     let unchanged = values.input == live.input
         && values.expected_output == live.expected_output
         && values.metadata == live.metadata;
     if unchanged {
-        return Ok(Ok(live));
+        return Ok(Ok((live, None)));
     }
     let schemas = compiled_schemas(&row)?;
     let errors = check_item("", &values, &schemas);
@@ -917,14 +974,14 @@ async fn update_item_tx(
         description: format!("edit item {item}"),
         created_by,
     };
-    store::write_version(conn, row.id, change, now).await?;
+    let version = store::write_version(conn, row.id, change, now).await?;
     let updated = store::get_live_item_tx(conn, row.id, item)
         .await?
         .ok_or(MetaError::Corrupt {
             table: "dataset_items",
             column: "item_id",
         })?;
-    Ok(Ok(updated))
+    Ok(Ok((updated, Some(version))))
 }
 
 async fn delete_item(
@@ -936,8 +993,9 @@ async fn delete_item(
     let project = access.project.id;
     let key = DatasetKey::parse(&dataset);
     let now = state.clock.now_ns();
-    let created_by = created_by(&principal);
-    let outcome = state
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let deleted = state
         .meta
         .write(move |conn| {
             Box::pin(
@@ -945,15 +1003,23 @@ async fn delete_item(
             )
         })
         .await?;
-    match outcome {
-        Ok(version) => Ok(error::Json(version)),
-        // The delete writes no item values, so it has no `Invalid` outcome.
-        Err(_) => Err(ApiError::NotFound),
-    }
+    let Some((dataset_id, version)) = deleted else {
+        return Err(ApiError::NotFound);
+    };
+    tracing::info!(
+        target: "audit",
+        item_id = %item_id,
+        dataset_id = %dataset_id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        version = version.version,
+        "dataset item deleted"
+    );
+    Ok(error::Json(version))
 }
 
 /// The item delete's write transaction: the live revision closes in one new version that has
-/// no revision of its own.
+/// no revision of its own. `None` when there is no such dataset or no live such item.
 async fn delete_item_tx(
     conn: &mut SqliteConnection,
     project: ProjectId,
@@ -961,12 +1027,12 @@ async fn delete_item_tx(
     item: Uuid,
     created_by: Option<String>,
     now: i64,
-) -> Result<Result<DatasetVersion, WriteOutcome>, MetaError> {
+) -> Result<Option<(Uuid, DatasetVersion)>, MetaError> {
     let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
-        return Ok(Err(WriteOutcome::NotFound));
+        return Ok(None);
     };
     if store::get_live_item_tx(conn, row.id, item).await?.is_none() {
-        return Ok(Err(WriteOutcome::NotFound));
+        return Ok(None);
     }
     let description = format!("delete item {item}");
     let change = VersionChange {
@@ -976,12 +1042,15 @@ async fn delete_item_tx(
         created_by: created_by.clone(),
     };
     let version = store::write_version(conn, row.id, change, now).await?;
-    Ok(Ok(DatasetVersion {
-        version,
-        description,
-        created_by,
-        created_at: now,
-    }))
+    Ok(Some((
+        row.id,
+        DatasetVersion {
+            version,
+            description,
+            created_by,
+            created_at: now,
+        },
+    )))
 }
 
 /// The head of an import file, checked against the dataset's schemas and not written (D-J-6).
@@ -2114,6 +2183,10 @@ mod tests {
             field_errors(&get(&app, &seeded, "faq/items?cursor=nope").await),
             vec![("cursor".to_owned(), "invalid cursor".to_owned())]
         );
+        // Version 0 is the empty version, not the current one.
+        let empty: Value = get(&app, &seeded, "faq/items?version=0").await.json();
+        assert!(empty["data"].as_array().unwrap().is_empty());
+        assert!(empty["next_cursor"].is_null());
 
         let first: Value = get(&app, &seeded, "faq/items?limit=2").await.json();
         assert_eq!(first["data"].as_array().unwrap().len(), 2);
@@ -2367,6 +2440,185 @@ mod tests {
         .await;
         assert_eq!(status, 201);
         assert!(!logs.contains("canary-j1-input"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn schema_check_sums_in_sql_before_reading() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create_ok(&app, &seeded, "sql-first").await;
+        let id: Uuid = dataset["id"].as_str().unwrap().parse().unwrap();
+        // Both items fail the schema, so only the size bound can make the check answer "too large".
+        add_items(
+            &app,
+            &id.to_string(),
+            vec![json!({ "q": "a" }), json!({ "q": "b" })],
+        )
+        .await;
+
+        let schemas = Schemas::compile(Some(FAQ_SCHEMA), None).unwrap();
+        let capped = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(
+                    async move { check_live_items(conn, id, "input_schema", &schemas, 16).await },
+                )
+            })
+            .await
+            .unwrap()
+            .expect("the bound is exceeded");
+        assert_eq!(capped.len(), 1);
+        assert_eq!(
+            capped[0].message,
+            "the dataset is too large to validate against a new schema"
+        );
+
+        let schemas = Schemas::compile(Some(FAQ_SCHEMA), None).unwrap();
+        let failures = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    check_live_items(conn, id, "input_schema", &schemas, MAX_SCHEMA_CHECK_BYTES)
+                        .await
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the items fail");
+        assert_eq!(failures.len(), 2);
+        assert!(failures[0].field.starts_with("items["), "{failures:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn item_patch_refuses_null_input_and_metadata() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let added: Value = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "kept", "expected_output": "old", "metadata": { "k": 1 } } ] }),
+        )
+        .await
+        .json();
+        let item = added["item_ids"][0].as_str().unwrap().to_owned();
+
+        assert_eq!(
+            field_errors(&patch_item(&app, &seeded, "faq", &item, json!({ "input": null })).await),
+            vec![("input".to_owned(), "must not be null".to_owned())]
+        );
+        assert_eq!(
+            field_errors(
+                &patch_item(&app, &seeded, "faq", &item, json!({ "metadata": null })).await
+            ),
+            vec![("metadata".to_owned(), "must not be null".to_owned())]
+        );
+        let unchanged: Value = get(&app, &seeded, &format!("faq/items/{item}"))
+            .await
+            .json();
+        assert_eq!(unchanged["input"], "kept");
+        assert_eq!(unchanged["version"], 1);
+
+        // `expected_output: null` still clears the field.
+        let cleared = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &item,
+            json!({ "expected_output": null }),
+        )
+        .await;
+        assert_eq!(cleared.status, 200);
+        assert_eq!(cleared.json::<Value>()["version"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failing_batch_lists_at_most_100_errors() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let items: Vec<Value> = (0..1_000).map(|_| json!({ "input": null })).collect();
+        let errors =
+            field_errors(&post_items(&app, &seeded, "faq", json!({ "items": items })).await);
+        assert_eq!(errors.len(), 100);
+        assert_eq!(
+            errors[0],
+            ("items[0].input".to_owned(), "must not be null".to_owned())
+        );
+        assert_eq!(
+            errors[99],
+            ("items[99].input".to_owned(), "must not be null".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_filter_matches_wildcards_literally() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        for name in ["100% done", "100 done", "a_b", "axb"] {
+            create_ok(&app, &seeded, name).await;
+        }
+        let names = |body: &Value| -> Vec<String> {
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let percent: Value = get(&app, &seeded, "?q=%25").await.json();
+        assert_eq!(names(&percent), vec!["100% done"]);
+        let underscore: Value = get(&app, &seeded, "?q=_").await.json();
+        assert_eq!(names(&underscore), vec!["a_b"]);
+    }
+
+    #[tokio::test]
+    async fn item_edits_and_deletes_are_audited() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create_ok(&app, &seeded, "faq").await;
+        let dataset_id = dataset["id"].as_str().unwrap().to_owned();
+        let added: Value = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "canary-audit-old" } ] }),
+        )
+        .await
+        .json();
+        let item = added["item_ids"][0].as_str().unwrap().to_owned();
+
+        let ((edited, deleted), logs) = capture_logs(async {
+            let edited = patch_item(
+                &app,
+                &seeded,
+                "faq",
+                &item,
+                json!({ "input": "canary-audit-new" }),
+            )
+            .await;
+            let deleted = app
+                .request(
+                    Method::DELETE,
+                    &format!("{}/faq/items/{item}", base(&seeded)),
+                )
+                .header("cookie", &seeded.cookie)
+                .send()
+                .await;
+            (edited.status, deleted.status)
+        })
+        .await;
+        assert_eq!((edited, deleted), (StatusCode::OK, StatusCode::OK));
+        assert!(logs.contains("dataset item edited"), "{logs}");
+        assert!(logs.contains("dataset item deleted"), "{logs}");
+        assert!(logs.contains(&item), "{logs}");
+        assert!(logs.contains(&dataset_id), "{logs}");
+        assert!(logs.contains("version=2"), "{logs}");
+        assert!(logs.contains("version=3"), "{logs}");
+        assert!(!logs.contains("canary-audit"), "{logs}");
     }
 
     const CSV_MAPPING: &str =

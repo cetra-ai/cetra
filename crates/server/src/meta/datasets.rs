@@ -8,6 +8,7 @@ use sqlx::{AssertSqlSafe, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use super::{MetaError, unique_or};
+use crate::datasets::json_bytes;
 
 /// A project holds at most this many datasets (D-J-4).
 pub(crate) const PROJECT_CAP: i64 = 1_000;
@@ -147,15 +148,6 @@ impl fmt::Debug for NewRevision {
     }
 }
 
-/// Serialized size of an item's three JSON fields, for logs and `Debug` only.
-fn json_bytes(input: &Value, expected: Option<&Value>, metadata: &Map<String, Value>) -> usize {
-    serde_json::to_string(input).map_or(0, |s| s.len())
-        + expected.map_or(0, |value| {
-            serde_json::to_string(value).map_or(0, |s| s.len())
-        })
-        + serde_json::to_string(metadata).map_or(0, |s| s.len())
-}
-
 /// The dataset SELECT used by every dataset read.
 const DATASET_SELECT: &str = "SELECT d.id, d.project_id, d.name, d.description, d.input_schema, d.expected_schema, \
      d.current_version, d.created_at, d.updated_at, \
@@ -210,17 +202,38 @@ struct ItemRecord {
     created_at: i64,
 }
 
-/// Every dataset of `project`, ordered by `lower(name)`, then `id`.
+/// Every dataset of `project` whose name contains `needle` (case-insensitive, literally: `%`,
+/// `_` and `\` in it match themselves), ordered by `lower(name)`, then `id`.
 pub(crate) async fn list_datasets(
     pool: &SqlitePool,
     project: ProjectId,
+    needle: Option<&str>,
 ) -> Result<Vec<DatasetRow>, MetaError> {
-    let sql = format!("{DATASET_SELECT} WHERE d.project_id = ? ORDER BY lower(d.name), d.id");
+    // Only constants are spliced; every value is bound.
+    let sql = format!(
+        "{DATASET_SELECT} WHERE d.project_id = ?1 \
+         AND (?2 IS NULL OR lower(d.name) LIKE '%' || lower(?2) || '%' ESCAPE '\\') \
+         ORDER BY lower(d.name), d.id"
+    );
+    let needle = needle.map(escape_like);
     let records: Vec<DatasetRecord> = sqlx::query_as(AssertSqlSafe(sql))
         .bind(project.to_string())
+        .bind(needle)
         .fetch_all(pool)
         .await?;
     records.into_iter().map(dataset_from).collect()
+}
+
+/// `text` with the LIKE wildcards and the escape character itself escaped (`ESCAPE '\'`).
+fn escape_like(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
 }
 
 /// The dataset of `project` named by `key`.
@@ -471,6 +484,24 @@ pub(crate) async fn list_items(
     records.into_iter().map(item_from).collect()
 }
 
+/// Bytes of the live revisions of `dataset`, summed in SQLite so that no item is read to know
+/// it (D-J-2). The same measure as [`json_bytes`] of each item, for stored JSON.
+pub(crate) async fn live_json_bytes_tx(
+    conn: &mut SqliteConnection,
+    dataset: Uuid,
+) -> Result<i64, MetaError> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(length(CAST(input AS BLOB)) \
+         + length(CAST(COALESCE(expected_output, '') AS BLOB)) \
+         + length(CAST(metadata AS BLOB))), 0) \
+         FROM dataset_items WHERE dataset_id = ?1 AND valid_to_version IS NULL",
+    )
+    .bind(dataset.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(total)
+}
+
 /// The page of live revisions (`valid_to_version IS NULL`), inside a write transaction.
 pub(crate) async fn live_items_tx(
     conn: &mut SqliteConnection,
@@ -719,7 +750,7 @@ mod tests {
         create(&db, project, "Zeta").await;
         create(&db, project, "alpha").await;
 
-        let names: Vec<String> = list_datasets(db.reader(), project)
+        let names: Vec<String> = list_datasets(db.reader(), project, None)
             .await
             .unwrap()
             .into_iter()

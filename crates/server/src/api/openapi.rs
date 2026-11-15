@@ -2903,7 +2903,7 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<DatasetItem>("The item after the edit."),
-            &[400, 401, 403, 404, 409, 413, 429],
+            &[400, 401, 403, 404, 413, 429],
         ))
         .build();
     let item_delete = operation("delete_dataset_item", "datasets", "Delete an item")
@@ -2914,7 +2914,7 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         .responses(responses(
             "200",
             json_of::<DatasetVersion>("The new version."),
-            &[400, 401, 403, 404, 409, 429],
+            &[400, 401, 403, 404, 429],
         ))
         .build();
     let import_preview = operation(

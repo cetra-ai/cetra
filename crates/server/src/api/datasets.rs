@@ -9,6 +9,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::common::{Limit, any_json};
+use crate::datasets::json_bytes;
 
 /// A dataset (D-J-2, D-J-3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -102,7 +103,7 @@ pub struct DatasetVersion {
 }
 
 /// One item as it is in a version.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct DatasetItem {
     /// The item id, stable across versions.
     pub id: Uuid,
@@ -132,6 +133,19 @@ pub struct DatasetItem {
     pub created_at: i64,
 }
 
+// `Debug` is hand-written: ids, versions and sizes only, never content (AGENTS.md § Privacy).
+impl fmt::Debug for DatasetItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = json_bytes(&self.input, self.expected_output.as_ref(), &self.metadata);
+        f.debug_struct("DatasetItem")
+            .field("id", &self.id)
+            .field("revision_id", &self.revision_id)
+            .field("version", &self.version)
+            .field("bytes", &bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One item to add.
 #[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -151,9 +165,8 @@ pub struct NewDatasetItem {
 
 impl fmt::Debug for NewDatasetItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bytes = json_len(&self.input)
-            + self.expected_output.as_ref().map_or(0, json_len)
-            + self.metadata.as_ref().map_or(0, json_len);
+        let metadata = self.metadata.clone().unwrap_or_default();
+        let bytes = json_bytes(&self.input, self.expected_output.as_ref(), &metadata);
         f.debug_struct("NewDatasetItem")
             .field("bytes", &bytes)
             .finish_non_exhaustive()
@@ -177,22 +190,39 @@ pub struct AddItemsResponse {
     pub item_ids: Vec<Uuid>,
 }
 
-/// `PATCH …/items/{item_id}` body. Absent keeps; `expected_output: null` clears it.
-#[derive(Debug, Clone, PartialEq, Deserialize, ToSchema)]
+/// `PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears
+/// it. `input` and `metadata` must not be null (400).
+#[derive(Clone, PartialEq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateItemRequest {
-    /// New input, when present. Never null.
-    #[serde(default)]
-    #[schema(schema_with = any_json)]
-    pub input: Option<Value>,
+    /// New input, when present. Must not be null.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(schema_with = any_json_not_null)]
+    pub input: Option<Option<Value>>,
     /// New expected output, when present. `null` clears it.
     #[serde(default, deserialize_with = "present")]
     #[schema(schema_with = any_json)]
     pub expected_output: Option<Option<Value>>,
-    /// New metadata, when present. A JSON object.
-    #[serde(default)]
+    /// New metadata, when present. A JSON object; must not be null.
+    #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<Object>)]
-    pub metadata: Option<Map<String, Value>>,
+    pub metadata: Option<Option<Map<String, Value>>>,
+}
+
+// `Debug` is hand-written: presence flags and sizes only, never content (AGENTS.md § Privacy).
+impl fmt::Debug for UpdateItemRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let input = self.input.clone().flatten().unwrap_or(Value::Null);
+        let expected = self.expected_output.clone().flatten();
+        let metadata = self.metadata.clone().flatten().unwrap_or_default();
+        let bytes = json_bytes(&input, expected.as_ref(), &metadata);
+        f.debug_struct("UpdateItemRequest")
+            .field("input_present", &self.input.is_some())
+            .field("expected_output_present", &self.expected_output.is_some())
+            .field("metadata_present", &self.metadata.is_some())
+            .field("bytes", &bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 /// `GET /datasets` query.
@@ -256,11 +286,6 @@ where
     T: Deserialize<'de>,
 {
     Ok(Some(Option::<T>::deserialize(deserializer)?))
-}
-
-/// Serialized size of one JSON value, in bytes.
-fn json_len<T: Serialize>(value: &T) -> usize {
-    serde_json::to_string(value).map_or(0, |text| text.len())
 }
 
 /// The format of an import or a preview (D-J-6).
@@ -347,6 +372,14 @@ pub struct ImportResult {
     pub errors: Vec<ImportRowError>,
 }
 
+/// OpenAPI schema of `UpdateItemRequest.input`: any JSON value but null.
+fn any_json_not_null() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+    utoipa::openapi::schema::ObjectBuilder::new()
+        .schema_type(utoipa::openapi::schema::SchemaType::AnyValue)
+        .description(Some("Any JSON value but null."))
+        .into()
+}
+
 /// OpenAPI schema of `ImportPreview.rows`: an array of any JSON values.
 fn any_json_array() -> utoipa::openapi::schema::Array {
     utoipa::openapi::schema::ArrayBuilder::new()
@@ -404,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn new_item_debug_prints_no_content() {
+    fn item_debug_prints_no_content() {
         let item = NewDatasetItem {
             input: json!("canary-debug"),
             expected_output: None,
@@ -412,5 +445,34 @@ mod tests {
         };
         let text = format!("{item:?}");
         assert!(!text.contains("canary-debug"));
+
+        let edit = UpdateItemRequest {
+            input: Some(Some(json!("canary-patch"))),
+            expected_output: Some(Some(json!("canary-patch-expected"))),
+            metadata: Some(Some(Map::from_iter([(
+                "k".to_owned(),
+                json!("canary-patch-meta"),
+            )]))),
+        };
+        let text = format!("{edit:?}");
+        assert!(text.contains("bytes"), "{text}");
+        for canary in ["canary-patch", "canary-patch-expected", "canary-patch-meta"] {
+            assert!(!text.contains(canary), "{text}");
+        }
+
+        let stored = DatasetItem {
+            id: Uuid::nil(),
+            revision_id: Uuid::nil(),
+            version: 3,
+            input: json!("canary-stored"),
+            expected_output: Some(json!("canary-stored-expected")),
+            metadata: Map::new(),
+            source_trace_id: None,
+            source_span_id: None,
+            created_at: 0,
+        };
+        let text = format!("{stored:?}");
+        assert!(text.contains("version: 3"), "{text}");
+        assert!(!text.contains("canary-stored"), "{text}");
     }
 }
