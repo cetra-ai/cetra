@@ -7,7 +7,7 @@ use arrow::datatypes::DataType;
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, Out};
+use crate::format::{Cursor, MAX_DICT_VALUES, Out};
 
 /// The distinct values of a column, sorted bytewise. A code is the index of a value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,9 @@ impl Dictionary {
         let corrupt = |what: &'static str| StrataError::Corrupt { what, offset };
         let mut c = Cursor::new(bytes, offset);
         let n = c.u32("dictionary count")? as usize;
+        if n > MAX_DICT_VALUES {
+            return Err(corrupt("dictionary count"));
+        }
         let mut offsets = Vec::new();
         for _ in 0..=n {
             offsets.push(c.u32("dictionary offsets")? as usize);
@@ -101,14 +104,15 @@ impl Dictionary {
 
 /// The dictionary of the Utf8 values of `array`, or of the elements of a List(Utf8) array,
 /// over all its rows. Elements of null lists are left out. `None` for other types, and when
-/// the dictionary would exceed the limits in `config`.
+/// the dictionary would exceed the limits in `config`. A Utf8 column with no non-null value
+/// gets `None`, so it writes no dictionary; a List(Utf8) column keeps an empty one.
 pub fn for_column(array: &dyn Array, config: &Config) -> Option<Dictionary> {
     let max_values = config.dict_max_values;
     let max_bytes = config.dict_max_bytes;
     match array.data_type() {
         DataType::Utf8 => {
             let strings = array.as_string_opt::<i32>()?;
-            build(&[strings], max_values, max_bytes)
+            build(&[strings], max_values, max_bytes).filter(|dict| !dict.values.is_empty())
         }
         DataType::List(field) if field.data_type() == &DataType::Utf8 => {
             let list = array.as_list_opt::<i32>()?;
@@ -281,6 +285,19 @@ mod tests {
             Dictionary::decode(&bytes, 0),
             Err(StrataError::Corrupt {
                 what: "dictionary utf8",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_a_count_above_the_limit_before_reading_offsets() {
+        // Only the count is present: the check comes before any offset is read.
+        let bytes = raw(u32::try_from(MAX_DICT_VALUES + 1).unwrap(), &[], b"");
+        assert!(matches!(
+            Dictionary::decode(&bytes, 0),
+            Err(StrataError::Corrupt {
+                what: "dictionary count",
                 ..
             })
         ));

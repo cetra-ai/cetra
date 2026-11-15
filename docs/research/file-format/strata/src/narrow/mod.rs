@@ -20,13 +20,6 @@ use arrow::datatypes::DataType;
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, Out};
 
-/// The most rows a chunk may hold. The `FSB_RLE` run lengths are `u16`.
-pub const MAX_CHUNK_ROWS: u32 = 65_535;
-
-/// The most list elements a List(Utf8) chunk may hold. The writer refuses a bigger chunk
-/// (`Unsupported`), and the reader refuses it as `Corrupt` before it allocates for it.
-pub const MAX_CHUNK_ELEMENTS: usize = 1 << 24;
-
 /// The S3 encodings.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

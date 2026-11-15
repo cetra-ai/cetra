@@ -10,14 +10,32 @@ use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, HEADER_LEN, POSTSCRIPT_LEN, checksum32};
-use crate::hot::{DirectoryRecord, HotTail, Postscript};
+use crate::format::{
+    Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
+};
+use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
 use crate::narrow::BlockEntry;
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
 #[cfg(test)]
 #[path = "../tests/common/counting.rs"]
 mod counting;
+
+/// Checks that a segment of `len` bytes at `offset` lies after the file header and before the
+/// hot tail, and is at least a segment header long. Returns the end offset of the segment.
+/// Every segment is checked this way before it is fetched.
+fn segment_end(offset: u64, len: u32, hot_offset: u64) -> Result<u64> {
+    let corrupt = || StrataError::Corrupt {
+        what: "segment range",
+        offset,
+    };
+    let end = offset.checked_add(u64::from(len)).ok_or_else(corrupt)?;
+    if offset >= HEADER_LEN && u64::from(len) >= SEGMENT_HEADER_LEN as u64 && end <= hot_offset {
+        Ok(end)
+    } else {
+        Err(corrupt())
+    }
+}
 
 /// An open Strata file: its postscript and decoded hot tail, plus the store to read
 /// segments from.
@@ -126,6 +144,29 @@ impl StrataFile {
                 offset: postscript.hot_offset,
             });
         }
+        // Every schema column has a record, in order. Records past the schema are hidden
+        // map children (M3); they carry their own ids, which are checked the same way.
+        let n_fields = hot.schema.fields().len();
+        if hot.directory.len() < n_fields {
+            return Err(StrataError::Corrupt {
+                what: "directory count",
+                offset: postscript.hot_offset,
+            });
+        }
+        for (i, record) in hot.directory.iter().enumerate() {
+            if usize::try_from(record.column_id).ok() != Some(i) {
+                return Err(StrataError::Corrupt {
+                    what: "directory column id",
+                    offset: postscript.hot_offset,
+                });
+            }
+            if i < n_fields && !matches!(record.layer, Layer::Narrow | Layer::Payload) {
+                return Err(StrataError::Corrupt {
+                    what: "directory layer",
+                    offset: postscript.hot_offset,
+                });
+            }
+        }
         Ok(StrataFile {
             store,
             path,
@@ -163,13 +204,7 @@ impl StrataFile {
 
     /// Reads and checks one segment of the given kind.
     pub async fn read_segment(&self, r: &SegmentRef, kind: Kind) -> Result<Vec<u8>> {
-        let end = r
-            .offset
-            .checked_add(u64::from(r.len))
-            .ok_or(StrataError::Corrupt {
-                what: "segment range",
-                offset: r.offset,
-            })?;
+        let end = segment_end(r.offset, r.len, self.postscript.hot_offset)?;
         let bytes = self.store.get_range(&self.path, r.offset..end).await?;
         decode_segment(&bytes, r.offset, kind)
     }
@@ -194,7 +229,11 @@ impl StrataFile {
             .ok_or_else(|| StrataError::Schema {
                 reason: format!("no column {column}"),
             })?;
+        let hot_offset = self.postscript.hot_offset;
         let pages = self.hot.pages_of(record)?;
+        for page in &pages {
+            segment_end(page.offset, page.len, hot_offset)?;
+        }
         let bodies = try_join_all(pages.iter().map(|page| async move {
             let segment = SegmentRef {
                 offset: page.offset,
@@ -204,20 +243,40 @@ impl StrataFile {
         }))
         .await?;
 
+        let corrupt_page = |offset: u64| StrataError::Corrupt {
+            what: "block page",
+            offset,
+        };
         let mut entries = Vec::new();
         let mut next_row = 0u64;
         for (page, body) in pages.iter().zip(&bodies) {
+            // A page holds between 1 and MAX_PAGE_ENTRIES entries, and its first row is the
+            // first row of its first entry.
             let mut c = Cursor::new(body, page.offset);
+            let mut page_entries = 0usize;
             while c.remaining() > 0 {
                 let entry = BlockEntry::decode(&mut c)?;
+                if page_entries == 0 && entry.first_row != page.first_row {
+                    return Err(corrupt_page(page.offset));
+                }
+                page_entries += 1;
+                if page_entries > MAX_PAGE_ENTRIES {
+                    return Err(corrupt_page(page.offset));
+                }
                 if u64::from(entry.first_row) != next_row || entry.n_rows == 0 {
                     return Err(StrataError::Corrupt {
                         what: "block row order",
                         offset: page.offset,
                     });
                 }
+                if entry.segment_len > 0 {
+                    segment_end(entry.segment_offset, entry.segment_len, hot_offset)?;
+                }
                 next_row += u64::from(entry.n_rows);
                 entries.push(entry);
+            }
+            if page_entries == 0 {
+                return Err(corrupt_page(page.offset));
             }
         }
         if next_row != self.row_count() {
@@ -251,6 +310,8 @@ impl StrataFile {
 )]
 mod tests {
     use super::*;
+    use crate::format::PAGE_REF_LEN;
+    use crate::testgen::{assert_same, batch, schema as batch_schema};
     use crate::writer::StrataWriter;
     use counting::Counting;
     use llmobs_core::schema::spans_schema;
@@ -408,6 +469,158 @@ mod tests {
                 put(store.as_ref(), bytes).await;
                 let _ = StrataFile::open(store, path(), None, &Config::default()).await;
             });
+        });
+    }
+
+    /// The offset of the hot tail, read from the postscript at the end of `bytes`.
+    fn hot_offset_of(bytes: &[u8]) -> u64 {
+        let ps_at = bytes.len() - 64;
+        u64::from_le_bytes(bytes[ps_at..ps_at + 8].try_into().unwrap())
+    }
+
+    /// Rewrites the hot checksum in the postscript, after the hot tail was edited.
+    fn refresh_hot_checksum(bytes: &mut [u8]) {
+        let hot = hot_offset_of(bytes) as usize;
+        let ps_at = bytes.len() - 64;
+        let sum = checksum32(&[&bytes[hot..ps_at]]);
+        bytes[ps_at + 12..ps_at + 16].copy_from_slice(&sum.to_le_bytes());
+    }
+
+    /// The offset of the first column directory record. Section 1 (the schema) and section 2
+    /// (the directory) follow the hot tail's start, each behind its `u32` length.
+    fn directory_at(bytes: &[u8]) -> usize {
+        let hot = hot_offset_of(bytes) as usize;
+        let schema_len = u32::from_le_bytes(bytes[hot..hot + 4].try_into().unwrap()) as usize;
+        hot + 4 + schema_len + 4
+    }
+
+    /// `batch(20_000)` written with one block-table entry per page, so the hot tail is long.
+    fn populated() -> (Vec<u8>, crate::writer::FileSummary) {
+        let config = Config {
+            page_max_entries: 1,
+            ..Config::default()
+        };
+        let mut w = StrataWriter::new(batch_schema(), &["trace_id", "start_time"], config).unwrap();
+        w.write(&batch(20_000)).unwrap();
+        w.finish().unwrap()
+    }
+
+    async fn open_patched(bytes: Vec<u8>) -> Result<StrataFile> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        put(store.as_ref(), bytes).await;
+        StrataFile::open(store, path(), None, &Config::default()).await
+    }
+
+    async fn assert_columns_round_trip(file: &StrataFile) {
+        let full = batch(20_000);
+        for column in 0..full.num_columns() {
+            let decoded = crate::reader::read_column(file, column).await.unwrap();
+            assert_same(decoded.as_ref(), full.column(column).as_ref());
+        }
+    }
+
+    #[test]
+    fn populated_file_opens_with_one_or_two_gets() {
+        runtime().block_on(async {
+            let (bytes, summary) = populated();
+            assert!(u64::from(summary.hot_len) + POSTSCRIPT_LEN > 1024);
+            let counting = Arc::new(Counting::new());
+            let store: Arc<dyn ObjectStore> = counting.clone();
+            put(store.as_ref(), bytes).await;
+
+            // Without a hint, the suffix is too short for the hot tail: one more read.
+            let short = Config {
+                open_default_suffix: 1024,
+                ..Config::default()
+            };
+            let before = counting.gets();
+            let file = StrataFile::open(store.clone(), path(), None, &short)
+                .await
+                .unwrap();
+            assert_eq!(counting.gets() - before, 2);
+            assert_columns_round_trip(&file).await;
+
+            // With the exact hint, one read covers everything.
+            let before = counting.gets();
+            let file = StrataFile::open(store, path(), Some(summary.hot_len), &Config::default())
+                .await
+                .unwrap();
+            assert_eq!(counting.gets() - before, 1);
+            assert_columns_round_trip(&file).await;
+        });
+    }
+
+    #[test]
+    fn block_page_first_row_that_disagrees_with_its_entries_is_corrupt() {
+        runtime().block_on(async {
+            let (mut bytes, _) = populated();
+            // The last page reference is the last 16 bytes before the postscript: it belongs
+            // to the last column.
+            let at = bytes.len() - 64 - PAGE_REF_LEN;
+            bytes[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            refresh_hot_checksum(&mut bytes);
+            let file = open_patched(bytes).await.unwrap();
+            let last = file.directory().len() - 1;
+            assert!(is_corrupt(&file.block_entries(last).await));
+        });
+    }
+
+    #[test]
+    fn block_page_offset_inside_the_hot_tail_is_corrupt() {
+        runtime().block_on(async {
+            let (mut bytes, _) = populated();
+            let at = bytes.len() - 64 - PAGE_REF_LEN;
+            let hot = hot_offset_of(&bytes);
+            bytes[at + 4..at + 12].copy_from_slice(&(hot + 1).to_le_bytes());
+            refresh_hot_checksum(&mut bytes);
+            let file = open_patched(bytes).await.unwrap();
+            let last = file.directory().len() - 1;
+            assert!(is_corrupt(&file.block_entries(last).await));
+        });
+    }
+
+    #[test]
+    fn directory_ids_layers_and_dictionary_flags_are_checked() {
+        runtime().block_on(async {
+            let good = populated().0;
+            let dir = directory_at(&good);
+
+            // Record 0 names column 7 instead of 0.
+            let mut bytes = good.clone();
+            bytes[dir..dir + 4].copy_from_slice(&7u32.to_le_bytes());
+            refresh_hot_checksum(&mut bytes);
+            assert!(matches!(
+                open_patched(bytes).await,
+                Err(StrataError::Corrupt {
+                    what: "directory column id",
+                    ..
+                })
+            ));
+
+            // Record 0 has the Residual layer, which a schema column may not have in M1.
+            let mut bytes = good.clone();
+            bytes[dir + 8] = 4;
+            refresh_hot_checksum(&mut bytes);
+            assert!(matches!(
+                open_patched(bytes).await,
+                Err(StrataError::Corrupt {
+                    what: "directory layer",
+                    ..
+                })
+            ));
+
+            // Record 2 (input_tokens, no dictionary) claims one anyway.
+            let mut bytes = good.clone();
+            bytes[dir + 64 * 2 + 9] |= 1;
+            refresh_hot_checksum(&mut bytes);
+            let file = open_patched(bytes).await.unwrap();
+            assert!(matches!(
+                crate::reader::read_column(&file, 2).await,
+                Err(StrataError::Corrupt {
+                    what: "dictionary flag",
+                    ..
+                })
+            ));
         });
     }
 }

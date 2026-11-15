@@ -272,10 +272,23 @@ mod tests {
             .prop_map(|v| serde_json::to_string(&v).unwrap_or_default().into_bytes())
     }
 
+    /// JSON arrays of one to five strings, each of 8,000 to 19,999 bytes. The repeated
+    /// strings keep debug time low, and the elements straddle the gear threshold, so the
+    /// gear-inside-JSON branch runs with a non-zero base.
+    fn long_string_array() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(8_000usize..20_000, 1..6).prop_map(|lens| {
+            let items: Vec<String> = lens.iter().map(|k| "x".repeat(*k)).collect();
+            serde_json::to_string(&items)
+                .unwrap_or_default()
+                .into_bytes()
+        })
+    }
+
     fn value_strategy() -> impl Strategy<Value = Vec<u8>> {
         prop_oneof![
             json_array(),
             proptest::collection::vec(any::<u8>(), 0..50_000),
+            long_string_array(),
         ]
     }
 

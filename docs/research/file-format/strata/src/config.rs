@@ -10,9 +10,11 @@ pub struct Config {
     pub chunk_max_rows: u32,
     /// Maximum value bytes per narrow chunk. Default 32 KiB.
     pub chunk_max_bytes: usize,
-    /// Maximum block-table entries per page. Default 64.
+    /// Maximum block-table entries per page. Default 64. The writer rejects 0 and values
+    /// above 4,096 (`MAX_PAGE_ENTRIES`).
     pub page_max_entries: usize,
-    /// Maximum distinct values in a dictionary. Default 65,535.
+    /// Maximum distinct values in a dictionary. Default 65,535. The writer rejects values
+    /// above 1,048,576 (`MAX_DICT_VALUES`).
     pub dict_max_values: usize,
     /// Maximum dictionary size in bytes. Default 64 KiB.
     pub dict_max_bytes: usize,

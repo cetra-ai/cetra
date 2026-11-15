@@ -32,15 +32,23 @@ pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef> {
         .ok_or_else(|| StrataError::Schema {
             reason: format!("no column {column}"),
         })?;
-    let dict = if record.dict_offset != 0 {
-        let segment = SegmentRef {
-            offset: record.dict_offset,
-            len: record.dict_len,
-        };
-        let bytes = file.read_segment(&segment, Kind::Dictionary).await?;
-        Some(Dictionary::decode(&bytes, record.dict_offset)?)
-    } else {
-        None
+    // Bit 0 of the flags says the column has a dictionary, and the offset must agree.
+    let dict = match (record.flags & 1 != 0, record.dict_offset != 0) {
+        (true, true) => {
+            let segment = SegmentRef {
+                offset: record.dict_offset,
+                len: record.dict_len,
+            };
+            let bytes = file.read_segment(&segment, Kind::Dictionary).await?;
+            Some(Dictionary::decode(&bytes, record.dict_offset)?)
+        }
+        (false, false) => None,
+        _ => {
+            return Err(StrataError::Corrupt {
+                what: "dictionary flag",
+                offset: record.dict_offset,
+            });
+        }
     };
 
     let bodies = try_join_all(entries.iter().map(|entry| async move {

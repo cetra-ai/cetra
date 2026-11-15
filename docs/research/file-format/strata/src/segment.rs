@@ -4,7 +4,7 @@
 //! `u32` raw length, `u32` stored length, `u32` checksum) followed by the stored bytes.
 
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum32};
+use crate::format::{Cursor, MAX_SEGMENT_RAW, Out, SEGMENT_HEADER_LEN, SEGMENT_MAGIC, checksum32};
 
 /// What a segment holds (S1 table).
 #[repr(u8)]
@@ -90,7 +90,7 @@ pub fn encode_segment(
     level: i32,
     out: &mut Out,
 ) -> Result<SegmentRef> {
-    if body.len() > (u32::MAX - 16) as usize {
+    if body.len() > MAX_SEGMENT_RAW as usize {
         return Err(StrataError::Unsupported {
             what: format!("segment body of {} bytes", body.len()),
         });
@@ -144,9 +144,16 @@ pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>
     let raw_len = c.u32("segment length")?;
     let stored_len = c.u32("segment length")?;
     let sum = c.u32("segment length")?;
+    // The raw length is capped before anything is allocated for it.
+    if raw_len > MAX_SEGMENT_RAW {
+        return Err(corrupt("segment raw length"));
+    }
     let stored_len = stored_len as usize;
     if stored_len.checked_add(SEGMENT_HEADER_LEN) != Some(bytes.len()) {
         return Err(corrupt("segment length"));
+    }
+    if codec == Codec::Raw && raw_len as usize != stored_len {
+        return Err(corrupt("segment raw length"));
     }
     let prefix = bytes.get(..12).ok_or_else(|| corrupt("segment length"))?;
     let stored = c.bytes(stored_len, "segment length")?;
@@ -154,12 +161,7 @@ pub fn decode_segment(bytes: &[u8], offset: u64, expect: Kind) -> Result<Vec<u8>
         return Err(corrupt("segment checksum"));
     }
     match codec {
-        Codec::Raw => {
-            if raw_len as usize != stored.len() {
-                return Err(corrupt("segment length"));
-            }
-            Ok(stored.to_vec())
-        }
+        Codec::Raw => Ok(stored.to_vec()),
         Codec::Zstd => {
             let body = zstd::bulk::decompress(stored, raw_len as usize)
                 .map_err(|_| corrupt("segment decompress"))?;
@@ -217,6 +219,44 @@ mod tests {
         #[test]
         fn never_panics_on_random_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
             let _ = decode_segment(&bytes, 0, Kind::NarrowChunk);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(500))]
+
+        #[test]
+        fn random_headers_with_correct_checksums_never_panic(
+            kind in 1u8..=9,
+            codec in 0u8..=1,
+            huge in 0u8..10,
+            small_raw in 0u32..=(1 << 20),
+            huge_raw in (MAX_SEGMENT_RAW + 1)..=u32::MAX,
+            stored in proptest::collection::vec(any::<u8>(), 0..2048),
+        ) {
+            // One case in ten has a raw length above the cap; the others stay small so that
+            // zstd's reservation stays small.
+            let raw_len = if huge == 0 { huge_raw } else { small_raw };
+            let mut bytes = Vec::with_capacity(SEGMENT_HEADER_LEN + stored.len());
+            bytes.extend_from_slice(&SEGMENT_MAGIC.to_le_bytes());
+            bytes.push(kind);
+            bytes.push(codec);
+            bytes.extend_from_slice(&raw_len.to_le_bytes());
+            bytes.extend_from_slice(&(stored.len() as u32).to_le_bytes());
+            let sum = checksum32(&[bytes.as_slice(), stored.as_slice()]);
+            bytes.extend_from_slice(&sum.to_le_bytes());
+            bytes.extend_from_slice(&stored);
+            // The header carries `kind`, so the segment is decoded as that kind.
+            let expect = Kind::from_u8(kind).unwrap();
+            let result = decode_segment(&bytes, 0, expect);
+            if raw_len > MAX_SEGMENT_RAW {
+                match result {
+                    Err(StrataError::Corrupt { what, .. }) => {
+                        prop_assert_eq!(what, "segment raw length");
+                    }
+                    other => prop_assert!(false, "expected Corrupt, got {other:?}"),
+                }
+            }
         }
     }
 

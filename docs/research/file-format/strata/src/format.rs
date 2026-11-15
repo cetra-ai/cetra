@@ -26,6 +26,18 @@ pub const BLOCK_ENTRY_LEN: usize = 56;
 pub const PAGE_REF_LEN: usize = 16;
 /// Number of sections in the hot tail.
 pub const HOT_SECTIONS: usize = 7;
+/// Largest raw (decompressed) segment body the reader accepts and the writer writes.
+pub const MAX_SEGMENT_RAW: u32 = 256 * 1024 * 1024;
+/// Largest number of rows in one narrow chunk.
+pub const MAX_CHUNK_ROWS: u32 = 65_535;
+/// Largest number of list or map elements in one narrow chunk.
+pub const MAX_CHUNK_ELEMENTS: usize = 1 << 20;
+/// Largest number of value bytes a decoded narrow chunk may materialise.
+pub const MAX_CHUNK_OUTPUT: usize = 256 * 1024 * 1024;
+/// Largest number of block-table entries in one page.
+pub const MAX_PAGE_ENTRIES: usize = 4_096;
+/// Largest number of values in one dictionary.
+pub const MAX_DICT_VALUES: usize = 1 << 20;
 
 /// The little-endian value of `bytes`, zero-extended to 64 bits. `None` when there are
 /// more than eight bytes.

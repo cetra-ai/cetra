@@ -7,12 +7,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 
 use super::bitpack::{pack, width_for};
-use super::{
-    Class, Dictionary, Encoding, MAX_CHUNK_ELEMENTS, Numeric, flags, numeric_of, unsupported,
-};
+use super::{Class, Dictionary, Encoding, Numeric, flags, numeric_of, unsupported};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::le_u64;
+use crate::format::{MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, le_u64};
 
 /// One chunk, encoded. `body` is `None` for `Const` and `ConstNull`, which write no
 /// segment.
@@ -402,6 +400,26 @@ fn code_of(dict: &Dictionary, v: &[u8]) -> Result<u32> {
     })
 }
 
+/// The byte length of the dictionary value of `code`. The code came from [`code_of`].
+fn value_len(dict: &Dictionary, code: u32) -> Result<usize> {
+    dict.value(code)
+        .map(<[u8]>::len)
+        .ok_or_else(|| StrataError::Schema {
+            reason: "a value is missing from its dictionary".to_string(),
+        })
+}
+
+/// Adds `len` decoded bytes to `total`. A total above `MAX_CHUNK_OUTPUT` is refused, since
+/// the reader refuses such a chunk.
+fn add_output(total: usize, len: usize) -> Result<usize> {
+    total
+        .checked_add(len)
+        .filter(|sum| *sum <= MAX_CHUNK_OUTPUT)
+        .ok_or_else(|| StrataError::Unsupported {
+            what: "chunk output above MAX_CHUNK_OUTPUT".to_string(),
+        })
+}
+
 /// A Utf8 chunk with a dictionary: `Const` when every value is the same, else `Dict`.
 fn encode_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
     let strings = array
@@ -412,9 +430,12 @@ fn encode_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
     // Null rows take code 0 in the packed codes; the zone uses only the valid codes.
     let mut codes: Vec<u64> = Vec::with_capacity(n);
     let mut valid_codes: Vec<u32> = Vec::with_capacity(n);
+    // The decoded bytes of the valid rows, checked against `MAX_CHUNK_OUTPUT`.
+    let mut decoded = 0usize;
     for i in 0..n {
         if strings.is_valid(i) {
             let code = code_of(dict, strings.value(i).as_bytes())?;
+            decoded = add_output(decoded, value_len(dict, code)?)?;
             codes.push(u64::from(code));
             valid_codes.push(code);
         } else {
@@ -558,6 +579,8 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
     let n = list.len();
     let has_nulls = list.null_count() > 0;
     let mut codes: Vec<u64> = Vec::new();
+    // The decoded bytes of the elements of the valid lists, checked against `MAX_CHUNK_OUTPUT`.
+    let mut decoded = 0usize;
     let mut offsets: Vec<u32> = Vec::with_capacity(n + 1);
     offsets.push(0);
     for (i, pair) in list.value_offsets().windows(2).enumerate() {
@@ -577,7 +600,9 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
                 if child.is_null(j) {
                     return Ok(None);
                 }
-                codes.push(u64::from(code_of(dict, child.value(j).as_bytes())?));
+                let code = code_of(dict, child.value(j).as_bytes())?;
+                decoded = add_output(decoded, value_len(dict, code)?)?;
+                codes.push(u64::from(code));
             }
         }
         // A null list has no elements in the chunk, whatever its child range holds.
@@ -618,7 +643,8 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
 )]
 mod tests {
     use super::*;
-    use arrow::array::{Int64Array, new_null_array};
+    use crate::narrow::BlockEntry;
+    use arrow::array::{Float32Array, Float64Array, Int64Array, new_null_array};
     use std::sync::Arc;
 
     #[test]
@@ -690,5 +716,96 @@ mod tests {
         let array: ArrayRef = Arc::new(builder.finish());
         let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
         assert_eq!(chunk.encoding, Encoding::Ipc);
+    }
+
+    /// Encodes `array` without a dictionary, decodes it and checks the values bitwise.
+    fn round_trip(array: ArrayRef) -> EncodedChunk {
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: array.len() as u32,
+            segment_offset: if chunk.body.is_some() { 8 } else { 0 },
+            segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = Field::new("c", array.data_type().clone(), true);
+        let decoded =
+            crate::narrow::decode_chunk(&entry, chunk.body.as_deref(), &field, None).unwrap();
+        crate::testgen::assert_same(decoded.as_ref(), array.as_ref());
+        chunk
+    }
+
+    #[test]
+    fn float_zone_excludes_nan_and_takes_signed_zero_as_zero() {
+        let array = Float64Array::from(vec![Some(0.0), Some(1.5), Some(f64::NAN), None]);
+        let chunk = round_trip(Arc::new(array));
+        assert_eq!(chunk.encoding, Encoding::Plain);
+        assert_ne!(chunk.flags & flags::HAS_NAN, 0);
+        assert_ne!(chunk.flags & flags::HAS_ZONE, 0);
+        assert_eq!(&chunk.min[..8], &0.0f64.to_le_bytes()[..]);
+        assert_eq!(&chunk.max[..8], &1.5f64.to_le_bytes()[..]);
+    }
+
+    #[test]
+    fn negative_zero_in_a_zone_is_stored_as_positive_zero() {
+        let chunk = round_trip(Arc::new(Float64Array::from(vec![-0.0, 2.0])));
+        assert_eq!(&chunk.min[..8], &0.0f64.to_le_bytes()[..]);
+        assert_eq!(&chunk.max[..8], &2.0f64.to_le_bytes()[..]);
+    }
+
+    #[test]
+    fn constant_negative_zero_keeps_its_bits_and_has_no_zone() {
+        let chunk = round_trip(Arc::new(Float64Array::from(vec![-0.0; 5])));
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert_eq!(chunk.const_len, 8);
+        assert_eq!(&chunk.min[..8], &(-0.0f64).to_le_bytes()[..]);
+        assert_eq!(chunk.flags & flags::HAS_ZONE, 0);
+    }
+
+    #[test]
+    fn constant_nan_sets_has_nan_and_no_zone() {
+        let chunk = round_trip(Arc::new(Float64Array::from(vec![f64::NAN; 5])));
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert_ne!(chunk.flags & flags::HAS_NAN, 0);
+        assert_eq!(chunk.flags & flags::HAS_ZONE, 0);
+    }
+
+    #[test]
+    fn float32_constants_take_four_bytes() {
+        let zero = round_trip(Arc::new(Float32Array::from(vec![-0.0f32; 5])));
+        assert_eq!(zero.encoding, Encoding::Const);
+        assert_eq!(zero.const_len, 4);
+        assert_eq!(&zero.min[..4], &(-0.0f32).to_le_bytes()[..]);
+        assert_eq!(zero.flags & flags::HAS_ZONE, 0);
+        let nan = round_trip(Arc::new(Float32Array::from(vec![f32::NAN; 5])));
+        assert_eq!(nan.encoding, Encoding::Const);
+        assert_eq!(nan.const_len, 4);
+        assert_ne!(nan.flags & flags::HAS_NAN, 0);
+        assert_eq!(nan.flags & flags::HAS_ZONE, 0);
+    }
+
+    #[test]
+    fn utf8_constant_chunks_with_and_without_a_dictionary() {
+        let array: ArrayRef = Arc::new(arrow::array::StringArray::from(vec!["abc"; 4]));
+        let with_dict = crate::narrow::for_column(array.as_ref(), &Config::default()).unwrap();
+        let chunk = encode_chunk(&array, Some(&with_dict), &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert_eq!(chunk.const_len, 4);
+        assert!(chunk.body.is_none());
+
+        let no_dict = Config {
+            dict_max_values: 0,
+            ..Config::default()
+        };
+        assert!(crate::narrow::for_column(array.as_ref(), &no_dict).is_none());
+        let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::Const);
+        assert_eq!(chunk.const_len, 3);
+        assert_eq!(&chunk.min[..3], &b"abc"[..]);
+        assert!(chunk.body.is_none());
     }
 }

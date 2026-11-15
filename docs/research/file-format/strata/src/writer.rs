@@ -10,11 +10,10 @@ use arrow::row::{OwnedRow, RowConverter, SortField};
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{Out, VERSION, checksum32};
+use crate::format::{MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, Out, VERSION, checksum32};
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript, write_file_header};
 use crate::narrow::{
-    BlockEntry, Class, EncodedChunk, MAX_CHUNK_ROWS, chunk_ranges, encode_chunk, for_column,
-    numeric_of,
+    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk, for_column, numeric_of,
 };
 use crate::segment::{Codec, Kind, encode_segment};
 
@@ -68,9 +67,20 @@ impl StrataWriter {
                 ),
             });
         }
-        if config.page_max_entries == 0 {
+        if config.page_max_entries == 0 || config.page_max_entries > MAX_PAGE_ENTRIES {
             return Err(StrataError::Schema {
-                reason: "page_max_entries must be at least 1".to_string(),
+                reason: format!(
+                    "page_max_entries {} is not in 1..={MAX_PAGE_ENTRIES}",
+                    config.page_max_entries
+                ),
+            });
+        }
+        if config.dict_max_values > MAX_DICT_VALUES {
+            return Err(StrataError::Schema {
+                reason: format!(
+                    "dict_max_values {} is above {MAX_DICT_VALUES}",
+                    config.dict_max_values
+                ),
             });
         }
         if sort_key.is_empty() {
@@ -380,4 +390,108 @@ fn check_schema(expected: &Schema, actual: &Schema) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use crate::file::StrataFile;
+    use crate::testgen::{batch, schema};
+    use arrow::array::{FixedSizeBinaryArray, new_null_array};
+    use arrow::datatypes::Field;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+
+    const SORT: [&str; 2] = ["trace_id", "start_time"];
+
+    #[test]
+    fn page_and_dictionary_limits_are_schema_errors() {
+        let too_few_entries = Config {
+            page_max_entries: 0,
+            ..Config::default()
+        };
+        let too_many_entries = Config {
+            page_max_entries: MAX_PAGE_ENTRIES + 1,
+            ..Config::default()
+        };
+        let too_many_values = Config {
+            dict_max_values: MAX_DICT_VALUES + 1,
+            ..Config::default()
+        };
+        for config in [too_few_entries, too_many_entries, too_many_values] {
+            assert!(matches!(
+                StrataWriter::new(schema(), &SORT, config),
+                Err(StrataError::Schema { .. })
+            ));
+        }
+        let at_limits = Config {
+            page_max_entries: MAX_PAGE_ENTRIES,
+            dict_max_values: MAX_DICT_VALUES,
+            ..Config::default()
+        };
+        assert!(StrataWriter::new(schema(), &SORT, at_limits).is_ok());
+    }
+
+    #[test]
+    fn equal_sort_keys_across_a_batch_boundary_are_accepted() {
+        let rows = batch(10);
+        let mut w = StrataWriter::new(schema(), &SORT, Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        // The first row of the next batch has the sort key of the last row of the previous one.
+        w.write(&rows.slice(9, 1)).unwrap();
+        let (_, summary) = w.finish().unwrap();
+        assert_eq!(summary.rows, 11);
+    }
+
+    #[test]
+    fn null_in_a_sort_key_column_is_a_schema_error() {
+        let nullable = Arc::new(Schema::new(vec![Field::new(
+            "trace_id",
+            DataType::FixedSizeBinary(16),
+            true,
+        )]));
+        let ids = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            vec![Some([1u8; 16]), None].into_iter(),
+            16,
+        )
+        .unwrap();
+        let rows = RecordBatch::try_new(Arc::clone(&nullable), vec![Arc::new(ids)]).unwrap();
+        let mut w = StrataWriter::new(nullable, &["trace_id"], Config::default()).unwrap();
+        assert!(matches!(w.write(&rows), Err(StrataError::Schema { .. })));
+    }
+
+    #[tokio::test]
+    async fn all_null_utf8_column_writes_no_dictionary() {
+        let table = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ids = FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+            vec![Some([0u8; 16]); 4].into_iter(),
+            16,
+        )
+        .unwrap();
+        let names = new_null_array(&DataType::Utf8, 4);
+        let rows = RecordBatch::try_new(Arc::clone(&table), vec![Arc::new(ids), names]).unwrap();
+        let mut w = StrataWriter::new(table, &["trace_id"], Config::default()).unwrap();
+        w.write(&rows).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("table.strata");
+        store.put(&path, PutPayload::from(bytes)).await.unwrap();
+        let file = StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap();
+        let record = &file.directory()[1];
+        assert_eq!(record.dict_offset, 0);
+        assert_eq!(record.flags & 1, 0);
+    }
 }

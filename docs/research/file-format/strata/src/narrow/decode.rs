@@ -12,11 +12,10 @@ use arrow::ipc::reader::StreamReader;
 
 use super::bitpack::unpack;
 use super::{
-    BlockEntry, Class, Dictionary, Encoding, MAX_CHUNK_ELEMENTS, MAX_CHUNK_ROWS, Numeric, fits,
-    flags, numeric_of, unsupported,
+    BlockEntry, Class, Dictionary, Encoding, Numeric, fits, flags, numeric_of, unsupported,
 };
 use crate::error::{Result, StrataError};
-use crate::format::{Cursor, le_u64};
+use crate::format::{Cursor, MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, MAX_CHUNK_ROWS, le_u64};
 
 /// Decodes `entry` with its body (`None` for `Const` and `ConstNull`) into an array of
 /// `field`'s type. `dict` is the column's dictionary when it has one: `Dict` and `ListDict`
@@ -320,7 +319,12 @@ fn decode_fsb(
             if total != n {
                 return Err(corrupt("rle length"));
             }
-            let mut out = Vec::with_capacity(n * width);
+            // Checked before the output is allocated.
+            let out_len = n
+                .checked_mul(width)
+                .filter(|len| *len <= MAX_CHUNK_OUTPUT)
+                .ok_or_else(|| corrupt("chunk output size"))?;
+            let mut out = Vec::with_capacity(out_len);
             for (k, len) in lens.iter().enumerate() {
                 let start = k * width;
                 let value = run_values
@@ -385,7 +389,23 @@ fn decode_utf8(
     }
     let dict = require_dict(dict, at)?;
     let codes = read_codes(c, n, at)?;
-    let mut builder = StringBuilder::with_capacity(n, 0);
+
+    // First pass: every code is in the dictionary, and the value bytes fit the output limit.
+    // Nothing is allocated for the output before this passes.
+    let mut total = 0usize;
+    for (i, code) in codes.iter().enumerate() {
+        let value = code_str(dict, *code, at)?;
+        if nulls.as_ref().is_none_or(|valid| valid.is_valid(i)) {
+            total = total
+                .checked_add(value.len())
+                .ok_or_else(|| corrupt_output(at))?;
+        }
+    }
+    if total > MAX_CHUNK_OUTPUT {
+        return Err(corrupt_output(at));
+    }
+
+    let mut builder = StringBuilder::with_capacity(n, total);
     for (i, code) in codes.into_iter().enumerate() {
         let value = code_str(dict, code, at)?;
         if nulls.as_ref().is_none_or(|valid| valid.is_valid(i)) {
@@ -395,6 +415,14 @@ fn decode_utf8(
         }
     }
     Ok(Arc::new(builder.finish()))
+}
+
+/// The error for a chunk whose decoded values would exceed `MAX_CHUNK_OUTPUT`.
+fn corrupt_output(at: u64) -> StrataError {
+    StrataError::Corrupt {
+        what: "chunk output size",
+        offset: at,
+    }
 }
 
 /// A `ListDict` chunk of List(Utf8): `n + 1` list offsets, then the codes of all elements.
@@ -439,7 +467,18 @@ fn decode_list_utf8(
     }
 
     let codes = read_codes(c, total, at)?;
-    let mut builder = StringBuilder::new();
+    // First pass: every code is in the dictionary, and the value bytes fit the output limit.
+    let mut bytes = 0usize;
+    for code in &codes {
+        let value = code_str(dict, *code, at)?;
+        bytes = bytes
+            .checked_add(value.len())
+            .ok_or_else(|| corrupt_output(at))?;
+    }
+    if bytes > MAX_CHUNK_OUTPUT {
+        return Err(corrupt_output(at));
+    }
+    let mut builder = StringBuilder::with_capacity(total, bytes);
     for code in codes {
         builder.append_value(code_str(dict, code, at)?);
     }
@@ -481,7 +520,16 @@ fn decode_const(
                 .and_then(le_u64)
                 .ok_or_else(|| corrupt("const value"))?;
             let value = code_str(dict, code, at)?;
-            Ok(Arc::new(StringArray::from(vec![value; n])))
+            let total = value
+                .len()
+                .checked_mul(n)
+                .filter(|total| *total <= MAX_CHUNK_OUTPUT)
+                .ok_or_else(|| corrupt_output(at))?;
+            let mut builder = StringBuilder::with_capacity(n, total);
+            for _ in 0..n {
+                builder.append_value(value);
+            }
+            Ok(Arc::new(builder.finish()))
         }
         DataType::Utf8 | DataType::Binary => {
             let value = entry
@@ -692,15 +740,188 @@ mod tests {
             round_trip(Arc::new(array));
         }
 
-        #[test]
-        fn sliced_arrays_round_trip(
-            v in proptest::collection::vec(proptest::option::of(any::<i64>()), 2..500),
-            skip in 0usize..2,
-        ) {
-            let array = Int64Array::from_iter(v);
-            let sliced: ArrayRef = Array::slice(&array, skip, array.len() - 1 - skip);
-            round_trip(sliced);
+    }
+
+    /// The number of array kinds that [`typed_array`] draws.
+    const SLICED_KINDS: usize = 13;
+
+    /// A random array of `rows` rows with nulls, of the kind with index `kind`:
+    /// 0 Int64, 1 Int16, 2 UInt32, 3 Float64, 4 Float32, 5 Timestamp(ns, UTC), 6 Boolean,
+    /// 7 FixedSizeBinary(16), 8 Utf8 (with a dictionary), 9 Utf8 (without one), 10 Binary,
+    /// 11 List(Utf8) (with a dictionary), 12 Map(Utf8, Utf8 nullable).
+    fn typed_array(kind: usize, rows: usize) -> BoxedStrategy<ArrayRef> {
+        match kind {
+            0 => proptest::collection::vec(proptest::option::of(any::<i64>()), rows)
+                .prop_map(|v| Arc::new(Int64Array::from_iter(v)) as ArrayRef)
+                .boxed(),
+            1 => proptest::collection::vec(proptest::option::of(any::<i16>()), rows)
+                .prop_map(|v| Arc::new(Int16Array::from_iter(v)) as ArrayRef)
+                .boxed(),
+            2 => proptest::collection::vec(proptest::option::of(any::<u32>()), rows)
+                .prop_map(|v| Arc::new(UInt32Array::from_iter(v)) as ArrayRef)
+                .boxed(),
+            3 => proptest::collection::vec(
+                proptest::option::of(any::<u64>().prop_map(f64::from_bits)),
+                rows,
+            )
+            .prop_map(|v| Arc::new(Float64Array::from_iter(v)) as ArrayRef)
+            .boxed(),
+            4 => proptest::collection::vec(
+                proptest::option::of(any::<u32>().prop_map(f32::from_bits)),
+                rows,
+            )
+            .prop_map(|v| Arc::new(Float32Array::from_iter(v)) as ArrayRef)
+            .boxed(),
+            5 => proptest::collection::vec(proptest::option::of(any::<i64>()), rows)
+                .prop_map(|v| {
+                    Arc::new(TimestampNanosecondArray::from_iter(v).with_timezone("UTC"))
+                        as ArrayRef
+                })
+                .boxed(),
+            6 => proptest::collection::vec(proptest::option::of(any::<bool>()), rows)
+                .prop_map(|v| Arc::new(BooleanArray::from_iter(v)) as ArrayRef)
+                .boxed(),
+            7 => proptest::collection::vec(proptest::option::of(any::<[u8; 16]>()), rows)
+                .prop_map(|v| {
+                    let array =
+                        FixedSizeBinaryArray::try_from_sparse_iter_with_size(v.into_iter(), 16)
+                            .unwrap();
+                    Arc::new(array) as ArrayRef
+                })
+                .boxed(),
+            8 | 9 => proptest::collection::vec(proptest::option::of(".{0,12}"), rows)
+                .prop_map(|v| Arc::new(StringArray::from_iter(v)) as ArrayRef)
+                .boxed(),
+            10 => proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(any::<u8>(), 0..40)),
+                rows,
+            )
+            .prop_map(|v| Arc::new(BinaryArray::from_iter(v)) as ArrayRef)
+            .boxed(),
+            11 => proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(".{0,6}", 0..6)),
+                rows,
+            )
+            .prop_map(|v| list_of_utf8(&v))
+            .boxed(),
+            _ => proptest::collection::vec(
+                proptest::option::of(proptest::collection::vec(
+                    (".{0,6}", proptest::option::of(".{0,6}")),
+                    0..4,
+                )),
+                rows,
+            )
+            .prop_map(|v| map_of(&v))
+            .boxed(),
         }
+    }
+
+    /// One sliced-array case: the kind, the whole array, and the slice's start and length.
+    /// The start is at most 69, and the length fits in the rest of the array.
+    fn sliced_case() -> impl Strategy<Value = (usize, ArrayRef, usize, usize)> {
+        (0usize..SLICED_KINDS, 0usize..300)
+            .prop_flat_map(|(kind, rows)| (Just(kind), typed_array(kind, rows), 0usize..70))
+            .prop_flat_map(|(kind, full, skip_draw)| {
+                let rows = full.len();
+                let skip = skip_draw.min(rows);
+                (Just(kind), Just(full), Just(skip), 0usize..=(rows - skip))
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+
+        #[test]
+        fn sliced_arrays_round_trip((kind, full, skip, len) in sliced_case()) {
+            // The dictionary is built from the whole array, so a slice uses a part of it.
+            let dict = if matches!(kind, 8 | 11) { dict_of(&full) } else { None };
+            round_trip_with(full.slice(skip, len), dict.as_ref());
+        }
+    }
+
+    #[test]
+    fn list_dict_offsets_past_the_element_limit_are_corrupt() {
+        let sample: ArrayRef = Arc::new(StringArray::from(vec!["a"]));
+        let dict = dict_of(&sample).unwrap();
+        // One list whose offsets end at MAX_CHUNK_ELEMENTS + 1, with width 0 and no codes.
+        let mut body = Vec::new();
+        for offset in [0u32, MAX_CHUNK_ELEMENTS as u32 + 1] {
+            body.extend_from_slice(&offset.to_le_bytes());
+        }
+        body.push(0);
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 1,
+            segment_offset: 8,
+            segment_len: body.len() as u32 + 16,
+            encoding: Encoding::ListDict,
+            flags: 0,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new(
+            "c",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        );
+        assert!(matches!(
+            decode_chunk(&entry, Some(&body), &field, Some(&dict)),
+            Err(StrataError::Corrupt { .. })
+        ));
+    }
+
+    #[test]
+    fn dict_chunk_whose_values_exceed_the_output_limit_is_corrupt() {
+        let sample: ArrayRef = Arc::new(StringArray::from(vec!["x".repeat(64 * 1024)]));
+        let dict = dict_of(&sample).unwrap();
+        // 65,535 rows, all code 0: width 0 and no packed codes.
+        let body = vec![0u8];
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 65_535,
+            segment_offset: 8,
+            segment_len: body.len() as u32 + 16,
+            encoding: Encoding::Dict,
+            flags: 0,
+            const_len: 0,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new("c", DataType::Utf8, true);
+        assert!(matches!(
+            decode_chunk(&entry, Some(&body), &field, Some(&dict)),
+            Err(StrataError::Corrupt {
+                what: "chunk output size",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn const_chunk_whose_value_exceeds_the_output_limit_is_corrupt() {
+        let sample: ArrayRef = Arc::new(StringArray::from(vec!["x".repeat(64 * 1024)]));
+        let dict = dict_of(&sample).unwrap();
+        // The value is code 0, repeated 65,535 times.
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 65_535,
+            segment_offset: 0,
+            segment_len: 0,
+            encoding: Encoding::Const,
+            flags: 0,
+            const_len: 4,
+            min: [0; 16],
+            max: [0; 16],
+        };
+        let field = Field::new("c", DataType::Utf8, true);
+        assert!(matches!(
+            decode_chunk(&entry, None, &field, Some(&dict)),
+            Err(StrataError::Corrupt {
+                what: "chunk output size",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -887,16 +1108,21 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(200))]
+
         #[test]
         fn random_entries_and_bodies_never_panic(
             encoding in 0u8..=10,
-            n_rows in 0u32..5_000,
+            n_rows in 0u32..70_000,
             const_len in 0u16..40,
             entry_flags in any::<u8>(),
             min in any::<[u8; 16]>(),
             max in any::<[u8; 16]>(),
-            body in proptest::collection::vec(any::<u8>(), 0..512),
-            kind in 0usize..10,
+            kind in 0usize..13,
+            with_dict in any::<bool>(),
+            structured in any::<bool>(),
+            width in 0u8..=64,
+            raw in proptest::collection::vec(any::<u8>(), 0..512),
         ) {
             if let Some(encoding) = Encoding::from_u8(encoding) {
             let dt = match kind {
@@ -909,8 +1135,29 @@ mod tests {
                 6 => DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
                 7 => DataType::FixedSizeBinary(4),
                 8 => DataType::FixedSizeBinary(16),
-                _ => DataType::UInt32,
+                9 => DataType::UInt32,
+                10 => DataType::Utf8,
+                11 => DataType::Binary,
+                _ => DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
             };
+            // Half the bodies are random bytes. The other half have a validity bitmap, a
+            // width byte and the packed byte count for `n_rows` codes, with random contents.
+            let n = n_rows as usize;
+            let fill = |len: usize| -> Vec<u8> {
+                (0..len)
+                    .map(|i| raw.get(i % raw.len().max(1)).copied().unwrap_or(0))
+                    .collect()
+            };
+            let (body, entry_flags) = if structured {
+                let mut body = fill(n.div_ceil(8));
+                body.push(width);
+                body.extend(fill((n * usize::from(width)).div_ceil(8)));
+                (body, entry_flags | flags::HAS_NULLS)
+            } else {
+                (raw.clone(), entry_flags)
+            };
+            let sample: ArrayRef = Arc::new(StringArray::from(vec!["alpha", "beta", "gamma"]));
+            let dict = if with_dict { dict_of(&sample) } else { None };
             let entry = BlockEntry {
                 first_row: 0,
                 n_rows,
@@ -923,7 +1170,7 @@ mod tests {
                 max,
             };
             let field = Field::new("c", dt, true);
-            let _ = decode_chunk(&entry, Some(&body), &field, None);
+            let _ = decode_chunk(&entry, Some(&body), &field, dict.as_ref());
             }
         }
     }

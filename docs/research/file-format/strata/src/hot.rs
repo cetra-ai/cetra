@@ -414,6 +414,7 @@ impl HotTail {
 )]
 mod tests {
     use super::*;
+    use crate::narrow::BlockEntry;
     use llmobs_core::schema::spans_schema;
     use proptest::prelude::*;
 
@@ -597,5 +598,31 @@ mod tests {
             write_section(&mut out, &pages).unwrap();
             let _ = HotTail::decode(&out.0, 0);
         });
+    }
+
+    proptest! {
+        #[test]
+        fn random_block_entries_never_panic(bytes in proptest::collection::vec(any::<u8>(), 56..=56)) {
+            let _ = BlockEntry::decode(&mut Cursor::new(&bytes, 0));
+        }
+
+        #[test]
+        fn random_page_lists_never_panic(
+            pages in proptest::collection::vec(any::<u8>(), 0..256),
+            pages_offset in 0u32..300,
+            n_pages in 0u32..20,
+        ) {
+            let hot = HotTail {
+                schema: spans_schema(),
+                directory: vec![record(0, pages_offset)],
+                sort_key_entries: Vec::new(),
+                sort_key_filter: Vec::new(),
+                map_keys: Vec::new(),
+                key_filter_index: Vec::new(),
+                pages,
+            };
+            let rec = DirectoryRecord { n_pages, ..record(0, pages_offset) };
+            let _ = hot.pages_of(&rec);
+        }
     }
 }
