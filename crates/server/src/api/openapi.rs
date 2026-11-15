@@ -49,9 +49,9 @@ use super::connections::{
 use super::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ImportColumn, ImportFormat, ImportMapping, ImportParams,
-    ImportPreview, ImportResult, ImportRowError, NewDatasetItem, PreviewParams,
-    UpdateDatasetRequest, UpdateItemRequest,
+    DatasetVersionListParams, ExportFormat, ExportParams, ImportColumn, ImportFormat,
+    ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem,
+    PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -309,6 +309,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<DatasetVersion>("DatasetVersionPage");
     set.insert_page::<DatasetItem>("DatasetItemPage");
     set.insert::<ImportFormat>();
+    set.insert::<ExportFormat>();
     set.insert::<ImportColumn>();
     set.insert::<ImportMapping>();
     set.insert::<ImportRowError>();
@@ -2936,6 +2937,14 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 413, 429],
     ))
     .build();
+    let export = operation("get_dataset_export", "datasets", "Export a dataset version")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<ExportParams>(vec![
+            project_param(),
+            dataset.clone(),
+        ])))
+        .responses(responses("200", export_result(), QUERY_ERRORS))
+        .build();
     let import_op = operation(
         "post_dataset_import",
         "datasets",
@@ -3008,6 +3017,19 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
             format!("{PROJECT}/datasets/{{dataset}}/import"),
             PathItem::new(HttpMethod::Post, import_op),
         )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/export"),
+            PathItem::new(HttpMethod::Get, export),
+        )
+}
+
+/// The body of an export: the items as JSONL or CSV, as a file download (D-J-7).
+fn export_result() -> Response {
+    ResponseBuilder::new()
+        .description("The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.")
+        .content("application/x-ndjson", Content::new(Some(string_schema())))
+        .content("text/csv", Content::new(Some(string_schema())))
+        .build()
 }
 
 /// The body of the preview: the first bytes of the file, raw.

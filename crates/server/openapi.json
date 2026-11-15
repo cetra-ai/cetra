@@ -7698,6 +7698,122 @@
         }
       }
     },
+    "/api/v1/projects/{project}/datasets/{dataset}/export": {
+      "get": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "Export a dataset version",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_dataset_export",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "path",
+            "description": "Dataset id, or its name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "The version to export; default the latest.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Default `jsonl`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ExportFormat"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/datasets/{dataset}/import": {
       "post": {
         "tags": [
@@ -17868,6 +17984,14 @@
             "minimum": 0
           }
         }
+      },
+      "ExportFormat": {
+        "type": "string",
+        "description": "The format of an export (D-J-7).",
+        "enum": [
+          "jsonl",
+          "csv"
+        ]
       },
       "Feature": {
         "type": "string",

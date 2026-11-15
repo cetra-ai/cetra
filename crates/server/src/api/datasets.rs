@@ -344,6 +344,26 @@ pub struct ImportParams {
     pub format: ImportFormat,
 }
 
+/// The format of an export (D-J-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    /// One JSON object per line.
+    Jsonl,
+    /// Comma-separated values with a header record (RFC 4180).
+    Csv,
+}
+
+/// `?version=&format=` of the export.
+#[derive(Debug, Clone, Deserialize, IntoParams)]
+pub struct ExportParams {
+    /// The version to export; default the latest.
+    pub version: Option<i64>,
+    /// Default `jsonl`.
+    #[serde(default)]
+    pub format: Option<ExportFormat>,
+}
+
 /// The head of a file as the import wizard shows it (D-J-6).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ImportPreview {

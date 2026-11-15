@@ -659,10 +659,12 @@ fn manifest_covers_the_read_operations() {
             known.insert(id.to_owned());
             // Streams and the OAuth redirects have no JSON body to fixture.
             // Internal operations are called by the control plane and have no examples.
+            // A file download, not a JSON body.
             if method == "get"
                 && operation["tags"][0].as_str() != Some("internal")
                 && id != "stream_traces"
                 && id != "stream_trace"
+                && id != "get_dataset_export"
                 && id != "get_oauth_authorize"
                 && id != "get_sso_authorize"
                 && id != "get_oauth_callback"

@@ -3,18 +3,20 @@
 
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::time::Duration;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::multipart::{MultipartError, MultipartRejection};
 use axum::extract::rejection::BytesRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Multipart, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
-use llmobs_core::ids::ProjectId;
-use serde::Deserialize;
-use serde_json::Value;
-use sqlx::SqliteConnection;
+use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
@@ -22,9 +24,9 @@ use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
     DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
-    DatasetVersionListParams, ImportFormat, ImportMapping, ImportParams, ImportPreview,
-    ImportResult, ImportRowError, NewDatasetItem, PreviewParams, UpdateDatasetRequest,
-    UpdateItemRequest,
+    DatasetVersionListParams, ExportFormat, ExportParams, ImportFormat, ImportMapping,
+    ImportParams, ImportPreview, ImportResult, ImportRowError, NewDatasetItem, PreviewParams,
+    UpdateDatasetRequest, UpdateItemRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
@@ -213,6 +215,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: post(import_items).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/export",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(export_items),
         },
     ]
 }
@@ -745,6 +757,180 @@ async fn get_item(
     Ok(error::Json(item_json(&item)))
 }
 
+/// Rows read per page of an export (J2.3). Each SQLite read stays short.
+const EXPORT_PAGE: u32 = 1_000;
+
+/// The header record of a CSV export (D-J-7).
+const CSV_HEADER: &[u8] = b"id,input,expected_output,metadata,source_trace_id,source_span_id\r\n";
+
+/// One JSONL line of an export (D-J-7). The source ids are omitted when none.
+#[derive(Serialize)]
+struct ExportLine<'a> {
+    id: Uuid,
+    input: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_output: Option<&'a Value>,
+    metadata: &'a Map<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_trace_id: Option<TraceId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_span_id: Option<SpanId>,
+}
+
+/// Where an export's stream is: the item id to read after, whether the CSV header is still due,
+/// and whether the last page was read.
+struct ExportCursor {
+    after: Option<Uuid>,
+    header_due: bool,
+    done: bool,
+}
+
+/// `GET …/datasets/{dataset}/export?version=&format=` (D-J-7): the live items of a version,
+/// streamed in pages of [`EXPORT_PAGE`] ordered by item id. Versions are immutable, so the stream
+/// cannot change under the reader.
+async fn export_items(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Query(params): error::Query<ExportParams>,
+) -> Result<Response, ApiError> {
+    let row = find(&state, access.project.id, &dataset).await?;
+    let version = version_of(&row, params.version)?;
+    let format = params.format.unwrap_or(ExportFormat::Jsonl);
+    let (content_type, extension) = match format {
+        ExportFormat::Jsonl => ("application/x-ndjson", "jsonl"),
+        ExportFormat::Csv => ("text/csv; charset=utf-8", "csv"),
+    };
+    let disposition = format!("attachment; filename=\"{}-v{version}.{extension}\"", row.id);
+    let disposition =
+        HeaderValue::from_str(&disposition).map_err(|error| ApiError::Internal(Box::new(error)))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    let pool = state.meta.reader().clone();
+    let dataset = row.id;
+    let project = access.project.id;
+    let cursor = ExportCursor {
+        after: None,
+        header_due: format == ExportFormat::Csv,
+        done: false,
+    };
+    let pages = futures::stream::try_unfold(cursor, move |cursor| {
+        export_page(pool.clone(), dataset, project, version, format, cursor)
+    });
+    Ok((StatusCode::OK, headers, Body::from_stream(pages)).into_response())
+}
+
+/// One page of an export as its chunk of bytes, with the cursor for the next one. `None` ends the
+/// stream: after the last page, or for a JSONL export of an empty version.
+async fn export_page(
+    pool: SqlitePool,
+    dataset: Uuid,
+    project: ProjectId,
+    version: i64,
+    format: ExportFormat,
+    cursor: ExportCursor,
+) -> Result<Option<(Bytes, ExportCursor)>, io::Error> {
+    if cursor.done {
+        return Ok(None);
+    }
+    let fail = |error: &dyn fmt::Display| {
+        tracing::warn!(
+            dataset_id = %dataset,
+            project_id = %project,
+            version,
+            error = %error,
+            "dataset export failed"
+        );
+        io::Error::other("dataset export failed")
+    };
+    let mut rows = match store::list_items(&pool, dataset, version, cursor.after, EXPORT_PAGE).await
+    {
+        Ok(rows) => rows,
+        Err(error) => return Err(fail(&error)),
+    };
+    // The store returns one more row than asked when there is a next page.
+    let more = rows.len() > EXPORT_PAGE as usize;
+    rows.truncate(EXPORT_PAGE as usize);
+    let bytes = match encode_rows(&rows, format, cursor.header_due) {
+        Ok(bytes) => bytes,
+        Err(error) => return Err(fail(&error)),
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let next = ExportCursor {
+        after: rows.last().map(|row| row.item_id),
+        header_due: false,
+        done: !more,
+    };
+    Ok(Some((Bytes::from(bytes), next)))
+}
+
+/// The bytes of one page of rows: JSONL lines, or CSV records preceded by the header when
+/// `with_header` is set.
+fn encode_rows(rows: &[ItemRow], format: ExportFormat, with_header: bool) -> io::Result<Vec<u8>> {
+    match format {
+        ExportFormat::Jsonl => {
+            let mut bytes = Vec::new();
+            for row in rows {
+                let line = ExportLine {
+                    id: row.item_id,
+                    input: &row.input,
+                    expected_output: row.expected_output.as_ref(),
+                    metadata: &row.metadata,
+                    source_trace_id: row.source_trace_id,
+                    source_span_id: row.source_span_id,
+                };
+                serde_json::to_writer(&mut bytes, &line).map_err(io::Error::other)?;
+                bytes.push(b'\n');
+            }
+            Ok(bytes)
+        }
+        ExportFormat::Csv => {
+            let mut bytes = if with_header {
+                CSV_HEADER.to_vec()
+            } else {
+                Vec::new()
+            };
+            let mut writer = csv::Writer::from_writer(Vec::new());
+            for row in rows {
+                writer
+                    .write_record([
+                        row.item_id.to_string(),
+                        compact_json(&row.input)?,
+                        row.expected_output
+                            .as_ref()
+                            .map(compact_json)
+                            .transpose()?
+                            .unwrap_or_default(),
+                        compact_json(&row.metadata)?,
+                        row.source_trace_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_default(),
+                        row.source_span_id
+                            .map(|id| id.to_string())
+                            .unwrap_or_default(),
+                    ])
+                    .map_err(io::Error::other)?;
+            }
+            bytes.extend(
+                writer
+                    .into_inner()
+                    .map_err(csv::IntoInnerError::into_error)?,
+            );
+            Ok(bytes)
+        }
+    }
+}
+
+/// A JSON value as compact text, for a CSV cell.
+fn compact_json(value: &impl Serialize) -> io::Result<String> {
+    serde_json::to_string(value).map_err(io::Error::other)
+}
+
 async fn add_items(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -851,7 +1037,7 @@ async fn add_items_tx(
 struct ItemPatch {
     input: Option<Value>,
     expected_output: Option<Option<Value>>,
-    metadata: Option<serde_json::Map<String, Value>>,
+    metadata: Option<Map<String, Value>>,
 }
 
 /// `input` and `metadata` must not be null (`expected_output` may be, and clears it).
@@ -1934,6 +2120,216 @@ mod tests {
             .iter()
             .map(|id| id.as_str().unwrap().to_owned())
             .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_jsonl_of_a_past_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let added = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [{ "input": { "q": "a" } }, { "input": { "q": "b" } }] }),
+        )
+        .await;
+        let ids = item_ids(&added);
+        let edited = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &ids[0],
+            json!({ "input": { "q": "a2" } }),
+        )
+        .await;
+        assert_eq!(edited.status, 200);
+        let third = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [{ "input": { "q": "c" } }] }),
+        )
+        .await;
+        assert_eq!(item_ids(&third).len(), 1);
+
+        let response = get(&app, &seeded, "faq/export?version=1").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/x-ndjson")
+        );
+        assert_eq!(response.header("cache-control"), Some("no-store"));
+        let disposition = response.header("content-disposition").unwrap();
+        assert!(disposition.ends_with("-v1.jsonl\""), "{disposition}");
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
+        let lines: Vec<Value> = body
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let first = lines
+            .iter()
+            .find(|line| line["id"] == ids[0].as_str())
+            .unwrap();
+        assert_eq!(first["input"], json!({ "q": "a" }));
+        assert!(first.get("expected_output").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_csv() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "input": { "question": "a" }, "expected_output": "x", "metadata": { "t": "x" } },
+                { "input": { "question": "b" } }
+            ] }),
+        )
+        .await;
+
+        let response = get(&app, &seeded, "faq/export?format=csv").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header("content-type"),
+            Some("text/csv; charset=utf-8")
+        );
+        assert!(response.body.starts_with(CSV_HEADER));
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(response.body.as_ref());
+        let records: Vec<csv::StringRecord> = reader.records().collect::<Result<_, _>>().unwrap();
+        assert_eq!(records.len(), 3);
+        let header: Vec<&str> = records[0].iter().collect();
+        assert_eq!(
+            header,
+            [
+                "id",
+                "input",
+                "expected_output",
+                "metadata",
+                "source_trace_id",
+                "source_span_id"
+            ]
+        );
+        let with_output = records[1..]
+            .iter()
+            .find(|record| &record[2] == "\"x\"")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&with_output[1]).unwrap(),
+            json!({ "question": "a" })
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&with_output[3]).unwrap(),
+            json!({ "t": "x" })
+        );
+        assert_eq!(records[1..].iter().filter(|r| r[2].is_empty()).count(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_pages() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, "faq").await;
+        let dataset = created["id"].as_str().unwrap().to_owned();
+        add_items(
+            &app,
+            &dataset,
+            (0..2_500).map(|n| json!({ "n": n })).collect(),
+        )
+        .await;
+
+        let response = get(&app, &seeded, "faq/export?format=jsonl").await;
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body.to_vec()).unwrap();
+        let ids: Vec<String> = body
+            .lines()
+            .map(|line| {
+                let line: Value = serde_json::from_str(line).unwrap();
+                line["id"].as_str().unwrap().to_owned()
+            })
+            .collect();
+        assert_eq!(ids.len(), 2_500);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_empty_dataset() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = get(&app, &seeded, "faq/export?format=csv").await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_ref(), CSV_HEADER);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_bad_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = get(&app, &seeded, "faq/export?version=99").await;
+        assert_eq!(response.status, 400);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_with_a_read_key() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = app
+            .request(Method::GET, &format!("{}/faq/export", base(&seeded)))
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_source_ids() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, "faq").await;
+        let dataset: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+        let now = app.state.clock.now_ns();
+        let trace: TraceId = "a1000000000000000000000000000001".parse().unwrap();
+        let span: SpanId = "b100000000000011".parse().unwrap();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let change = VersionChange {
+                        close: Vec::new(),
+                        insert: vec![NewRevision {
+                            revision_id: Uuid::now_v7(),
+                            item_id: Uuid::now_v7(),
+                            input: json!("x"),
+                            expected_output: None,
+                            metadata: Map::new(),
+                            source_trace_id: Some(trace),
+                            source_span_id: Some(span),
+                        }],
+                        description: "add from trace".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, dataset, change, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = get(&app, &seeded, "faq/export").await;
+        assert_eq!(response.status, 200);
+        let line: Value =
+            serde_json::from_slice(response.body.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        assert_eq!(line["source_trace_id"], "a1000000000000000000000000000001");
+        assert_eq!(line["source_span_id"], "b100000000000011");
     }
 
     #[tokio::test(flavor = "multi_thread")]

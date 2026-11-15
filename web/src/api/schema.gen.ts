@@ -1293,6 +1293,26 @@ export interface paths {
         patch: operations["patch_dataset"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/datasets/{dataset}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export a dataset version
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_dataset_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/datasets/{dataset}/import": {
         parameters: {
             query?: never;
@@ -3741,6 +3761,11 @@ export interface components {
              */
             output_tokens?: number;
         };
+        /**
+         * @description The format of an export (D-J-7).
+         * @enum {string}
+         */
+        ExportFormat: "jsonl" | "csv";
         /**
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
@@ -12493,6 +12518,82 @@ export interface operations {
             };
             /** @description The request body is larger than the limit. */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dataset_export: {
+        parameters: {
+            query?: {
+                /** @description The version to export; default the latest. */
+                version?: number;
+                /** @description Default `jsonl`. */
+                format?: components["schemas"]["ExportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

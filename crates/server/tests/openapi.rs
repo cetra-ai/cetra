@@ -567,6 +567,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/datasets/{dataset}/import",
         "post_dataset_import",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/export",
+        "get_dataset_export",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -933,6 +938,8 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "get_dataset_export" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
