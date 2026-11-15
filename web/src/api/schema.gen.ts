@@ -1744,7 +1744,7 @@ export interface paths {
         put?: never;
         /**
          * Write scores
-         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order.
+         * @description Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.
          */
         post: operations["create_scores"];
         delete?: never;
@@ -1765,7 +1765,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a score
-         * @description Appends a deleted version of the score. Its `created_at` is kept.
+         * @description Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).
          */
         delete: operations["delete_score"];
         options?: never;

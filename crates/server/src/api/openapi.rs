@@ -2259,7 +2259,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_scores", "scores", "Write scores")
         .description(Some(
-            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order.",
+            "Writes 1–1000 scores in one batch. The answer has one id per item, in input order. With a session or a personal access token, a `score_id` that names another user's `human` score is refused with 403 unless the caller is a project admin.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("ScoreBatch")))
@@ -2271,7 +2271,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let delete = operation("delete_score", "scores", "Delete a score")
         .description(Some(
-            "Appends a deleted version of the score. Its `created_at` is kept.",
+            "Appends a deleted version of the score. Its `created_at` is kept. With a session or a personal access token, another user's `human` score can be deleted only by a project admin (403).",
         ))
         .parameters(Some(vec![
             project_param(),
