@@ -18,8 +18,6 @@ pub(crate) const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 /// Largest item: `input` + `expected_output` + `metadata`, serialized, in bytes.
 pub(crate) const MAX_ITEM_BYTES: usize = 1024 * 1024;
 /// Items in one batch add.
-// Used by J1.4 add_items; no J1.3 caller.
-#[allow(dead_code)]
 pub(crate) const MAX_BATCH_ITEMS: usize = 1_000;
 /// Schema failures listed when a schema change is refused.
 pub(crate) const MAX_SCHEMA_FAILURES: usize = 20;

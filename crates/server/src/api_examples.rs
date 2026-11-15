@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
-use crate::api::datasets::Dataset;
+use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion};
 use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
@@ -23,6 +23,8 @@ use crate::test_support::{EXAMPLE_PROJECT, TestApp};
 
 const MEDIA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
 const EXAMPLE_DATASET: &str = "01900000-0000-7000-8000-000000000c01";
+/// Item `…0d02` of `faq`: edited once, so its current revision is `…0d14`.
+const EXAMPLE_ITEM: &str = "01900000-0000-7000-8000-000000000d02";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Example {
@@ -331,6 +333,54 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &[],
         &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
         &dataset,
+    );
+    let versions: Page<DatasetVersion> = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/versions"),
+    )
+    .await;
+    out.add(
+        "list_dataset_versions",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/versions.json"),
+        &versions,
+    );
+    let items: Page<DatasetItem> =
+        fetch(&app, cookie, &format!("/datasets/{EXAMPLE_DATASET}/items")).await;
+    out.add(
+        "list_dataset_items",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items.json"),
+        &items,
+    );
+    let items_v1: Page<DatasetItem> = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/items?version=1"),
+    )
+    .await;
+    out.add(
+        "list_dataset_items",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[("version", "1")],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items-v1.json"),
+        &items_v1,
+    );
+    let item: DatasetItem = fetch(
+        &app,
+        cookie,
+        &format!("/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}"),
+    )
+    .await;
+    out.add(
+        "get_dataset_item",
+        &[("dataset", EXAMPLE_DATASET), ("item_id", EXAMPLE_ITEM)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}/items/{EXAMPLE_ITEM}.json"),
+        &item,
     );
 
     let metrics: MetricsResponse = fetch(

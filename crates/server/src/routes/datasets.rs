@@ -12,25 +12,35 @@ use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
-    CreateDatasetRequest, Dataset, DatasetListParams, UpdateDatasetRequest,
+    AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
+    DatasetVersionListParams, NewDatasetItem, UpdateDatasetRequest, UpdateItemRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::datasets::{
-    ItemValues, MAX_SCHEMA_CHECK_BYTES, MAX_SCHEMA_FAILURES, Schemas, check_description,
-    check_item, check_name, check_schema, json_bytes,
+    ItemValues, MAX_BATCH_ITEMS, MAX_SCHEMA_CHECK_BYTES, MAX_SCHEMA_FAILURES, Schemas,
+    check_description, check_item, check_name, check_schema, json_bytes,
 };
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::datasets as store;
-use crate::meta::datasets::{DatasetFields, DatasetKey, DatasetRow};
+use crate::meta::datasets::{
+    DatasetFields, DatasetKey, DatasetRow, ItemRow, NewRevision, VersionChange,
+};
 
 use super::orgs::page_named;
 
 /// Bodies of dataset create and update: a name, a description and two schemas of ≤ 64 KiB.
 const DATASET_BODY_LIMIT: usize = 256 * 1024;
+
+/// A batch add: up to 1 000 items of at most 1 MiB, within 16 MiB (D-J-4).
+const ITEMS_BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// One item edit: an item of at most 1 MiB plus JSON overhead.
+const ITEM_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Page size of the live-item read when a new schema is checked.
 const SCHEMA_PAGE: u32 = 1_000;
@@ -89,6 +99,66 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: delete(delete_dataset),
         },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/versions",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_versions),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_items),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(add_items).layer(DefaultBodyLimit::max(ITEMS_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_item),
+        },
+        RouteDef {
+            method: Method::PATCH,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: patch(update_item).layer(DefaultBodyLimit::max(ITEM_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+            access: Access::Project {
+                perm: ProjectPerm::ManageDatasets,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(delete_item),
+        },
     ]
 }
 
@@ -96,6 +166,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 #[derive(Debug, Deserialize)]
 pub(crate) struct DatasetPath {
     pub(crate) dataset: String,
+}
+
+/// The `{dataset}` and `{item_id}` segments of an item route.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ItemPath {
+    dataset: String,
+    item_id: Uuid,
 }
 
 /// Who made a change: a user id, `key:<key id>`, or `None` (the control plane never reaches
@@ -252,8 +329,8 @@ fn merged(row: &DatasetRow, checked: CheckedUpdate) -> DatasetFields {
     }
 }
 
-/// What the update's write transaction answers when it writes nothing.
-enum UpdateOutcome {
+/// What a write transaction answers when it writes nothing.
+enum WriteOutcome {
     NotFound,
     Invalid(Vec<FieldError>),
 }
@@ -342,8 +419,8 @@ async fn update_dataset(
         .await?;
     let row = match outcome {
         Ok(row) => row,
-        Err(UpdateOutcome::NotFound) => return Err(ApiError::NotFound),
-        Err(UpdateOutcome::Invalid(errors)) => return Err(bad_request(errors)),
+        Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
     };
     let actor = created_by(&principal);
     tracing::info!(
@@ -364,9 +441,9 @@ async fn update_tx(
     key: DatasetKey,
     checked: CheckedUpdate,
     now: i64,
-) -> Result<Result<DatasetRow, UpdateOutcome>, MetaError> {
+) -> Result<Result<DatasetRow, WriteOutcome>, MetaError> {
     let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
-        return Ok(Err(UpdateOutcome::NotFound));
+        return Ok(Err(WriteOutcome::NotFound));
     };
     let fields = merged(&row, checked);
     let input_changed = fields.input_schema != row.input_schema;
@@ -388,13 +465,13 @@ async fn update_tx(
             column,
         })?;
         if let Some(errors) = check_live_items(conn, row.id, field, &schemas).await? {
-            return Ok(Err(UpdateOutcome::Invalid(errors)));
+            return Ok(Err(WriteOutcome::Invalid(errors)));
         }
     }
     Ok(
         match store::update_dataset(conn, project, row.id, fields, now).await? {
             Some(row) => Ok(row),
-            None => Err(UpdateOutcome::NotFound),
+            None => Err(WriteOutcome::NotFound),
         },
     )
 }
@@ -480,13 +557,387 @@ async fn delete_dataset(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn field_error(field: &str, message: impl Into<String>) -> FieldError {
+    FieldError {
+        field: field.to_owned(),
+        message: message.into(),
+        position: None,
+    }
+}
+
+fn invalid_cursor() -> ApiError {
+    bad_request(vec![field_error("cursor", "invalid cursor")])
+}
+
+/// `?version=`: 0 and the default both mean the current version. Any other value must be
+/// between 1 and the current version.
+fn version_of(row: &DatasetRow, requested: Option<i64>) -> Result<i64, ApiError> {
+    match requested {
+        None | Some(0) => Ok(row.current_version),
+        Some(version) if (1..=row.current_version).contains(&version) => Ok(version),
+        Some(_) => Err(bad_request(vec![field_error(
+            "version",
+            format!("must be between 0 and {}", row.current_version),
+        )])),
+    }
+}
+
+/// API form of one stored item revision.
+fn item_json(row: &ItemRow) -> DatasetItem {
+    DatasetItem {
+        id: row.item_id,
+        revision_id: row.revision_id,
+        version: row.valid_from_version,
+        input: row.input.clone(),
+        expected_output: row.expected_output.clone(),
+        metadata: row.metadata.clone(),
+        source_trace_id: row.source_trace_id,
+        source_span_id: row.source_span_id,
+        created_at: row.created_at,
+    }
+}
+
+fn add_description(count: usize) -> String {
+    if count == 1 {
+        "add 1 item".to_owned()
+    } else {
+        format!("add {count} items")
+    }
+}
+
+/// The schemas of a stored dataset. Stored text that no longer compiles is `MetaError::Corrupt`.
+fn compiled_schemas(row: &DatasetRow) -> Result<Schemas, MetaError> {
+    Schemas::compile(row.input_schema.as_deref(), row.expected_schema.as_deref()).map_err(
+        |column| MetaError::Corrupt {
+            table: "datasets",
+            column,
+        },
+    )
+}
+
+async fn list_versions(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Query(params): error::Query<DatasetVersionListParams>,
+) -> Result<error::Json<Page<DatasetVersion>>, ApiError> {
+    let row = find(&state, access.project.id, &dataset).await?;
+    let before = match params.cursor.as_deref() {
+        None => None,
+        Some(cursor) => Some(cursor.parse::<i64>().map_err(|_| invalid_cursor())?),
+    };
+    let limit = params.limit.get();
+    let mut versions = store::list_versions(state.meta.reader(), row.id, before, limit).await?;
+    let more = versions.len() > limit as usize;
+    versions.truncate(limit as usize);
+    let next_cursor = if more {
+        versions.last().map(|last| last.version.to_string())
+    } else {
+        None
+    };
+    let data = versions
+        .into_iter()
+        .map(|version| DatasetVersion {
+            version: version.version,
+            description: version.description,
+            created_by: version.created_by,
+            created_at: version.created_at,
+        })
+        .collect();
+    Ok(error::Json(Page { data, next_cursor }))
+}
+
+async fn list_items(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Query(params): error::Query<DatasetItemListParams>,
+) -> Result<error::Json<Page<DatasetItem>>, ApiError> {
+    let row = find(&state, access.project.id, &dataset).await?;
+    let version = version_of(&row, params.version)?;
+    let after = match params.cursor.as_deref() {
+        None => None,
+        Some(cursor) => Some(cursor.parse::<Uuid>().map_err(|_| invalid_cursor())?),
+    };
+    let limit = params.limit.get();
+    let mut items = store::list_items(state.meta.reader(), row.id, version, after, limit).await?;
+    let more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = if more {
+        items.last().map(|last| last.item_id.to_string())
+    } else {
+        None
+    };
+    Ok(error::Json(Page {
+        data: items.iter().map(item_json).collect(),
+        next_cursor,
+    }))
+}
+
+async fn get_item(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(ItemPath { dataset, item_id }): error::Path<ItemPath>,
+    error::Query(params): error::Query<DatasetItemParams>,
+) -> Result<error::Json<DatasetItem>, ApiError> {
+    let row = find(&state, access.project.id, &dataset).await?;
+    let version = version_of(&row, params.version)?;
+    let item = store::get_item(state.meta.reader(), row.id, item_id, version)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(error::Json(item_json(&item)))
+}
+
+async fn add_items(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
+    error::Json(body): error::Json<AddItemsRequest>,
+) -> Result<(StatusCode, error::Json<AddItemsResponse>), ApiError> {
+    if !(1..=MAX_BATCH_ITEMS).contains(&body.items.len()) {
+        return Err(bad_request(vec![field_error(
+            "items",
+            "must hold 1 to 1000 items",
+        )]));
+    }
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let actor = created_by(&principal);
+    let created_by = actor.clone();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(
+                async move { add_items_tx(conn, project, key, body.items, created_by, now).await },
+            )
+        })
+        .await?;
+    let (dataset_id, response) = match outcome {
+        Ok(added) => added,
+        Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
+    };
+    tracing::info!(
+        target: "audit",
+        dataset_id = %dataset_id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        count = response.item_ids.len(),
+        version = response.version,
+        "dataset items added"
+    );
+    Ok((StatusCode::CREATED, error::Json(response)))
+}
+
+/// The batch add's write transaction. Every item is checked before anything is written; one
+/// failing item writes nothing (D-J-2).
+async fn add_items_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    items: Vec<NewDatasetItem>,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<(Uuid, AddItemsResponse), WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    let schemas = compiled_schemas(&row)?;
+    let mut errors = Vec::new();
+    let mut values = Vec::with_capacity(items.len());
+    for (index, item) in items.into_iter().enumerate() {
+        let item_values = ItemValues {
+            input: item.input,
+            expected_output: item.expected_output,
+            metadata: item.metadata.unwrap_or_default(),
+        };
+        errors.extend(check_item(
+            &format!("items[{index}]"),
+            &item_values,
+            &schemas,
+        ));
+        values.push(item_values);
+    }
+    if !errors.is_empty() {
+        return Ok(Err(WriteOutcome::Invalid(errors)));
+    }
+    let mut item_ids = Vec::with_capacity(values.len());
+    let mut insert = Vec::with_capacity(values.len());
+    for item in values {
+        let item_id = Uuid::now_v7();
+        item_ids.push(item_id);
+        insert.push(NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id,
+            input: item.input,
+            expected_output: item.expected_output,
+            metadata: item.metadata,
+            source_trace_id: None,
+            source_span_id: None,
+        });
+    }
+    let change = VersionChange {
+        close: Vec::new(),
+        description: add_description(insert.len()),
+        insert,
+        created_by,
+    };
+    let version = store::write_version(conn, row.id, change, now).await?;
+    Ok(Ok((row.id, AddItemsResponse { version, item_ids })))
+}
+
+async fn update_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(ItemPath { dataset, item_id }): error::Path<ItemPath>,
+    error::Json(body): error::Json<UpdateItemRequest>,
+) -> Result<error::Json<DatasetItem>, ApiError> {
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let created_by = created_by(&principal);
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                update_item_tx(conn, project, key, item_id, body, created_by, now).await
+            })
+        })
+        .await?;
+    match outcome {
+        Ok(item) => Ok(error::Json(item_json(&item))),
+        Err(WriteOutcome::NotFound) => Err(ApiError::NotFound),
+        Err(WriteOutcome::Invalid(errors)) => Err(bad_request(errors)),
+    }
+}
+
+/// The item edit's write transaction. A body that changes nothing writes no version and answers
+/// the live revision (D-J-3). Otherwise the live revision closes and its replacement is
+/// inserted in one new version; the source ids of the item are kept (D-J-9).
+async fn update_item_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    item: Uuid,
+    body: UpdateItemRequest,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<ItemRow, WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    let Some(live) = store::get_live_item_tx(conn, row.id, item).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    let values = ItemValues {
+        input: body.input.unwrap_or_else(|| live.input.clone()),
+        expected_output: match body.expected_output {
+            None => live.expected_output.clone(),
+            Some(value) => value,
+        },
+        metadata: body.metadata.unwrap_or_else(|| live.metadata.clone()),
+    };
+    let unchanged = values.input == live.input
+        && values.expected_output == live.expected_output
+        && values.metadata == live.metadata;
+    if unchanged {
+        return Ok(Ok(live));
+    }
+    let schemas = compiled_schemas(&row)?;
+    let errors = check_item("", &values, &schemas);
+    if !errors.is_empty() {
+        return Ok(Err(WriteOutcome::Invalid(errors)));
+    }
+    let change = VersionChange {
+        close: vec![item],
+        insert: vec![NewRevision {
+            revision_id: Uuid::now_v7(),
+            item_id: item,
+            input: values.input,
+            expected_output: values.expected_output,
+            metadata: values.metadata,
+            source_trace_id: live.source_trace_id,
+            source_span_id: live.source_span_id,
+        }],
+        description: format!("edit item {item}"),
+        created_by,
+    };
+    store::write_version(conn, row.id, change, now).await?;
+    let updated = store::get_live_item_tx(conn, row.id, item)
+        .await?
+        .ok_or(MetaError::Corrupt {
+            table: "dataset_items",
+            column: "item_id",
+        })?;
+    Ok(Ok(updated))
+}
+
+async fn delete_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(ItemPath { dataset, item_id }): error::Path<ItemPath>,
+) -> Result<error::Json<DatasetVersion>, ApiError> {
+    let project = access.project.id;
+    let key = DatasetKey::parse(&dataset);
+    let now = state.clock.now_ns();
+    let created_by = created_by(&principal);
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(
+                async move { delete_item_tx(conn, project, key, item_id, created_by, now).await },
+            )
+        })
+        .await?;
+    match outcome {
+        Ok(version) => Ok(error::Json(version)),
+        // The delete writes no item values, so it has no `Invalid` outcome.
+        Err(_) => Err(ApiError::NotFound),
+    }
+}
+
+/// The item delete's write transaction: the live revision closes in one new version that has
+/// no revision of its own.
+async fn delete_item_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    key: DatasetKey,
+    item: Uuid,
+    created_by: Option<String>,
+    now: i64,
+) -> Result<Result<DatasetVersion, WriteOutcome>, MetaError> {
+    let Some(row) = store::get_dataset_tx(conn, project, &key).await? else {
+        return Ok(Err(WriteOutcome::NotFound));
+    };
+    if store::get_live_item_tx(conn, row.id, item).await?.is_none() {
+        return Ok(Err(WriteOutcome::NotFound));
+    }
+    let description = format!("delete item {item}");
+    let change = VersionChange {
+        close: vec![item],
+        insert: Vec::new(),
+        description: description.clone(),
+        created_by: created_by.clone(),
+    };
+    let version = store::write_version(conn, row.id, change, now).await?;
+    Ok(Ok(DatasetVersion {
+        version,
+        description,
+        created_by,
+        created_at: now,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Map, json};
 
     use super::*;
     use crate::auth::roles::OrgRole;
-    use crate::meta::datasets::{NewRevision, VersionChange};
     use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs};
 
     const FAQ_SCHEMA: &str =
@@ -938,5 +1389,556 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(get(&app, &seeded, &id.to_string()).await.status, 404);
+    }
+
+    /// `POST …/faq/items` (or another `dataset` segment) with `body`.
+    async fn post_items(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        body: Value,
+    ) -> TestResponse {
+        app.request(Method::POST, &format!("{}/{dataset}/items", base(seeded)))
+            .header("cookie", &seeded.cookie)
+            .json(&body)
+            .send()
+            .await
+    }
+
+    /// `PATCH …/{dataset}/items/{item}` with `body`.
+    async fn patch_item(
+        app: &TestApp,
+        seeded: &Seeded,
+        dataset: &str,
+        item: &str,
+        body: Value,
+    ) -> TestResponse {
+        app.request(
+            Method::PATCH,
+            &format!("{}/{dataset}/items/{item}", base(seeded)),
+        )
+        .header("cookie", &seeded.cookie)
+        .json(&body)
+        .send()
+        .await
+    }
+
+    /// The item ids of a `201` batch answer, as strings.
+    fn item_ids(response: &TestResponse) -> Vec<String> {
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let body: Value = response.json();
+        body["item_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_list_and_version() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        let created = create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": schema }),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+
+        let added = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [
+                { "input": { "question": "a" } },
+                { "input": { "question": "b" }, "expected_output": "x", "metadata": { "topic": "t" } }
+            ] }),
+        )
+        .await;
+        let ids = item_ids(&added);
+        let body: Value = added.json();
+        assert_eq!(body["version"], 1);
+        assert_eq!(ids.len(), 2);
+
+        let items: Value = get(&app, &seeded, "faq/items").await.json();
+        let data = items["data"].as_array().unwrap();
+        assert_eq!(data.len(), 2);
+        assert!(data.iter().all(|row| row["version"] == 1));
+        let mut listed: Vec<&str> = data.iter().map(|row| row["id"].as_str().unwrap()).collect();
+        let mut expected: Vec<&str> = ids.iter().map(String::as_str).collect();
+        listed.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(listed, expected);
+
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        let versions = versions["data"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["description"], "add 2 items");
+        assert_eq!(versions[0]["created_by"], seeded.user_id.to_string());
+
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 1);
+        assert_eq!(dataset["item_count"], 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_validates_every_item() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": schema }),
+        )
+        .await;
+
+        let refused = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": { "question": "ok" } }, { "input": { "q": 1 } } ] }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&refused),
+            vec![("items[1].input".to_owned(), "/: required".to_owned())]
+        );
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 0);
+
+        let empty = post_items(&app, &seeded, "faq", json!({ "items": [] })).await;
+        assert_eq!(
+            field_errors(&empty),
+            vec![("items".to_owned(), "must hold 1 to 1000 items".to_owned())]
+        );
+
+        let many: Vec<Value> = (0..1_001)
+            .map(|_| json!({ "input": { "question": "a" } }))
+            .collect();
+        let too_many = post_items(&app, &seeded, "faq", json!({ "items": many })).await;
+        assert_eq!(
+            field_errors(&too_many),
+            vec![("items".to_owned(), "must hold 1 to 1000 items".to_owned())]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edit_creates_a_version_and_keeps_history() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let schema: Value = serde_json::from_str(FAQ_SCHEMA).unwrap();
+        create(
+            &app,
+            &seeded,
+            json!({ "name": "faq", "input_schema": schema }),
+        )
+        .await;
+        let added = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": { "question": "a" } } ] }),
+        )
+        .await;
+        let id = item_ids(&added).remove(0);
+        let item_path = format!("faq/items/{id}");
+        let first: Value = get(&app, &seeded, &item_path).await.json();
+
+        let edited = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &id,
+            json!({ "expected_output": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(edited.status, 200);
+        let edited: Value = edited.json();
+        assert_eq!(edited["id"], first["id"]);
+        assert_eq!(edited["version"], 2);
+        assert_ne!(edited["revision_id"], first["revision_id"]);
+        assert_eq!(edited["expected_output"], json!({ "a": 1 }));
+
+        let old: Value = get(&app, &seeded, &format!("{item_path}?version=1"))
+            .await
+            .json();
+        assert_eq!(old["version"], 1);
+        assert!(old.get("expected_output").is_none());
+
+        // The same body again changes nothing: no version.
+        let same = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &id,
+            json!({ "expected_output": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(same.status, 200);
+        let same: Value = same.json();
+        assert_eq!(same["revision_id"], edited["revision_id"]);
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["current_version"], 2);
+
+        let cleared = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &id,
+            json!({ "expected_output": null }),
+        )
+        .await;
+        assert_eq!(cleared.status, 200);
+        let cleared: Value = cleared.json();
+        assert_eq!(cleared["version"], 3);
+        assert!(cleared.get("expected_output").is_none());
+
+        let refused = patch_item(&app, &seeded, "faq", &id, json!({ "input": { "q": 1 } })).await;
+        assert_eq!(
+            field_errors(&refused),
+            vec![("input".to_owned(), "/: required".to_owned())]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_item_keeps_older_versions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let id = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" } ] }),
+            )
+            .await,
+        )
+        .remove(0);
+        let item_path = format!("faq/items/{id}");
+
+        let deleted = app
+            .request(Method::DELETE, &format!("{}/{item_path}", base(&seeded)))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, 200);
+        let deleted: Value = deleted.json();
+        assert_eq!(deleted["version"], 2);
+        assert_eq!(deleted["description"], format!("delete item {id}"));
+
+        assert_eq!(get(&app, &seeded, &item_path).await.status, 404);
+        assert_eq!(
+            get(&app, &seeded, &format!("{item_path}?version=1"))
+                .await
+                .status,
+            200
+        );
+        let listed: Value = get(&app, &seeded, "faq/items").await.json();
+        assert!(listed["data"].as_array().unwrap().is_empty());
+        let dataset: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(dataset["item_count"], 0);
+
+        let again = app
+            .request(Method::DELETE, &format!("{}/{item_path}", base(&seeded)))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(again.status, 404);
+        assert_eq!(
+            patch_item(&app, &seeded, "faq", &id, json!({ "input": "b" }))
+                .await
+                .status,
+            404
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn version_bounds_and_cursors() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": 1 }, { "input": 2 }, { "input": 3 } ] }),
+        )
+        .await;
+
+        assert_eq!(
+            field_errors(&get(&app, &seeded, "faq/items?version=5").await),
+            vec![("version".to_owned(), "must be between 0 and 1".to_owned())]
+        );
+        assert_eq!(
+            field_errors(&get(&app, &seeded, "faq/items?version=-1").await),
+            vec![("version".to_owned(), "must be between 0 and 1".to_owned())]
+        );
+        assert_eq!(
+            field_errors(&get(&app, &seeded, "faq/items?cursor=nope").await),
+            vec![("cursor".to_owned(), "invalid cursor".to_owned())]
+        );
+
+        let first: Value = get(&app, &seeded, "faq/items?limit=2").await.json();
+        assert_eq!(first["data"].as_array().unwrap().len(), 2);
+        let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+        let second: Value = get(&app, &seeded, &format!("faq/items?limit=2&cursor={cursor}"))
+            .await
+            .json();
+        assert_eq!(second["data"].as_array().unwrap().len(), 1);
+        assert!(second["next_cursor"].is_null());
+
+        post_items(&app, &seeded, "faq", json!({ "items": [ { "input": 4 } ] })).await;
+        let newest: Value = get(&app, &seeded, "faq/versions?limit=1").await.json();
+        assert_eq!(newest["data"][0]["version"], 2);
+        assert_eq!(newest["next_cursor"], "2");
+        let older: Value = get(&app, &seeded, "faq/versions?limit=1&cursor=2")
+            .await
+            .json();
+        assert_eq!(older["data"][0]["version"], 1);
+        assert!(older["next_cursor"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_item_cap() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create_ok(&app, &seeded, "faq").await;
+        let dataset_id: Uuid = dataset["id"].as_str().unwrap().parse().unwrap();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let insert: Vec<NewRevision> = (0..store::LIVE_ITEM_CAP)
+                        .map(|i| NewRevision {
+                            revision_id: Uuid::now_v7(),
+                            item_id: Uuid::now_v7(),
+                            input: json!(i),
+                            expected_output: None,
+                            metadata: Map::new(),
+                            source_trace_id: None,
+                            source_span_id: None,
+                        })
+                        .collect();
+                    let change = VersionChange {
+                        close: Vec::new(),
+                        insert,
+                        description: "fill".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, dataset_id, change, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let refused = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "one more" } ] }),
+        )
+        .await;
+        assert_eq!(refused.status, 409);
+        let problem: Value = refused.json();
+        assert_eq!(problem["detail"], "a dataset holds at most 50000 items");
+        let after: Value = get(&app, &seeded, "faq").await.json();
+        assert_eq!(after["current_version"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn source_ids_survive_an_edit() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let dataset = create_ok(&app, &seeded, "faq").await;
+        let dataset_id: Uuid = dataset["id"].as_str().unwrap().parse().unwrap();
+        let item = Uuid::now_v7();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let change = VersionChange {
+                        close: Vec::new(),
+                        insert: vec![NewRevision {
+                            revision_id: Uuid::now_v7(),
+                            item_id: item,
+                            input: json!({ "question": "x" }),
+                            expected_output: None,
+                            metadata: Map::new(),
+                            source_trace_id: Some(
+                                "a1000000000000000000000000000001".parse().unwrap(),
+                            ),
+                            source_span_id: Some("b100000000000011".parse().unwrap()),
+                        }],
+                        description: "copy".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, dataset_id, change, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let edited = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &item.to_string(),
+            json!({ "metadata": { "topic": "t" } }),
+        )
+        .await;
+        assert_eq!(edited.status, 200);
+        let edited: Value = edited.json();
+        assert_eq!(
+            edited["source_trace_id"],
+            "a1000000000000000000000000000001"
+        );
+        assert_eq!(edited["source_span_id"], "b100000000000011");
+        assert_eq!(edited["metadata"], json!({ "topic": "t" }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn size_limits() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+
+        let oversized = post_items(
+            &app,
+            &seeded,
+            "faq",
+            json!({ "items": [ { "input": "x".repeat(1_048_577) } ] }),
+        )
+        .await;
+        assert_eq!(
+            field_errors(&oversized),
+            vec![("items[0]".to_owned(), "is larger than 1 MiB".to_owned())]
+        );
+
+        // Twenty items of about 870 KiB each: under the per-item cap, over the 16 MiB body cap.
+        let text = "a".repeat(870 * 1024);
+        let body =
+            json!({ "items": (0..20).map(|_| json!({ "input": text })).collect::<Vec<_>>() });
+        assert_eq!(post_items(&app, &seeded, "faq", body).await.status, 413);
+
+        let id = item_ids(
+            &post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": "a" } ] }),
+            )
+            .await,
+        )
+        .remove(0);
+        let large = patch_item(
+            &app,
+            &seeded,
+            "faq",
+            &id,
+            json!({ "input": "x".repeat(3 * 1024 * 1024) }),
+        )
+        .await;
+        assert_eq!(large.status, 413);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn personal_tokens_write_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let read_write = app.personal_token(seeded.user_id, true).await;
+        let added = app
+            .request(Method::POST, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &format!("Bearer {read_write}"))
+            .json(&json!({ "items": [ { "input": "a" } ] }))
+            .send()
+            .await;
+        assert_eq!(added.status, 201);
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        assert_eq!(
+            versions["data"][0]["created_by"],
+            seeded.user_id.to_string()
+        );
+
+        let read_only = app.personal_token(seeded.user_id, false).await;
+        let refused = app
+            .request(Method::POST, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &format!("Bearer {read_only}"))
+            .json(&json!({ "items": [ { "input": "b" } ] }))
+            .send()
+            .await;
+        assert_eq!(refused.status, 403);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keys_write_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let write_key = app.write_key(&seeded).await;
+        let added = app
+            .request(Method::POST, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &format!("Bearer {write_key}"))
+            .json(&json!({ "items": [ { "input": "a" } ] }))
+            .send()
+            .await;
+        assert_eq!(added.status, 201);
+        let versions: Value = get(&app, &seeded, "faq/versions").await.json();
+        let created_by = versions["data"][0]["created_by"].as_str().unwrap();
+        assert!(
+            created_by
+                .strip_prefix("key:")
+                .is_some_and(|id| id.parse::<Uuid>().is_ok()),
+            "{created_by}"
+        );
+
+        let read_header = format!("Bearer {}", seeded.read_key);
+        let read = app
+            .request(Method::GET, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &read_header)
+            .send()
+            .await;
+        assert_eq!(read.status, 200);
+        let write = app
+            .request(Method::POST, &format!("{}/faq/items", base(&seeded)))
+            .header("authorization", &read_header)
+            .json(&json!({ "items": [ { "input": "b" } ] }))
+            .send()
+            .await;
+        assert_eq!(write.status, 403);
+    }
+
+    #[tokio::test]
+    async fn item_logs_hold_no_content() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let (status, logs) = capture_logs(async {
+            post_items(
+                &app,
+                &seeded,
+                "faq",
+                json!({ "items": [ { "input": { "question": "canary-j1-input" } } ] }),
+            )
+            .await
+            .status
+        })
+        .await;
+        assert_eq!(status, 201);
+        assert!(!logs.contains("canary-j1-input"), "{logs}");
     }
 }

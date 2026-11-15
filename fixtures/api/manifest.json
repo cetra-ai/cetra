@@ -70,6 +70,17 @@
     "file": "responses/datasets/01900000-0000-7000-8000-000000000c01.json"
   },
   {
+    "operation_id": "get_dataset_item",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01",
+      "item_id": "01900000-0000-7000-8000-000000000d02"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json"
+  },
+  {
     "operation_id": "get_deletion",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000902"
@@ -561,6 +572,38 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/channels.json"
+  },
+  {
+    "operation_id": "list_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {
+      "version": "1"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items-v1.json"
+  },
+  {
+    "operation_id": "list_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items.json"
+  },
+  {
+    "operation_id": "list_dataset_versions",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json"
   },
   {
     "operation_id": "list_datasets",

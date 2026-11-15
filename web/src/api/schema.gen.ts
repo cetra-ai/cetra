@@ -1293,6 +1293,78 @@ export interface paths {
         patch: operations["patch_dataset"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/datasets/{dataset}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the items of a version
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_dataset_items"];
+        put?: never;
+        /**
+         * Add items
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. A batch with any failing item writes nothing; the error lists the failing items.
+         */
+        post: operations["post_dataset_items"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an item
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_dataset_item"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an item
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version in which the item is gone; older versions still hold it.
+         */
+        delete: operations["delete_dataset_item"];
+        options?: never;
+        head?: never;
+        /**
+         * Edit an item
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. An edit that changes nothing creates none and answers the item as it is (D-J-3).
+         */
+        patch: operations["patch_dataset_item"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/datasets/{dataset}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the versions of a dataset
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_dataset_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/deletions": {
         parameters: {
             query?: never;
@@ -2110,6 +2182,21 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description `POST …/datasets/{dataset}/items` body: 1 to 1 000 items, one new version. */
+        AddItemsRequest: {
+            /** @description The items, 1 to 1 000 of them. Their ids come back in the same order. */
+            items: components["schemas"]["NewDatasetItem"][];
+        };
+        /** @description The new version and the new item ids, in request order. */
+        AddItemsResponse: {
+            /** @description The new item ids, in request order. */
+            item_ids: string[];
+            /**
+             * Format: int64
+             * @description The version the items were added in.
+             */
+            version: number;
+        };
         /** @description `POST /api/v1/orgs/{org}/sso/domains`. */
         AddOrgSsoDomain: {
             /** @description The email domain, e.g. `acme.com`. Punycode for internationalized names. */
@@ -3092,10 +3179,74 @@ export interface components {
              */
             updated_at: string;
         };
+        /** @description One item as it is in a version. */
+        DatasetItem: {
+            /**
+             * Format: date-time
+             * @description Creation time of this revision. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /**
+             * Format: uuid
+             * @description The item id, stable across versions.
+             */
+            id: string;
+            /** @description Any JSON value. */
+            input: unknown;
+            /** @description A JSON object. Empty when the item has no metadata. */
+            metadata: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description This revision.
+             */
+            revision_id: string;
+            /** @description The span the item was copied from. Omitted when none. */
+            source_span_id?: components["schemas"]["SpanId"];
+            /** @description The trace the item was copied from. Omitted when none. */
+            source_trace_id?: components["schemas"]["TraceId"];
+            /**
+             * Format: int64
+             * @description The version that introduced this revision.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DatasetItemPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DatasetItem"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         DatasetPage: {
             /** @description Items in this page. */
             data: components["schemas"]["Dataset"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One version of a dataset. */
+        DatasetVersion: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The user id, or `key:<key id>` for an API key. Omitted when unknown. */
+            created_by?: string;
+            /** @description What changed, e.g. `add 12 items`. */
+            description: string;
+            /**
+             * Format: int64
+             * @description Version number. Versions start at 1.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        DatasetVersionPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["DatasetVersion"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
@@ -4146,6 +4297,15 @@ export interface components {
              * @description Sum of `total_tokens`. Omitted when every span omitted the field.
              */
             total_tokens?: number;
+        };
+        /** @description One item to add. */
+        NewDatasetItem: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input: unknown;
+            /** @description A JSON object. Empty when omitted. */
+            metadata?: Record<string, never>;
         };
         /** @description A notification channel. The URL, the secret and header values are never returned (D-K-6). */
         NotificationChannel: {
@@ -6049,6 +6209,15 @@ export interface components {
              *     `config`, so a saved secret never signs requests to a new URL. An empty string is refused.
              */
             webhook_secret?: string;
+        };
+        /** @description `PATCH …/items/{item_id}` body. Absent keeps; `expected_output: null` clears it. */
+        UpdateItemRequest: {
+            /** @description Any JSON value. */
+            expected_output?: unknown;
+            /** @description Any JSON value. */
+            input?: unknown;
+            /** @description New metadata, when present. A JSON object. */
+            metadata?: Record<string, never>;
         };
         /**
          * @description `PATCH /api/v1/orgs/{org}/llm-connections/{id}` body. Absent means
@@ -12223,6 +12392,500 @@ export interface operations {
             };
             /** @description The request body is larger than the limit. */
             413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dataset_items: {
+        parameters: {
+            query?: {
+                /** @description Version to read, 0 to the current version. Default: the current version. */
+                version?: number;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of items, by item id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItemPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_dataset_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version and the new item ids. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddItemsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_dataset_item: {
+        parameters: {
+            query?: {
+                /** @description Version to read, 0 to the current version. Default: the current version. */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The item's revision in the version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_dataset_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_dataset_item: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+                /** @description Item id, stable across versions. */
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateItemRequest"];
+            };
+        };
+        responses: {
+            /** @description The item after the edit. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetItem"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_dataset_versions: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Dataset id, or its name. */
+                dataset: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of versions, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatasetVersionPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

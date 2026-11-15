@@ -527,6 +527,36 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/datasets/{dataset}",
         "delete_dataset",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/versions",
+        "list_dataset_versions",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "list_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "post_dataset_items",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "get_dataset_item",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "patch_dataset_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "delete_dataset_item",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -563,6 +593,9 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_evaluators",
     "list_score_definitions",
     "list_datasets",
+    "list_dataset_versions",
+    "list_dataset_items",
+    "get_dataset_item",
     "list_online_rules",
     "post_online_rule_preview",
     "post_backfill_estimate",
@@ -880,8 +913,14 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_dataset" || *id == "patch_dataset" {
+        } else if *id == "post_dataset"
+            || *id == "patch_dataset"
+            || *id == "post_dataset_items"
+            || *id == "patch_dataset_item"
+        {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "delete_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
@@ -972,6 +1011,8 @@ fn document_lint() {
         ("EvaluatorPage", "Evaluator"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
         ("DatasetPage", "Dataset"),
+        ("DatasetVersionPage", "DatasetVersion"),
+        ("DatasetItemPage", "DatasetItem"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
@@ -1246,6 +1287,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "EvaluatorPage",
         "ScoreDefinitionPage",
         "DatasetPage",
+        "DatasetVersionPage",
+        "DatasetItemPage",
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",
