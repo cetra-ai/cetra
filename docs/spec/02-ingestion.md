@@ -226,7 +226,7 @@ Applied to `input`, `output`, `system_instructions` after message conversion and
    - provider shapes that survived as raw JSON: OpenAI `image_url.url` data URI, `input_audio.data`, Anthropic `source: {type: base64, media_type, data}`, Gemini `inline_data` / `inlineData {mime_type, data}`;
    - Vercel `image` and `file` parts (raw base64 in `image` or `data`). The Vercel converter turns them into `blob` parts.
 2. Skip if decoded size < `media.min_bytes` (default 4 KiB) — tiny blobs stay inline.
-3. Decode base64, compute SHA-256, sniff MIME if missing. Sniffing uses a fixed magic-byte table: PNG, JPEG, GIF, WebP, PDF, WAV, MP3, OGG, FLAC, MP4/M4A, WebM. Otherwise the declared type, else `application/octet-stream`.
+3. Decode base64, compute SHA-256, sniff MIME if missing. A declared MIME type longer than 255 bytes, or not `type/subtype` made of token characters, is ignored, because storage keeps 1 to 255 bytes. The blob is then sniffed, so one long type never fails the request. Sniffing uses a fixed magic-byte table: PNG, JPEG, GIF, WebP, PDF, WAV, MP3, OGG, FLAC, MP4/M4A, WebM. Otherwise the declared type, else `application/octet-stream`.
 4. The server stores the blob through `llmobs-storage` (03 §9): it writes `media/<project_id>/<sha256>` durably if absent and records the `media` row in its catalog (normalization returns the blob; D103).
 5. Replace with `{"type":"uri","modality":…,"mime_type":…,"uri":"media://<sha256>"}` (or for raw JSON shapes, replace the base64 string by `media://<sha256>`).
 6. Append the hash to `media_refs`.
