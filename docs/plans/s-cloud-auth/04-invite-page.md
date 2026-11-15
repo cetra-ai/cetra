@@ -136,7 +136,7 @@ Extend S3's `### Changed` line `- Web UI: with password sign-in off and exactly 
 ### 5. Closeout
 
 1. `docs/plans/s-cloud-auth/README.md`: the first line becomes `Status: S1–S4 done on <today, YYYY-MM-DD>`.
-2. `docs/roadmap.md`, the row that starts `| **S** Cloud auth |`: the status cell becomes `**Done.** S1–S4: R16 (\`LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET\`), R13 (instance admins' password at \`/login?password=1\`), R7 (login and invite pages start the only provider). Q's Q2.27 can move its pin.` Leave the PR cell for the coordinator if you do not know the PR number.
+2. `docs/roadmap.md`, the row that starts `| **S** Cloud auth |`: the status cell becomes `**Done.** S1–S4: R16 (\`LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET\`), R13 (instance admins' password at \`/login?password=1\`), R7 (login and invite pages start the only provider). Q's Q2.27 can move its pin.` Append the merged PR numbers to that cell when you know them (the table has no PR column).
 
 ## Check
 
