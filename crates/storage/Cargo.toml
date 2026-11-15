@@ -39,5 +39,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+reqwest = { workspace = true }
 tempfile.workspace = true
 toml.workspace = true

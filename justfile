@@ -41,6 +41,12 @@ model cases="500":
 model-s3 cases="200":
     LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
 
+# S3 chaos through toxiproxy in front of an S3 endpoint (R M4). Needs
+# LLMOBS_TEST_S3_ENDPOINT, LLMOBS_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY and LLMOBS_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
+s3-chaos:
+    cargo test --release --workspace --all-features --test s3_chaos -- --ignored --test-threads 1 --nocapture
+
 # Cross-check the storage crash tests on LazyFS, which drops unsynced data at each crash (R2.12).
 # Needs FUSE 3 and `user_allow_other`: tools/lazyfs/README.md. Manual, not in `just test`.
 lazyfs:
