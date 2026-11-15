@@ -13,10 +13,7 @@ use arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Fields};
 
 use crate::error::{Result, StrataError};
-use crate::format::MAX_PROMOTED_KEYS;
-
-/// Longest key that may be promoted, in bytes.
-const MAX_KEY_LEN: usize = 1024;
+use crate::format::{MAX_PROMOTED_KEY_LEN, MAX_PROMOTED_KEYS};
 
 /// The result of [`shred`].
 pub(crate) struct Shredded {
@@ -127,7 +124,7 @@ fn is_moved(occ: &BTreeMap<&[u8], Occurrence<'_>>, key: &[u8], promoted: &[Vec<u
 }
 
 /// The promoted keys: keys that occur exactly once with a non-null value in at least 5% of the
-/// rows (rounded up, at least one), of at most `MAX_KEY_LEN` bytes. The top `MAX_PROMOTED_KEYS`
+/// rows (rounded up, at least one), of at most `MAX_PROMOTED_KEY_LEN` bytes. The top `MAX_PROMOTED_KEYS`
 /// by count, then by key bytes, sorted bytewise.
 fn promoted_keys(
     keys: &StringArray,
@@ -145,7 +142,7 @@ fn promoted_keys(
     let threshold = rows.len().saturating_mul(5).div_ceil(100).max(1);
     let mut ranked: Vec<(&[u8], usize)> = counts
         .into_iter()
-        .filter(|(key, count)| *count >= threshold && key.len() <= MAX_KEY_LEN)
+        .filter(|(key, count)| *count >= threshold && key.len() <= MAX_PROMOTED_KEY_LEN)
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     ranked.truncate(MAX_PROMOTED_KEYS);

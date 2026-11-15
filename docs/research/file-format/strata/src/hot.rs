@@ -13,8 +13,8 @@ use arrow::ipc::writer::StreamWriter;
 
 use crate::error::{Result, StrataError};
 use crate::format::{
-    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, MAX_PROMOTED_KEYS,
-    Out, PAGE_REF_LEN, VERSION,
+    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, MAX_PROMOTED_KEY_LEN,
+    MAX_PROMOTED_KEYS, Out, PAGE_REF_LEN, VERSION,
 };
 use crate::segment::SegmentRef;
 
@@ -282,13 +282,9 @@ pub(crate) struct MapKey {
     pub child: u32,
     /// The rows in which the key was present but stayed in the residual.
     pub residual_hits: u32,
-    /// The key, valid UTF-8 of at most `MAX_MAP_KEY_LEN` bytes.
+    /// The key, valid UTF-8 of at most `MAX_PROMOTED_KEY_LEN` bytes.
     pub key: Vec<u8>,
 }
-
-/// Longest promoted key in bytes. The same limit as the shredder's (`shred.rs`), checked here
-/// because the file is read without the shredder.
-const MAX_MAP_KEY_LEN: usize = 1024;
 
 /// Fewest bytes of one map in section 5: `u32 map · u32 residual · u32 n_keys`.
 const MAP_ENTRY_MIN_LEN: usize = 12;
@@ -325,7 +321,7 @@ fn encode_map_layout(maps: &[MapLayout]) -> Result<Vec<u8>> {
 
 /// Decodes section 5 whose bytes start at file offset `base`. Length 0 is no map. Otherwise
 /// the counts must fit in the bytes that remain before any allocation, each key must be valid
-/// UTF-8 of at most `MAX_MAP_KEY_LEN` bytes, the keys of a map must be strictly increasing, and
+/// UTF-8 of at most `MAX_PROMOTED_KEY_LEN` bytes, the keys of a map must be strictly increasing, and
 /// the section must be consumed exactly. Ids are checked later, in `file.rs`.
 fn decode_map_layout(bytes: &[u8], base: u64) -> Result<Vec<MapLayout>> {
     let corrupt = || StrataError::Corrupt {
@@ -361,7 +357,7 @@ fn decode_map_layout(bytes: &[u8], base: u64) -> Result<Vec<MapLayout>> {
             let residual_hits = c.u32("map layout")?;
             let key_len = usize::from(c.u16("map layout")?);
             let key = c.bytes(key_len, "map layout")?;
-            if key_len > MAX_MAP_KEY_LEN || std::str::from_utf8(key).is_err() {
+            if key_len > MAX_PROMOTED_KEY_LEN || std::str::from_utf8(key).is_err() {
                 return Err(corrupt());
             }
             if keys.last().is_some_and(|prev| prev.key.as_slice() >= key) {

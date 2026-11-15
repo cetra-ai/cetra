@@ -40,6 +40,8 @@ pub const MAX_PAGE_ENTRIES: usize = 4_096;
 pub const MAX_DICT_VALUES: usize = 1 << 20;
 /// Largest number of keys of one `Map` column that are promoted to child columns.
 pub const MAX_PROMOTED_KEYS: usize = 64;
+/// Longest map key that may be promoted to a child column, in bytes.
+pub const MAX_PROMOTED_KEY_LEN: usize = 1024;
 
 /// The little-endian value of `bytes`, zero-extended to 64 bits. `None` when there are
 /// more than eight bytes.
