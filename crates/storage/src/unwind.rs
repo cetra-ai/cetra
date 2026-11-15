@@ -170,15 +170,12 @@ impl ExecutionPlan for GuardExec {
         vec![false]
     }
 
-    fn dynamic_expressions_produced(&self) -> Vec<Arc<dyn PhysicalExpr>> {
-        self.input.dynamic_expressions_produced()
-    }
-
     fn apply_expressions(
         &self,
-        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
     ) -> DfResult<TreeNodeRecursion> {
-        self.input.apply_expressions(f)
+        // The wrapper owns no expressions, as DataFusion's CooperativeExec.
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -218,7 +215,10 @@ impl ExecutionPlan for GuardExec {
         let stream = match catch_unwind(AssertUnwindSafe(|| self.input.execute(partition, context)))
         {
             Ok(stream) => stream?,
-            Err(_) => return Err(DataFusionError::ParquetError(Box::new(decoder_panicked()))),
+            Err(_) => {
+                tracing::error!("a Parquet decoder panicked; the read fails as a decode error");
+                return Err(DataFusionError::ParquetError(Box::new(decoder_panicked())));
+            }
         };
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             schema,
@@ -566,5 +566,67 @@ mod tests {
             .filter(|line| !line.starts_with("GuardExec"))
             .collect();
         assert_eq!(lines, EXPECTED);
+    }
+
+    /// The optimized plan of `sql` over the seed spans file, indentation stripped and `GuardExec`
+    /// lines removed.
+    fn plan_text(sql: &str) -> Vec<String> {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let meta = stored(FileTable::Spans, &store);
+        let (ctx, _) = parquet_query(store, &meta);
+        let plan = runtime().block_on(async {
+            ctx.session()
+                .sql(sql)
+                .await
+                .expect("the query parses")
+                .create_physical_plan()
+                .await
+                .expect("the query plans")
+        });
+        displayable(plan.as_ref())
+            .indent(false)
+            .to_string()
+            .lines()
+            .map(|line| line.trim().to_owned())
+            .filter(|line| !line.starts_with("GuardExec"))
+            .collect()
+    }
+
+    /// Baselines captured with the scan unwrapped; the guard must not change them.
+    #[test]
+    fn guard_changes_no_other_plan_in_more_shapes() {
+        let limit = [
+            "ProjectionExec: expr=[encode(span_id@0, hex) as span_id]",
+            "RepartitionExec: partitioning=RoundRobinBatch(2), input_partitions=1",
+            "DataSourceExec: file_groups={1 group: [[tables/spans/fuzz.parquet]]}, projection=[span_id], limit=10, file_type=parquet",
+        ];
+        assert_eq!(
+            plan_text("SELECT span_id FROM spans LIMIT 10"),
+            limit,
+            "LIMIT without a sort"
+        );
+        let filter = [
+            "ProjectionExec: expr=[encode(span_id@0, hex) as span_id]",
+            "RepartitionExec: partitioning=RoundRobinBatch(2), input_partitions=1",
+            "DataSourceExec: file_groups={1 group: [[tables/spans/fuzz.parquet]]}, projection=[span_id, status], file_type=parquet, predicate=status@9 = error AND status@9 = error, pruning_predicate=status_null_count@2 != row_count@3 AND status_min@0 <= error AND error <= status_max@1 AND status_null_count@2 != row_count@3 AND status_min@0 <= error AND error <= status_max@1, required_guarantees=[status in (error)]",
+        ];
+        assert_eq!(
+            plan_text("SELECT span_id FROM spans WHERE status = 'error'"),
+            filter,
+            "a filter"
+        );
+        let group = [
+            "ProjectionExec: expr=[status@0 as status, count(Int64(1))@1 as n]",
+            "AggregateExec: mode=FinalPartitioned, gby=[status@0 as status], aggr=[count(Int64(1))]",
+            "RepartitionExec: partitioning=Hash([status@0], 2), input_partitions=2",
+            "AggregateExec: mode=Partial, gby=[status@0 as status], aggr=[count(Int64(1))]",
+            "RepartitionExec: partitioning=RoundRobinBatch(2), input_partitions=1",
+            "DataSourceExec: file_groups={1 group: [[tables/spans/fuzz.parquet]]}, projection=[status], file_type=parquet",
+        ];
+        assert_eq!(
+            plan_text("SELECT status, count(*) AS n FROM spans GROUP BY status"),
+            group,
+            "a group-by"
+        );
     }
 }
