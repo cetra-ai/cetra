@@ -75,6 +75,17 @@ Pending (external). The LazyFS cross-check (R2.12) needs FUSE and a real run of 
 - **M2-R2.5 (unverified): a WAL truncation whose directory fsync fails.** The flush task retries it on the next flush (spec 03 § Durability, why this is safe). No test covers the retry.
 - **M2 pre-fix assertion texts.** The findings above rest on the test-first runs recorded in their commits. The texts are not recorded, and R2.14 records them.
 
+## M3 — Fuzzing
+
+Track R, plan `docs/plans/r-hardening/03-m3-fuzzing.md`. The fuzz targets live in `fuzz/`; a crash is fixed with its input in `fuzz/regressions/<target>/`.
+
+### Findings
+
+| Id | Target | Regression | Cause | Classification | Severity | Fix |
+|---|---|---|---|---|---|---|
+| M3-1 | `wal_record`, `wal_replay` | `fuzz/regressions/wal_record/crash-fadaf511…`, `fuzz/regressions/wal_replay/crash-f945199…` | A CRC-valid WAL record declared a huge LZ4 decompressed size in a buffer prefix; arrow-ipc allocated it unchecked, so replay aborted the process on every start. | ours (storage) | medium: needs a CRC-valid corrupt record | commit 1b3311d plus this commit (R3.8) |
+| M3-2 | `parquet_file` | `fuzz/regressions/parquet_file/min-crash-3c48037…` | A 21-byte file whose footer claims more metadata than the file holds. Upstream's push decoder underflows (parquet `push_decoder.rs:391`). The guard catches it, so every read reports the file corrupt; the upstream report is not filed yet. | upstream guarded | low: the file must be corrupt already | the regression test in `verify.rs` (R3.8) |
+
 ## M4 — S3 fault injection
 
 The S3 fault milestone (plan `docs/plans/r-hardening/04-m4-s3-faults.md`, decision D-R-8). `ChaosStore` (`crates/storage/src/test_support/chaos.rs`) sits in front of an in-memory bucket and fails or delays the calls it forwards, as `object_store`'s S3 client does once its retries are exhausted. The model test has an S3 mode (`model_tests::storage_matches_the_model_on_s3`) that runs the same ops against it with the read cache on.
