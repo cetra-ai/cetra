@@ -139,6 +139,12 @@ impl Entitlements {
         Self { features, limits }
     }
 
+    /// The current window plus 30 days, in days; `None` without a window (D-P-22). Ingest's D85
+    /// age check uses it. M's retention uses the window history instead (D-P-45).
+    pub(crate) fn retention_cap_days(self) -> Option<u32> {
+        retention_cap(self.limits.data_access_days)
+    }
+
     /// Whether the org may use `feature`.
     pub(crate) fn allows(self, feature: Feature) -> bool {
         self.features.contains(feature)
@@ -353,6 +359,12 @@ impl EntitlementsState {
     }
 }
 
+/// The retention cap of a data window of `days` (D-P-22, D-P-45): the window plus 30 days, in
+/// days, saturating at `u32::MAX`. `None` (no window) caps nothing.
+pub(crate) fn retention_cap(days: Option<u64>) -> Option<u32> {
+    days.map(|days| u32::try_from(days.saturating_add(30)).unwrap_or(u32::MAX))
+}
+
 /// What `org` may do now. Synchronous and in memory; call it at every check (D-P-10).
 pub(crate) fn of(state: &AppState, org: OrgId) -> Entitlements {
     state.entitlements.resolve(org, state.clock.now_ns())
@@ -425,6 +437,25 @@ pub(crate) fn log_license(license: &LicenseState, now_ns: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_cap_is_the_window_plus_thirty_days() {
+        assert_eq!(retention_cap(None), None);
+        assert_eq!(retention_cap(Some(30)), Some(60));
+        assert_eq!(retention_cap(Some(u64::MAX)), Some(u32::MAX));
+        assert_eq!(retention_cap(Some(u64::from(u32::MAX))), Some(u32::MAX));
+        assert_eq!(
+            Entitlements::new(
+                FeatureSet::EMPTY,
+                Limits {
+                    data_access_days: Some(30),
+                    ..Limits::default()
+                }
+            )
+            .retention_cap_days(),
+            Some(60)
+        );
+    }
     use crate::config::{EntitlementDefaults, PublicUrl, Secret};
     use crate::ee::license::InvalidLicense;
     use crate::meta::entitlements::{StoredToken, put_token, record_window_end};

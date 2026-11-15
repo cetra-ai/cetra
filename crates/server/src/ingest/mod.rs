@@ -181,12 +181,19 @@ impl Ingest {
         self.max_request_bytes
     }
 
-    /// The normalizer's context for an in-process commit into `project` (D-I-21).
-    pub(crate) fn context(&self, project: &ProjectRow, now_ns: i64) -> IngestContext {
+    /// The normalizer's context for an in-process commit into `project` (D-I-21). The D85 age
+    /// bound is the project's retention, or `retention_cap` (the org's window plus 30 days, D-P-22)
+    /// when that is shorter.
+    pub(crate) fn context(
+        &self,
+        project: &ProjectRow,
+        retention_cap: Option<u32>,
+        now_ns: i64,
+    ) -> IngestContext {
         IngestContext {
             project_id: project.id,
             ingest_time: now_ns,
-            retention_days: project.retention_days,
+            retention_days: crate::retention::effective_days(project.retention_days, retention_cap),
             limits: self.limits,
         }
     }
@@ -219,6 +226,7 @@ impl Ingest {
     ///
     /// `reservation` covers the raw body; decompressed chunks are reserved as they are
     /// produced. The result keeps the reservation until it is dropped.
+    #[allow(clippy::too_many_arguments)] // the body, its reservation and format, and the project and clock
     pub(crate) async fn accept(
         &self,
         raw: Bytes,
@@ -226,6 +234,7 @@ impl Ingest {
         format: BodyFormat,
         encoding: BodyEncoding,
         project: &ProjectRow,
+        retention_cap: Option<u32>,
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let request_bytes = raw.len();
@@ -282,6 +291,7 @@ impl Ingest {
             u64::try_from(request_bytes).unwrap_or(u64::MAX),
             u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
             project,
+            retention_cap,
             now_ns,
         )
         .await
@@ -289,6 +299,7 @@ impl Ingest {
 
     /// Counts, normalizes and rewrites a decoded request (D-G-2, D-G-7). Used by OTLP/HTTP after
     /// decoding and by gRPC, whose request tonic decodes.
+    #[allow(clippy::too_many_arguments)] // the request, its reservation and sizes, and the project and clock
     pub(crate) async fn accept_request(
         &self,
         request: ExportTraceServiceRequest,
@@ -296,6 +307,7 @@ impl Ingest {
         request_bytes: u64,
         decompressed_bytes: u64,
         project: &ProjectRow,
+        retention_cap: Option<u32>,
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let prices: Arc<PriceTable> = self
@@ -303,7 +315,7 @@ impl Ingest {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let ctx = self.context(project, now_ns);
+        let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
@@ -648,6 +660,7 @@ mod tests {
                 format,
                 encoding,
                 project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -791,6 +804,7 @@ mod tests {
                 BodyFormat::Json,
                 BodyEncoding::Identity,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -871,6 +885,7 @@ mod tests {
                 len,
                 len,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await

@@ -120,6 +120,7 @@ async fn export_request(
     let message = request.into_inner();
     let bytes = u64::try_from(message.encoded_len()).unwrap_or(u64::MAX);
     let reservation = state.ingest.reserve_exact(bytes)?;
+    let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
         normalized,
         rewritten,
@@ -127,7 +128,15 @@ async fn export_request(
         ..
     } = state
         .ingest
-        .accept_request(message, reservation, bytes, bytes, &project, now)
+        .accept_request(
+            message,
+            reservation,
+            bytes,
+            bytes,
+            &project,
+            retention_cap,
+            now,
+        )
         .await?;
     check_rate(state, project.org_id, normalized.spans.len(), now)?;
     let rejected = normalized.rejections.total();

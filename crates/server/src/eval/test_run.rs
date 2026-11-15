@@ -216,7 +216,8 @@ pub(crate) async fn run(
 
     let judge_trace_id = judge_trace_id()?;
     let now = state.clock.now_ns();
-    let ingest = state.ingest.context(project, now);
+    // A judge trace is written now, so the D85 age bound never applies (D-P-22).
+    let ingest = state.ingest.context(project, None, now);
     let prices = state.ingest.prices();
     let signing_secret = prepared
         .secrets
