@@ -56,5 +56,7 @@ set the bucket in `llmobs.env` as in [s3.md](s3.md).
 | Upgrade | set `LLMOBS_IMAGE` in `.env`, then `docker compose up -d` ([upgrade.md](upgrade.md)) |
 | Back up | [backup.md](backup.md#docker-compose) |
 
+Health checks and the Prometheus metrics port are described in [monitoring.md](monitoring.md).
+
 The volumes are named `<project>_llmobs-data` (the project is `llmobs` unless you pass `-p`).
 `docker compose down` keeps them; `docker compose down -v` deletes them and all data.

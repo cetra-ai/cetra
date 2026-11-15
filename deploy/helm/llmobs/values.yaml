@@ -80,6 +80,15 @@ ingress:
   # Example: [{secretName: llmobs-tls, hosts: [llmobs.example.com]}]
   tls: []
 
+# Prometheus metrics on port 9464 (`metrics_addr`, D-N-28). Off by default.
+metrics:
+  enabled: false
+  # Added to the pod when metrics are enabled, for annotation-based scraping.
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9464"
+    prometheus.io/path: "/metrics"
+
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}

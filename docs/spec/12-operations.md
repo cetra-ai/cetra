@@ -71,7 +71,7 @@ Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-
 | Artifact | Details |
 |---|---|
 | Binary | `llmobs` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static) and `aarch64-apple-darwin` (D-N-1). Web UI embedded. Built natively per platform with `cargo auditable build --release --locked` (the workspace release profile: LTO thin, `codegen-units=1`, unwinding kept for task isolation). Shipped as `llmobs-<version>-<target>.tar.gz` with `LICENSE`, `LICENSE-ELASTIC` and `THIRD-PARTY-NOTICES.md` (D-N-8, D-N-16) on the GitHub release, with `SHA256SUMS`, an SPDX SBOM per binary, build provenance attestations and `install.sh` (D-N-7, D-N-15). |
-| Docker image | `ghcr.io/<owner>/llmobs:<version>`, `linux/amd64` and `linux/arm64`. `gcr.io/distroless/static-debian13:nonroot` pinned by digest, uid/gid 65532, `/data` owned by it, `VOLUME /data`, `EXPOSE 8080 4317 4318`, healthcheck `llmobs health` (`/readyz`). Built from the release archives (D-N-3, D-N-4). |
+| Docker image | `ghcr.io/<owner>/llmobs:<version>`, `linux/amd64` and `linux/arm64`. `gcr.io/distroless/static-debian13:nonroot` pinned by digest, uid/gid 65532, `/data` owned by it, `VOLUME /data`, `EXPOSE 8080 4317 4318 9464`, healthcheck `llmobs health` (`/readyz`). Built from the release archives (D-N-3, D-N-4). |
 | docker-compose | `deploy/compose/compose.yaml` (`llmobs` with a named volume) and the overlay `compose.s3.yaml` (a single-node Garage and its init, S3 mode). Compose settings in `.env`, server settings in `llmobs.env` (D-N-9). |
 | Helm chart | `deploy/helm/llmobs`, pushed to `oci://ghcr.io/<owner>/charts/llmobs`, chart version = app version. One `StatefulSet` (`replicas: 1`, not configurable), a `volumeClaimTemplates` volume for `/data` kept on delete, `Service` (8080, 4317, 4318), optional `Ingress`, config through `config` (rendered to `llmobs.toml`), `env`, a Secret (`existingSecret` or chart-made) and `s3.*`. `podManagementPolicy: OrderedReady`, `terminationGracePeriodSeconds: 60`, a rolling update that replaces the one pod (never two pods on one volume) (D-N-10). |
 
@@ -110,7 +110,12 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 
 ## Self-monitoring
 
-Deferred to just before release (D38). Placeholder decisions: Prometheus `/metrics` on a separate admin port, OTel self-traces opt-in.
+> **Built in N M3 (D-N-28 to D-N-30, D-N-33):**
+> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
+> - `/readyz` as § Process lifecycle describes it.
+> - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work.
+>
+> OTel self-traces stay deferred (D38).
 
 ## Backups (documented procedure, D37)
 
