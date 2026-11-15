@@ -84,6 +84,8 @@ pub(crate) struct AppInner {
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
     /// The single backup slot: a second backup answers `busy` (N M2, D-N-19).
     pub(crate) backup_slot: tokio::sync::Mutex<()>,
+    /// The eval queue's in-memory state (D-I-6).
+    pub(crate) eval: crate::eval::EvalQueue,
     /// Per-org span rate (D-P-19, D-P-35).
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
 }

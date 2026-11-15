@@ -43,6 +43,16 @@ impl Adapter {
         }
     }
 
+    /// The `gen_ai.provider.name` the judge span records, and the provider prices are looked up with.
+    #[must_use]
+    pub const fn provider_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gcp.gemini",
+        }
+    }
+
     /// Parses the stored connection value. Unknown text is [`UnknownName`].
     pub fn from_name(text: &str) -> Result<Self, UnknownName> {
         match text {

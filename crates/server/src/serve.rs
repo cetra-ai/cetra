@@ -144,6 +144,8 @@ pub struct Running {
     admin_socket: Option<JoinHandle<()>>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
+    /// The eval loops. Shutdown stops them before the storage flush (D-I-12).
+    eval_tasks: Option<crate::eval::EvalTasks>,
 }
 
 impl std::fmt::Debug for Running {
@@ -171,6 +173,9 @@ impl Drop for Running {
         }
         for task in &self.tasks {
             task.abort();
+        }
+        if let Some(eval) = &self.eval_tasks {
+            eval.abort();
         }
     }
 }
@@ -310,6 +315,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let storage = Arc::new(storage);
+    let eval = crate::eval::EvalQueue::new(config.eval.workers);
     let state = AppState::new(AppInner {
         config,
         meta,
@@ -338,11 +344,16 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
         backup_slot: tokio::sync::Mutex::new(()),
+        eval,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
         release_state(state).await;
         return Err(serve_bootstrap(error));
+    }
+    if let Err(error) = crate::eval::recover(&state).await {
+        release_state(state).await;
+        return Err(ServeError::Meta(error));
     }
     // The guard is a safety net for judge runs; the server starts without it.
     if let Err(error) = state
@@ -391,6 +402,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         &state,
         crate::alerts::AlertTiming::DEFAULT,
     ));
+    let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
     tasks.push(spawn_usage(state.clone()));
@@ -454,6 +466,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         state: Some(state),
         admin_socket,
         tasks,
+        eval_tasks: Some(eval_tasks),
     })
 }
 
@@ -621,8 +634,8 @@ impl Running {
             .expect("state is present until shutdown")
     }
 
-    /// Stop the control socket, stop accepting, drain HTTP, stop background tasks,
-    /// flush storage, close `meta.db`.
+    /// Stop the control socket, stop accepting, drain HTTP, stop the eval loops and
+    /// background tasks, flush storage, close `meta.db`.
     ///
     /// The control socket goes first: a backup in progress is cancelled, and no
     /// new one starts during the drain. A storage flush error is logged. The lock
@@ -660,6 +673,9 @@ impl Running {
             drain_optional(self.grpc_serve.take()),
         );
         let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) {
+            eval.shutdown(state).await;
+        }
         for task in self.tasks.drain(..) {
             task.abort();
             let _ = task.await;
@@ -902,6 +918,27 @@ mod tests {
         assert!(text.contains("in use"), "{text}");
         assert!(text.contains(&dir.path().display().to_string()), "{text}");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dropped_running_releases_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        drop(running);
+        // The aborted tasks drop their state a few polls later, so retry for a short while.
+        let started = Instant::now();
+        loop {
+            match bind(config(dir.path()), None).await {
+                Ok(again) => {
+                    again.shutdown().await.unwrap();
+                    break;
+                }
+                Err(error) => {
+                    assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
     }
 
     #[tokio::test]
