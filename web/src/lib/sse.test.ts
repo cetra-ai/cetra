@@ -1,6 +1,7 @@
 import { renderHook, waitFor } from "@testing-library/react";
-import { sse } from "msw";
+import { HttpResponse, http, sse } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
+import { setUnauthorizedHandler } from "@/api/session";
 import type { Schema } from "@/api/types";
 import {
   openStream,
@@ -34,6 +35,7 @@ afterEach(() => {
     stop();
   }
   stops.length = 0;
+  setUnauthorizedHandler(undefined);
   vi.useRealTimers();
 });
 
@@ -284,4 +286,107 @@ it("fixture streams ping and do not emit rows", async () => {
   await vi.advanceTimersByTimeAsync(30_000);
   expect(events).toEqual([]);
   expect(statuses.at(-1)).toBe("open");
+});
+
+/** Answers every stream request with `status` (or a network error) and counts them. */
+function refusedStream(status: number | "network"): { requests: () => number } {
+  let requests = 0;
+  server.use(
+    http.get("/api/v1/projects/:project/traces/stream", () => {
+      requests += 1;
+      if (status === "network") {
+        return HttpResponse.error();
+      }
+      return new HttpResponse(null, { status });
+    }),
+  );
+  return { requests: () => requests };
+}
+
+it.each([400, 403, 404])(
+  "stops for good after a %i answered before the stream opens",
+  async (status) => {
+    useStreamTimers();
+    const refused = refusedStream(status);
+    const events: StreamEvent[] = [];
+    const statuses: StreamStatus[] = [];
+    listen({ events, statuses });
+    await waitFor(() => {
+      expect(statuses.at(-1)).toBe("closed");
+    });
+    const seen = refused.requests();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(refused.requests()).toBe(seen);
+    expect(statuses).not.toContain("retrying");
+    expect(events).toEqual([]);
+  },
+);
+
+it("hands a 401 before open to the session handler and stops", async () => {
+  useStreamTimers();
+  const refused = refusedStream(401);
+  const unauthorized = vi.fn();
+  setUnauthorizedHandler(unauthorized);
+  const statuses: StreamStatus[] = [];
+  listen({ events: [], statuses });
+  await waitFor(() => {
+    expect(statuses.at(-1)).toBe("closed");
+  });
+  expect(unauthorized).toHaveBeenCalledTimes(1);
+  expect(unauthorized).toHaveBeenCalledWith("/api/v1/projects/acme%2Fsupport-bot/traces/stream");
+  const seen = refused.requests();
+  await vi.advanceTimersByTimeAsync(120_000);
+  expect(refused.requests()).toBe(seen);
+  expect(statuses).not.toContain("retrying");
+});
+
+it.each([503, 429, 408])("retries after a %i answered before the stream opens", async (status) => {
+  const refused = refusedStream(status);
+  const statuses: StreamStatus[] = [];
+  listen({ events: [], statuses });
+  await waitFor(() => {
+    expect(statuses).toContain("retrying");
+  });
+  await waitFor(
+    () => {
+      expect(refused.requests()).toBeGreaterThanOrEqual(4);
+    },
+    { timeout: 4_000 },
+  );
+  expect(statuses.at(-1)).toBe("retrying");
+  expect(statuses).not.toContain("closed");
+});
+
+it("retries after a network error before the stream opens", async () => {
+  const refused = refusedStream("network");
+  const statuses: StreamStatus[] = [];
+  listen({ events: [], statuses });
+  await waitFor(
+    () => {
+      expect(refused.requests()).toBeGreaterThanOrEqual(4);
+    },
+    { timeout: 4_000 },
+  );
+  expect(statuses).toContain("retrying");
+  expect(statuses).not.toContain("closed");
+});
+
+it("does not probe again after the user closes the stream", async () => {
+  const refused = refusedStream(503);
+  const statuses: StreamStatus[] = [];
+  const stop = openStream(
+    STREAM,
+    () => {},
+    (status) => {
+      statuses.push(status);
+    },
+  );
+  await waitFor(() => {
+    expect(refused.requests()).toBeGreaterThanOrEqual(2);
+  });
+  stop();
+  const seen = refused.requests();
+  await delay(1_500);
+  expect(refused.requests()).toBe(seen);
+  expect(statuses.at(-1)).toBe("closed");
 });

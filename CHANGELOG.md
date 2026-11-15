@@ -52,6 +52,11 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- The traces page shows onboarding only for a project with no trace at all (an all-time one-row probe); a project whose traces are older than the selected range sees its empty range instead.
+- The live traces list refetches its first page at most once at a time: a busy stream no longer cancels the refetch it started, and the traces that arrived meanwhile are fetched by one trailing refetch.
+- The live traces list and the trace view stop their stream on a 4xx answer instead of retrying forever, a 401 on a stream goes to `/login`, and the live list opens no stream while it shows an invalid filter.
+- The org's project list says "Forever" for a project that keeps data forever, instead of "Default".
+- The `/cli-auth` page hands the new CLI token over in a form POST instead of a URL, so it stays out of the browser history; the token expires after 90 days, and the page warns about links sent by someone else and shows the CLI's host as reported.
 - OTLP/gRPC checks the credential, the project and the units cap before decoding a message, and
   reserves the in-flight budget for the largest message before the body is read. The gRPC listener
   allows 100 concurrent streams and 32 in-flight requests per connection, and cuts a request
