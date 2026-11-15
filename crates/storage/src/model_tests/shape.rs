@@ -4,14 +4,17 @@
 //! number). Ops only choose which rows to write and when. This module builds rows with
 //! `test_support::{span_row, score_row}` and does not call the engine's merge or read code.
 
+use std::collections::BTreeMap;
+
 use chrono::{Datelike, Days, NaiveDate};
 use llmobs_core::enums::{SpanKind, SpanStatus};
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::names::environment;
+use llmobs_core::names::{environment, metadata_key};
 use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
 use llmobs_core::span::Span;
 use uuid::Uuid;
 
+use super::ops::TRACES;
 use crate::test_support::{score_row, span_row};
 
 pub(super) const PROJECT_A: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000a1";
@@ -114,6 +117,11 @@ pub(super) fn trace_id(trace: u8) -> TraceId {
     TraceId::from_bytes(bytes).expect("trace id is never all zero")
 }
 
+/// The trace an evaluation trace of `trace` targets: `(trace + 1) % TRACES`.
+pub(super) fn eval_target(trace: u8) -> u8 {
+    (trace + 1) % TRACES
+}
+
 /// The span id `span_row` builds for `span`: 8 bytes of `span + 1`.
 pub(super) fn span_id(span: u8) -> SpanId {
     SpanId::from_bytes([span + 1; 8]).expect("span id is never all zero")
@@ -167,6 +175,13 @@ pub(super) fn span(project: P, trace: u8, span_no: u8, ingest: i64) -> Span {
         }
         .to_owned(),
     ];
+    if shape.environment.as_deref() == Some(environment::EVAL) {
+        // Every span of an evaluation trace names its target (`eval_trace_ids` reads it).
+        row.metadata = BTreeMap::from([(
+            metadata_key::EVAL_TARGET_TRACE_ID.to_owned(),
+            hex(trace_id(eval_target(trace)).as_bytes()),
+        )]);
+    }
     row.session_id = shape.session;
     row.user_id = shape.user;
     row.environment = shape.environment;

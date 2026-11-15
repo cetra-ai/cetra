@@ -8,11 +8,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::NaiveDate;
 use llmobs_core::enums::{SpanKind, SpanStatus};
+use llmobs_core::names::environment;
 use llmobs_core::span::Span;
 use uuid::Uuid;
 
 use super::shape::{
-    P, ScoreKey, Target, date_of, day, hex, score_created_at, score_id, span, trace_id, trace_shape,
+    P, ScoreKey, Target, date_of, day, eval_target, hex, score_created_at, score_id, span,
+    trace_id, trace_shape,
 };
 
 /// One stored copy of a span key. Every copy of a key has the same content.
@@ -54,6 +56,8 @@ pub(super) struct ModelDeletion {
     /// `User` scope only.
     pub(super) user: Option<String>,
     pub(super) sessions: BTreeSet<String>,
+    /// Set once storage reported the deletion `Applied`. It must never read `Pending` again.
+    pub(super) applied_seen: bool,
 }
 
 pub(super) struct Model {
@@ -177,6 +181,42 @@ impl ProjectModel {
         self.dropped = true;
         self.spans.clear();
         self.scores.clear();
+    }
+
+    /// The trace numbers with a visible copy of some key.
+    fn visible_trace_numbers(&self) -> BTreeSet<u8> {
+        self.visible_spans()
+            .keys()
+            .map(|&(trace, _)| trace)
+            .collect()
+    }
+
+    /// The traces `eval_trace_ids` returns for `targets` (trace numbers): evaluation traces
+    /// with a visible copy whose target is in `targets`, and that are not in `targets` (one level).
+    pub(super) fn eval_traces_for(&self, targets: &BTreeSet<u8>) -> BTreeSet<u8> {
+        self.visible_trace_numbers()
+            .into_iter()
+            .filter(|&trace| {
+                trace_shape(self.project, trace).environment.as_deref() == Some(environment::EVAL)
+                    && targets.contains(&eval_target(trace))
+                    && !targets.contains(&trace)
+            })
+            .collect()
+    }
+
+    /// The traces `user_deletion_scope` returns for `user`, and their sessions: the traces of
+    /// that user with a visible copy, and the `Some` sessions among them.
+    pub(super) fn user_scope(&self, user: &str) -> (BTreeSet<u8>, BTreeSet<String>) {
+        let mut traces = BTreeSet::new();
+        let mut sessions = BTreeSet::new();
+        for trace in self.visible_trace_numbers() {
+            let shape = trace_shape(self.project, trace);
+            if shape.user.as_deref() == Some(user) {
+                traces.insert(trace);
+                sessions.extend(shape.session);
+            }
+        }
+        (traces, sessions)
     }
 
     /// Whether a span copy of `trace` written at `ingest` is covered by a deletion (spec 03 §7).
@@ -420,6 +460,7 @@ mod tests {
             traces: traces.iter().copied().collect::<BTreeSet<u8>>(),
             user: None,
             sessions: BTreeSet::new(),
+            applied_seen: false,
         }
     }
 
@@ -497,6 +538,7 @@ mod tests {
             traces: BTreeSet::new(),
             user: Some("u0".to_owned()),
             sessions: BTreeSet::from(["s2".to_owned()]),
+            applied_seen: false,
         });
         let session_two = ScoreKey {
             project: P::A,
@@ -540,6 +582,7 @@ mod tests {
             traces: BTreeSet::new(),
             user: Some("u0".to_owned()),
             sessions: BTreeSet::new(),
+            applied_seen: false,
         });
         let visible = model.visible_spans();
         assert!(!visible.contains_key(&(0, 0)));

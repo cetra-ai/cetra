@@ -14,6 +14,7 @@ use super::observe::{
 };
 use super::ops::{SPANS, TRACES, score_key_space};
 use super::shape::{P, hex, score_id, span_id, trace_id};
+use crate::deletion::DeletionStatus;
 use crate::reads::MAX_PAGE;
 
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
@@ -28,14 +29,38 @@ pub(super) fn check_quick(h: &Harness, model: &Model, project: P, index: usize) 
 }
 
 /// After Restart, Crash and Settle, and at the end: both projects, the reads of
-/// `check_quick`, plus the sampled details and the score reads by id and latest.
-pub(super) fn check_full(h: &Harness, model: &Model, index: usize) {
+/// `check_quick`, plus the sampled details, the score reads by id and latest, and the
+/// deletion statuses.
+pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
+    check_deletions(h, model, index);
+    let model: &Model = model;
     for project in [P::A, P::B] {
         let state = model.project(project);
         check_quick(h, model, project, index);
         check_paging(h, project, index);
         check_samples(h, state, project, index);
         check_score_reads(h, model, project, index);
+    }
+}
+
+/// Every registered deletion of both projects reads `Pending` or `Applied`. Once one reads
+/// `Applied` it never reads `Pending` again (spec 03 §7). Dropped projects' deletions are
+/// checked too: a drop marks them applied.
+fn check_deletions(h: &Harness, model: &mut Model, index: usize) {
+    for project in [P::A, P::B] {
+        for deletion in &mut model.project_mut(project).deletions {
+            let status = h
+                .block_on(h.storage().deletion_status(deletion.id))
+                .expect("deletion_status of a registered deletion");
+            match status {
+                DeletionStatus::Applied { .. } => deletion.applied_seen = true,
+                DeletionStatus::Pending => assert!(
+                    !deletion.applied_seen,
+                    "op {index}, project {project:?}: deletion {} reads Pending after it was Applied",
+                    deletion.id
+                ),
+            }
+        }
     }
 }
 

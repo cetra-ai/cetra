@@ -14,8 +14,11 @@ use proptest::prelude::*;
 use check::{check_full, check_quick};
 use harness::Harness;
 use model::Model;
+use observe::{ALL_ROWS, observe_spans, observe_traces};
 use ops::{Op, apply, settle};
 use shape::{HOUR_NS, P, day, midnight};
+
+use crate::reads::MAX_PAGE;
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 16 (D-R-14).
 fn cases() -> u32 {
@@ -42,7 +45,7 @@ fn run_case(ops: &[Op]) {
     for (index, op) in ops.iter().enumerate() {
         apply(op, &mut harness, &mut model, &mut clock);
         match op {
-            Op::Restart | Op::Crash | Op::Settle => check_full(&harness, &model, index),
+            Op::Restart | Op::Crash | Op::Settle => check_full(&harness, &mut model, index),
             _ => match op.project() {
                 Some(project) => check_quick(&harness, &model, project, index),
                 None => {
@@ -53,7 +56,59 @@ fn run_case(ops: &[Op]) {
         }
     }
     settle(&mut harness, &mut model, &mut clock);
-    check_full(&harness, &model, ops.len());
+    check_full(&harness, &mut model, ops.len());
+}
+
+/// Dropping B leaves A's reads as the model has them, and B's reads empty (spec 03 §7).
+#[test]
+fn drop_keeps_project_a() {
+    let ops = [
+        Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 3,
+            split: false,
+        },
+        Op::Append {
+            project: P::B,
+            trace: 0,
+            count: 3,
+            split: false,
+        },
+        Op::Append {
+            project: P::A,
+            trace: 1,
+            count: 2,
+            split: true,
+        },
+        Op::Append {
+            project: P::B,
+            trace: 1,
+            count: 2,
+            split: false,
+        },
+        Op::DropB,
+        Op::Settle,
+    ];
+    let mut harness = Harness::new();
+    let mut model = Model::new();
+    let mut clock = midnight(day(0)) + 12 * HOUR_NS;
+    for op in &ops {
+        apply(op, &mut harness, &mut model, &mut clock);
+    }
+    check_full(&harness, &mut model, ops.len());
+    assert!(
+        !model.a.expected_traces().is_empty(),
+        "project A has traces to check"
+    );
+    assert!(
+        observe_spans(&harness, P::B, MAX_PAGE).is_empty(),
+        "dropped project B still lists spans"
+    );
+    assert!(
+        observe_traces(&harness, P::B, ALL_ROWS, MAX_PAGE).is_empty(),
+        "dropped project B still lists traces"
+    );
 }
 
 /// Score ops leave live scores behind, and storage reads them back as the model has them.

@@ -12,11 +12,13 @@ use super::ops::{SESSIONS, TRACES};
 use super::shape::{P, hex, span_id, trace_id};
 use crate::reads::{
     ListScope, ScoreListRequest, ScoreTargets, SortOrder, SpanListRequest, SpanSort,
-    TraceListRequest, TraceSort, latest_scores, score_list, scores_by_id, span_detail, span_list,
-    trace_detail, trace_list,
+    TraceListRequest, TraceSort, UserDeletionScope, eval_trace_ids, latest_scores, score_list,
+    scores_by_id, span_detail, span_list, trace_detail, trace_list, user_deletion_scope,
 };
 use crate::views::QueryContext;
+use llmobs_core::ids::TraceId;
 use llmobs_core::schema::{scores, spans, traces};
+use std::collections::HashSet;
 
 /// Time allowed for each read request.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,6 +39,36 @@ pub(super) const ALL_ROWS: ListScope = ListScope {
     include_eval: true,
     include_experiments: true,
 };
+
+/// The scope of user `user` as `user_deletion_scope` returns it, for a cutoff of `cutoff`.
+pub(super) fn observe_user_scope(
+    harness: &Harness,
+    project: P,
+    user: &str,
+    cutoff: i64,
+) -> UserDeletionScope {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        user_deletion_scope(&ctx, user, cutoff, TIMEOUT)
+            .await
+            .expect("user_deletion_scope on a project")
+    })
+}
+
+/// The evaluation traces `eval_trace_ids` returns for `targets`, in its order.
+pub(super) fn observe_eval_trace_ids(
+    harness: &Harness,
+    project: P,
+    targets: &[TraceId],
+) -> Vec<TraceId> {
+    harness.block_on(async {
+        let ctx = context(harness, project).await;
+        let targets: HashSet<TraceId> = targets.iter().cloned().collect();
+        eval_trace_ids(&ctx, &targets, TIMEOUT)
+            .await
+            .expect("eval_trace_ids on a project")
+    })
+}
 
 /// A query context on `project`'s snapshot, as the server's read handlers build one.
 async fn context(harness: &Harness, project: P) -> QueryContext {

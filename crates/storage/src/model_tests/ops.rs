@@ -4,17 +4,22 @@
 //! Ops are plain values resolved against the model when they run, so a shrunk failure prints
 //! a readable op list.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use proptest::prelude::*;
+use proptest::strategy::Union;
+use uuid::Uuid;
 
 use super::harness::Harness;
-use super::model::{Model, ProjectModel, SpanCopy};
-use super::shape::{HOUR_NS, P, ScoreKey, Target, day, midnight, score, span};
-use crate::deletion::DeletionStatus;
+use super::model::{Model, ModelDeletion, ProjectModel, SpanCopy};
+use super::observe::{observe_eval_trace_ids, observe_user_scope};
+use super::shape::{HOUR_NS, P, ScoreKey, Target, day, hex, midnight, score, span, trace_id};
+use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
 use crate::test_support::span_rows;
 use llmobs_core::batch::scores_to_record_batch;
+use llmobs_core::ids::TraceId;
 use llmobs_core::span::Span;
 
 /// One microsecond. Every op advances the clock by this much, so ingest times strictly rise.
@@ -31,6 +36,9 @@ const SCORE_TARGETS: u8 = TRACES + SESSIONS;
 const SCORE_NAMES: u8 = 3;
 /// Passes a settle step makes before the case fails.
 const SETTLE_PASSES: usize = 10;
+/// The retention days a `Retention` op picks from, as offsets from `D`. Never `D + 2`: class-2
+/// traces have rows on `D + 1` and `D + 2` whose partition depends on the anchor (D-R-3).
+const RETENTION_DAYS: [u8; 3] = [1, 3, 4];
 
 #[derive(Debug, Clone)]
 pub(super) enum Op {
@@ -87,6 +95,29 @@ pub(super) enum Op {
         pick: u8,
         back: u8,
     },
+    /// `register_deletion` of the traces `picks` names (each `% TRACES`), plus their
+    /// evaluation traces, cut off at the op's ingest time.
+    DeleteTraces {
+        project: P,
+        picks: Vec<u8>,
+    },
+    /// A user deletion as the server resolves it (D-M-3): through `user_deletion_scope` and
+    /// `eval_trace_ids`. `user % 2` picks `"u0"` or `"u1"`.
+    DeleteUser {
+        project: P,
+        user: u8,
+    },
+    /// Advances the clock by `hours`, then one deletion pass.
+    ApplyDeletions {
+        hours: u8,
+    },
+    /// `apply_retention` of `RETENTION_DAYS[keep % 3]`.
+    Retention {
+        project: P,
+        keep: u8,
+    },
+    /// Drops project B.
+    DropB,
 }
 
 impl Op {
@@ -97,8 +128,17 @@ impl Op {
             | Self::Resend { project, .. }
             | Self::Score { project, .. }
             | Self::DeleteScore { project, .. }
-            | Self::StaleScore { project, .. } => Some(project),
-            Self::Restart | Self::Crash | Self::Compact { .. } | Self::Gc | Self::Settle => None,
+            | Self::StaleScore { project, .. }
+            | Self::DeleteTraces { project, .. }
+            | Self::DeleteUser { project, .. }
+            | Self::Retention { project, .. } => Some(project),
+            Self::Restart
+            | Self::Crash
+            | Self::Compact { .. }
+            | Self::Gc
+            | Self::Settle
+            | Self::ApplyDeletions { .. }
+            | Self::DropB => None,
         }
     }
 }
@@ -108,29 +148,90 @@ pub(super) fn ops() -> impl Strategy<Value = Vec<Op>> {
     proptest::collection::vec(op(), 1..=24)
 }
 
+/// Every op with its weight. One weighted union, since `prop_oneof!` takes at most ten arms.
 fn op() -> impl Strategy<Value = Op> {
-    prop_oneof![
-        30 => (project(), 0..TRACES, 1..=6_u8, any::<bool>()).prop_map(
-            |(project, trace, count, split)| Op::Append { project, trace, count, split }
+    Union::new_weighted(vec![
+        (
+            30,
+            (project(), 0..TRACES, 1..=6_u8, any::<bool>())
+                .prop_map(|(project, trace, count, split)| Op::Append {
+                    project,
+                    trace,
+                    count,
+                    split,
+                })
+                .boxed(),
         ),
-        4 => (project(), resendable_trace(), any::<u8>()).prop_map(
-            |(project, trace, pick)| Op::Resend { project, trace, pick }
+        (
+            4,
+            (project(), resendable_trace(), any::<u8>())
+                .prop_map(|(project, trace, pick)| Op::Resend {
+                    project,
+                    trace,
+                    pick,
+                })
+                .boxed(),
         ),
-        3 => Just(Op::Restart),
-        3 => Just(Op::Crash),
-        3 => (0..72_u8).prop_map(|hours| Op::Compact { hours }),
-        1 => Just(Op::Gc),
-        1 => Just(Op::Settle),
-        8 => (project(), 0..SCORE_TARGETS, 0..SCORE_NAMES).prop_map(
-            |(project, target, name)| Op::Score { project, target, name }
+        (3, Just(Op::Restart).boxed()),
+        (3, Just(Op::Crash).boxed()),
+        (
+            3,
+            (0..72_u8).prop_map(|hours| Op::Compact { hours }).boxed(),
         ),
-        2 => (project(), any::<u8>()).prop_map(
-            |(project, pick)| Op::DeleteScore { project, pick }
+        (1, Just(Op::Gc).boxed()),
+        (1, Just(Op::Settle).boxed()),
+        (
+            8,
+            (project(), 0..SCORE_TARGETS, 0..SCORE_NAMES)
+                .prop_map(|(project, target, name)| Op::Score {
+                    project,
+                    target,
+                    name,
+                })
+                .boxed(),
         ),
-        2 => (project(), any::<u8>(), any::<u8>()).prop_map(
-            |(project, pick, back)| Op::StaleScore { project, pick, back }
+        (
+            2,
+            (project(), any::<u8>())
+                .prop_map(|(project, pick)| Op::DeleteScore { project, pick })
+                .boxed(),
         ),
-    ]
+        (
+            2,
+            (project(), any::<u8>(), any::<u8>())
+                .prop_map(|(project, pick, back)| Op::StaleScore {
+                    project,
+                    pick,
+                    back,
+                })
+                .boxed(),
+        ),
+        (
+            3,
+            (project(), prop::collection::vec(any::<u8>(), 1..=3))
+                .prop_map(|(project, picks)| Op::DeleteTraces { project, picks })
+                .boxed(),
+        ),
+        (
+            2,
+            (project(), any::<u8>())
+                .prop_map(|(project, user)| Op::DeleteUser { project, user })
+                .boxed(),
+        ),
+        (
+            2,
+            (0..24_u8)
+                .prop_map(|hours| Op::ApplyDeletions { hours })
+                .boxed(),
+        ),
+        (
+            1,
+            (project(), 0..3_u8)
+                .prop_map(|(project, keep)| Op::Retention { project, keep })
+                .boxed(),
+        ),
+        (1, Just(Op::DropB).boxed()),
+    ])
 }
 
 /// Project A with weight 3, project B with weight 1.
@@ -182,6 +283,16 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             pick,
             back,
         } => stale_score(harness, model, project, pick, back, *clock),
+        Op::DeleteTraces { project, ref picks } => {
+            delete_traces(harness, model, project, picks, *clock);
+        }
+        Op::DeleteUser { project, user } => delete_user(harness, model, project, user, *clock),
+        Op::ApplyDeletions { hours } => {
+            *clock += i64::from(hours) * HOUR_NS;
+            apply_deletions(harness, *clock);
+        }
+        Op::Retention { project, keep } => retention(harness, model, project, keep),
+        Op::DropB => drop_b(harness, model),
     }
 }
 
@@ -194,6 +305,19 @@ fn send(harness: &Harness, project: P, batch: &[Span]) {
                 .append_spans(project.id(), span_rows(batch)),
         )
         .expect("append_spans of a span batch");
+}
+
+/// Sends one batch of spans to a dropped project: storage refuses it, and the model keeps nothing.
+fn send_refused(harness: &Harness, project: P, batch: &[Span]) {
+    let result = harness.block_on(
+        harness
+            .storage()
+            .append_spans(project.id(), span_rows(batch)),
+    );
+    assert!(
+        matches!(result, Err(AppendError::ProjectDropped)),
+        "append_spans on a dropped project is refused as ProjectDropped"
+    );
 }
 
 fn append(
@@ -218,6 +342,10 @@ fn append(
     let spans: Vec<Span> = (first..end)
         .map(|span_no| span(project, trace, span_no, clock))
         .collect();
+    if model.project(project).dropped {
+        send_refused(harness, project, &spans);
+        return;
+    }
     if split && spans.len() >= 2 {
         let (head, tail) = spans.split_at(spans.len() / 2);
         send(harness, project, head);
@@ -244,7 +372,12 @@ fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8,
         return;
     }
     let span_no = pick % next;
-    send(harness, project, &[span(project, trace, span_no, clock)]);
+    let batch = [span(project, trace, span_no, clock)];
+    if model.project(project).dropped {
+        send_refused(harness, project, &batch);
+        return;
+    }
+    send(harness, project, &batch);
     model.project_mut(project).write_span(trace, span_no, clock);
 }
 
@@ -389,6 +522,147 @@ fn collect_obsolete(harness: &Harness) {
     harness
         .block_on(harness.storage().collect_obsolete(Duration::ZERO))
         .expect("collect_obsolete with no grace");
+}
+
+/// The trace numbers `picks` names: each `% TRACES`, as a set.
+fn picked_traces(picks: &[u8]) -> BTreeSet<u8> {
+    picks.iter().map(|pick| pick % TRACES).collect()
+}
+
+/// The trace number of a trace id the model knows.
+fn number_of(id: &TraceId) -> u8 {
+    (0..TRACES)
+        .find(|&trace| hex(trace_id(trace).as_bytes()) == hex(id.as_bytes()))
+        .expect("a trace id the model knows")
+}
+
+/// The trace ids of `traces`, in trace-number order (which is byte order, see `trace_id`).
+fn ids_of(traces: &BTreeSet<u8>) -> Vec<TraceId> {
+    traces.iter().map(|&trace| trace_id(trace)).collect()
+}
+
+/// Checks `eval_trace_ids` of `targets` against the model, and returns the evaluation traces
+/// the model expects.
+fn resolve_evals(harness: &Harness, state: &ProjectModel, targets: &BTreeSet<u8>) -> BTreeSet<u8> {
+    let observed: Vec<u8> = observe_eval_trace_ids(harness, state.project, &ids_of(targets))
+        .iter()
+        .map(number_of)
+        .collect();
+    let expected = state.eval_traces_for(targets);
+    assert_eq!(
+        observed,
+        expected.iter().copied().collect::<Vec<u8>>(),
+        "eval_trace_ids of targets {targets:?} in project {:?} differ from the model",
+        state.project
+    );
+    expected
+}
+
+/// Registers a deletion, expecting success.
+fn register(harness: &Harness, deletion: Deletion) {
+    harness
+        .block_on(harness.storage().register_deletion(deletion))
+        .expect("register_deletion on a live project");
+}
+
+/// `register_deletion` of the picked traces and their evaluation traces, cut off at `clock`.
+fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8], clock: i64) {
+    if model.project(project).dropped {
+        return;
+    }
+    let targets = picked_traces(picks);
+    let evals = resolve_evals(harness, model.project(project), &targets);
+    let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
+    let id = Uuid::now_v7();
+    register(
+        harness,
+        Deletion {
+            id,
+            project: project.id(),
+            cutoff: clock,
+            scope: DeletionScope::Traces {
+                trace_ids: ids_of(&covered),
+            },
+        },
+    );
+    model.project_mut(project).deletions.push(ModelDeletion {
+        id,
+        cutoff: clock,
+        traces: covered,
+        user: None,
+        sessions: BTreeSet::new(),
+        applied_seen: false,
+    });
+}
+
+/// A user deletion, resolved as the server does (D-M-3): `user_deletion_scope` first, then
+/// `eval_trace_ids` of its traces. Both results are checked against the model before the
+/// deletion is registered with them.
+fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock: i64) {
+    if model.project(project).dropped {
+        return;
+    }
+    let name = format!("u{}", user % 2);
+    let (expected_traces, expected_sessions) = model.project(project).user_scope(&name);
+    let observed = observe_user_scope(harness, project, &name, clock);
+    let observed_traces: Vec<u8> = observed.trace_ids.iter().map(number_of).collect();
+    assert_eq!(
+        observed_traces,
+        expected_traces.iter().copied().collect::<Vec<u8>>(),
+        "user_deletion_scope of {name} in project {project:?}: traces differ from the model"
+    );
+    assert_eq!(
+        observed.session_ids,
+        expected_sessions.iter().cloned().collect::<Vec<String>>(),
+        "user_deletion_scope of {name} in project {project:?}: sessions differ from the model"
+    );
+    let evals = resolve_evals(harness, model.project(project), &expected_traces);
+    let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
+    let id = Uuid::now_v7();
+    register(
+        harness,
+        Deletion {
+            id,
+            project: project.id(),
+            cutoff: clock,
+            scope: DeletionScope::User {
+                user_id: name.clone(),
+                trace_ids: ids_of(&covered),
+                session_ids: observed.session_ids,
+            },
+        },
+    );
+    model.project_mut(project).deletions.push(ModelDeletion {
+        id,
+        cutoff: clock,
+        traces: covered,
+        user: Some(name),
+        sessions: expected_sessions,
+        applied_seen: false,
+    });
+}
+
+/// `apply_retention` of one of `RETENTION_DAYS`. The model keeps the watermark rule of R1.2.
+fn retention(harness: &Harness, model: &mut Model, project: P, keep: u8) {
+    if model.project(project).dropped {
+        return;
+    }
+    let keep_from = day(RETENTION_DAYS[usize::from(keep % 3)]);
+    harness
+        .block_on(harness.storage().apply_retention(project.id(), keep_from))
+        .expect("apply_retention on a live project");
+    model.project_mut(project).apply_retention(keep_from);
+}
+
+/// Drops project B. Later drops are no-ops without a call.
+fn drop_b(harness: &Harness, model: &mut Model) {
+    if model.b.dropped {
+        return;
+    }
+    harness
+        .block_on(harness.storage().drop_project(P::B.id()))
+        .expect("drop_project of B");
+    model.project_mut(P::B).drop_project();
 }
 
 /// Whether every deletion either project registered reads `Applied`.
