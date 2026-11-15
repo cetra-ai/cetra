@@ -29,6 +29,8 @@
 mod format;
 mod hot;
 mod narrow;
+#[allow(dead_code)] // used by the writer from M2.2 on
+mod payload;
 mod segment;
 
 mod config;
