@@ -137,7 +137,7 @@ impl MetricsCache {
 ```rust
 //! Trace ids and end users of recent deletions, so a judge run that started before a
 //! deletion does not write a copy of deleted data after its cut-off (D-M-6).
-#![cfg_attr(not(test), allow(dead_code))] // `blocks` is called by I's executor from M8 on
+#![cfg_attr(not(test), allow(dead_code))] // `blocking` is called by I's executor from M8 on
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
@@ -161,19 +161,20 @@ struct GuardState {
 }
 
 impl DeletionGuard {
-    /// Records `traces` of `project` from a deletion created at `created_at`. An existing entry
-    /// keeps the later `created_at`.
-    pub(crate) fn add_traces(&self, project: ProjectId, traces: &[TraceId], created_at: i64);
-    /// Records an end user of `project`.
-    pub(crate) fn add_user(&self, project: ProjectId, user_id: &str, created_at: i64);
-    /// Whether a judge run about `trace` must not go on (D-M-6). Only entries with
-    /// `created_at > now - GUARD_NS` count:
+    // Amended after the plan review (M-1): every entry carries its deletion's id, and a user
+    // entry looks at the user's oldest span. The code in `deletion/guard.rs` is the reference.
+    /// Records `traces` of `project` from `deletion`, created at `created_at`. An existing entry
+    /// keeps the later deletion.
+    pub(crate) fn add_traces(&self, project: ProjectId, traces: &[TraceId], deletion: Uuid, created_at: i64);
+    /// Records an end user of `project` from `deletion`.
+    pub(crate) fn add_user(&self, project: ProjectId, user_id: &str, deletion: Uuid, created_at: i64);
+    /// The deletion that forbids a judge run about `trace` to go on, if any (D-M-6). Only
+    /// entries with `created_at > now - GUARD_NS` count:
     /// - a trace-id entry for `trace` blocks;
-    /// - a user entry for one of `users` blocks only when `newest_ingest_ns <= entry.created_at`
-    ///   (the trace's data predates that user's deletion; newer data is not covered, spec S5).
-    /// `users` are the distinct user ids of the trace's loaded spans; `newest_ingest_ns` their
-    /// largest `ingest_time`. Callers that know neither pass `&[]` and `0`.
-    pub(crate) fn blocks(&self, project: ProjectId, trace: TraceId, users: &[&str], newest_ingest_ns: i64, now: i64) -> bool;
+    /// - a user entry blocks when `users` holds that user with an oldest ingest time at or
+    ///   before the entry's `created_at` (spec S5: a trace with only newer data is not covered).
+    /// `users` pairs each user id of the loaded spans with its smallest `ingest_time`.
+    pub(crate) fn blocking(&self, project: ProjectId, trace: TraceId, users: &[(&str, i64)], now: i64) -> Option<Uuid>;
     /// Removes entries with `created_at <= now - GUARD_NS`, and empty project maps.
     pub(crate) fn prune(&self, now: i64);
     /// Adds `meta::deletions::guard_entries(now - GUARD_NS)`.
@@ -348,7 +349,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
    - `meta.write` → `mark_applied(row.id, now)`;
    - log `deletion applied` (audit, below);
    - return `Ok(())`.
-2. For a `User` row, `state.deletions.guard.add_user(project, user_id, row.created_at)` (idempotent; M4 also adds it at creation, and this covers rows left by a previous process or copied by M7). For a `TraceIds` row whose `trace_count` is `None`, add its requested ids (`scope_traces`) with `add_traces` the same way.
+2. For a `User` row, `state.deletions.guard.add_user(project, user_id, row.id, row.created_at)` (idempotent; M4 also adds it at creation, and this covers rows left by a previous process or copied by M7). For a `TraceIds` row whose `trace_count` is `None`, add its requested ids (`scope_traces`) with `add_traces` the same way.
 3. Then by state:
    - `Resolving` with `trace_count == None`: `if !resolve::resolve(state, row, project).await? { return Ok(()) }`, then `register(state, row, project, now)`. `resolve` returns `Ok(false)` when `store_counts` found the row no longer `resolving`.
    - `Resolving` with `trace_count == Some(_)`, or `Pending` with `handed_over_at == None`: `register(state, row, project, now)`.
@@ -384,7 +385,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
    - return. Storage refuses an empty `Traces` scope.
 
    A `User` row always registers: its `user_id` covers spans even with no trace.
-3. `state.deletions.guard.add_traces(project, &traces, row.created_at)`.
+3. `state.deletions.guard.add_traces(project, &traces, row.id, row.created_at)`.
 4. Build `llmobs_storage::Deletion { id: row.id, project, cutoff: row.created_at, scope }`:
    - `TraceIds` and `Filter`: `scope = DeletionScope::Traces { trace_ids: traces }`;
    - `User`: `scope = DeletionScope::User { user_id, trace_ids: traces, session_ids: sessions }`.
@@ -563,7 +564,7 @@ To build a span, take `dataset_span(0)`, then set `trace_id`, `span_id`, `parent
 
 `deletion/guard.rs` tests:
 
-16. `blocks_known_traces_and_users_for_a_day`:
+16. `blocks_known_traces_and_users_for_a_day` (as amended for `blocking`, M-1; the code's test is the reference):
     - `add_traces(P, [T], 100)` and `add_user(P, "u", 100)`.
     - `blocks(P, T, &[], 0, 101)` is true. `blocks(P, T2, &["u"], 100, 101)` is true (data ingested at the cut-off).
     - `blocks(P, T2, &["u"], 101, 102)` is false: that trace's data is newer than the deletion.
