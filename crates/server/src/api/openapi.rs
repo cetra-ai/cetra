@@ -73,8 +73,9 @@ use super::keys::{
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
 use super::online_rules::{
-    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage, PauseReason,
-    RuleSpend, RuleTarget, UpdateOnlineRuleRequest,
+    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -302,6 +303,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OnlineRulePage>();
     set.insert::<CreateOnlineRuleRequest>();
     set.insert::<UpdateOnlineRuleRequest>();
+    set.insert::<OnlineRulePreviewRequest>();
+    set.insert::<OnlineRulePreview>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -2242,6 +2245,22 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 429],
         ))
         .build();
+    let preview = operation(
+        "post_online_rule_preview",
+        "evaluation",
+        "Count what a rule's filter matches",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("OnlineRulePreviewRequest")))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRulePreview>("What the filter matches."),
+        READ_ERRORS,
+    ))
+    .build();
     let resume = operation(
         "post_online_rule_resume",
         "evaluation",
@@ -2277,6 +2296,10 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/preview"),
+            PathItem::new(HttpMethod::Post, preview),
         )
         .path(
             format!("{PROJECT}/online-rules/{{id}}/resume"),

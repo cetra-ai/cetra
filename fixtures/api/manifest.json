@@ -792,6 +792,14 @@
     "file": "static/online-rule.json"
   },
   {
+    "operation_id": "post_online_rule_preview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-preview.json"
+  },
+  {
     "operation_id": "post_online_rule_resume",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000701"
