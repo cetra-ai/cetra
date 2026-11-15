@@ -177,6 +177,11 @@ impl Compactor {
         self: &Arc<Self>,
         now: i64,
     ) -> Result<CompactionReport, CompactionError> {
+        // A stopped store (D-R-6) would only stage rows that cannot commit.
+        if self.objects.sync_failed() || self.committer.stopped() {
+            tracing::debug!("compaction pass skipped: the store stopped after an I/O error");
+            return Ok(CompactionReport::default());
+        }
         let catalog = self.committer.catalog().await;
         let mut spawned: Vec<(Job, ClaimGuard)> = Vec::new();
         {

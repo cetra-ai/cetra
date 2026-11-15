@@ -265,9 +265,9 @@ impl Committer {
                 let _ = transaction.rollback().await;
                 return Err(error.into());
             }
-            transaction.commit().await.map_err(|source| {
-                DeletionError::Catalog(CatalogError::db(stop_on_fatal(&self.stopped, source)))
-            })?;
+            let outcome = transaction.commit().await;
+            commit_point(&self.stopped, &inner.hooks, outcome)
+                .map_err(|source| DeletionError::Catalog(CatalogError::db(source)))?;
             inner.tombstones = Arc::new(inner.tombstones.with_known_seq(seq));
             return Ok(Registered::New { seq });
         }
@@ -356,9 +356,9 @@ impl Committer {
                 source,
             ))));
         }
-        transaction.commit().await.map_err(|source| {
-            DeletionError::Catalog(CatalogError::db(stop_on_fatal(&self.stopped, source)))
-        })?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome)
+            .map_err(|source| DeletionError::Catalog(CatalogError::db(source)))?;
         inner.tombstones = Arc::new(inner.tombstones.with(pending));
         publish(&inner.tombstones);
         Ok(Registered::New { seq })
@@ -411,10 +411,8 @@ impl Committer {
                 return Err(error);
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         inner.tombstones = Arc::new(inner.tombstones.without(project, id));
         publish(&inner.tombstones);
         Ok(true)
@@ -454,7 +452,7 @@ impl Committer {
         now: i64,
     ) -> Result<bool, CatalogError> {
         let mut inner = self.lock_running().await?;
-        let updated = sqlx::query(
+        let outcome = sqlx::query(
             "UPDATE media SET last_seen_at = MAX(last_seen_at, ?)
              WHERE project_id = ? AND sha256 = ?",
         )
@@ -462,8 +460,9 @@ impl Committer {
         .bind(project.to_string())
         .bind(sha)
         .execute(&mut inner.connection)
-        .await
-        .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        .await;
+        let updated =
+            commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(updated.rows_affected() == 1)
     }
 
@@ -471,12 +470,13 @@ impl Committer {
     /// blob may race.
     pub(crate) async fn stage_media(&self, path: &str, now: i64) -> Result<(), CatalogError> {
         let mut inner = self.lock_running().await?;
-        sqlx::query("INSERT OR REPLACE INTO staged_objects (path, created_at) VALUES (?, ?)")
-            .bind(path)
-            .bind(now)
-            .execute(&mut inner.connection)
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome =
+            sqlx::query("INSERT OR REPLACE INTO staged_objects (path, created_at) VALUES (?, ?)")
+                .bind(path)
+                .bind(now)
+                .execute(&mut inner.connection)
+                .await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
     }
 
@@ -538,10 +538,8 @@ impl Committer {
             let _ = transaction.rollback().await;
             return Err(error);
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(true)
     }
 
@@ -661,20 +659,18 @@ impl Committer {
             let _ = transaction.rollback().await;
             return Err(error.into());
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         hooks.pause(HookPoint::MediaBeforeDelete);
         if hooks.fail(HookPoint::MediaBeforeDelete).is_some() {
             return Err(MediaError::Fault);
         }
         let bytes = delete().await?;
-        sqlx::query("DELETE FROM staged_objects WHERE path = ?")
+        let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
             .bind(&path)
             .execute(&mut inner.connection)
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+            .await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(Some(bytes))
     }
 
@@ -705,12 +701,12 @@ impl Committer {
         sha: &str,
     ) -> Result<(), CatalogError> {
         let mut inner = self.lock_running().await?;
-        sqlx::query("DELETE FROM media WHERE project_id = ? AND sha256 = ?")
+        let outcome = sqlx::query("DELETE FROM media WHERE project_id = ? AND sha256 = ?")
             .bind(project.to_string())
             .bind(sha)
             .execute(&mut inner.connection)
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+            .await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
     }
 
@@ -735,11 +731,11 @@ impl Committer {
     /// Marks the project's drop finished: `state = 'dropped'`.
     pub(crate) async fn finish_drop(&self, project: ProjectId) -> Result<(), CatalogError> {
         let mut inner = self.lock_running().await?;
-        sqlx::query("UPDATE projects SET state = 'dropped' WHERE project_id = ?")
+        let outcome = sqlx::query("UPDATE projects SET state = 'dropped' WHERE project_id = ?")
             .bind(project.to_string())
             .execute(&mut inner.connection)
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+            .await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
     }
 
@@ -862,10 +858,8 @@ impl Committer {
             .await
             .map_err(CatalogError::db)?;
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
     }
 
@@ -900,10 +894,8 @@ impl Committer {
                 return Err(error);
             }
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+        let outcome = transaction.commit().await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
     }
 
@@ -1120,11 +1112,11 @@ impl Committer {
                     .await
                     .map_err(CatalogError::db)?;
             if stored.is_some() {
-                sqlx::query("DELETE FROM staged_objects WHERE path = ?")
+                let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
                     .bind(path)
                     .execute(&mut inner.connection)
-                    .await
-                    .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+                    .await;
+                commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
                 return Ok(StagedRemoval::MediaStored);
             }
         }
@@ -1143,11 +1135,11 @@ impl Committer {
             return Err(GcError::Fault);
         }
         let bytes = delete().await?;
-        sqlx::query("DELETE FROM staged_objects WHERE path = ?")
+        let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
             .bind(path)
             .execute(&mut inner.connection)
-            .await
-            .map_err(|error| CatalogError::db(stop_on_fatal(&self.stopped, error)))?;
+            .await;
+        commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(StagedRemoval::Deleted { bytes })
     }
 
@@ -1239,13 +1231,12 @@ impl Committer {
             // deletes the row (`delete_len` of a missing object is `Ok(0)`).
             return Err(GcError::Fault);
         }
-        sqlx::query("DELETE FROM data_files WHERE id = ?")
+        let outcome = sqlx::query("DELETE FROM data_files WHERE id = ?")
             .bind(file.id.to_string())
             .execute(&mut inner.connection)
-            .await
-            .map_err(|source| {
-                GcError::Catalog(CatalogError::db(stop_on_fatal(&self.stopped, source)))
-            })?;
+            .await;
+        commit_point(&self.stopped, &inner.hooks, outcome)
+            .map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
         inner.retired.remove(&file.id);
         Ok(ObsoleteRemoval::Deleted { bytes })
     }
@@ -1376,6 +1367,26 @@ fn is_fatal_io(error: &sqlx::Error) -> bool {
         .is_some_and(|code| FATAL_IO_CODES.contains(&code))
 }
 
+/// One catalog commit point (D-R-6): a transaction's `commit()`, or a write
+/// statement outside a transaction. A fatal SQLite I/O error stops the
+/// committer ([`stop_on_fatal`]). Under `cfg(test)`, the `CatalogFsync` fault
+/// turns a success into a failed fsync, so a test can stop the committer at any
+/// commit point. The write may already be durable: the stop holds until a
+/// restart, which decides it (spec 03 §4).
+fn commit_point<T>(
+    stopped: &AtomicBool,
+    hooks: &Hooks,
+    outcome: Result<T, sqlx::Error>,
+) -> Result<T, sqlx::Error> {
+    #[cfg(test)]
+    if outcome.is_ok() && hooks.fail(HookPoint::CatalogFsync).is_some() {
+        return Err(stop_on_fatal(stopped, injected_fsync_error()));
+    }
+    #[cfg(not(test))]
+    let _ = hooks;
+    outcome.map_err(|error| stop_on_fatal(stopped, error))
+}
+
 /// Records a fatal SQLite I/O error at a commit point, which stops the committer
 /// (D-R-6), and returns the error unchanged. The caller maps it as before, so a
 /// retryable error keeps its retry path. The state is set under the committer's
@@ -1472,10 +1483,8 @@ async fn commit_inner(
             injected_fsync_error(),
         )));
     }
-    transaction
-        .commit()
-        .await
-        .map_err(|error| CommitError::db(stop_on_fatal(&inner.stopped, error)))?;
+    let outcome = transaction.commit().await;
+    commit_point(&inner.stopped, &hooks, outcome).map_err(CommitError::db)?;
     for file in removed {
         inner.retired.insert(file.id, file);
     }
@@ -2314,6 +2323,152 @@ mod tests {
         reopened.commit(&edit, |_| {}).await.unwrap();
         let catalog = reopened.catalog().await;
         assert_eq!(ids(&catalog).len(), 1);
+    }
+
+    /// A fresh committer and the hooks it shares, one per commit point below:
+    /// a stopped committer stays stopped.
+    async fn with_hooks() -> (tempfile::TempDir, Committer, Hooks) {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = Hooks::default();
+        let committer = Committer::open(dir.path(), hooks.clone()).await.unwrap();
+        (dir, committer, hooks)
+    }
+
+    /// D-R-6: every commit point stops the committer on a fsync error, not only
+    /// `commit`. Covers the transactions (`mark_applied`, `insert_media`), the
+    /// statements outside one (`touch_media`, `collect_staged_path`,
+    /// `collect_obsolete_file`, `finish_drop`). `collect_media`, `retire_quarantined`
+    /// and `stage` are commit points too, and go through the same helper.
+    #[tokio::test]
+    async fn every_commit_point_stops_the_committer_on_an_fsync_error() {
+        let spans = project("018f6b4e-7c1a-7c1a-8c1a-000000000060");
+        let sha = "0".repeat(64);
+
+        // mark_applied: a transaction of a pending deletion.
+        let (_dir, committer, hooks) = with_hooks().await;
+        let id = Uuid::now_v7();
+        let pending = deletion(
+            id,
+            spans,
+            DeletionScope::Traces {
+                trace_ids: vec![trace_id(1)],
+            },
+        );
+        committer
+            .register_deletion(&pending, 100, |_| {})
+            .await
+            .unwrap();
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer
+            .mark_applied(spans, id, 200, |_| {})
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CatalogError::Db { .. }),
+            "mark_applied: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "mark_applied did not stop the committer"
+        );
+
+        // insert_media: a transaction.
+        let (_dir, committer, hooks) = with_hooks().await;
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer
+            .insert_media(spans, &sha, "image/png", 4, "media/staged", 100)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CatalogError::Db { .. }),
+            "insert_media: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "insert_media did not stop the committer"
+        );
+
+        // touch_media: one statement.
+        let (_dir, committer, hooks) = with_hooks().await;
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer.touch_media(spans, &sha, 100).await.unwrap_err();
+        assert!(
+            matches!(error, CatalogError::Db { .. }),
+            "touch_media: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "touch_media did not stop the committer"
+        );
+
+        // collect_staged_path: the staged row goes after the delete.
+        let (_dir, committer, hooks) = with_hooks().await;
+        committer
+            .stage_at(&["tables/staged".to_owned()], 10)
+            .await
+            .unwrap();
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer
+            .collect_staged_path("tables/staged", &hooks, 100, || async {
+                Ok::<u64, ObjectError>(0)
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, GcError::Catalog(CatalogError::Db { .. })),
+            "collect_staged_path: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "collect_staged_path did not stop the committer"
+        );
+
+        // collect_obsolete_file: an obsolete file's row goes after its object.
+        let (_dir, committer, hooks) = with_hooks().await;
+        let meta = file(FileTable::Spans, spans, day(1), 1, "obsolete/doomed");
+        let file_id = meta.id;
+        committer
+            .stage(&["obsolete/doomed".to_owned()])
+            .await
+            .unwrap();
+        let add = CatalogEdit {
+            add: vec![meta],
+            ..CatalogEdit::default()
+        };
+        committer.commit(&add, |_| {}).await.unwrap();
+        let remove = CatalogEdit {
+            remove: vec![(file_id, FileState::Active)],
+            ..CatalogEdit::default()
+        };
+        committer.commit(&remove, |_| {}).await.unwrap();
+        let obsolete = committer.obsolete_before(i64::MAX, None, 10).await.unwrap();
+        assert_eq!(obsolete.len(), 1, "the removed file is obsolete");
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer
+            .collect_obsolete_file(&obsolete[0], &hooks, || async { Ok::<u64, ObjectError>(0) })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, GcError::Catalog(CatalogError::Db { .. })),
+            "collect_obsolete_file: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "collect_obsolete_file did not stop the committer"
+        );
+
+        // finish_drop: one statement.
+        let (_dir, committer, hooks) = with_hooks().await;
+        hooks.arm_fail(HookPoint::CatalogFsync);
+        let error = committer.finish_drop(spans).await.unwrap_err();
+        assert!(
+            matches!(error, CatalogError::Db { .. }),
+            "finish_drop: {error}"
+        );
+        assert!(
+            committer.stopped(),
+            "finish_drop did not stop the committer"
+        );
     }
 
     #[tokio::test]

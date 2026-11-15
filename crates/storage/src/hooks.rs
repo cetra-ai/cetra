@@ -32,8 +32,9 @@ pub(crate) enum HookPoint {
     /// Replaces the SQLite commit of `commit_inner`, after `CatalogCommit`.
     ///
     /// `fail` rolls the transaction back and returns `SQLITE_IOERR_FSYNC` as the
-    /// commit's error, as a failed fsync would (D-R-6).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// commit's error, as a failed fsync would (D-R-6). At a statement outside
+    /// a transaction, the statement's success becomes that error.
+    #[cfg(test)]
     CatalogFsync,
     /// Before the bytes of a local object are written to the temp file.
     ObjectWrite,

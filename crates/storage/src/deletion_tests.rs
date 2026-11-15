@@ -11,9 +11,12 @@ use llmobs_core::score::ScoreTarget;
 use uuid::Uuid;
 
 use crate::QueryOptions;
+use crate::compaction::job::CompactionReport;
+use crate::compaction::rewrite::DeletionReport;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::DeletionError;
+use crate::hooks::HookPoint;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
 
@@ -500,5 +503,35 @@ async fn register_deletion_is_idempotent_and_status_reports_the_state() {
     invalid.cutoff = 0;
     let error = storage.register_deletion(invalid).await.unwrap_err();
     assert!(matches!(error, DeletionError::Invalid { .. }), "{error}");
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_store_runs_no_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+    storage
+        .append_spans(project(), span_rows(&[span_row(1, 0, INGEST, INGEST)]))
+        .await
+        .unwrap();
+    storage
+        .register_deletion(traces_deletion(&[1], INGEST))
+        .await
+        .unwrap();
+
+    // The next catalog commit fails with a fsync error, which stops the
+    // committer (D-R-6). The deletion above stays pending.
+    storage.hooks().arm_fail(HookPoint::CatalogFsync);
+    storage
+        .register_deletion(traces_deletion(&[2], INGEST))
+        .await
+        .unwrap_err();
+    assert!(storage.health().catalog_failed);
+
+    // Neither pass attempts its work: each returns an empty report.
+    let deletions = storage.apply_deletions(INGEST + 1).await.unwrap();
+    assert_eq!(deletions, DeletionReport::default());
+    let compacted = storage.compact(INGEST + 1).await.unwrap();
+    assert_eq!(compacted, CompactionReport::default());
     storage.shutdown().await.unwrap();
 }

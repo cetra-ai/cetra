@@ -395,6 +395,7 @@ impl Objects {
                 let root = root.clone();
                 let key = key.to_owned();
                 let key_for_error = key.clone();
+                let sync_failed = Arc::clone(&self.sync_failed);
                 let opened = tokio::task::spawn_blocking(move || {
                     let final_path = root.join(&key);
                     let Some(directory) = final_path.parent() else {
@@ -403,7 +404,7 @@ impl Objects {
                     let Ok(relative_dir) = directory.strip_prefix(root.as_path()) else {
                         return Err(ObjectError::InvalidPath);
                     };
-                    create_dir_chain_from(&root, relative_dir)?;
+                    create_dir_chain_from(&root, relative_dir, &sync_failed)?;
                     let Some(file_name) = final_path.file_name() else {
                         return Err(ObjectError::InvalidPath);
                     };
@@ -722,7 +723,7 @@ fn put_local(
     let Ok(relative_dir) = directory.strip_prefix(root) else {
         return Err(ObjectError::InvalidPath);
     };
-    create_dir_chain_from(root, relative_dir)?;
+    create_dir_chain_from(root, relative_dir, sync_failed)?;
 
     let Some(file_name) = final_path.file_name() else {
         return Err(ObjectError::InvalidPath);
@@ -1055,7 +1056,15 @@ fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, ObjectError> {
     }
 }
 
-fn create_dir_chain_from(root: &Path, relative: &Path) -> Result<(), ObjectError> {
+/// Creates the directories of `relative` under `root`, syncing each parent
+/// after its `create_dir`. A failed sync is a failed local fsync: it sets
+/// `sync_failed` (D-R-6), because a retry would find the directory and skip
+/// its sync.
+fn create_dir_chain_from(
+    root: &Path,
+    relative: &Path,
+    sync_failed: &AtomicBool,
+) -> Result<(), ObjectError> {
     let mut current = root.to_path_buf();
     for segment in relative.components() {
         current.push(segment);
@@ -1073,7 +1082,7 @@ fn create_dir_chain_from(root: &Path, relative: &Path) -> Result<(), ObjectError
             Ok(()) => {
                 if let Some(parent) = current.parent() {
                     fs::sync_dir(parent).map_err(|source| {
-                        ObjectError::io("syncing object directory", parent, source)
+                        sync_failure(sync_failed, "syncing object directory", parent, source)
                     })?;
                 }
             }
@@ -1799,6 +1808,52 @@ mod tests {
         assert!(matches!(error, ObjectError::Io { .. }), "{error}");
         assert!(objects.sync_failed());
         let (other, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        let error = objects
+            .put_durable(&other, Bytes::from_static(b"refused"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::SyncFailed), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_sync_of_a_new_day_directory_stops_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let lossy = Lossy::enable(&data, &dir.path().join("shadow"));
+        let objects = Objects::new(&local_config(&data), Hooks::default())
+            .await
+            .unwrap();
+        let (kept, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 0);
+        objects
+            .put_durable(&kept, Bytes::from_static(b"kept"))
+            .await
+            .unwrap();
+
+        // The next day's directory does not exist yet, so its creation syncs
+        // the project directory. A retry would find the directory and skip
+        // that sync, so the failure has to stop the store (D-R-6).
+        let next_day = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let (fresh, _) = Objects::table_file_path(FileTable::Spans, project(), next_day, 0);
+        let project_dir = data
+            .join("objects")
+            .join(&fresh)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        lossy.fail_next_sync(&project_dir);
+
+        let error = objects
+            .put_durable(&fresh, Bytes::from_static(b"lost"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ObjectError::Io { .. }), "{error}");
+        assert!(
+            objects.sync_failed(),
+            "a failed sync of a new directory did not stop the store"
+        );
+        let (other, _) = Objects::table_file_path(FileTable::Spans, project(), day(), 1);
         let error = objects
             .put_durable(&other, Bytes::from_static(b"refused"))
             .await
