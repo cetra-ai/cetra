@@ -282,7 +282,7 @@ mod tests {
 
     use super::*;
     use crate::routes::read::open_query;
-    use crate::test_support::{TestApp, dataset_span};
+    use crate::test_support::{TestApp, dataset_span, set_limits};
 
     const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
     const ROOT: &str = "1000000000000001";
@@ -592,5 +592,51 @@ mod tests {
         target.input = Some("x".repeat(1000));
         let result = cap(vec![target], Some(span_id(TARGET)), 100);
         assert!(matches!(result, Err(LoadError::TooLarge)));
+    }
+
+    /// D-P-21: an evaluator loads a trace through the org's data window. An old trace is not
+    /// found; once the org's window covers it, it is.
+    #[tokio::test]
+    async fn a_trace_before_the_window_is_not_found() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 1}),
+        );
+        let now = app.state.clock.now_ns();
+        let old = bare(TRACE, ROOT, None, now - 2 * DAY);
+        app.commit_spans(&seeded.project, vec![old]).await;
+
+        let windowed = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(windowed, Err(LoadError::NotFound)));
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-02T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let widened = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
+        assert!(widened.is_ok(), "the same trace loads under a wider window");
     }
 }

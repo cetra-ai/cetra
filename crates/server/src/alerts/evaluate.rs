@@ -290,7 +290,7 @@ mod tests {
         list_events, rule_by_id, update_rule,
     };
     use crate::test_support::hook_receiver::HookReceiver;
-    use crate::test_support::{TestApp, assert_logs_clean, dataset_span};
+    use crate::test_support::{TestApp, assert_logs_clean, dataset_span, set_limits};
 
     const MINUTE: Duration = Duration::from_secs(60);
     const MINUTE_NS: i64 = 60_000_000_000;
@@ -998,5 +998,40 @@ mod tests {
             task.abort();
             let _ = task.await;
         }
+    }
+
+    /// D-P-21: a rule's measurement counts only the rows the org's window shows. The rule window
+    /// (two days) reaches past the one-day window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn alerts_do_not_count_hidden_spans() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 1}),
+        );
+        let now = app.state.clock.now_ns();
+        let hidden = TraceId::from_bytes([0x91; 16]).expect("trace id");
+        let visible = TraceId::from_bytes([0x92; 16]).expect("trace id");
+        app.commit_trace_at(&seeded.project, hidden, 1, now - 30 * 3_600_000_000_000)
+            .await;
+        app.commit_trace_at(&seeded.project, visible, 2, now - 2 * 3_600_000_000_000)
+            .await;
+
+        let condition = error_rate(AlertWindow::M5, 0.1, None, None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            seeded.project.id,
+            &condition,
+            now - 2 * DAY,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 1);
     }
 }
