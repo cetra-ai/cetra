@@ -29,6 +29,7 @@ use crate::error::AnchorError;
 use crate::memtable::{FrozenView, PartitionKey};
 use crate::objects::Objects;
 use crate::verify::{VerifyQueue, is_store_error};
+use object_store::ObjectStore;
 
 /// Nanoseconds in a UTC day.
 pub(crate) const DAY_NS: i64 = 86_400_000_000_000;
@@ -240,7 +241,7 @@ impl Anchors {
             .collect();
         let mut rows_read = 0_usize;
         for file in &files {
-            match self.rebuild_file(file, objects, since).await {
+            match self.rebuild_file(file, objects.store(), since).await {
                 Ok(rows) => rows_read = rows_read.saturating_add(rows),
                 Err(AnchorError::Parquet(error)) if is_store_error(&error) => {
                     return Err(AnchorError::Parquet(error));
@@ -268,16 +269,15 @@ impl Anchors {
 
 impl Anchors {
     /// Reads the recent row groups of one `traces` file; returns the rows read.
-    async fn rebuild_file(
+    pub(crate) async fn rebuild_file(
         &mut self,
         file: &FileMeta,
-        objects: &Objects,
+        store: Arc<dyn ObjectStore>,
         since: i64,
     ) -> Result<usize, AnchorError> {
         #[allow(deprecated)]
-        let reader =
-            ParquetObjectReader::new(objects.store(), ObjectPath::from(file.path.as_str()))
-                .with_file_size(file.size);
+        let reader = ParquetObjectReader::new(store, ObjectPath::from(file.path.as_str()))
+            .with_file_size(file.size);
         let builder = ParquetRecordBatchStreamBuilder::new(reader)
             .await
             .map_err(AnchorError::parquet)?;

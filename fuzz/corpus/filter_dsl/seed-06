@@ -1,0 +1,1 @@
+name = 'helpfulness' AND value_num > 0.5
