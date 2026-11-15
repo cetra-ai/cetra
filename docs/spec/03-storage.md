@@ -462,6 +462,36 @@ A dropped project's media is deleted by `drop_project` (§7).
 
 The model test (`crates/storage/src/model_tests/`, track R M1) checks every read against an in-memory model through restarts and crashes.
 
+## Durability
+
+Every write path, what it syncs and in what order. "fsync dir" is an fsync of the directory that holds the entry. A failed fsync is fatal for its component (D-R-6), except where the table says otherwise and why. The shim tests run each path that has a crash test under a lossy crash (`crates/storage/src/fs/lossy.rs`, track R M2); a path marked "not tested" has none. LazyFS runs the crash tests on the real binary (`tools/lazyfs/`), which is pending.
+
+| Write path | Code | Steps, in order | On fsync failure | Test |
+|---|---|---|---|---|
+| Data directory layout | `lib.rs` `prepare_layout`, `ensure_dir` | `mkdir` (or it exists) → fsync parent, at every open | open fails | `the_data_dir_layout_is_durable_after_a_crash_before_its_sync` |
+| Lock | `lib.rs` `lock_dir` | create `LOCK` → `flock` → fsync data dir | open fails | `a_second_open_is_locked_until_shutdown` (the lock; the fsync is not tested) |
+| WAL segment creation | `wal/segment.rs` `SegmentWriter::create` | create the file → fsync `wal/<table>/` | at open: open fails; at rotation: the writer stops | model (`LossyCrash`), crash children |
+| WAL group, `"always"` | `wal/writer.rs` `IoJob::commit`, `SegmentWriter::sync` | `write_all` → `fdatasync` → memtable → publish → ack | the writer stops; the group stays as written; `WalFailed` | `a_failed_sync_leaves_the_group_and_does_not_sync_again`, `a_failed_sync_group_is_lost_on_power_loss`, model (`LossyCrash`) |
+| WAL group, interval | `wal/writer.rs` `IoJob::commit`, `run` | `write_all` → ack. `fdatasync` at the first group after the interval, at the idle timer, at shutdown, and before rotation | as above | `interval_rotation_syncs_the_old_segment`, `storage_matches_the_model_in_interval_mode` |
+| WAL rotation | `wal/writer.rs` `IoJob::commit` | `fdatasync` the old segment (interval mode) → create the new one (fsync dir) | the writer stops | `interval_rotation_syncs_the_old_segment` |
+| WAL replay | `wal/replay.rs` `recover_table`, `truncate_tail` | torn tail: `set_len` → fsync the file. The replayed segment is fsynced at open | open fails | `a_torn_tail_truncates_to_the_last_full_record`, `reopen_syncs_the_replayed_segment` |
+| Discarded group | `wal/writer.rs` `discard_unacked` | `set_len(mark)` → fsync the file; unlink the new segment → fsync dir | logged; the writer is stopping anyway | `a_discarded_segment_stays_removed_after_a_lossy_crash` |
+| WAL truncation | `wal/mod.rs` `truncate_segments`, `flush.rs` `truncate_flushed` | unlink covered segments → fsync dir | logged and **retried** by the next flush. Not fatal, and why (below) | which segments go: `truncation_keeps_the_newest_segment_and_unflushed_records`. The retry: not tested |
+| Local object publish (flush, compaction, rewrite, media) | `objects.rs` `put_local`, `publish_local` | each new directory: fsync parent → temp file → write → fsync file → rename → fsync dir → the caller's catalog commit | the store stops (`SyncFailed`) | `a_failed_object_fsync_refuses_later_writes_and_deletes`, `a_failed_sync_of_a_new_day_directory_stops_the_store`, `an_outside_object_root_under_an_unsynced_ancestor_survives_a_lossy_crash`, crash children |
+| Local object delete (GC of obsolete, staged and media objects; orphans) | `objects.rs` `delete_local` | unlink → fsync dir → the caller's row delete | the store stops | `a_deleted_object_stays_deleted_after_a_lossy_crash`, `gc_leaves_no_orphan_after_a_lossy_crash`, `a_failed_delete_sync_stops_the_store` |
+| Object tree at open | `objects.rs` `remove_temp_files` | unlink temp files → fsync the directories, then the root | open fails | `an_object_in_a_directory_left_unsynced_survives_a_lossy_crash` |
+| `catalog.db` | `catalog/committer.rs`, `catalog/db.rs` | SQLite in WAL mode, `synchronous=FULL`. Every commit point goes through `commit_point` | the committer stops until restart (D-R-6) | `every_commit_point_stops_the_committer_on_an_fsync_error`, `fatal_io_codes_stop_the_committer_and_the_rest_stay_retryable`, `an_fsync_error_stops_the_committer_until_reopen`; LazyFS (pending) |
+| S3 objects | `objects.rs` remote writes | the PUT or `complete` returned → catalog commit | n/a: no local fsync | `tests/s3.rs` (a real S3-compatible server, `LLMOBS_TEST_S3_ENDPOINT`) |
+| Read cache | `read_cache.rs` | no fsync. Blocks and `size` carry a CRC-32C; a bad one is dropped and fetched again | n/a | `a_torn_size_file_never_serves_short_ranges`, `a_corrupt_block_is_fetched_again` |
+| Scratch: query spill, compaction temp | DataFusion spill; `create_output` | no fsync; spill directories are removed at open | n/a | `open_removes_leftover_spill_directories` |
+| Catalog snapshot (N B3, not merged yet) | `snapshot_catalog` (N M2) | `VACUUM INTO` (SQLite) | the backup fails | N's tests |
+| Backup object copies (N B4, not merged yet) | `copy_objects` (N M2) | hard link, or copy → fsync file; at the end, fsync every directory of `dest` | the backup fails | N's tests |
+| Pre-migration copy (N B9, not merged yet) | `catalog/db.rs` (N M2) | `VACUUM INTO <tmp>` → rename → fsync dir (added by R2.3 when B9 merges) → migrations | open fails | none yet: `a_pre_migration_copy_survives_a_lossy_crash` is written with B9 |
+
+The N rows are marked "not merged yet": the track N code that writes them is not on this branch. When it merges, its file calls go through `crate::fs` (as R2.1 requires), and its row gets the test.
+
+**Why a failed WAL truncation is retried, not fatal.** Truncation deletes only segments whose every record is at or below `flushed_seq`, and the catalog has already advanced `flushed_seq` when it runs (§1). If the directory fsync fails, the segments may come back after a power loss. They then hold only records that replay skips, and every non-last segment was fsynced before its successor was created (§1), so it is intact. The next flush retries the truncation, and nothing is lost. The retry is not covered by a test.
+
 ## 11. Toward multi-node
 
 Nothing here assumes a single node, apart from the WAL and memtable living in the same process as the querier. The planned split:
