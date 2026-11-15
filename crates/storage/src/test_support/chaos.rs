@@ -117,6 +117,21 @@ impl Rates {
         read_error: 0.04,
         truncated: 0.04,
     };
+
+    /// These rates with every probability times `factor`, each clamped to `[0, 1]`. `max_delay`
+    /// is unchanged.
+    pub(crate) fn scaled(self, factor: f64) -> Self {
+        let scale = |rate: f64| (rate * factor).clamp(0.0, 1.0);
+        Self {
+            delay: scale(self.delay),
+            max_delay: self.max_delay,
+            before: scale(self.before),
+            after: scale(self.after),
+            abort: scale(self.abort),
+            read_error: scale(self.read_error),
+            truncated: scale(self.truncated),
+        }
+    }
 }
 
 /// A store that injects faults into the calls it forwards to `inner`. Clones share their state.
@@ -410,6 +425,17 @@ impl ChaosStore {
     /// Turns the random schedule on or off. Scripted faults and holds are not affected.
     pub(crate) fn set_active(&self, on: bool) {
         self.lock().schedule.active = on;
+    }
+
+    /// The rates of the schedule, as `set_schedule` or the last `set_rates` gave them.
+    pub(crate) fn rates(&self) -> Rates {
+        self.lock().schedule.rates
+    }
+
+    /// Replaces the rates of the schedule, keeping its seed and generator position and whether it
+    /// is on. The model test swaps rates per op (R4.5).
+    pub(crate) fn set_rates(&self, rates: Rates) {
+        self.lock().schedule.rates = rates;
     }
 
     pub(crate) fn is_active(&self) -> bool {

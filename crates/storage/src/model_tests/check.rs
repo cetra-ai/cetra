@@ -92,7 +92,7 @@ fn check_never_listed(h: &Harness, index: usize) {
 /// S3 mode (R4.2, R4.3): storage left no multipart upload open that it could have closed. An
 /// upload that only a lifecycle rule removes (a failed abort, a lost create answer, a cancelled
 /// life) is abandoned, not leaked, and is counted in the statistics instead.
-fn check_no_leaked_uploads(h: &Harness, index: usize) {
+pub(super) fn check_no_leaked_uploads(h: &Harness, index: usize) {
     let Some(chaos) = h.chaos() else {
         return;
     };
@@ -236,7 +236,7 @@ fn expected_latest(state: &ProjectModel) -> Vec<LatestScore> {
 }
 
 /// Two sets of scores, compared by `score_id` with every field equal.
-fn assert_same_scores(
+pub(super) fn assert_same_scores(
     mut observed: Vec<ExpectedScore>,
     mut expected: Vec<ExpectedScore>,
     what: &str,
@@ -281,10 +281,22 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
 /// `span_list` shows each visible span key exactly once: the keys read equal the visible keys,
 /// and no key repeats.
 fn check_span_keys(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    let mut observed: BTreeMap<(String, String), usize> = BTreeMap::new();
-    for (_, trace, span) in observe_spans(h, project, MAX_PAGE) {
-        *observed.entry((trace, span)).or_default() += 1;
+    compare_span_keys(state, &observe_spans(h, project, MAX_PAGE), index, project);
+}
+
+/// The `span_list` rows `observed` (`(start_time, trace_id, span_id)`) against the model: the keys
+/// are the visible keys, each listed once. `check_quick` and the `FaultyRead` op share it (R4.5).
+pub(super) fn compare_span_keys(
+    state: &ProjectModel,
+    observed: &[(i64, String, String)],
+    index: usize,
+    project: P,
+) {
+    let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for (_, trace, span) in observed {
+        *counts.entry((trace.clone(), span.clone())).or_default() += 1;
     }
+    let observed = counts;
     let expected: BTreeSet<(String, String)> = state
         .visible_spans()
         .into_keys()
@@ -545,17 +557,17 @@ fn trace_mismatch(
 }
 
 /// The days `from..to` after D, as a window of nanoseconds.
-fn days(from: u8, to: u8) -> (i64, i64) {
+pub(super) fn days(from: u8, to: u8) -> (i64, i64) {
     (midnight(day(from)), midnight(day(to)))
 }
 
 /// What the aggregate checks need from one project's visible copies.
-struct Copies {
+pub(super) struct Copies {
     visible: Visible,
 }
 
 impl Copies {
-    fn of(state: &ProjectModel) -> Self {
+    pub(super) fn of(state: &ProjectModel) -> Self {
         Self {
             visible: state.visible_spans(),
         }
@@ -629,7 +641,7 @@ fn check_aggregates(h: &Harness, state: &ProjectModel, project: P, index: usize)
     for span in [(0, 4), (2, 4)] {
         let label = format!("{at}: days D+{}..D+{}", span.0, span.1);
         let window = days(span.0, span.1);
-        check_kpis(h, state, &copies, project, window, &label);
+        check_kpis(h, state, project, window, &label);
         check_filter_ids(h, state, project, window, &label);
     }
     // Days D+1..D+2 holds a class-2 trace whose score is in the window but whose trace starts
@@ -877,19 +889,18 @@ fn expected_kpis(
 
 /// The KPIs over `window` and their `previous` values, which cover `previous_window(window)`.
 /// The percentile is not compared (approximate); it must only be listed.
-fn check_kpis(
-    h: &Harness,
-    state: &ProjectModel,
-    copies: &Copies,
-    project: P,
-    window: (i64, i64),
-    label: &str,
-) {
-    let kpis = observe_kpis(h, project, window);
-    let current = expected_kpis(state, copies, window);
-    let previous = expected_kpis(state, copies, previous_window(window));
+fn check_kpis(h: &Harness, state: &ProjectModel, project: P, window: (i64, i64), label: &str) {
+    compare_kpis(state, window, &observe_kpis(h, project, window), label);
+}
+
+/// The KPIs `kpis` read over `window` against the model, as `check_kpis` compares them.
+/// `FaultyRead` shares it (R4.5).
+pub(super) fn compare_kpis(state: &ProjectModel, window: (i64, i64), kpis: &[Kpi], label: &str) {
+    let copies = Copies::of(state);
+    let current = expected_kpis(state, &copies, window);
+    let previous = expected_kpis(state, &copies, previous_window(window));
     for ((name, want, exact), (_, want_previous, previous_exact)) in current.iter().zip(&previous) {
-        let got = kpi(&kpis, *name);
+        let got = kpi(kpis, *name);
         assert!(
             float_sum_matches(*want, got.value, *exact),
             "{label}: the {name:?} KPI is {:?}, expected {want:?}",
@@ -901,7 +912,7 @@ fn check_kpis(
             got.previous
         );
     }
-    let _ = kpi(&kpis, KpiName::LatencyP95);
+    let _ = kpi(kpis, KpiName::LatencyP95);
 }
 
 /// `filter_trace_ids` over `window`: the traces of the window's trace list, evaluation excluded.
@@ -1163,10 +1174,8 @@ pub(super) fn check_s3_audit(h: &mut Harness) {
         counts.orphans, 0,
         "the store holds objects no catalog row names: a leak"
     );
-    assert_eq!(
-        counts.recent_unknown, 0,
-        "an object is unknown to the catalog younger than the minimum age"
-    );
+    // B5's `collect_orphans` will bring the age filter, and then the unknown objects younger than
+    // it are counted here as `recent_unknown`. Until then every unknown object is an orphan above.
     assert_eq!(
         counts.missing, 0,
         "the catalog names data files the store does not have: lost data"
@@ -1178,10 +1187,22 @@ pub(super) fn check_s3_audit(h: &mut Harness) {
     let obsolete = h.block_on(obsolete_rows(h.dir()));
     assert_eq!(obsolete, 0, "the catalog has obsolete rows after settle");
 
-    assert!(
-        h.storage().objects.read_cache().is_some(),
-        "S3 mode runs with the read cache on"
-    );
+    let cache = h
+        .storage()
+        .objects
+        .read_cache()
+        .expect("S3 mode runs with the read cache on");
+    let files: usize = [FileTable::Spans, FileTable::Traces, FileTable::Scores]
+        .into_iter()
+        .map(|table| h.storage().catalog_files(table).len())
+        .sum();
+    let before = cache.stats();
+    if files > 0 {
+        assert!(
+            before.blocks > 0,
+            "the catalog has {files} files but the read cache holds no block"
+        );
+    }
     for table in [FileTable::Spans, FileTable::Traces, FileTable::Scores] {
         for file in h.storage().catalog_files(table) {
             // Bounded, with the catalog's size: an unbounded read bypasses the cache (read_cache.rs).
@@ -1198,6 +1219,13 @@ pub(super) fn check_s3_audit(h: &mut Harness) {
                 file.path
             );
         }
+    }
+    let after = cache.stats();
+    if files > 0 {
+        assert!(
+            after.hits > before.hits,
+            "reading {files} files through the read cache served no block from disk"
+        );
     }
 }
 

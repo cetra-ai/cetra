@@ -10,10 +10,16 @@ use std::time::Duration;
 use proptest::prelude::*;
 use proptest::strategy::Union;
 
-use super::check::{check_s3_audit, check_settled_files, compare_traces};
+use super::check::{
+    assert_same_scores, check_s3_audit, check_settled_files, compare_kpis, compare_span_keys,
+    compare_traces, days,
+};
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
-use super::observe::{ALL_ROWS, observe_eval_trace_ids, observe_user_scope, try_observe_traces};
+use super::observe::{
+    ALL_ROWS, try_observe_eval_trace_ids, try_observe_kpis, try_observe_scores, try_observe_spans,
+    try_observe_traces, try_observe_user_scope,
+};
 use super::shape::{
     HOUR_NS, P, ScoreKey, Target, day, deletion_id, hex, midnight, score, score_created_at, span,
     trace_id,
@@ -143,9 +149,11 @@ pub(super) enum Op {
     /// S3 mode only (R4.5). Drops every block of the read cache of the active files, so the next
     /// reads go to the store.
     EvictCache,
-    /// S3 mode only (R4.5). One trace list of `project`, under faults.
+    /// S3 mode only (R4.5). One read of `project`, under faults: `pick % 4` picks the trace list,
+    /// the span list, the score list or the aggregates (the KPIs of days D..D+4).
     FaultyRead {
         project: P,
+        pick: u8,
     },
 }
 
@@ -161,7 +169,7 @@ impl Op {
             | Self::DeleteTraces { project, .. }
             | Self::DeleteUser { project, .. }
             | Self::Retention { project, .. }
-            | Self::FaultyRead { project } => Some(project),
+            | Self::FaultyRead { project, .. } => Some(project),
             Self::Restart
             | Self::Crash
             | Self::Compact { .. }
@@ -222,10 +230,10 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
         (3, Just(Op::Restart).boxed()),
         (3, Just(Op::Crash).boxed()),
         (
-            3,
+            5,
             (0..72_u8).prop_map(|hours| Op::Compact { hours }).boxed(),
         ),
-        (1, Just(Op::Gc).boxed()),
+        (2, Just(Op::Gc).boxed()),
         (1, Just(Op::Settle).boxed()),
         (
             8,
@@ -290,9 +298,9 @@ fn op_strategy(mode: Mode) -> impl Strategy<Value = Op> {
             arms.push((2, any::<u8>().prop_map(|pick| Op::Verify { pick }).boxed()));
             arms.push((2, Just(Op::EvictCache).boxed()));
             arms.push((
-                4,
-                project()
-                    .prop_map(|project| Op::FaultyRead { project })
+                6,
+                (project(), any::<u8>())
+                    .prop_map(|(project, pick)| Op::FaultyRead { project, pick })
                     .boxed(),
             ));
         }
@@ -348,10 +356,10 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             require_s3(harness, op);
             evict_cache(harness);
         }
-        Op::FaultyRead { project } => {
+        Op::FaultyRead { project, pick } => {
             require_s3(harness, op);
             let index = model.ops_applied - 1;
-            faulty_read(harness, model, project, index);
+            faulty_read(harness, model, project, pick, index);
         }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
@@ -686,7 +694,7 @@ fn send_score(
 /// Whether an op that touches the store may fail (R4.5): only when the chaos store injected a
 /// fault during it, which `injected_before` (from `injected_so_far`, taken before the op) marks.
 /// Without a chaos store (local mode) nothing may fail.
-fn allow_failure(harness: &Harness, injected_before: u64) -> bool {
+pub(super) fn allow_failure(harness: &Harness, injected_before: u64) -> bool {
     injected_so_far(harness) > injected_before
 }
 
@@ -797,19 +805,38 @@ fn evict_cache(harness: &Harness) {
     }
 }
 
-/// `FaultyRead` (R4.5): one trace list of `project` under faults. A failed read is allowed only
-/// under an injected fault; a successful one must match the model as `check_quick` requires.
-fn faulty_read(harness: &mut Harness, model: &Model, project: P, index: usize) {
+/// `FaultyRead` (R4.5): one read of `project` under faults, picked by `pick % 4`: the trace list,
+/// the span list, the score list, or the aggregates over days D..D+4. A failed read is allowed
+/// only under an injected fault; a successful one must match the model as `check_quick` requires.
+fn faulty_read(harness: &mut Harness, model: &Model, project: P, pick: u8, index: usize) {
     let before = injected_so_far(harness);
-    match try_observe_traces(harness, project, ALL_ROWS, MAX_PAGE) {
-        Ok(observed) => compare_traces(model.project(project), &observed, index, project),
-        Err(error) => {
-            assert!(
-                allow_failure(harness, before),
-                "a read failed without an injected fault: {error}"
+    let state = model.project(project);
+    let at = format!("op {index}, project {project:?}");
+    let outcome = match pick % 4 {
+        0 => try_observe_traces(harness, project, ALL_ROWS, MAX_PAGE)
+            .map(|observed| compare_traces(state, &observed, index, project)),
+        1 => try_observe_spans(harness, project, MAX_PAGE)
+            .map(|observed| compare_span_keys(state, &observed, index, project)),
+        2 => try_observe_scores(harness, project, MAX_PAGE).map(|observed| {
+            assert_same_scores(
+                observed,
+                state.expected_scores(),
+                &format!("{at}: the score list"),
             );
-            harness.faulty_read_errors += 1;
+        }),
+        _ => {
+            let window = days(0, 4);
+            try_observe_kpis(harness, project, window).map(|kpis| {
+                compare_kpis(state, window, &kpis, &format!("{at}: the aggregates"));
+            })
         }
+    };
+    if let Err(error) = outcome {
+        assert!(
+            allow_failure(harness, before),
+            "a read failed without an injected fault: {error}"
+        );
+        harness.faulty_read_errors += 1;
     }
 }
 
@@ -835,9 +862,13 @@ fn hex_numbers(traces: &BTreeSet<u8>) -> Vec<String> {
 }
 
 /// Checks `eval_trace_ids` of `targets` against the model, and returns the evaluation traces
-/// the model expects.
-fn resolve_evals(harness: &Harness, state: &ProjectModel, targets: &BTreeSet<u8>) -> BTreeSet<u8> {
-    let observed = observe_eval_trace_ids(harness, state.project, &ids_of(targets));
+/// the model expects. A failed read is returned as its message: the caller decides (R4.5).
+fn resolve_evals(
+    harness: &Harness,
+    state: &ProjectModel,
+    targets: &BTreeSet<u8>,
+) -> Result<BTreeSet<u8>, String> {
+    let observed = try_observe_eval_trace_ids(harness, state.project, &ids_of(targets))?;
     let expected = state.eval_traces_for(targets);
     assert_eq!(
         hex_of(&observed),
@@ -845,7 +876,16 @@ fn resolve_evals(harness: &Harness, state: &ProjectModel, targets: &BTreeSet<u8>
         "eval_trace_ids of targets {targets:?} in project {:?} differ from the model",
         state.project
     );
-    expected
+    Ok(expected)
+}
+
+/// Fails the op (panics) unless the injected faults of this op (`before`) explain a failed read
+/// (R4.5). The op then makes no call and changes no model state.
+fn read_failed_under_faults(harness: &Harness, before: u64, error: &str) {
+    assert!(
+        allow_failure(harness, before),
+        "a read failed without an injected fault: {error}"
+    );
 }
 
 /// Registers a deletion, expecting success.
@@ -860,8 +900,12 @@ fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8],
     if model.project(project).dropped {
         return;
     }
+    let before = injected_so_far(harness);
     let targets = picked_traces(picks);
-    let evals = harness.calm(|calm| resolve_evals(calm, model.project(project), &targets));
+    let evals = match resolve_evals(harness, model.project(project), &targets) {
+        Ok(evals) => evals,
+        Err(error) => return read_failed_under_faults(harness, before, &error),
+    };
     let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
     let id = deletion_id(clock);
     register(
@@ -892,9 +936,13 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
     if model.project(project).dropped {
         return;
     }
+    let before = injected_so_far(harness);
     let name = format!("u{}", user % 2);
     let (expected_traces, expected_sessions) = model.project(project).user_scope(&name);
-    let observed = harness.calm(|calm| observe_user_scope(calm, project, &name, clock));
+    let observed = match try_observe_user_scope(harness, project, &name, clock) {
+        Ok(observed) => observed,
+        Err(error) => return read_failed_under_faults(harness, before, &error),
+    };
     assert_eq!(
         hex_of(&observed.trace_ids),
         hex_numbers(&expected_traces),
@@ -905,7 +953,10 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
         expected_sessions.iter().cloned().collect::<Vec<String>>(),
         "user_deletion_scope of {name} in project {project:?}: sessions differ from the model"
     );
-    let evals = harness.calm(|calm| resolve_evals(calm, model.project(project), &expected_traces));
+    let evals = match resolve_evals(harness, model.project(project), &expected_traces) {
+        Ok(evals) => evals,
+        Err(error) => return read_failed_under_faults(harness, before, &error),
+    };
     let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
     let id = deletion_id(clock);
     register(

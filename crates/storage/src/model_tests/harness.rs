@@ -101,6 +101,10 @@ pub(super) struct Harness {
     pub(super) faulty_read_errors: u64,
 }
 
+/// How long a shutdown runs before the ending window opens (R4.5). `Storage::shutdown` cuts its
+/// flush off after 30 s, and the window must already be open by then.
+const SHUTDOWN_WINDOW: Duration = Duration::from_secs(29);
+
 /// Opens storage on `config`. In S3 mode the store is `remote`'s chaos store. Opening runs calm:
 /// the schedule is off while the open runs, and the previous setting is restored after it (a
 /// store error during the open fails it by design, R4.6).
@@ -238,13 +242,28 @@ impl Harness {
         }
     }
 
-    /// Clean shutdown, then a new life.
+    /// Clean shutdown, then a new life. The ending window opens only once `shutdown` has run for
+    /// [`SHUTDOWN_WINDOW`] (R4.5): the flush of a shutdown writes and uploads under the schedule,
+    /// and an upload it drops during a clean shutdown is a leak, not an abandoned one. The
+    /// window still opens in time for shutdown's own 30 s cut-off, which cancels uploads by design.
     pub(super) fn restart(&mut self) {
         let Life { storage, runtime } = self.life.take().expect("a life");
+        let remote = self.remote.as_ref();
+        let result = runtime.block_on(async {
+            let shutdown = storage.shutdown();
+            tokio::pin!(shutdown);
+            tokio::select! {
+                result = &mut shutdown => result,
+                () = tokio::time::sleep(SHUTDOWN_WINDOW) => {
+                    if let Some(remote) = remote {
+                        remote.chaos.set_ending(true);
+                    }
+                    shutdown.await
+                }
+            }
+        });
+        result.expect("clean shutdown");
         self.set_ending(true);
-        runtime
-            .block_on(storage.shutdown())
-            .expect("clean shutdown");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.set_ending(false);
@@ -285,20 +304,6 @@ impl Harness {
     /// The remote store's chaos store; `None` in local mode.
     pub(super) fn chaos(&self) -> Option<&ChaosStore> {
         self.remote.as_ref().map(|remote| &remote.chaos)
-    }
-
-    /// Runs `run` with the fault schedule off, then restores its previous setting (R4.5): for
-    /// the reads that check a result against the model, which must not fail on a fault. Local
-    /// mode has no schedule, so `run` simply runs.
-    pub(super) fn calm<T>(&self, run: impl FnOnce(&Self) -> T) -> T {
-        let Some(chaos) = self.chaos() else {
-            return run(self);
-        };
-        let was_active = chaos.is_active();
-        chaos.set_active(false);
-        let result = run(self);
-        chaos.set_active(was_active);
-        result
     }
 
     /// The bytes of `file`, read past the chaos store and the read cache: from

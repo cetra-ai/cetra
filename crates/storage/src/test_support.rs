@@ -787,15 +787,15 @@ async fn needed_names(data_dir: &Path) -> BTreeSet<String> {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrphanCounts {
     pub(crate) orphans: u64,
-    pub(crate) recent_unknown: u64,
     pub(crate) missing: u64,
     pub(crate) missing_media: u64,
 }
 
 /// Stand-in for N's B5 `Storage::collect_orphans(ZERO, dry_run = true)` until B5 merges (R4.4).
 /// It lists `tables/` and `media/` on `store`, and compares the keys with the catalog in
-/// `data_dir`. The minimum age is zero, so every unknown object is an orphan and `recent_unknown`
-/// stays 0. Like B5, it reads the needed names before listing and the known names after.
+/// `data_dir`. Every unknown object is an orphan: there is no minimum age yet. B5's
+/// `collect_orphans` brings the age filter, and the model test then counts the unknown objects
+/// younger than it. Like B5, it reads the needed names before listing and the known names after.
 pub(crate) async fn collect_orphans_dry_run(
     data_dir: &Path,
     store: &dyn object_store::ObjectStore,

@@ -44,33 +44,35 @@ pub(super) const ALL_ROWS: ListScope = ListScope {
     include_experiments: true,
 };
 
-/// The scope of user `user` as `user_deletion_scope` returns it, for a cutoff of `cutoff`.
-pub(super) fn observe_user_scope(
+/// The scope of user `user` as `user_deletion_scope` returns it, for a cutoff of `cutoff`. A failed
+/// read is returned as its message (R4.5: a read may fail under injected faults).
+pub(super) fn try_observe_user_scope(
     harness: &Harness,
     project: P,
     user: &str,
     cutoff: i64,
-) -> UserDeletionScope {
+) -> Result<UserDeletionScope, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
+        let ctx = try_context(harness, project).await?;
         user_deletion_scope(&ctx, user, cutoff, TIMEOUT)
             .await
-            .expect("user_deletion_scope on a project")
+            .map_err(|error| format!("user_deletion_scope on a project: {error:?}"))
     })
 }
 
-/// The evaluation traces `eval_trace_ids` returns for `targets`, in its order.
-pub(super) fn observe_eval_trace_ids(
+/// The evaluation traces `eval_trace_ids` returns for `targets`, in its order. A failed read is
+/// returned as its message (R4.5).
+pub(super) fn try_observe_eval_trace_ids(
     harness: &Harness,
     project: P,
     targets: &[TraceId],
-) -> Vec<TraceId> {
+) -> Result<Vec<TraceId>, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
+        let ctx = try_context(harness, project).await?;
         let targets: HashSet<TraceId> = targets.iter().cloned().collect();
         eval_trace_ids(&ctx, &targets, TIMEOUT)
             .await
-            .expect("eval_trace_ids on a project")
+            .map_err(|error| format!("eval_trace_ids on a project: {error:?}"))
     })
 }
 
@@ -98,8 +100,17 @@ pub(super) fn observe_spans(
     project: P,
     limit: usize,
 ) -> Vec<(i64, String, String)> {
+    try_observe_spans(harness, project, limit).expect("span_list on a project")
+}
+
+/// `observe_spans`, with a failed read returned as its message (R4.5).
+pub(super) fn try_observe_spans(
+    harness: &Harness,
+    project: P,
+    limit: usize,
+) -> Result<Vec<(i64, String, String)>, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
+        let ctx = try_context(harness, project).await?;
         let mut keys = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -117,7 +128,7 @@ pub(super) fn observe_spans(
                 },
             )
             .await
-            .expect("span_list on a project");
+            .map_err(|error| format!("span_list on a project: {error:?}"))?;
             for batch in &page.batches {
                 let trace_ids = utf8(batch, spans::TRACE_ID);
                 let span_ids = utf8(batch, spans::SPAN_ID);
@@ -134,7 +145,7 @@ pub(super) fn observe_spans(
                 None => break,
             }
         }
-        keys
+        Ok(keys)
     })
 }
 
@@ -247,8 +258,17 @@ pub(super) fn observe_span_detail(
 
 /// Every live `scores` row of `project`, in list order, read in pages of `limit` rows.
 pub(super) fn observe_scores(harness: &Harness, project: P, limit: usize) -> Vec<ExpectedScore> {
+    try_observe_scores(harness, project, limit).expect("score_list on a project")
+}
+
+/// `observe_scores`, with a failed read returned as its message (R4.5).
+pub(super) fn try_observe_scores(
+    harness: &Harness,
+    project: P,
+    limit: usize,
+) -> Result<Vec<ExpectedScore>, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
+        let ctx = try_context(harness, project).await?;
         let mut rows = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
@@ -268,7 +288,7 @@ pub(super) fn observe_scores(harness: &Harness, project: P, limit: usize) -> Vec
                 },
             )
             .await
-            .expect("score_list on a project");
+            .map_err(|error| format!("score_list on a project: {error:?}"))?;
             for batch in &page.batches {
                 for row in 0..batch.num_rows() {
                     rows.push(score_from_batch(batch, row));
@@ -279,7 +299,7 @@ pub(super) fn observe_scores(harness: &Harness, project: P, limit: usize) -> Vec
                 None => break,
             }
         }
-        rows
+        Ok(rows)
     })
 }
 
@@ -437,9 +457,18 @@ pub(super) fn observe_users(harness: &Harness, project: P) -> Vec<(String, i64)>
 /// The KPIs of the dashboard metrics over days D..D+4, as the dashboard requests them: one
 /// day per bucket, no filter, no grouping, evaluation traces excluded, experiments kept.
 pub(super) fn observe_kpis(harness: &Harness, project: P, window: (i64, i64)) -> Vec<Kpi> {
+    try_observe_kpis(harness, project, window).expect("metrics on a project")
+}
+
+/// `observe_kpis`, with a failed read returned as its message (R4.5).
+pub(super) fn try_observe_kpis(
+    harness: &Harness,
+    project: P,
+    window: (i64, i64),
+) -> Result<Vec<Kpi>, String> {
     harness.block_on(async {
-        let ctx = context(harness, project).await;
-        metrics(
+        let ctx = try_context(harness, project).await?;
+        let response = metrics(
             &ctx,
             MetricsRequest {
                 window: window_of(window),
@@ -452,8 +481,8 @@ pub(super) fn observe_kpis(harness: &Harness, project: P, window: (i64, i64)) ->
             },
         )
         .await
-        .expect("metrics on a project")
-        .kpis
+        .map_err(|error| format!("metrics on a project: {error:?}"))?;
+        Ok(response.kpis)
     })
 }
 

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use proptest::prelude::*;
 
-use check::{check_deletions, check_dropped, check_full, check_quick};
+use check::{check_deletions, check_dropped, check_full, check_no_leaked_uploads, check_quick};
 use harness::{Harness, MODEL_PUT_SIZES};
 use model::Model;
 use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
@@ -27,8 +27,11 @@ use crate::config::{StorageConfig, WalSync};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::fs::lossy::CrashMode;
 use crate::reads::MAX_PAGE;
-use crate::test_support::{Call, Rates};
+use crate::test_support::{Call, ChaosStore, Rates};
+use bytes::Bytes;
+use object_store::ObjectStoreExt;
 use object_store::memory::InMemory;
+use object_store::path::Path as ObjectPath;
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
 fn cases() -> u32 {
@@ -43,13 +46,15 @@ fn interval_cases() -> u32 {
     (cases() / 2).max(2)
 }
 
-/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 8 (R4.5, the largest of 8, 4 or 2 that
-/// runs in under 60 s in debug: 32.7 s).
+/// Cases of the S3 mode: `LLMOBS_MODEL_S3_CASES`, else 4 (R4.5). A shutdown whose flush fails
+/// under the schedule retries it until the 30 s grace period ends, so a case can take 30 s or
+/// more. Measured in debug over nine runs at 4 cases: 6 s to 98 s, 8 of 9 under 45 s. At 8 cases
+/// five runs took 10 s to 103 s, and two of them were over 45 s, so 8 does not fit the 60 s budget.
 fn s3_cases() -> u32 {
     std::env::var("LLMOBS_MODEL_S3_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(8)
+        .unwrap_or(4)
 }
 
 proptest! {
@@ -77,6 +82,10 @@ proptest! {
 
     /// The model test on a remote store behind the read cache, with injected S3 faults (R4.4,
     /// R4.5). The seed is not shrunk: a failure is reported with its journal, and R4.10 scripts it.
+    ///
+    /// A `no_shrink` seed does not reproduce after shrinking: the schedule draws in the order of the
+    /// calls, and a shorter op list makes other calls, so the same seed injects other faults. To
+    /// replay a failure, script the faults of the printed journal (R4.10), not the seed.
     #[test]
     fn storage_matches_the_model_on_s3(ops in ops::ops_s3(), seed in any::<u64>().no_shrink()) {
         let harness = run_case_s3(&ops, Some((seed, Rates::MODEL)));
@@ -123,16 +132,43 @@ fn set_faults(harness: &Harness, on: bool) {
     }
 }
 
+/// The fault rates of a case's boosted ops (R4.5): each rate times `1 + seed % 4`, and `before`
+/// capped at 0.25, so that an op with many calls still gets through.
+fn boosted_rates(base: Rates, seed: u64) -> Rates {
+    let mut rates = base.scaled(1.0 + (seed % 4) as f64);
+    rates.before = rates.before.min(0.25);
+    rates
+}
+
+/// Whether an op runs at the boosted rates (R4.5): the ones that read or rewrite many objects.
+/// Every other op, Restart and Crash included, runs at the case's base rates.
+fn boosts(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Compact { .. }
+            | Op::ApplyDeletions { .. }
+            | Op::Gc
+            | Op::Verify { .. }
+            | Op::FaultyRead { .. }
+    )
+}
+
 /// The loop shared by both modes: each op, then the checks its kind needs, then `settle`. In S3
 /// mode the schedule is on during each op but `Settle`, and off during the checks and the final
-/// settle. A panic turns the schedule off, prints the journal and the seed, and resumes (R4.5).
+/// settle. The rates of an op are the boosted ones for `boosts` ops, the base ones otherwise. A
+/// panic turns the schedule off, prints the journal and the seed, and resumes (R4.5).
 fn run_with(mut harness: Harness, ops: &[Op], seed: Option<u64>) -> Harness {
+    let base = harness.chaos().map(ChaosStore::rates);
+    let boosted = seed.zip(base).map(|(seed, base)| boosted_rates(base, seed));
     let mut model = new_model(&harness);
     let mut clock = midnight(day(0)) + 12 * HOUR_NS;
     let mut index = 0_usize;
     let ran = catch_unwind(AssertUnwindSafe(|| {
         for (number, op) in ops.iter().enumerate() {
             index = number;
+            if let (Some(chaos), Some(base)) = (harness.chaos(), base) {
+                chaos.set_rates(boosted.filter(|_| boosts(op)).unwrap_or(base));
+            }
             set_faults(&harness, !matches!(op, Op::Settle));
             apply(op, &mut harness, &mut model, &mut clock);
             set_faults(&harness, false);
@@ -664,6 +700,97 @@ fn regression_lossy_crash_tears_the_wal_tail() {
 }
 
 /// S3 mode with a schedule (R4.5): the schedule is off once the run returns, whatever it injected.
+/// A run whose boosted ops (R4.5) reach `before` 0.24 injects faults over a fixed list of Restart,
+/// Compact, Verify and FaultyRead ops. The base rates stay the model's, since a shutdown retries
+/// its flush until the 30 s grace period ends: at a higher base rate a Restart takes that long.
+/// Crash stands in for the later restarts.
+#[test]
+fn a_high_rate_run_injects_faults() {
+    let rates = Rates::MODEL;
+    let mut ops: Vec<Op> = (0..2)
+        .map(|trace| Op::Append {
+            project: P::A,
+            trace,
+            count: 6,
+            split: true,
+        })
+        .collect();
+    // The Restart flushes the appends, so the files exist for the reads and the compaction below.
+    ops.extend([
+        Op::Restart,
+        Op::Compact { hours: 60 },
+        Op::Verify { pick: 0 },
+        Op::FaultyRead {
+            project: P::A,
+            pick: 0,
+        },
+        Op::Crash,
+        Op::Verify { pick: 1 },
+        Op::FaultyRead {
+            project: P::A,
+            pick: 1,
+        },
+        Op::FaultyRead {
+            project: P::A,
+            pick: 3,
+        },
+        Op::Compact { hours: 60 },
+    ]);
+    // Seed 3 has factor 4: the boosted ops run at `before` 0.24 (0.06 times 4).
+    let harness = run_case_s3(&ops, Some((3, rates)));
+    let chaos = harness
+        .chaos()
+        .expect("an S3-mode harness has a chaos store");
+    assert!(
+        chaos.injected() > 0,
+        "a run at before 0.5 injected no fault"
+    );
+}
+
+/// `allow_failure` (R4.5): a failed call is allowed only when a fault was injected during it. A
+/// held call fails with its fault counted, so its failure is allowed.
+#[test]
+fn allow_failure_needs_an_injected_fault() {
+    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let chaos = harness
+        .chaos()
+        .expect("an S3-mode harness has a chaos store")
+        .clone();
+    let path = ObjectPath::from("tables/spans/held.parquet");
+
+    let before = chaos.injected();
+    assert!(
+        !ops::allow_failure(&harness, before),
+        "nothing was injected, so no failure is allowed"
+    );
+
+    chaos.hold(&[Call::Put]);
+    let put = harness.block_on(chaos.put(&path, Bytes::from_static(b"x").into()));
+    assert!(put.is_err(), "a held put must fail");
+    assert!(
+        ops::allow_failure(&harness, before),
+        "the held put's fault was injected, so its failure is allowed"
+    );
+    chaos.release();
+}
+
+/// A multipart upload dropped outside an ending window is a leak, and the check fires on it. This
+/// is what a clean shutdown's flush would leave if it dropped an upload (R4.5).
+#[test]
+#[should_panic(expected = "multipart uploads storage left open")]
+fn check_no_leaked_uploads_fires_on_a_leak() {
+    let harness = Harness::new_s3(Arc::new(InMemory::new()), MODEL_PUT_SIZES);
+    let chaos = harness
+        .chaos()
+        .expect("an S3-mode harness has a chaos store")
+        .clone();
+    let upload = harness
+        .block_on(chaos.put_multipart(&ObjectPath::from("tables/spans/leak.parquet")))
+        .expect("start a multipart upload");
+    drop(upload);
+    check_no_leaked_uploads(&harness, 0);
+}
+
 #[test]
 fn a_run_leaves_the_schedule_off() {
     let harness = run_case_s3(
