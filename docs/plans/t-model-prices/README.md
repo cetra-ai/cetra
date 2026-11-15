@@ -112,7 +112,7 @@ web/src/routes/$org/$project/settings/models.tsx                                
 
 ### Migration number
 
-Other tracks add migrations in parallel (`main` ends at `0014_backfills.sql` today). T's migration takes **the next free number when T2 is implemented**: the highest `NNNN` in `crates/server/migrations/meta/` plus one, zero-padded to four digits (`0015_model_prices.sql` if `0014_backfills.sql` is still the last). If another branch lands the same number before T merges, renumber T's file at merge and shift the version literals of T2 § Version numbers again.
+Other tracks add migrations in parallel (`main` ends at `0015_email_verified_via.sql` today). T's migration takes **the next free number when T2 is implemented**: the highest `NNNN` in `crates/server/migrations/meta/` plus one, zero-padded to four digits (`0016_model_prices.sql` if `0015_email_verified_via.sql` is still the last). If another branch lands the same number before T merges, renumber T's file at merge and regenerate the schema snapshot (the tests read `expected_version()`, so no version literal changes; T2 § Schema version).
 
 ## Decisions
 
