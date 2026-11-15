@@ -105,6 +105,18 @@ _fuzz-max-files target:
         *) echo 2000 ;;
     esac
 
+# Open or update the one open `nightly` issue for a failed nightly run (RUN_URL from the environment)
+nightly-issue:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    gh label create nightly --force --description "A nightly run failed"
+    number="$(gh issue list --label nightly --state open --json number --jq '.[0].number // empty')"
+    if [ -n "$number" ]; then
+        gh issue comment "$number" --body "Nightly failed again: $RUN_URL"
+    else
+        gh issue create --title "Nightly run failed" --label nightly --body "Nightly run failed: $RUN_URL"
+    fi
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1

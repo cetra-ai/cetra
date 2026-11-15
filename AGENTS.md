@@ -182,6 +182,8 @@ Required tools:
 
 CI runs the `just` recipes from the table. A branch that passes `just check` locally and leaves a clean tree passes CI, except for the runtime matrix (Python 3.15, Node 22.12). The `packaging` job runs `just check-packaging-lint`; the full `just check-packaging` runs in `packaging.yml` on pushes to `main` and weekly, outside `ci-ok` (D-N-13).
 
+`.github/workflows/nightly.yml` runs nightly and on demand, outside `ci-ok`: each fuzz target for 10 minutes. A failed run opens or updates one issue labelled `nightly` (track R M3). The model, stress and LazyFS jobs join it when their recipes land.
+
 Actions are pinned by commit SHA with the tag in a comment; Dependabot updates them. Never use a tag or branch reference.
 
 Workflow `run:` steps call `just` recipes. New checks go into the `justfile` first.
