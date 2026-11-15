@@ -88,6 +88,11 @@ pub(super) struct HarnessOptions {
     pub(super) store: Option<(Arc<dyn ObjectStore>, PutSizes)>,
     /// Tokio worker threads per life; 0 means [`WORKERS`].
     pub(super) workers: usize,
+    /// No lossy root: the files are not recorded, so the disk holds only what storage keeps. The
+    /// lossy shadow keeps a hard link of every file the storage unlinks, so on a small filesystem
+    /// it would fill the disk with WAL segments that are already truncated (R5.4, D7). A lossy
+    /// crash is not possible in an unrecorded harness.
+    pub(super) unrecorded: bool,
 }
 
 /// The remote store of a harness with an object store.
@@ -112,8 +117,9 @@ pub(super) struct Harness {
     _dir: Option<tempfile::TempDir>,
     data: std::path::PathBuf,
     config: StorageConfig,
-    /// The data directory's lossy root (R2.2), registered before the first open.
-    lossy: Lossy,
+    /// The data directory's lossy root (R2.2), registered before the first open. `None` when the
+    /// harness is unrecorded (R5.4): its files are not shadowed, so a lossy crash is not possible.
+    lossy: Option<Lossy>,
     life: Option<Life>,
     /// What each `lossy_crash` of this case did, in order.
     crashes: Vec<CrashReport>,
@@ -197,6 +203,7 @@ impl Harness {
             &dir.path().join("shadow"),
             options.store,
             workers,
+            !options.unrecorded,
             adjust,
         );
         harness._dir = Some(dir);
@@ -216,9 +223,13 @@ impl Harness {
         shadow: &std::path::Path,
         seed: Option<u64>,
     ) -> Self {
-        let harness = Self::open_in(data, shadow, None, WORKERS, |_| {});
+        let harness = Self::open_in(data, shadow, None, WORKERS, true, |_| {});
         if let Some(seed) = seed {
-            harness.lossy.crash_on_abort(seed);
+            harness
+                .lossy
+                .as_ref()
+                .expect("an attached harness is recorded")
+                .crash_on_abort(seed);
         }
         harness
     }
@@ -231,9 +242,10 @@ impl Harness {
         shadow: &std::path::Path,
         store: Option<(Arc<dyn ObjectStore>, PutSizes)>,
         workers: usize,
+        recorded: bool,
         change: impl FnOnce(&mut StorageConfig),
     ) -> Self {
-        let lossy = Lossy::enable(data, shadow);
+        let lossy = recorded.then(|| Lossy::enable(data, shadow));
         let remote = store.map(|(inner, put_sizes)| Remote {
             chaos: ChaosStore::new(inner),
             put_sizes,
@@ -286,6 +298,21 @@ impl Harness {
     /// and an upload it drops during a clean shutdown is a leak, not an abandoned one. The
     /// window still opens in time for shutdown's own 30 s cut-off, which cancels uploads by design.
     pub(super) fn restart(&mut self) {
+        self.shut_down_clean();
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
+    }
+
+    /// Clean shutdown, `adjust` applied to the config, then a new life with it (R5.4: the read
+    /// cache of D7 is off while the data is seeded and on in the second life). Later restarts
+    /// keep the changed config.
+    pub(super) fn restart_with(&mut self, adjust: impl FnOnce(&mut StorageConfig)) {
+        self.shut_down_clean();
+        adjust(&mut self.config);
+        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
+    }
+
+    /// The shutdown of [`Self::restart`]: it leaves no life.
+    fn shut_down_clean(&mut self) {
         let Life { storage, runtime } = self.life.take().expect("a life");
         let remote = self.remote.as_ref();
         let result = runtime.block_on(async {
@@ -315,7 +342,6 @@ impl Harness {
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
         self.set_ending(false);
-        self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
     /// Drop without shutdown, then a new life.
@@ -370,7 +396,11 @@ impl Harness {
         let Life { storage, runtime } = self.life.take().expect("a life");
         drop(storage);
         runtime.shutdown_timeout(Duration::from_secs(10));
-        self.crashes.push(self.lossy.crash(seed));
+        let lossy = self
+            .lossy
+            .as_ref()
+            .expect("a lossy crash needs a recorded harness");
+        self.crashes.push(lossy.crash(seed));
         self.life = Some(open_life(&self.config, self.remote.as_ref(), self.workers));
     }
 
