@@ -3614,6 +3614,7 @@ dependencies = [
  "crc32c",
  "datafusion",
  "datafusion-datasource",
+ "flate2",
  "futures",
  "hex",
  "humantime-serde",
@@ -3634,6 +3635,7 @@ dependencies = [
  "tokio",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

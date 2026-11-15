@@ -76,6 +76,25 @@ s3-chaos:
 lazyfs:
     tools/lazyfs/lazyfs.sh build && tools/lazyfs/lazyfs.sh run
 
+# Download the pinned text corpus of the storage benchmarks and soak (OpenAssistant oasst2, Apache-2.0; track R M7)
+fetch-corpus:
+    mkdir -p target/bench-corpus
+    curl -fL --retry 3 -o target/bench-corpus/oasst2-ready-messages.jsonl.gz.part https://huggingface.co/datasets/OpenAssistant/oasst2/resolve/179dd21fc55192153d94adb0e0ce8f69e222bf75/2023-11-05_oasst2_ready.messages.jsonl.gz
+    echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
+    mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
+
+# Storage soak (D-R-11). Needs LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT; see crates/storage/tests/soak.rs
+soak:
+    RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+
+# Plots of a soak run's samples into <out>/plots
+soak-plot out:
+    cd tools/soak && uv run --locked python plot.py {{absolute_path(out)}}
+
+# Lint and type-check the soak plot script (not part of `just check`)
+check-soak-plot:
+    cd tools/soak && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy plot.py
+
 # Write the fuzz seed corpus from the test fixtures (track R M3)
 fuzz-seed:
     cargo test --workspace --all-features -- --ignored --exact fuzz_entry::tests::write_seed_corpus
