@@ -10,8 +10,8 @@ use llmobs_core::ids::{OrgId, ProjectId, TraceId};
 use llmobs_core::score::ScoreTarget;
 use llmobs_eval::{
     Adapter, Check, ErrorClass, EvalError, EvalOrigin, EvalOutcome, EvalRun, EvalTarget, Evaluator,
-    EvaluatorConfig, JudgeConfig, JudgeConnection, PromptTemplate, RunInput, Secret, TraceData,
-    VariableMapping, Variables, resolve,
+    EvaluatorConfig, JudgeConfig, JudgeConnection, JudgeError, PromptTemplate, RunInput, Secret,
+    TraceData, VariableMapping, Variables, resolve,
 };
 use llmobs_otel::Normalized;
 use serde_json::Value;
@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::api::evaluators::EvaluatorKind;
 use crate::api::online_rules::BudgetPeriod;
 use crate::api::scores::ScoreCreate;
+use crate::entitlements::units;
 use crate::eval::budget::{self, Reservation, Reserve};
 use crate::eval::definitions::fits_definition;
 use crate::eval::evaluator;
@@ -46,6 +47,8 @@ const EVALUATOR_VERSION_KEY: &str = llmobs_core::llmobs_name!(".eval.evaluator_v
 const TRUNCATED_KEY: &str = llmobs_core::llmobs_name!(".eval.truncated");
 /// The job error of a write that kept failing (D-I-13).
 const STORE_ERROR: &str = "could not store the result";
+/// The job error of a score refused at the org's monthly units cap (D-I-35).
+const UNITS_CAP_ERROR: &str = "monthly units cap reached";
 /// The breaker's pause detail (D-I-14).
 const BREAKER_DETAIL: &str = "half or more of the last 50 jobs failed";
 
@@ -346,6 +349,9 @@ struct Call {
     connection: Option<Arc<JudgeConnection>>,
     /// The judge's org and connection id (judge jobs only).
     judge_link: Option<(OrgId, Uuid)>,
+    /// The judge's model is not its connection's default: a 404 for it pauses only the rules of
+    /// the evaluator (I-2, D-I-14).
+    judge_model_differs: bool,
     webhook_secret: Option<Secret>,
     variables: Variables,
     target: EvalTarget,
@@ -372,6 +378,8 @@ struct JudgeLink {
     connection_id: Uuid,
     adapter: Adapter,
     connection: Arc<JudgeConnection>,
+    /// The judge's model is not the connection's `default_model` (D-I-14).
+    model_differs: bool,
 }
 
 /// Steps 1 to 11 of § Job execution: everything before the call.
@@ -402,9 +410,16 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
     let (evaluator, opened) = evaluator::load(&state.secrets, &evaluator_row)
         .map_err(|_| permanent("evaluator could not be loaded"))?;
     let judge = match &evaluator.config {
-        EvaluatorConfig::LlmJudge(judge) => {
-            Some(judge_link(state, job, project.org_id, judge.connection_id).await?)
-        }
+        EvaluatorConfig::LlmJudge(judge) => Some(
+            judge_link(
+                state,
+                job,
+                project.org_id,
+                judge.connection_id,
+                &judge.model,
+            )
+            .await?,
+        ),
         EvaluatorConfig::Check(_) | EvaluatorConfig::Webhook(_) => None,
     };
     // Step 5.
@@ -470,6 +485,13 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
     if levenshtein_too_large(&evaluator, &variables) {
         return Err(permanent("levenshtein inputs must be at most 64 KiB each"));
     }
+    // Before step 10 (D-I-35): a judge or webhook call is not made at the org's monthly units cap.
+    if !matches!(evaluator.config, EvaluatorConfig::Check(_))
+        && let Err(cap) = units::check_cap(state, project.org_id).await
+    {
+        tracing::debug!(job_id = %row.id, detail = %cap.detail, "eval job skipped at the units cap");
+        return Err(ended(Finish::Skipped { error: "quota" }));
+    }
     // Step 10.
     let mut estimate = None;
     let mut reservation = None;
@@ -503,9 +525,13 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
         Some(rule) => EvalOrigin::Rule(rule),
         None => EvalOrigin::Test,
     };
-    let (connection, judge_link) = match judge {
-        Some(link) => (Some(link.connection), Some((link.org, link.connection_id))),
-        None => (None, None),
+    let (connection, judge_link, judge_model_differs) = match judge {
+        Some(link) => (
+            Some(link.connection),
+            Some((link.org, link.connection_id)),
+            link.model_differs,
+        ),
+        None => (None, None, false),
     };
     let kind = kind_of(&evaluator.config);
     Ok(Ready {
@@ -516,6 +542,7 @@ async fn prepare<'a>(state: &'a AppState, job: &ClaimedJob) -> Result<Ready<'a>,
             kind,
             connection,
             judge_link,
+            judge_model_differs,
             webhook_secret: opened.map(|values| Secret::new(values.signing_secret)),
             variables,
             target: EvalTarget {
@@ -547,12 +574,14 @@ async fn active_project(state: &AppState, id: ProjectId) -> Result<ProjectRow, E
     Ok(project)
 }
 
-/// Step 4 for a judge: its connection row (unchanged since the claim), adapter and key.
+/// Step 4 for a judge: its connection row (unchanged since the claim), adapter and key. `model` is
+/// the judge's model; `model_differs` says whether it is not the connection's default (D-I-14).
 async fn judge_link(
     state: &AppState,
     job: &ClaimedJob,
     org: OrgId,
     connection_id: Uuid,
+    model: &str,
 ) -> Result<JudgeLink, Exit> {
     let row = connections::get_connection(state.meta.reader(), org, connection_id)
         .await?
@@ -572,7 +601,20 @@ async fn judge_link(
         connection_id,
         adapter,
         connection,
+        model_differs: row.default_model.as_deref() != Some(model),
     })
+}
+
+/// A judge's 404 for its model, from the provider's status or its `model_not_found` code (I-2).
+fn is_missing_model(error: &EvalError) -> bool {
+    matches!(
+        error,
+        EvalError::Judge(JudgeError::Provider { status: 404, .. })
+    ) || matches!(
+        error,
+        EvalError::Judge(JudgeError::Provider { provider_code: Some(code), .. })
+            if code == "model_not_found"
+    )
 }
 
 /// Step 5: the job's mapping, a rule's or a manual run's.
@@ -651,6 +693,7 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
         kind,
         connection,
         judge_link,
+        judge_model_differs,
         webhook_secret,
         variables,
         target,
@@ -758,10 +801,16 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                 evaluator_id,
                 rule_id: row.rule_id,
             };
+            // A refusal (a bad request, the units cap) is final: it is not retried (D-I-35).
             let written = retry_write(
                 retry::WRITE_TRIES,
                 retry::WRITE_RETRY,
-                |error: &ApiError| !matches!(error, ApiError::BadRequest { .. }),
+                |error: &ApiError| {
+                    !matches!(
+                        error,
+                        ApiError::BadRequest { .. } | ApiError::QuotaExceeded { .. }
+                    )
+                },
                 || scores::write(state, &project, writer, vec![item.clone()]),
             )
             .await;
@@ -781,6 +830,18 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                     finish: Finish::Failed {
                         class: "permanent",
                         error: "score definition mismatch".to_owned(),
+                        judge_trace_id: Some(judge_trace_id),
+                        evaluator_version: Some(evaluator_version),
+                        usage: job_usage,
+                    },
+                    reached_evaluator: false,
+                    pause: Pause::None,
+                    actual,
+                },
+                Err(ApiError::QuotaExceeded { .. }) => Ended {
+                    finish: Finish::Failed {
+                        class: "permanent",
+                        error: UNITS_CAP_ERROR.to_owned(),
                         judge_trace_id: Some(judge_trace_id),
                         evaluator_version: Some(evaluator_version),
                         usage: job_usage,
@@ -833,7 +894,20 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                         evaluator_version: Some(evaluator_version),
                         usage: job_usage,
                     };
+                    // A missing model on a judge that is not the connection's default names the
+                    // model, not the connection (I-2): the evaluator's rules pause, as for a webhook.
+                    let model_only = judge_model_differs && is_missing_model(&error);
                     match (kind, row.rule_id, judge_link) {
+                        (EvaluatorKind::LlmJudge, Some(_), Some(_)) if model_only => (
+                            Finish::PauseRequeue { not_before: now },
+                            Pause::Evaluator {
+                                evaluator_id,
+                                error_text: text,
+                            },
+                        ),
+                        (EvaluatorKind::LlmJudge, None, Some(_)) if model_only => {
+                            (failed, Pause::None)
+                        }
                         (EvaluatorKind::LlmJudge, Some(_), Some((org, connection_id))) => (
                             Finish::PauseRequeue { not_before: now },
                             Pause::Connection {
@@ -930,6 +1004,10 @@ async fn finish_job(
     for (rule_id, reason) in &settled.paused {
         audit_pause(rule_id, row.project_id, reason);
     }
+    if let Some(rule) = settled.skip_rule {
+        // A budget pause skips the rule's backlog in chunks of 1 000 per write (I-3).
+        eval_jobs::skip_queued_of_rule(&state.meta, rule, "budget", now).await?;
+    }
     let Some(rule) = row.rule_id else {
         return Ok(());
     };
@@ -962,10 +1040,12 @@ struct Settle {
     pause: Pause,
 }
 
-/// What the write did: whether the job's row matched, and the rules it paused.
+/// What the write did: whether the job's row matched, the rules it paused, and a rule whose queued
+/// jobs are still to be skipped with `budget` (in chunks, after this write).
 struct Settled {
     matched: bool,
     paused: Vec<(Uuid, &'static str)>,
+    skip_rule: Option<Uuid>,
 }
 
 /// The write of § Job execution step 16, on the writer.
@@ -1020,9 +1100,11 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
         return Ok(Settled {
             matched: false,
             paused: Vec::new(),
+            skip_rule: None,
         });
     }
     let mut paused = Vec::new();
+    let mut skip_rule = None;
     match pause {
         Pause::None => {}
         Pause::Connection {
@@ -1089,13 +1171,14 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
                 paused.push((rule_id, reason));
             }
             if skip_queued {
-                eval_jobs::skip_queued_of_rule(conn, rule_id, "budget", now).await?;
+                skip_rule = Some(rule_id);
             }
         }
     }
     Ok(Settled {
         matched: true,
         paused,
+        skip_rule,
     })
 }
 
@@ -1381,6 +1464,7 @@ mod job_tests {
     use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
     use crate::test_support::mock_llm::{MockLlm, Reply, completion};
     use crate::test_support::mock_webhook::MockWebhook;
+    use crate::test_support::set_limits;
     use crate::test_support::{Seeded, TestApp, dataset_span};
 
     const MAPPING: &str = r#"{"input": "trace.input", "output": "trace.output"}"#;
@@ -2594,6 +2678,173 @@ mod job_tests {
         assert!(row.score_id.is_some());
         assert_eq!(row.judge_trace_id, Some(job_judge_trace_id(job, 1)));
         assert!(mock.requests().is_empty());
+    }
+
+    /// Puts the org at `cap` units this month, so the next units check refuses.
+    fn at_units_cap(app: &TestApp, seeded: &Seeded, cap: u64) {
+        set_limits(
+            app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &json!({"units_cap": cap}),
+        );
+        app.state.usage.add(
+            seeded.org_id,
+            seeded.project.id,
+            app.state.clock.now_ns(),
+            cap,
+            0,
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_judge_at_the_units_cap_is_skipped_before_the_call() {
+        let mock = MockLlm::start(vec![completion(JUDGE_ANSWER)]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let evaluator = judge(&app, &seeded, conn, "gpt-test").await;
+        store_trace(&app, &seeded.project, trace(60), "production").await;
+        at_units_cap(&app, &seeded, 10);
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(MAPPING),
+            trace(60),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "skipped");
+        assert_eq!(row.error.as_deref(), Some("quota"));
+        assert_eq!(row.attempts, 0, "no attempt was started");
+        assert!(
+            mock.requests().is_empty(),
+            "no request reaches the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_score_refused_at_the_units_cap_fails_without_a_retry() {
+        let mock = MockLlm::start(vec![]).await;
+        let (app, seeded) = test_app().await;
+        let evaluator = check(&app, &seeded).await;
+        store_trace(&app, &seeded.project, trace(61), "production").await;
+        // A check is not held back before its run (only judges and webhooks are), so the
+        // refusal comes from the score write (D-I-35).
+        at_units_cap(&app, &seeded, 10);
+        let mapping = r#"{"output": "trace.output", "expected": "trace.output"}"#;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_MANUAL,
+            None,
+            evaluator,
+            Some(mapping),
+            trace(61),
+            app.state.clock.now_ns(),
+        );
+        enqueue(&app, new).await;
+
+        let row = run_once(&app, &seeded.project, job, None).await;
+        assert_eq!(row.status, "failed", "a refusal is final, not queued again");
+        assert_eq!(row.error_class.as_deref(), Some("permanent"));
+        assert_eq!(row.error.as_deref(), Some("monthly units cap reached"));
+        assert_eq!(row.score_id, None);
+        assert_eq!(row.attempts, 1);
+        assert!(mock.requests().is_empty());
+    }
+
+    /// A rule job of `judge` with `model` on the connection, and a bystander rule of a check. The
+    /// judge's provider answers 404 for `model`. Returns the job, the judge's rule and the
+    /// bystander rule.
+    async fn a_404_for_the_judge_model(
+        app: &TestApp,
+        seeded: &Seeded,
+        conn: Uuid,
+        model: &str,
+    ) -> (Uuid, Uuid, Uuid) {
+        let evaluator = judge(app, seeded, conn, model).await;
+        let rule_id = rule(app, seeded, evaluator, None, MAPPING).await;
+        let bystander_check = check(app, seeded).await;
+        let bystander = rule(
+            app,
+            seeded,
+            bystander_check,
+            None,
+            r#"{"output": "trace.output", "expected": "trace.output"}"#,
+        )
+        .await;
+        store_trace(app, &seeded.project, trace(62), "production").await;
+        let (job, new) = new_job(
+            seeded.project.id,
+            KIND_RULE,
+            Some(rule_id),
+            evaluator,
+            None,
+            trace(62),
+            app.state.clock.now_ns(),
+        );
+        enqueue(app, new).await;
+        (job, rule_id, bystander)
+    }
+
+    #[tokio::test]
+    async fn a_404_for_a_model_other_than_the_default_pauses_only_its_rules() {
+        let mock = MockLlm::start(vec![reply_status(404, "model not found")]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let (job, rule_id, bystander) =
+            a_404_for_the_judge_model(&app, &seeded, conn, "gpt-other").await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.attempts, 0, "the attempt is given back");
+        let paused = rule_row(&app, &seeded.project, rule_id).await;
+        assert_eq!(paused.paused_reason.as_deref(), Some("errors"));
+        assert_eq!(paused.paused_detail.as_deref(), Some("provider status 404"));
+        assert_eq!(
+            rule_row(&app, &seeded.project, bystander)
+                .await
+                .paused_reason,
+            None,
+            "other rules keep running"
+        );
+        let connection = connection_row(&app, &seeded.project, conn).await;
+        assert_eq!(connection.status, "ok");
+        assert_eq!(connection.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn a_404_for_the_default_model_takes_the_connection_path() {
+        let mock = MockLlm::start(vec![reply_status(404, "model not found")]).await;
+        let (app, seeded) = test_app().await;
+        let conn = connection(&app, &seeded.cookie, &mock).await;
+        let (job, rule_id, bystander) =
+            a_404_for_the_judge_model(&app, &seeded, conn, "gpt-test").await;
+
+        let row = run_once(&app, &seeded.project, job, Some(conn)).await;
+        assert_eq!(row.status, "queued");
+        assert_eq!(
+            rule_row(&app, &seeded.project, rule_id)
+                .await
+                .paused_reason
+                .as_deref(),
+            Some("connection")
+        );
+        assert_eq!(
+            connection_row(&app, &seeded.project, conn).await.status,
+            "failing"
+        );
+        assert_eq!(
+            rule_row(&app, &seeded.project, bystander)
+                .await
+                .paused_reason,
+            None,
+            "a check does not use the connection, so it keeps running"
+        );
     }
 
     #[test]
