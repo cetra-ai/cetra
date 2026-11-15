@@ -413,9 +413,29 @@ CREATE TABLE pending_traces (
   root_ended INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, trace_id)
 );
+
+CREATE TABLE backfills (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
+  from_ns INTEGER NOT NULL,
+  to_ns INTEGER NOT NULL,
+  max_targets INTEGER NOT NULL,
+  sample_rate REAL NOT NULL,
+  status TEXT NOT NULL,
+  matched INTEGER NOT NULL DEFAULT 0,
+  enqueued INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running';
+CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
 
 `pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
+
+`backfills` holds an online rule's runs over stored traces (spec 06 § Online rules › Backfill; D-I-25, D-I-39 to D-I-42). A backfill is `running` until the runner reads its last page; `matched` counts the targets read and `enqueued` the jobs inserted or re-queued. At most one backfill per rule is `running` (partial unique index). Startup marks the ones left `running` `failed` with `error = 'interrupted'`. Rows go with their rule.
 
 `connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
