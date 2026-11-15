@@ -359,7 +359,9 @@ D-L-2 said G's M5 would check these pages on the real server; it did not, so the
 
 Checked and working: `/setup` from the logged setup URL (cookie set, lands on `/acme`); org General, Members (invite without SMTP shows the copyable link), project General (retention in days, then "keep forever" saved as `null`), API keys (create shows the secret once with snippets), project Members (Teams gate shown without a licence); `/account` (tokens list with expiry); `/admin/users`, `/admin/settings` (test email disabled without SMTP); a session ended behind the app's back sends the next navigation to `/login?redirect=…`; `/invite/<token>` signed out creates the account and joins as Member; a Member gets the "no access" page on `/admin` and API keys and disabled controls on org General; sign-out from the user menu; `/login` wrong password ("Incorrect email or password.") and success; `/reset` without SMTP explains the admin path; `/verify` with a bad token offers a new link; `/cli-auth` Authorize (token POSTed to the callback, 90-day expiry accepted by the server) and Cancel (`error=access_denied`).
 
-Found and fixed: the org project list labelled a `null` retention "Default"; it means keep forever.
+The `/cli-auth` form POST was then re-run on a debug binary with the UI embedded (`ui: embedded`, public URL on the binary's own port), because the Vite dev server sends no CSP: with `form-action 'self' http://127.0.0.1:*` the POST reaches the callback.
+
+Found and fixed: the embedded UI's CSP had `form-action 'self'`, which blocks the `/cli-auth` POST to `127.0.0.1`; the org project list labelled a `null` retention "Default"; it means keep forever.
 
 Not checked: OAuth/OIDC sign-in and the `/login?error=` codes from a real provider, the SMTP paths (emails, verification required), password reset with a real token, `/setup` redirect from the gate on a fresh instance, and the origin check behind a reverse proxy.
 

@@ -122,6 +122,7 @@ export function useLiveTraces({
   // A queued refetch belongs to the list it was queued for. A new query key or stream url
   // starts clean, so the flag cannot refetch the new list.
   const listId = JSON.stringify(queryKey);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the effect must rerun when the list (key or stream url) changes, though its body reads neither
   useEffect(() => {
     refetchQueued.current = false;
   }, [listId, url]);
