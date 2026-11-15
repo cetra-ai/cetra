@@ -53,6 +53,9 @@ pub(crate) struct EvalQueue {
     pub(crate) budgets: budget::Budgets,
     pub(crate) breakers: breaker::Breakers,
     pub(crate) hourly: hourly::HourlyCaps,
+    /// Per rule: when its unreadable-filter warning was last logged. Entries older than an hour
+    /// are dropped as new ones come in, so the map holds only the rules warned about lately.
+    unreadable_filters: Mutex<HashMap<Uuid, i64>>,
 }
 
 impl std::fmt::Debug for EvalQueue {
@@ -79,6 +82,7 @@ impl EvalQueue {
             budgets: budget::Budgets::default(),
             breakers: breaker::Breakers::default(),
             hourly: hourly::HourlyCaps::default(),
+            unreadable_filters: Mutex::new(HashMap::new()),
         }
     }
 
@@ -90,6 +94,24 @@ impl EvalQueue {
     /// Tells every eval loop to stop.
     pub(crate) fn stop(&self) {
         self.stop.send_replace(true);
+    }
+
+    /// Whether `stop` was called. The sweeper checks it between projects and batches.
+    pub(crate) fn is_stopped(&self) -> bool {
+        *self.stop.borrow()
+    }
+
+    /// Whether `rule`'s unreadable-filter warning is due at `now`: at most one per rule per hour.
+    /// Returns true and records `now` when it is.
+    pub(crate) fn filter_warning_due(&self, rule: Uuid, now: i64) -> bool {
+        const HOUR_NS: i64 = 3_600_000_000_000;
+        let mut warned = lock(&self.unreadable_filters);
+        warned.retain(|_, at| now.saturating_sub(*at) < HOUR_NS);
+        if warned.contains_key(&rule) {
+            return false;
+        }
+        warned.insert(rule, now);
+        true
     }
 
     /// A receiver of the stop flag. Loops wait with `receiver.wait_for(|stopped| *stopped)`, which

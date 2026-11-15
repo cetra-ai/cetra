@@ -925,19 +925,18 @@ fn batches(completed: &[Completed]) -> Vec<(i64, &[Completed])>;
 ```rust
 /// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for
 /// each and drops those at `MAX_FAILED_READS`. Returns the traces dropped.
-fn settle(state: &AppState, project: ProjectId, batch: &[Completed], outcome: Result<(), ()>, report: &mut SweepReport) -> usize
+fn settle(state: &AppState, project: ProjectId, batch: &[Completed], outcome: Result<(), ()>, report: &mut SweepReport)
 ```
 
-   - `Ok(())` → `state.pending.finish(project, batch)`; return 0.
-   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`; return `dropped`.
+   - `Ok(())` → `state.pending.finish(project, batch)`.
+   - `Err(())` → `report.failed_batches += 1`; `dropped = state.pending.read_failed(project, batch)`; when `dropped > 0`, `tracing::warn!(project_id = %project, dropped, "pending traces dropped after 5 failed reads")` and `report.dropped += dropped`.
 
-   `settle` takes `&AppState` only for `state.pending`; its unit test builds a `TestApp`.
-3. `report.completed` is the sum of the `completed` lengths. When `report.enqueued > 0`, `state.eval.wake()`. Return the report.
+   `settle` returns nothing: tests read the report. It takes `&AppState` only for `state.pending`; its unit test builds a `TestApp`. Before `settle`, a test-only hook (`faults::run_before_settle`, `#[cfg(test)]`) runs, so a test can commit a span between the read and `finish`.
+3. `report.completed` is the sum of the `completed` lengths. When `report.enqueued > 0`, `state.eval.wake()`. Return the report. Before each project and each batch the sweep checks `state.eval.is_stopped()` and returns early when it is set, with the report so far.
 
-`sweep_batch(…) -> Result<(), ()>`. The error has already been logged inside; `()` keeps the signature honest about that. It has three steps in this order: read, then admit, then enqueue. Only the reads can fail before any hourly-cap unit is spent.
-1. **Read.** `let candidates = read_candidates(state, project, rules, around, batch).await?;`
-2. **Admit.** `report.matched += candidates.matched; report.sampled += candidates.targets.len();` then `let jobs = admit_targets(&state.eval.hourly, candidates.targets, now, report);`.
-3. **Enqueue.** For each chunk of `ENQUEUE_CHUNK` jobs, run one `MetaDb::write`. Its closure owns the chunk and calls `insert_rule_job` for each job; count the `true`s into `report.enqueued`. On a write error, log `error!(project_id, error = %error, "rule jobs could not be queued")` and return `Err(())`. The units the batch's admitted targets took stay spent; the retry admits them again. A write error is rare, so this is accepted.
+`sweep_batch(…) -> Result<(), ()>`. The error has already been logged inside; `()` keeps the signature honest about that. `SweepCtx` holds the state, the project, its rules and the sweep's `now`, in place of a long argument list. It has two phases: read, then, chunk by chunk, admit and enqueue. Only the reads can fail before any hourly-cap unit is spent.
+1. **Read.** `let candidates = read_candidates(ctx, around, batch).await?;`
+2. **Admit and enqueue, per chunk.** `report.matched += candidates.matched; report.sampled += candidates.targets.len();`. Then, for each chunk of `ENQUEUE_CHUNK` targets, `let jobs = admit_targets(&state.eval.hourly, chunk, now, report);`, and when `jobs` is not empty, one `MetaDb::write`. Its closure owns the chunk and calls `insert_rule_job` for each job; count the `true`s into `report.enqueued`. On a write error, log `error!(project_id, error = %error, "rule jobs could not be queued")` and return `Err(())`. The units the chunk's targets took stay spent; the retry admits them again. Later chunks are not admitted, so they keep their units. A write error is rare, so this is accepted.
 
 ```rust
 /// What the reads of one batch found, before the hourly cap.
@@ -1007,7 +1006,7 @@ Remove the I4.7 rows of § Conventions › Dead-code allows in M4, `HourlyCaps::
 - `the_hourly_cap_drops_and_counts`: advance the clock 6 s, then call `state.eval.hourly.admit(rule, state.clock.now_ns())` 10 000 times. Sweep one trace at the same clock value → no job, `report.capped == 1`, and `GET /online-rules/{id}` answers `dropped_last_hour: 1`.
 - `admit_targets_caps_in_order` (pure, on a fresh `HourlyCaps`): call `admit` 9 999 times for rule A, then `admit_targets` with three candidates of A and one of B → two jobs (A's first and B's), `report.capped == 2`.
 
-That a failed read spends no cap unit is guaranteed by the types: `read_candidates` takes no `HourlyCaps` and no report. There is no separate test for it. Do not add a test-only failure hook to storage.
+That a failed read spends no cap unit is guaranteed by the types: `read_candidates` takes no `HourlyCaps` and no report. It is also tested: `a_failed_candidate_read_spends_no_cap_and_counts_nothing` injects a `RunError::Timeout` through a test-only fault in the trigger (not in storage). Further tests: `a_span_committed_before_the_finish_keeps_its_trace`, `a_stopped_sweep_takes_no_batch`, `an_unreadable_filter_is_warned_once_an_hour` and `a_failed_chunk_spends_only_its_own_cap`.
 
 - `a_trace_completed_twice_gets_one_job`: sweep, commit another span of the same trace, sweep again → still one job.
 - `a_rule_with_an_unreadable_filter_is_skipped`: rule A's filter set by SQL to `status = = 'x'`, rule B fine → B's job is queued, the trace leaves the map, and the log has the skip warning (`capture_logs`, plain `#[tokio::test]`).
