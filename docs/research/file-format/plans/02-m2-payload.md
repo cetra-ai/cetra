@@ -660,7 +660,8 @@ The design is S4 § Trigram sets, Frame filter, Filter budget, Rollup, Edge grou
 
 **Edit:**
 - `strata/Cargo.toml` (one dependency);
-- `strata/src/payload/{mod.rs,frames.rs,header.rs,write.rs,search.rs (new),trigram.rs (new)}`;
+- `strata/src/lib.rs` (remove the crate-doc line saying payload columns have no search filters);
+- `strata/src/payload/{mod.rs,frames.rs,header.rs,write.rs,read.rs,search.rs (new),trigram.rs (new)}`;
 - `strata/tests/roundtrip_payload.rs`.
 
 **Dependency.** Add `memchr = "2"` under `[dependencies]`, the same spec as `bench/Cargo.toml`.
@@ -722,13 +723,28 @@ Unchanged from M2.2 § Rules for every step:
    - In `close`, before clearing `cur`, compute a `HashSet<u32>` from `add_trigrams` over each chunk of the frame separately, using the `cur_ends` ranges. Trigrams never span two chunks. Push the set to `frame_trigrams`.
    - The existing tests stay green.
 
-3. **`frames.rs`: frame lookup.** Add `pub(crate) fn frame_of(frames: &[FrameEntry], id: u32) -> Option<usize>`, with the same `partition_point` code as `read.rs`, plus the `local < n_chunks` check. Make `read.rs` call it, replacing its inline copy.
+3. **Frame lookup and shared reading.**
+   - In `frames.rs`, add `pub(crate) fn frame_of(frames: &[FrameEntry], id: u32) -> Option<usize>`. It returns only the frame index: the same `partition_point` code as `read.rs`, plus the `local < n_chunks` check. Callers compute `local = id.checked_sub(frames[f].first_chunk)` themselves, using `get`. `read.rs` calls it instead of its inline copy.
+   - In `read.rs`, move the header read (with the `n_rows == file.row_count()` check) and the refs-page fetch (with the per-page row-count checks) out of `read_payload_column` into:
+
+     ```rust
+     pub(crate) async fn read_header(file: &StrataFile, record: &DirectoryRecord) -> Result<PayloadHeader>;
+     pub(crate) async fn read_rows(file: &StrataFile, header: &PayloadHeader, at: u64) -> Result<Vec<Option<Vec<u32>>>>;
+     ```
+
+     `read_payload_column` and `payload_contains` both call them. The `read.rs` tests stay green.
 
 4. **`header.rs`: edge-group checks.** In `PayloadHeader::decode` add:
    - `n_edge_groups` must equal `n_chunks.div_ceil(EDGE_GROUP_CHUNKS)`;
    - group *i* must have `first_chunk == i × EDGE_GROUP_CHUNKS`.
 
-   Otherwise it is `Corrupt { what: "payload edge groups" }`. With zero chunks there are zero groups.
+   Otherwise it is `Corrupt { what: "payload edge groups" }`. Compute `i × EDGE_GROUP_CHUNKS` in `u64`. With zero chunks there are zero groups.
+
+   **Update the existing `header.rs` tests and docs:**
+   - `sample()` gets one `EdgeGroup { offset: 300, len: 40, first_chunk: 0 }` (`n_chunks` stays 3);
+   - `round_trip_and_exact_length` expects `32 + 2×16 + 16 + 2×24` bytes;
+   - `empty_frame_is_corrupt` sets `h.n_chunks = 2` and keeps one group, so it still fails on the frame table;
+   - the doc comments that say "M2.2 writes none", "Zero in M2.2" and "None in M2.2" get their M2.3 meaning.
 
 5. **The filters segment (`search.rs` holds its codec).**
 
@@ -749,25 +765,36 @@ Unchanged from M2.2 § Rules for every step:
    bitmap area: the frame bitmaps back to back, in frame order
    ```
 
-   `bitmap_offset` is relative to the start of the bitmap area.
+   **Writing the per-frame entries.**
+   - `bitmap_offset` is relative to the start of the bitmap area.
+   - A frame without a filter is written as `bitmap_offset = u32::MAX, bits = 0`.
+   - A frame with a filter is written with its cumulative offset (the sum of the earlier present bitmaps' `bits / 8`) and its `bits`.
+   - Bitmaps are written in frame order.
 
-   `decode` checks, each failure `Corrupt { what: "payload filters" }`:
-   - `rollup_bits` ∈ {0, `ROLLUP_BITS`};
-   - `n_frames` equals the header's;
-   - every present filter has `bits ≥ FILTER_MIN_BITS`, `bits % 64 == 0`, and `bitmap_offset + bits / 8 ≤` the area length (checked arithmetic);
-   - the whole segment is consumed.
+   **`decode` checks**, each failure `Corrupt { what: "payload filters" }`:
+   - `rollup_bits` ∈ {0, `ROLLUP_BITS`}, and the rollup bitmap fits in the input;
+   - `n_frames` equals the argument, and `n_frames × 8` does not exceed the remaining input, checked before allocating;
+   - for a frame with `bitmap_offset == u32::MAX`, `bits` is 0;
+   - for other frames, `bits ≥ FILTER_MIN_BITS`, `bits % 64 == 0`, and `bitmap_offset` equals the running sum of the earlier present bitmaps' `bits / 8`;
+   - the bitmap area length equals the total of the present bitmaps, which catches trailing bytes.
 
 6. **Edge groups (`search.rs`).**
    - `pub(crate) fn encode_edge_group(tails: &[Vec<u8>], out: &mut Vec<u8>)` writes one 64-byte entry per tail: `u8 tail_len`, the tail, zero padding to 63 bytes.
    - `pub(crate) fn decode_edge_group(bytes: &[u8], offset: u64, n: usize) -> Result<Vec<Vec<u8>>>` requires `bytes.len() == 64 × n` and `tail_len ≤ 63`, else `Corrupt { what: "payload edge group" }`.
+   - **Indexing.**
+     - Group *i* holds `n = min(EDGE_GROUP_CHUNKS, n_chunks − i × EDGE_GROUP_CHUNKS)` entries, and `decode_edge_group` is called with that `n`.
+     - The tail of chunk `l` is entry `l % EDGE_GROUP_CHUNKS` of group `l / EDGE_GROUP_CHUNKS`.
+     - A group is read with `file.read_segment(&SegmentRef { offset: g.offset, len: g.len }, Kind::PayloadEdges)`, and its error offset is `g.offset`.
 
-7. **`write.rs`: building the filters and edges.** In `write_payload_column`, after `frames.finish(..)` and after the refs pages:
+7. **`write.rs`: building the filters and edges.** In `write_payload_column`, after `frames.finish(..)` and after the refs pages.
+
+   The existing code moves the frames out with `std::mem::take(&mut frames.frames)` into `frame_entries`. Use `frame_entries` for `frame_of` and the budget, and keep `frames.frame_trigrams`, `tails` and `heads` in `frames`.
    1. **Boundary sets.** Collect every distinct adjacent pair `(l, r)` from every row's id list into a `HashSet<(u32, u32)>`.
       - For each pair, find `f = frame_of(&frames.frames, r)`; a `None` is an internal error, returned as `Corrupt { what: "payload pair" }`.
       - Build the window `tails[l] ‖ heads[r]`, fetching both with `.get(..)`.
       - Add the window's trigrams to `frames.frame_trigrams[f]` (with `get_mut`).
    2. **Frame filters.** For each frame *f* with trigram set `t`:
-      - `bits = filter_bits(t.len())`. If `bits / 8` exceeds `FILTER_MAX_SHARE ×` the frame's stored size (`FrameEntry.len − 16`), the frame gets no filter (`None`).
+      - `bits = filter_bits(t.len())`. If `bits / 8` exceeds `FILTER_MAX_SHARE ×` the frame's stored size, `u64::from(entry.len).saturating_sub(SEGMENT_HEADER_LEN as u64)` (from `crate::format`), the frame gets no filter (`None`).
       - Otherwise build the bitmap by setting `filter_bit(h, bits)` for each `h` in `t`.
    3. **Rollup.** Build a `ROLLUP_BITS` bitmap from the union of all frame trigram sets (in-chunk and boundary), with bit `h & (ROLLUP_BITS − 1)`. If more than `ROLLUP_MAX_FILL` of its bits are set, the rollup is `None`.
    4. **Edge groups.** Write `tails` in groups of `EDGE_GROUP_CHUNKS` as `Kind::PayloadEdges` segments (`Codec::Zstd`, `codec`). Record each `EdgeGroup { offset, len, first_chunk }`.
@@ -791,20 +818,21 @@ Unchanged from M2.2 § Rules for every step:
    ```
 
    **Algorithm** (S4 § `Contains(needle)`):
-   1. If `needle.len() > MAX_NEEDLE`, return `Unsupported { what: "needle longer than 64 bytes" }`.
-   2. Read and decode the header, every refs page (as `read.rs` does, same checks), and the filters segment (`header.filters_offset` / `filters_len`, `Kind::PayloadFilters`).
+   1. If `record.layer != Layer::Payload`, return `Unsupported { what: "contains on a non-payload column" }`. If `needle.len() > MAX_NEEDLE`, return `Unsupported { what: "needle longer than 64 bytes" }`.
+   2. Read the header (`read_header`) and the filters segment (`header.filters_offset` / `filters_len`, `Kind::PayloadFilters`).
 
       A header with `filters_len == 0` is `Corrupt { what: "payload filters" }`. Every M2.3 file writes the segment.
-   3. If `needle` is empty, every non-null row matches. Return without reading frames.
-   4. Let `tris` be the needle's trigram hashes (empty when `needle.len() < 3`). If `tris` is non-empty, the rollup is present, and some `h & (ROLLUP_BITS − 1)` bit is clear, no row matches. Return all-false, with `frames_read = 0`.
-   5. **Candidate frames.** Frame *f* is a candidate when:
+   3. If `needle` is empty, read the rows (`read_rows`). Every non-null row matches. Return without reading frames.
+   4. Let `tris` be the needle's trigram hashes (empty when `needle.len() < 3`). If `tris` is non-empty, the rollup is present, and some `h & (ROLLUP_BITS − 1)` bit is clear, no row matches. Return `n_rows` false values, with `frames_read = 0`, without reading the rows.
+   5. Otherwise read the rows (`read_rows`) and continue.
+   6. **Candidate frames.** Frame *f* is a candidate when:
       - it has no filter;
       - or `tris` is empty;
       - or every `h` in `tris` has `filter_bit(h, bits)` set.
 
       Fetch the candidate frames concurrently (`try_join_all`), check each `raw_len`, `decode_frame` them, and count them in `frames_read`.
-   6. **In-chunk matches.** Build a `memchr::memmem::Finder` for the needle. For every chunk of every candidate frame, mark its id in a `HashSet<u32>` when `finder.find(chunk).is_some()`.
-   7. **Boundary matches** (only when `needle.len() ≥ 2`). Let `k = needle.len() − 1`. Go through each row's id list, and for each adjacent pair `(l, r)` whose `r` lies in a candidate frame:
+   7. **In-chunk matches.** Build a `memchr::memmem::Finder` for the needle. For every chunk of every candidate frame, mark its id in a `HashSet<u32>` when `finder.find(chunk).is_some()`.
+   8. **Boundary matches** (only when `needle.len() ≥ 2`). Let `k = needle.len() − 1`. Go through each row's id list, and for each adjacent pair `(l, r)` whose `r` lies in a candidate frame:
       1. Load `l`'s tail from its edge group, group `l / EDGE_GROUP_CHUNKS`. Fetch each needed group once and cache it, counting it in `edge_groups_read`.
       2. Take `r`'s head from its decoded frame: the first `min(k, len)` bytes of chunk `r`.
       3. Build the window from the last `min(k, tail.len())` bytes of the tail followed by that head.
@@ -812,52 +840,91 @@ Unchanged from M2.2 § Rules for every step:
       5. Cache the answer per distinct pair in a `HashMap<(u32, u32), bool>`.
 
       Fetching edge groups needs the ids first, so gather the set of needed groups, then fetch them all concurrently.
-   8. **Result.** A row matches when one of its ids is in the in-chunk set, or one of its pairs matched. Null rows are `false`.
+   9. **Result.** A row matches when one of its ids is in the in-chunk set, or one of its pairs matched. Null rows are `false`.
 
    This search is exact. A frame that is not a candidate cannot hold the needle, and a needle crossing a boundary has its trigrams in the boundary set of the right chunk's frame. Every chunk except a value's last is at least 256 bytes, so a needle of 64 bytes or fewer spans at most two chunks.
 
 9. **`mod.rs`:**
-   - `mod search; mod trigram;`;
-   - `pub(crate) use search::{payload_contains, ContainsResult};`;
-   - the constants above.
-
-   `payload_contains` has no caller outside tests yet (M4 wires it into `scan`). Put `#[allow(dead_code)] // called by scan from M4 on` on `pub(crate) use search::…` and on the two items, the only `allow`s this sub-phase adds outside tests. They are removed in M4.
+   - add `mod search; mod trigram;` and the constants above;
+   - do **not** re-export `payload_contains` or `ContainsResult`. M4 adds the `pub(crate) use` when `scan` calls them. An `allow(dead_code)` on a `use` item would not silence `unused_imports`.
+   - `payload_contains` and `ContainsResult` have no caller outside tests yet. Put `#[allow(dead_code)] // called by scan from M4 on` on each of those two items in `search.rs`. Everything they call is then reachable. These are the only `allow`s this sub-phase adds outside test modules, and the tests reach the items through `super::*`.
 
 10. **`roundtrip_payload.rs`.**
     - Print `filter_bytes`, `edge_bytes`, `frames_without_filter` and `rollup` per payload column.
-    - Assert that, for the `input` column, `frames_without_filter × 5 ≤ frames`, that is, at least 80% of frames have a filter.
+    - For the `input` column, assert `frames ≥ 5`, then `frames_without_filter × 5 ≤ frames`, so at least 80% of frames have a filter.
+    - **If that assertion fails, stop and report** `frames`, `frames_without_filter` and `filter_bytes`. Do not change the thresholds.
 
 ### Tests
 
 **`trigram.rs`:**
-- `tri_hash` of `(0, 0, 0)` is 0, and `(1, 0, 0)` is `(0x9E37_79B9_7F4A_7C15u64 >> 32) as u32` (the `wrapping_mul` by 1).
+- `tri_hash` of `(0, 0, 0)` is 0, and `(1, 0, 0)` is `(0x9E37_79B9_7F4A_7C15u64 >> 32) as u32`.
 - `filter_bits(0) == 1024`, `filter_bits(512) == 1024`, `filter_bits(513) == 1088`, `filter_bits(10_000) == 20_032`.
-- `filter_bit(h, bits) < bits` for random `h` and `bits` (proptest).
+- `filter_bit(h, bits) < bits` (proptest, with `h` any `u32` and `bits` drawn from the multiples of 64 in `1024..=1 << 24`).
 - `add_trigrams(b"ab")` adds nothing; `add_trigrams(b"abcd")` adds 2 hashes.
 
 **Filters and edges:**
 - `Filters` round trips with a rollup, without one, and with mixed present and absent frame filters.
-- `decode` rejects `rollup_bits = 5`, a filter with `bits = 1000` (not a multiple of 64), a `bitmap_offset` past the area, and trailing bytes.
+- `decode` rejects each of these:
+  - `rollup_bits = 5`;
+  - a filter with `bits = 1000` (not a multiple of 64);
+  - a `bitmap_offset` that is not the running sum;
+  - an absent filter with `bits ≠ 0`;
+  - trailing bytes.
 - Edge groups round trip, including a tail of 0 bytes and one of 63 bytes. A `tail_len` of 64 is `Corrupt`.
-- Never panic on random bytes, for both decoders.
+- Never panic on random bytes, for both decoders. Random bytes must not trigger a large allocation.
 
-**Header:** a header whose edge-group count or `first_chunk`s do not match `n_chunks` is `Corrupt`.
+**Header:**
+- With `n_chunks` of 0, 1024 and 1025, a header with 0, 1 and 2 edge groups round trips.
+- A wrong edge-group count, or a wrong `first_chunk`, is `Corrupt`.
 
-**`Contains` correctness** (unit tests in `search.rs`). Build an in-memory file with `StrataWriter`, as `write.rs` tests do, from `fmt_testdata`-free data. Use a `testgen`-style column of 400 JSON-array values built from a seeded xorshift over a 40-word vocabulary. Each value holds 3–12 messages of 50–3,000 bytes, and conversations share prefixes: value *i + 1* extends value *i* in 70% of cases. Then:
-1. **Present needles.** 100 needles drawn from the data, each a substring of a random value at a random position, of length 1–64. Each result equals brute force: `value.windows(n).any(|w| w == needle)` per row.
-2. **Absent needles.** 100 random 8–32-byte strings over `[A-Z0-9]`. Brute force says absent, and the result is all-false.
+**Test data** (in the `search.rs` test module; a seeded xorshift64 as in the `frames.rs` `noise` helper):
+- **Vocabulary:** 40 lowercase ASCII words of 3–9 letters.
+- **Message *i*:** `{"role":"user","content":"<text>"}`, the role alternating between `user` and `assistant`.
+  - `<text>` is vocabulary words separated by single spaces, with a random token of 10–16 chars over `[a-z0-9]` inserted after every ~8th word. The tokens give each frame distinct trigrams.
+  - The JSON element is 50–3,000 bytes long; truncate the text to fit. No escapes are needed.
+- **Values:**
+  - A fresh value is a JSON array of 3–12 messages.
+  - With probability 70% (and *i* > 0), value *i* is instead value *i − 1* with its final `]` replaced by `,` + 1–3 new messages + `]`.
+  - 400 values, of which every 37th is null. `Config { payload_min_avg: 0, ..Config::default() }`.
+  - Assert `stats.frames ≥ 10`.
+
+**`Contains` correctness**, on that column, written with `StrataWriter`, put into `InMemory` and opened as `write.rs`'s tests do. Brute force is `value.windows(n).any(|w| w == needle)` per non-null row.
+1. **Present needles.** 100 needles, each a substring of a random non-null value at a random position, of length 1–64. Each result equals brute force.
+2. **Absent needles.** 100 random 8–32-byte strings over `[A-Z0-9]` (uppercase never occurs in the data). Skip any whose brute-force count is not 0.
+   - Every result is all-false.
+   - `frames_read == 0` for at least 95 of the 100 when the rollup is present. A rollup false positive is possible but rare.
+   - If the rollup was dropped, print that, and assert `frames_read <` the frame count for at least 95.
 3. **Boundary needles.**
-   - For 100 random rows, compute the row's chunk ranges with `chunk_value`. Pick a boundary `p` between two chunks, then `a` in 1..=`min(32, p − chunk start)` and `b` in 1..=32, with `a + b ≤ 64`.
-   - The needle is `value[p − a .. p + b]`.
-   - At least 30 of the 100 use `a ≥ 4`, so the boundary falls after the needle's 4th trigram. Generate them that way on purpose.
+   - For 100 random non-null rows with ≥ 2 chunks, compute the chunk ranges with `chunk_value`.
+   - Pick a boundary `p` = the end of chunk *j*, *j* not the last.
+   - Pick `a` in `1..=min(32, p − start of chunk j)` and `b` in `1..=min(32, value.len() − p)`. The needle is `value[p − a .. p + b]`.
+   - At least 30 of the 100 use `a ≥ 5`, so the 4th trigram (index 3) is the first one crossing the boundary. At least 10 use `a = 1`, and 10 use `b = 1`. Generate them that way on purpose.
    - Each result equals brute force.
-4. **Reads.** For an absent needle when the rollup is present: `frames_read == 0`. If the rollup was dropped for saturation, print that instead, and assert `frames_read <` the frame count.
-5. **Long and empty needles.** A 65-byte needle gives `Unsupported`. An empty needle matches every non-null row, with `frames_read == 0`.
-6. **Nulls and empties.** A column with null rows and empty values: nulls never match, and an empty value matches only the empty needle.
+4. **Long, empty and wrong-layer.**
+   - A 65-byte needle gives `Unsupported`.
+   - An empty needle matches every non-null row, with `frames_read == 0`.
+   - `payload_contains` on a narrow column's record gives `Unsupported`.
+5. **Nulls and empty values.** A column with null rows and some `""` values: nulls never match, and an empty value matches only the empty needle.
+
+**`boundary_set_is_required`.**
+- Build a column of 60 values, each a JSON array of two messages whose texts are 300 random `[a-z0-9]` bytes, so each value is two chunks with distinct trigrams.
+- For value *v*: the needle is the last 12 bytes of chunk 0 followed by the first 12 bytes of chunk 1. The result equals brute force, and `frames_read <` the frame count.
+- The swapped needle (chunk 1's first 12 bytes, then chunk 0's last 12) is all-false.
+
+**`unfiltered_frame_is_always_scanned`.**
+- One value, `"abc".repeat(100)`: 300 bytes, which compresses to far less than 256, so a 128-byte filter exceeds half the stored size.
+- Assert `frames_without_filter == 1`.
+- `Contains` for a present needle, an absent needle (`"xyz"`) and a needle crossing no boundary gives the brute-force answer. The absent needle has `frames_read == 1` when the rollup does not exclude it.
+
+**`dropped_rollup_still_exact`.**
+- 300 values of 4 KiB of seeded random bytes, as a Binary column. That is about 1.2 MB, which sets more than half of the 2^18 rollup buckets.
+- Assert `rollup == false`.
+- 50 present and 50 absent needles equal brute force.
 
 **Filter coverage.**
-- On the column of test *Contains correctness*, assert that at least 80% of frames have a filter, and print `filter_bytes`, `edge_bytes` and the rollup flag.
-- A `#[ignore]` test `filter_coverage_swe` reads the SWE-agent shards from `FMT_SWE_SHARDS` (comma-separated paths) with `fmt_testdata::swe::payloads(paths, 512 << 20, 1)`, writes the `input` values of the first chunk as one Utf8 column, and asserts the same 80%. It is run only when the shards are present. Note in the commit that it was not run if they were absent.
+- On the column of **`Contains` correctness**, assert `frames ≥ 5` and that at least 80% of frames have a filter. Print `filter_bytes`, `edge_bytes` and the rollup flag.
+- A `#[ignore]` test `filter_coverage_swe` returns early with a printed message when `FMT_SWE_SHARDS` (comma-separated paths) is unset. Otherwise it calls `fmt_testdata::swe::payloads(paths, 64 << 20, 1)`, writes the `input` values of the first chunk as one Utf8 column, and asserts the same 80%.
+- Note in the commit body whether `filter_coverage_swe` was run.
 
 ### Done when
 
