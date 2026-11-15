@@ -12,19 +12,15 @@
 import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
 import { ProtobufTraceSerializer } from "@opentelemetry/otlp-transformer";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace";
-
 import { warnOnce } from "./log.js";
 import { QuotaState } from "./quota.js";
-import { type FetchLike, getFetch, gzip, runtimeGlobals, timeoutSignal } from "./web.js";
+import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
+import { type FetchLike, getFetch, gzip, timeoutSignal } from "./web.js";
 
 const DEFAULT_TIMEOUT_MILLIS = 10_000;
 /** Total budget per `export` call, retries included (D-F-8). */
 const DEADLINE_MILLIS = 30_000;
-/** 1 attempt plus 3 retries. */
-const MAX_ATTEMPTS = 4;
 const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([429, 502, 503, 504]);
-const RETRY_AFTER_MAX_MILLIS = 30_000;
-const NON_NEGATIVE_INTEGER = /^[0-9]+$/;
 
 export interface FetchTraceExporterOptions {
   /** `<baseUrl>/v1/traces`. */
@@ -178,36 +174,4 @@ export class FetchTraceExporter implements SpanExporter {
 
 function failure(reason: string): ExportResult {
   return { code: ExportResultCode.FAILED, error: new Error(reason) };
-}
-
-/** Backoff after the attempt with index `attempt` (0-based): 1 s, 2 s, 4 s. */
-function backoffMillis(attempt: number): number {
-  switch (attempt) {
-    case 0:
-      return 1_000;
-    case 1:
-      return 2_000;
-    default:
-      return 4_000;
-  }
-}
-
-/** `Retry-After` seconds when a non-negative integer (capped at 30 s), else the backoff. */
-function waitMillis(retryAfter: string | null, attempt: number): number {
-  const header = retryAfter === null ? undefined : retryAfter.trim();
-  if (header !== undefined && NON_NEGATIVE_INTEGER.test(header)) {
-    return Math.min(Number(header) * 1000, RETRY_AFTER_MAX_MILLIS);
-  }
-  return backoffMillis(attempt);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  const { setTimeout } = runtimeGlobals();
-  if (setTimeout === undefined) {
-    // No timer in this runtime: continue without the wait.
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
