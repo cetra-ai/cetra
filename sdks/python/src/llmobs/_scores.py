@@ -23,6 +23,7 @@ from llmobs._context import current_values
 from llmobs._log import logger
 from llmobs._mask import apply
 from llmobs._quota import QuotaState
+from llmobs._retry import retry_delay
 from llmobs._serialize import serialize
 
 DataType = Literal["numeric", "boolean", "categorical", "text"]
@@ -227,8 +228,6 @@ _BATCH_LIMIT: Final = 1000
 _INTERVAL_S: Final = 1.0
 _REQUEST_TIMEOUT_S: Final = 10
 _MAX_RETRIES: Final = 3
-_RETRY_BACKOFF_S: Final = (1.0, 2.0, 4.0)
-_RETRY_AFTER_CAP_S: Final = 30.0
 _SHUTDOWN_BUDGET_S: Final = 30.0
 _WARN_EVERY_S: Final = 60.0
 
@@ -376,20 +375,7 @@ class ScoreQueue:
 
     def _retry_delay(self, response: requests.Response | None, attempt: int) -> float:
         """``Retry-After`` seconds when a non-negative integer (capped), else 1/2/4 s."""
-        if response is not None:
-            header = response.headers.get("Retry-After")
-            if header is not None:
-                # Spec 10 (Score delivery): ASCII digits, surrounding whitespace ignored. "+5",
-                # "1_0" and fullwidth digits are not integers here, so they use the default.
-                value = header.strip()
-                if value.isascii() and value.isdigit():
-                    try:
-                        seconds = int(value)
-                    except ValueError:  # more digits than int() converts: far above the cap
-                        return _RETRY_AFTER_CAP_S
-                    # Cap before float(): a very long digit string must not overflow the conversion.
-                    return float(min(seconds, _RETRY_AFTER_CAP_S))
-        return _RETRY_BACKOFF_S[attempt]
+        return retry_delay(response, attempt)
 
     def _post(self, batch: list[ScoreItem]) -> requests.Response | None:
         """One POST; ``None`` on a network error or timeout (retried like a 5xx)."""

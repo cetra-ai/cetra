@@ -8,15 +8,22 @@ import importlib.metadata
 # __version__ is set before the submodule imports: _runtime imports it from here.
 __version__ = importlib.metadata.version("llmobs")
 
+from llmobs._client import ApiError, Client
 from llmobs._config import ConfigError
 from llmobs._context import context
+from llmobs._datasets import Dataset, DatasetInfo, DatasetItem
 from llmobs._llm import LlmSpan, llm_span
 from llmobs._runtime import flush, init, shutdown, span_processor, tracer_provider
 from llmobs._scores import score, uuid7
 from llmobs._spans import Span, current_span_id, current_trace_id, observe, span
 
 __all__ = [
+    "ApiError",
+    "Client",
     "ConfigError",
+    "Dataset",
+    "DatasetInfo",
+    "DatasetItem",
     "LlmSpan",
     "Span",
     "__version__",
