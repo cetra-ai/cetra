@@ -3,6 +3,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::array::{Array, RecordBatch};
 use bytesize::ByteSize;
@@ -14,8 +15,10 @@ use crate::QueryOptions;
 use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::DeletionError;
+use crate::hooks::HookPoint;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
+use crate::wal::Table;
 
 fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
@@ -332,6 +335,43 @@ async fn a_user_deletion_hides_user_rows_and_session_scores_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explain_does_not_show_an_erased_users_identifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = flushed_with_score(&dir, &[(1, 0)]).await;
+    storage
+        .register_deletion(Deletion {
+            id: Uuid::now_v7(),
+            project: project(),
+            cutoff: INGEST,
+            scope: DeletionScope::User {
+                user_id: "erased@example.com".to_owned(),
+                trace_ids: Vec::new(),
+                session_ids: vec!["erased-session".to_owned()],
+            },
+        })
+        .await
+        .unwrap();
+
+    for table in ["spans", "scores"] {
+        let plan = text(&storage, &format!("EXPLAIN SELECT * FROM {table}")).await;
+        assert!(
+            plan.contains("user_id IN (<1 redacted>)"),
+            "the {table} plan shows the redacted term:\n{plan}"
+        );
+        assert!(
+            !plan.contains("erased@example.com") && !plan.contains("erased-session"),
+            "the {table} plan hides the identifiers:\n{plan}"
+        );
+    }
+    let scores = text(&storage, "EXPLAIN SELECT * FROM scores").await;
+    assert!(
+        scores.contains("session_id IN (<1 redacted>)"),
+        "the scores plan redacts the session ids:\n{scores}"
+    );
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_raised_file_escapes_the_tombstone_filter() {
     let dir = tempfile::tempdir().unwrap();
     let storage = flushed_with_score(&dir, &[(1, 0)]).await;
@@ -500,5 +540,133 @@ async fn register_deletion_is_idempotent_and_status_reports_the_state() {
     invalid.cutoff = 0;
     let error = storage.register_deletion(invalid).await.unwrap_err();
     assert!(matches!(error, DeletionError::Invalid { .. }), "{error}");
+    storage.shutdown().await.unwrap();
+}
+
+/// Marks a span's name so the test can find its bytes in a WAL file.
+const MARKER: &str = "erased-span-marker-4c1e9a7b";
+
+/// Whether any file under `dir` holds `marker`.
+fn files_contain(dir: &Path, marker: &[u8]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if files_contain(&path, marker) {
+                return true;
+            }
+        } else if std::fs::read(&path)
+            .is_ok_and(|bytes| bytes.windows(marker.len()).any(|window| window == marker))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Appends a span named [`MARKER`] on trace 1 and a plain span on trace 2, with
+/// the flush parked after its freeze. Returns once the flush is parked and the
+/// marker is in the WAL, so the later check cannot pass for the wrong reason.
+async fn park_flush_over_marked_span(storage: &crate::Storage, dir: &Path) {
+    let hooks = storage.hooks().clone();
+    hooks.hold(HookPoint::FlushAfterFreeze);
+    let mut marked = span_row(1, 0, INGEST, INGEST);
+    marked.name = MARKER.to_owned();
+    storage
+        .append_spans(
+            project(),
+            span_rows(&[marked, span_row(2, 0, INGEST, INGEST)]),
+        )
+        .await
+        .unwrap();
+    let started = Instant::now();
+    while hooks.waiting_at(HookPoint::FlushAfterFreeze) == 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "flush did not freeze"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        files_contain(&dir.join("wal"), MARKER.as_bytes()),
+        "the marker is in the WAL before the flush"
+    );
+}
+
+/// Waits until the parked flush has committed and the memtable is empty.
+async fn wait_for_flush_commit(storage: &crate::Storage, rows: u64) {
+    let started = Instant::now();
+    while storage.catalog_rows(Table::Spans) != rows || storage.published_rows(Table::Spans) != 0 {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "flush did not commit {rows} rows"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Waits until no file under `dir/wal` holds [`MARKER`]. The flush deletes the
+/// drained segment just after its commit, so the check is polled.
+async fn wait_until_wal_lacks_marker(dir: &Path) {
+    let started = Instant::now();
+    while files_contain(&dir.join("wal"), MARKER.as_bytes()) {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "the WAL still holds the marker"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_erased_span_leaves_no_wal_bytes_once_its_deletion_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path());
+    config.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(config).await.unwrap();
+    park_flush_over_marked_span(&storage, dir.path()).await;
+
+    let deletion = traces_deletion(&[1], INGEST);
+    let id = deletion.id;
+    storage.register_deletion(deletion).await.unwrap();
+    storage.hooks().release(HookPoint::FlushAfterFreeze);
+    // The flush read its tombstones before the registration, so both rows reach
+    // a file; the deletion pass then rewrites the file without trace 1.
+    wait_for_flush_commit(&storage, 2).await;
+
+    let mut status = storage.deletion_status(id).await.unwrap();
+    for _ in 0..50 {
+        if matches!(status, DeletionStatus::Applied { .. }) {
+            break;
+        }
+        storage
+            .apply_deletions(crate::catalog::now_ns())
+            .await
+            .unwrap();
+        status = storage.deletion_status(id).await.unwrap();
+    }
+    assert!(
+        matches!(status, DeletionStatus::Applied { .. }),
+        "deletion not applied: {status:?}"
+    );
+    wait_until_wal_lacks_marker(dir.path()).await;
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_project_leaves_no_wal_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path());
+    config.flush.max_age = Duration::from_millis(100);
+    let storage = crate::Storage::open(config).await.unwrap();
+    park_flush_over_marked_span(&storage, dir.path()).await;
+
+    storage.drop_project(project()).await.unwrap();
+    storage.hooks().release(HookPoint::FlushAfterFreeze);
+    // The flush skips the dropped project's partitions, so nothing is written.
+    wait_for_flush_commit(&storage, 0).await;
+    wait_until_wal_lacks_marker(dir.path()).await;
     storage.shutdown().await.unwrap();
 }

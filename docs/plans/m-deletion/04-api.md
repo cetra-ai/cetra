@@ -369,9 +369,10 @@ async fn create_deletion(
    - for `TraceIds`, `insert_traces(conn, id, &ids)`.
 
    The conflict becomes `409 conflict`.
-6. **Guard**, after the commit:
-   - `TraceIds`: `state.deletions.guard.add_traces(project, &ids, now)`;
-   - `User`: `state.deletions.guard.add_user(project, &user_id, now)`.
+6. **Guard**, before the write of step 5 (amended after the plan review, M-1: a judge copy stamped after the cut-off must always meet a guard that knows the trace): after the filter's count, fill it once with `clock.now_ns()`, then read the cut-off `now`, then fill it again with `now`:
+   - `TraceIds`: `state.deletions.guard.add_traces(project, &ids, id, now)`;
+   - `Filter`: `state.deletions.guard.add_traces(project, &matched, id, now)` (the ids the count read);
+   - `User`: `state.deletions.guard.add_user(project, &user_id, id, now)`.
 7. `state.deletions.wake.notify_one();`
 8. Audit: `tracing::info!(target: "audit", deletion_id = %id, kind = kind.as_str(), org_id = %org, project_id = %project, actor_kind = actor_kind.as_str(), actor_id = %actor_id, "deletion requested");`.
 9. `Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))`.
@@ -556,7 +557,7 @@ After committing, advance the clock 1 s (`app.state.clock.advance(Duration::from
     - `?limit=2` returns the newest two and a `next_cursor`. The next page returns the oldest, with `next_cursor` null.
     - `?cursor=bad` → `400`.
 14. `get_checks_the_project`: a deletion of another project (`app.add_project`) is `404` through this project's path. An unknown id is `404`. `…/deletions/not-a-uuid` is `400`.
-15. `guard_is_filled_at_creation`: after a `user` deletion of `u9`, `app.state.deletions.guard.blocks(project, TraceId::from_bytes([1; 16]).unwrap(), &["u9"], now, now)` is true (data ingested at the cut-off).
+15. `guard_is_filled_at_creation`: after a `user` deletion of `u9`, `app.state.deletions.guard.blocking(project, TraceId::from_bytes([1; 16]).unwrap(), &[("u9", now)], now)` is `Some` (data ingested at the cut-off). `filter_guard_is_filled_at_creation`: a filter deletion matching trace A guards A with its id, and not trace B.
 16. `request_audit_log_has_no_scope`: `let (response, logs) = capture_logs(post(…user secret-user-1…)).await;` → `202`, `logs.contains("deletion requested")`, `!logs.contains("secret-user-1")`.
 17. `read_pat_of_an_admin_lists`: a read-only PAT of the owner → `GET …/deletions` `200`.
 

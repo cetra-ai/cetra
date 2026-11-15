@@ -8,7 +8,7 @@ Tools that are not part of the product. Benchmark scripts live here too.
 
 Scenarios live in `tools/capture/py/scenarios/<group>/<case>/` (uv) and `tools/capture/ts/scenarios/<group>/<case>/` (pnpm). Each directory holds `scenario.json` and the program.
 
-The recipes arrive with the tool, in K9–K10 of [`docs/plans/b2-capture/`](../docs/plans/b2-capture/README.md):
+The recipes are in the tool; their design is in K9–K10 of [`docs/plans/b2-capture/`](../docs/plans/b2-capture/README.md):
 
 - `just capture <group>/<case>` records one scenario.
 - `just capture-all` records every scenario.

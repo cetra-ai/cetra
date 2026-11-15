@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::admin_socket;
 use crate::auth::Limits;
 use crate::clock::Clock;
 use crate::config::{ConfigError, ServerConfig};
@@ -138,8 +139,13 @@ pub struct Running {
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
     state: Option<AppState>,
+    /// The control socket's accept task, when it bound (D-N-17). Shutdown stops it
+    /// first, before the HTTP drain.
+    admin_socket: Option<JoinHandle<()>>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
+    /// The eval loops. Shutdown stops them before the storage flush (D-I-12).
+    eval_tasks: Option<crate::eval::EvalTasks>,
 }
 
 impl std::fmt::Debug for Running {
@@ -162,8 +168,14 @@ impl Drop for Running {
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
         }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+        }
         for task in &self.tasks {
             task.abort();
+        }
+        if let Some(eval) = &self.eval_tasks {
+            eval.abort();
         }
     }
 }
@@ -303,6 +315,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         }
     };
     let storage = Arc::new(storage);
+    let eval = crate::eval::EvalQueue::new(config.eval.workers);
     let state = AppState::new(AppInner {
         config,
         meta,
@@ -330,11 +343,22 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         ingest_rate: crate::entitlements::rate::IngestRate::default(),
         trace_loads: crate::eval::trace_load::TraceLoads::default(),
         definitions: crate::eval::definitions::DefinitionCache::default(),
+        backup_slot: tokio::sync::Mutex::new(()),
+        eval,
+        pending: crate::eval::pending::PendingTraces::default(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
         release_state(state).await;
         return Err(serve_bootstrap(error));
+    }
+    if let Err(error) = crate::eval::recover(&state).await {
+        release_state(state).await;
+        return Err(ServeError::Meta(error));
+    }
+    // Losing the load only stops tracking of the traces that were pending, so startup goes on.
+    if let Err(error) = crate::eval::trigger::load(&state).await {
+        tracing::warn!(error = %error, "pending traces could not be loaded; tracking starts empty");
     }
     // The guard is a safety net for judge runs; the server starts without it.
     if let Err(error) = state
@@ -383,10 +407,12 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         &state,
         crate::alerts::AlertTiming::DEFAULT,
     ));
+    let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
     tasks.push(spawn_usage(state.clone()));
     tasks.push(spawn_notices(state.clone()));
+    let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let app = router(state.clone(), ui).into_make_service_with_connect_info::<SocketAddr>();
@@ -443,7 +469,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         grpc_serve,
         grpc_shutdown_tx,
         state: Some(state),
+        admin_socket,
         tasks,
+        eval_tasks: Some(eval_tasks),
     })
 }
 
@@ -603,11 +631,22 @@ fn spawn_prune(state: AppState) -> JoinHandle<()> {
 }
 
 impl Running {
-    /// Stop accepting, drain HTTP, stop background tasks, flush storage, close `meta.db`.
+    /// The server state, while the server runs.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &AppState {
+        self.state
+            .as_ref()
+            .expect("state is present until shutdown")
+    }
+
+    /// Stop the control socket, stop accepting, drain HTTP, stop the eval loops and background
+    /// tasks, wait for detached commits, flush the pending traces, the last-used stamps and the
+    /// usage counters, flush storage, close `meta.db`.
     ///
-    /// A storage flush error is logged. The lock is released inside
-    /// `Storage::shutdown` before that error, and this method still closes
-    /// `meta.db`.
+    /// The control socket goes first: a backup in progress is cancelled, and no
+    /// new one starts during the drain. A storage flush error is logged. The lock
+    /// is released inside `Storage::shutdown` before that error, and this method
+    /// still closes `meta.db`.
     ///
     /// # Errors
     ///
@@ -615,6 +654,15 @@ impl Running {
     pub async fn shutdown(mut self) -> Result<(), ServeError> {
         if let Some(state) = &self.state {
             state.live.close();
+        }
+        if let Some(socket) = self.admin_socket.take() {
+            socket.abort();
+            let _ = socket.await;
+        }
+        if let Some(state) = &self.state
+            && let Err(error) = admin_socket::remove_socket_file(&state.config.data_dir)
+        {
+            tracing::warn!(error = %error, "could not remove the admin socket");
         }
         if let Some(sender) = self.shutdown_tx.take() {
             let _ = sender.send(());
@@ -631,6 +679,9 @@ impl Running {
             drain_optional(self.grpc_serve.take()),
         );
         let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        if let (Some(eval), Some(state)) = (self.eval_tasks.take(), self.state.as_ref()) {
+            eval.shutdown(state).await;
+        }
         for task in self.tasks.drain(..) {
             task.abort();
             let _ = task.await;
@@ -643,6 +694,9 @@ impl Running {
                 .is_err()
             {
                 tracing::error!("ingest commits did not finish before shutdown");
+            }
+            if let Err(error) = crate::eval::trigger::flush_all(&state).await {
+                tracing::error!(error = %error, "pending traces flush failed");
             }
             if let Err(error) = state.last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
@@ -724,9 +778,6 @@ fn directory_error(path: &Path, source: &io::Error) -> ServeError {
 mod tests {
     use std::time::Instant;
 
-    use llmobs_storage::config::{
-        AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
-    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -738,12 +789,10 @@ mod tests {
     use tonic::codec::CompressionEncoding;
 
     use super::*;
-    use crate::config::{
-        AuthSettings, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-        MediaConfig, OrgsConfig, PublicUrl, Secret, SecurityConfig,
-    };
+    use crate::config::Secret;
     use crate::crypto::{decode_key, encode_key, random_key, write_key_file};
     use crate::meta::instance_settings::put_setting;
+    use crate::test_support::{OTLP_KEY, config, with_init};
     use llmobs_core::ids::OrgId;
 
     #[tokio::test]
@@ -881,6 +930,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dropped_running_releases_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        drop(running);
+        // The aborted tasks drop their state a few polls later, so retry for a short while.
+        let started = Instant::now();
+        loop {
+            match bind(config(dir.path()), None).await {
+                Ok(again) => {
+                    again.shutdown().await.unwrap();
+                    break;
+                }
+                Err(error) => {
+                    assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn idle_keepalive_shuts_down_within_the_drain() {
         let dir = tempfile::tempdir().unwrap();
         let running = bind(config(dir.path()), None).await.unwrap();
@@ -971,6 +1041,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_flushes_the_map() {
+        use crate::meta::MetaDb;
+        use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+        use llmobs_core::ids::{ProjectId, SpanId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(with_init(config(dir.path())), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let project_text: String = sqlx::query_scalar("SELECT id FROM projects")
+            .fetch_one(state.meta.reader())
+            .await
+            .unwrap();
+        let project = ProjectId::from_uuid(uuid::Uuid::parse_str(&project_text).unwrap());
+        // A trace rule keeps the project tracked, as the sweeper's per-tick refresh would.
+        let evaluator = uuid::Uuid::now_v7();
+        let rule = uuid::Uuid::now_v7();
+        let now = state.clock.now_ns();
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        project,
+                        "check",
+                        EvaluatorFields {
+                            name: "Same".to_owned(),
+                            config: "{}".to_owned(),
+                            output_score: "{}".to_owned(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_rule(
+                        conn,
+                        NewRule {
+                            id: rule,
+                            project_id: project,
+                            evaluator_id: evaluator,
+                            target: "trace".to_owned(),
+                            created_by: None,
+                        },
+                        RuleFields {
+                            name: "Every trace".to_owned(),
+                            filter: None,
+                            variable_mapping: "{}".to_owned(),
+                            sample_rate: 1.0,
+                            budget_usd: None,
+                            budget_period: None,
+                            enabled: true,
+                        },
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // A sweep that read the rules before the insert may still hold a stale tracked set. Every
+        // tick that starts after this sleep tracks the project, so refreshing again is enough.
+        tokio::time::sleep(crate::eval::EvalTiming::DEFAULT.sweep_every * 2).await;
+        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        // An unrooted span: the trace stays pending for the 60 s timeout, so nothing completes it.
+        let mut span = crate::test_support::dataset_span(0);
+        span.parent_span_id = Some(SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1]).unwrap());
+        span.environment = None;
+        span.metadata.clear();
+        state
+            .pending
+            .observe(project, &[span], state.clock.now_ns());
+        running.shutdown().await.unwrap();
+        let meta = MetaDb::open(dir.path()).await.unwrap();
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM pending_traces WHERE project_id = ?")
+                .bind(project.to_string())
+                .fetch_one(meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(rows, 1);
+        meta.close().await;
+    }
+
+    #[tokio::test]
     async fn an_ingest_request_over_tcp_is_counted_by_the_shutdown_flush() {
         use crate::meta::MetaDb;
 
@@ -1055,21 +1216,8 @@ mod tests {
         meta.close().await;
     }
 
-    const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
     const TRACES: &str =
         include_str!("../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
-
-    fn with_init(mut config: ServerConfig) -> ServerConfig {
-        config.init = serde_json::from_value(serde_json::json!({
-            "admin_email": "ada@example.com",
-            "admin_password": "llmobs-ok1",
-            "org": "Acme",
-            "project": "Support bot",
-            "secret_key": OTLP_KEY,
-        }))
-        .unwrap();
-        config
-    }
 
     async fn send_raw(addr: SocketAddr, request: &[u8]) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1314,43 +1462,5 @@ mod tests {
 
         let again = bind(config(dir.path()), None).await.unwrap();
         again.shutdown().await.unwrap();
-    }
-
-    fn config(data_dir: &Path) -> ServerConfig {
-        ServerConfig {
-            data_dir: data_dir.to_path_buf(),
-            public_url: PublicUrl::default(),
-            http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
-            trusted_proxies: Vec::new(),
-            otlp_http_addr: None,
-            grpc_addr: None,
-            storage: StorageConfig {
-                data_dir: data_dir.to_path_buf(),
-                min_free_bytes: ByteSize::b(0),
-                object_store: None,
-                s3: S3Config::default(),
-                wal: WalConfig::default(),
-                flush: FlushConfig::default(),
-                memtable: MemtableConfig::default(),
-                query: QueryConfig::default(),
-                anchor: AnchorConfig::default(),
-                gc: Default::default(),
-                compaction: Default::default(),
-                deletion: Default::default(),
-            },
-            ingest: IngestConfig::default(),
-            media: MediaConfig::default(),
-            eval: EvalConfig::default(),
-            security: SecurityConfig::default(),
-            entitlements: EntitlementsConfig::default(),
-            orgs: OrgsConfig::default(),
-            encryption_key: None,
-            license_key: None,
-            auth: AuthSettings::default(),
-            smtp_url: None,
-            email_from: None,
-            init: InitConfig::default(),
-            log: LogConfig::default(),
-        }
     }
 }

@@ -138,12 +138,15 @@ async fn run_query(
 
     let mut notes = Vec::new();
     if result.truncated {
+        let returned = rows.len();
         notes.push(if limit < MAX_ROWS {
             format!(
-                "rows truncated at {limit}; pass a larger limit (at most 1000) or narrow the query"
+                "{returned} rows returned and more matched (the limit or the answer size cap); pass a larger limit (at most 1000) or narrow the query"
             )
         } else {
-            "rows truncated at 1000; narrow the query or the window".to_owned()
+            format!(
+                "{returned} rows returned and more matched (the 1000-row cap or the answer size cap); narrow the query or the window"
+            )
         });
     }
     if cut {
@@ -677,7 +680,9 @@ mod tests {
         assert_eq!(body["truncated"], json!(true));
         assert_eq!(
             body["notes"],
-            json!(["rows truncated at 2; pass a larger limit (at most 1000) or narrow the query"])
+            json!([
+                "2 rows returned and more matched (the limit or the answer size cap); pass a larger limit (at most 1000) or narrow the query"
+            ])
         );
 
         let (_, body) = sql(
@@ -714,7 +719,9 @@ mod tests {
         assert_eq!(body["truncated"], json!(true));
         assert_eq!(
             body["notes"][0],
-            json!("rows truncated at 1000; narrow the query or the window")
+            json!(
+                "1000 rows returned and more matched (the 1000-row cap or the answer size cap); narrow the query or the window"
+            )
         );
     }
 
@@ -755,7 +762,7 @@ mod tests {
         assert_eq!(
             body["notes"],
             json!([
-                "rows truncated at 1; pass a larger limit (at most 1000) or narrow the query",
+                "1 rows returned and more matched (the limit or the answer size cap); pass a larger limit (at most 1000) or narrow the query",
                 "string values longer than 2000 characters were cut",
             ])
         );

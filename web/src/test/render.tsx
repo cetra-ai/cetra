@@ -5,10 +5,13 @@ import userEvent from "@testing-library/user-event";
 import { ThemeProvider } from "@/components/theme-provider";
 import { createAppRouter } from "@/router";
 
-export async function renderApp(url: string) {
+export async function renderApp(
+  url: string,
+  options: { retry?: boolean | ((failureCount: number, error: unknown) => boolean) } = {},
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
-      queries: { retry: false, gcTime: Infinity, staleTime: Infinity },
+      queries: { retry: options.retry ?? false, gcTime: Infinity, staleTime: Infinity },
     },
   });
   const router = createAppRouter({

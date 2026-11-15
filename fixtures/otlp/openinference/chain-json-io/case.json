@@ -6,5 +6,5 @@
     "02 § Normalization rules",
     "02 § Mapping tables / Span kind"
   ],
-  "notes": "hand-written from openinference-instrumentation-langchain; re-check against a B2 capture"
+  "notes": "hand-written from openinference-instrumentation-langchain. The JSON input half is confirmed by openinference/langgraph-agent, whose CHAIN spans (LangGraph, model, tools) have input.mime_type application/json. No capture has a chain span with a text output, so the text output half is not covered."
 }

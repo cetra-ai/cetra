@@ -36,6 +36,9 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Deletions | `01900000-0000-7000-8000-000000000900` (`trace_ids`), `…0901` (`filter`), `…0902` (`user`), `…0903` (`project`), `…0904` (`org`), `…0905` (`user`, `resolving`, the `202` answer of `create_deletion`). `deletions.json`, `deletion.json`, `deletion-project.json`, `deletion-org.json` and `deletion-resolving.json` use them. They are not live deletions |
 | Evaluator | `01900000-0000-7000-8000-000000000500`, `Relevance`, an LLM judge on connection `…0400`, score `relevance` |
 | Score definition | `01900000-0000-7000-8000-000000000600`, `relevance`, numeric from 0 to 1 |
+| Online rule | `01900000-0000-7000-8000-000000000700`, `Relevance on answers`, a trace rule on evaluator `…0500`, filter `status = 'ok'`, budget 5 USD a day, enabled. `online-rule.json`, `online-rules.json` and `requests/online-rule-create.json` use it |
+| Second online rule | `01900000-0000-7000-8000-000000000701`, `Relevance on spans`, a span rule on `…0500`, enabled and paused (`errors`). `online-rules.json` uses it |
+| Eval jobs | `01900000-0000-7000-8000-000000000800` (done rule job of `…0700`, judge trace `e1000000000000000000000000000002`, score `…0900`), `…0801` (failed rule job, `provider status 503`), `…0802` (queued manual run of `…0500`). `eval-job.json`, `eval-jobs.json` and `eval-job-queued.json` use them. They are not live jobs |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |

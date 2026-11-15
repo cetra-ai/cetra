@@ -12,15 +12,19 @@ pub(crate) mod connections;
 pub(crate) mod deletions;
 pub(crate) mod email_verifications;
 pub(crate) mod entitlements;
+pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
 pub(crate) mod members;
+pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod password_resets;
+pub(crate) mod pending_traces;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
+pub(crate) mod rule_spend;
 pub(crate) mod saved_views;
 pub(crate) mod score_definitions;
 pub(crate) mod usage;
@@ -57,6 +61,15 @@ impl MetaDb {
     pub(crate) async fn open(data_dir: &Path) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
         let mut writer = connect(&path, true).await?;
+        let applied = applied_version(&mut writer).await?;
+        pre_migration_copy(
+            &mut writer,
+            data_dir,
+            "meta.db",
+            applied,
+            expected_version(),
+        )
+        .await?;
         migrator()
             .run(&mut writer)
             .await
@@ -76,6 +89,20 @@ impl MetaDb {
     /// migration other than this binary's is [`MetaError::SchemaMismatch`].
     /// No migration rows counts as version `0`.
     pub(crate) async fn open_existing(data_dir: &Path) -> Result<Self, MetaError> {
+        Self::open_checked(data_dir, false).await
+    }
+
+    /// [`Self::open_existing`], but a schema **newer** than this binary's is accepted
+    /// too. Only for reading a source whose tables this binary knows by column name:
+    /// `llmobs admin reapply-deletions --from` after a rollback (D-M-9). Migrations only
+    /// add, so the columns this binary reads are still there; a missing one fails the
+    /// read with [`MetaError::Database`]. An older schema is still
+    /// [`MetaError::SchemaMismatch`].
+    pub(crate) async fn open_existing_or_newer(data_dir: &Path) -> Result<Self, MetaError> {
+        Self::open_checked(data_dir, true).await
+    }
+
+    async fn open_checked(data_dir: &Path, newer_ok: bool) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
         if !path.is_file() {
             return Err(MetaError::NotInitialized);
@@ -83,7 +110,7 @@ impl MetaDb {
         let mut writer = connect(&path, false).await?;
         let found = applied_version(&mut writer).await?;
         let expected = expected_version();
-        if found != expected {
+        if found != expected && !(newer_ok && found > expected) {
             return Err(MetaError::SchemaMismatch { found, expected });
         }
         let readers = reader_pool(&path).await?;
@@ -177,6 +204,12 @@ pub enum MetaError {
     /// `open_existing` found no `meta.db`.
     #[error("meta.db is not initialized")]
     NotInitialized,
+    /// The pre-migration copy of `meta.db` could not be written or cleaned up (D-N-22).
+    #[error("meta.db pre-migration copy: {0}")]
+    PreMigrationIo(std::io::Error),
+    /// `VACUUM INTO` for the pre-migration copy of `meta.db` failed (D-N-22).
+    #[error("meta.db pre-migration copy: {0}")]
+    PreMigrationDb(sqlx::Error),
     /// The latest applied migration is not the one this binary embeds.
     #[error("meta.db schema version {found}, binary expects {expected}")]
     SchemaMismatch {
@@ -284,6 +317,80 @@ async fn reader_pool(path: &Path) -> Result<SqlitePool, MetaError> {
         })
 }
 
+/// Before migrations that change an existing database, copies `<name>` to
+/// `<name>.pre-m<applied, 4 digits>` with `VACUUM INTO` (an existing copy is
+/// kept), and removes the other `<name>.pre-*` copies (D-N-22). A new database (`applied == 0`) and a
+/// current one (`applied >= expected`) get no copy.
+async fn pre_migration_copy(
+    connection: &mut SqliteConnection,
+    dir: &Path,
+    name: &str,
+    applied: i64,
+    expected: i64,
+) -> Result<(), MetaError> {
+    if applied == 0 || applied >= expected {
+        return Ok(());
+    }
+    // Keyed by the schema being left, not the package version, which stays
+    // the same between releases while commit-pinned builds migrate (D-N-22).
+    let target = dir.join(format!("{name}.pre-m{applied:04}"));
+    let staging = dir.join(format!("{name}.pre-m{applied:04}.tmp"));
+    // An existing copy is kept: a failed upgrade must not replace the good
+    // pre-upgrade copy with a half-migrated database.
+    let copied = !target.exists();
+    if copied {
+        let staging_text = staging.to_str().ok_or_else(|| {
+            MetaError::PreMigrationIo(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "data directory path is not UTF-8",
+            ))
+        })?;
+        if staging.exists() {
+            std::fs::remove_file(&staging).map_err(MetaError::PreMigrationIo)?;
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(staging_text)
+            .execute(&mut *connection)
+            .await
+            .map_err(MetaError::PreMigrationDb)?;
+        std::fs::File::open(&staging)
+            .and_then(|file| file.sync_all())
+            .map_err(MetaError::PreMigrationIo)?;
+        std::fs::rename(&staging, &target).map_err(MetaError::PreMigrationIo)?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(MetaError::PreMigrationIo)?;
+    }
+    let prefix = format!("{name}.pre-");
+    for entry in std::fs::read_dir(dir).map_err(MetaError::PreMigrationIo)? {
+        let path = entry.map_err(MetaError::PreMigrationIo)?.path();
+        let stale = path != target
+            && path
+                .file_name()
+                .and_then(|file| file.to_str())
+                .is_some_and(|file| file.starts_with(&prefix));
+        if stale {
+            std::fs::remove_file(&path).map_err(MetaError::PreMigrationIo)?;
+        }
+    }
+    if copied {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "copied the database before migrating"
+        );
+    } else {
+        tracing::info!(
+            database = name,
+            applied,
+            expected,
+            "kept the existing pre-migration copy"
+        );
+    }
+    Ok(())
+}
+
 async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, MetaError> {
     let present: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
@@ -304,9 +411,9 @@ async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, MetaE
 mod tests {
     use std::sync::Arc;
 
-    use sqlx::SqliteConnection;
+    use sqlx::{Connection, SqliteConnection};
 
-    use super::{MetaDb, expected_version};
+    use super::{MetaDb, connect, expected_version, migrator};
     use crate::meta::MetaError;
 
     async fn pragmas(connection: &mut SqliteConnection) -> (String, i64, i64, i64) {
@@ -381,6 +488,69 @@ mod tests {
         }, {
             insta::assert_snapshot!("meta_schema", text);
         });
+    }
+
+    #[tokio::test]
+    async fn an_existing_pre_migration_copy_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let mut first_only = migrator();
+        let first = first_only.migrations[..1].to_vec();
+        let first_version = first[0].version;
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = connect(&path, true).await.unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+        let copy = dir.path().join(format!("meta.db.pre-m{first_version:04}"));
+        std::fs::write(&copy, b"known content").unwrap();
+
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+
+        assert_eq!(std::fs::read(&copy).unwrap(), b"known content");
+    }
+
+    /// Lists the `meta.db.pre-*` files in `dir`.
+    fn pre_copies(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("meta.db.pre-"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn opening_an_older_meta_db_keeps_a_pre_migration_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        // An older binary left only the first migration applied.
+        let mut first_only = migrator();
+        let first = first_only.migrations[..1].to_vec();
+        let first_version = first[0].version;
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = connect(&path, true).await.unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+        std::fs::write(dir.path().join("meta.db.pre-0.0.0-old"), b"old").unwrap();
+
+        let db = MetaDb::open(dir.path()).await.unwrap();
+        db.close().await;
+
+        let copy_name = format!("meta.db.pre-m{first_version:04}");
+        assert_eq!(pre_copies(dir.path()), vec![copy_name.clone()]);
+        let mut copy = connect(&dir.path().join(copy_name), false).await.unwrap();
+        let version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&mut copy)
+            .await
+            .unwrap();
+        assert_eq!(version, first_version);
+    }
+
+    #[tokio::test]
+    async fn a_new_or_current_meta_db_gets_no_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert!(pre_copies(dir.path()).is_empty());
     }
 
     #[tokio::test]

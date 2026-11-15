@@ -2667,6 +2667,7 @@ mod tests {
         let request = |include_eval: bool| TraceListRequest {
             filter: None,
             search: None,
+            strict_exclusions: false,
             scope: ListScope {
                 window: None,
                 include_eval,
@@ -2781,6 +2782,7 @@ mod tests {
         TraceListRequest {
             filter,
             search: None,
+            strict_exclusions: false,
             scope: ListScope {
                 window: None,
                 include_eval: true,

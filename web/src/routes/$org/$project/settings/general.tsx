@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { meQuery, projectListOptions, projectQuery } from "@/api/queries";
@@ -15,7 +15,9 @@ import { SettingsPage } from "@/components/settings/settings-page";
 import { useProject } from "@/components/shell/project-context";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S } from "@/lib/completion-timeout";
 import { removeProjectReads } from "@/lib/deletions";
 import { atLeast } from "@/lib/roles";
 
@@ -52,6 +54,55 @@ function ProjectGeneralPage() {
   const canDelete = me.isSuccess && atLeast(orgRole, "admin");
   const [dropOpen, setDropOpen] = useState(false);
   const dropMutation = $api.useMutation("delete", "/api/v1/projects/{project}");
+  const serverTimeout = data.trace_completion_timeout_s;
+  const [timeout, setTimeoutText] = useState(String(serverTimeout));
+  // Once the user has typed in the field, later server values no longer overwrite it.
+  const [timeoutEdited, setTimeoutEdited] = useState(false);
+  const [timeoutError, setTimeoutError] = useState<string | undefined>();
+  const [timeoutSaved, setTimeoutSaved] = useState(false);
+  const [timeoutFormError, setTimeoutFormError] = useState<string | undefined>();
+  const timeoutMutation = $api.useMutation("patch", "/api/v1/projects/{project}");
+  useEffect(() => {
+    if (!timeoutEdited) {
+      setTimeoutText(String(serverTimeout));
+    }
+  }, [serverTimeout, timeoutEdited]);
+
+  function onTimeoutSubmit(event: FormEvent) {
+    event.preventDefault();
+    setTimeoutSaved(false);
+    setTimeoutFormError(undefined);
+    timeoutMutation.reset();
+    const value = timeout.trim();
+    const seconds = Number(value);
+    if (
+      !/^\d+$/.test(value) ||
+      seconds < COMPLETION_TIMEOUT_MIN_S ||
+      seconds > COMPLETION_TIMEOUT_MAX_S
+    ) {
+      setTimeoutError(
+        `Enter a whole number from ${COMPLETION_TIMEOUT_MIN_S} to ${COMPLETION_TIMEOUT_MAX_S}.`,
+      );
+      return;
+    }
+    setTimeoutError(undefined);
+    timeoutMutation.mutate(
+      { params: { path: { project: ref } }, body: { trace_completion_timeout_s: seconds } },
+      {
+        onSuccess: () => {
+          setTimeoutSaved(true);
+          void queryClient.invalidateQueries({ queryKey: projectQuery(org, project).queryKey });
+        },
+        onError: (caught) => {
+          const fields = fieldErrors(caught);
+          setTimeoutError(fields.trace_completion_timeout_s);
+          if (fields.trace_completion_timeout_s === undefined) {
+            setTimeoutFormError(problemMessage(caught, "Could not save the timeout."));
+          }
+        },
+      },
+    );
+  }
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -168,7 +219,7 @@ function ProjectGeneralPage() {
           value={days}
           error={daysError}
           disabled={forever || !canEdit || mutation.isPending}
-          description="Lowering retention drops older data right away. Deleted data cannot be recovered."
+          description="Lowering retention drops older data right away. Deleted data cannot be recovered. Evaluation results and scores are kept by the day they were written, not by the day of the trace they score."
           onChange={(value) => {
             setDays(value);
             setSaved(false);
@@ -194,6 +245,53 @@ function ProjectGeneralPage() {
           </SubmitButton>
         </DisabledReason>
       </form>
+      <section className="flex max-w-md flex-col gap-4">
+        <h2 className="text-sm leading-none font-medium">Online evaluation</h2>
+        <form
+          noValidate
+          aria-label="Online evaluation"
+          className="flex flex-col gap-4"
+          onSubmit={onTimeoutSubmit}
+        >
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="project-trace-timeout">Trace completion timeout (seconds)</Label>
+            <Input
+              id="project-trace-timeout"
+              name="project-trace-timeout"
+              type="number"
+              min={COMPLETION_TIMEOUT_MIN_S}
+              max={COMPLETION_TIMEOUT_MAX_S}
+              step={1}
+              value={timeout}
+              aria-invalid={timeoutError ? true : undefined}
+              aria-describedby="project-trace-timeout-description"
+              disabled={!canEdit || timeoutMutation.isPending}
+              onChange={(event) => {
+                setTimeoutEdited(true);
+                setTimeoutText(event.target.value);
+                setTimeoutSaved(false);
+              }}
+            />
+            <p id="project-trace-timeout-description" className="text-xs text-muted-foreground">
+              Online rules evaluate a trace when its root span has ended and 5 seconds pass without
+              a new span, or after this many seconds without a new span. {COMPLETION_TIMEOUT_MIN_S}{" "}
+              to {COMPLETION_TIMEOUT_MAX_S}; default 60.
+            </p>
+            {timeoutError ? (
+              <p id="project-trace-timeout-error" role="alert" className="text-xs text-destructive">
+                {timeoutError}
+              </p>
+            ) : null}
+          </div>
+          <FormError message={timeoutFormError} />
+          <FormSuccess message={timeoutSaved ? "Saved" : undefined} />
+          <DisabledReason reason={canEdit ? undefined : reason}>
+            <SubmitButton pending={timeoutMutation.isPending} disabled={!canEdit}>
+              Save timeout
+            </SubmitButton>
+          </DisabledReason>
+        </form>
+      </section>
       <DangerZone
         title="Delete project"
         description="Deletes every trace, span, score, media file and setting of this project. Data is erased within 24 hours. This cannot be undone."

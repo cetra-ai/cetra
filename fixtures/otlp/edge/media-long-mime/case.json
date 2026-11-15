@@ -1,0 +1,11 @@
+{
+  "description": "A data URI whose declared MIME type is 300 bytes is kept as a blob with the sniffed or octet-stream type, not refused.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Media extraction"
+  ],
+  "settings": {
+    "media_min_bytes": 1
+  },
+  "notes": "The MIME type is over the 255-byte storage cap, so it is ignored. The one-byte blob matches no magic number and falls back to application/octet-stream. sha256 of 'a' is ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb."
+}

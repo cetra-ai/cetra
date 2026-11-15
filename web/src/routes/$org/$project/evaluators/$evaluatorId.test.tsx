@@ -158,3 +158,49 @@ it("shows the not-found page for an unknown evaluator", async () => {
 
   expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
 });
+
+const CONFLICT_RULE = "01900000-0000-7000-8000-000000000700";
+const CONFLICT_MESSAGE = "Relevance on answers uses this evaluator";
+const CONFLICT = {
+  detail: "online rules use this evaluator",
+  errors: [{ field: `rules.${CONFLICT_RULE}`, message: CONFLICT_MESSAGE }],
+};
+
+it("lists the rules that refuse a delete", async () => {
+  server.use(
+    http.delete("/api/v1/projects/:project/evaluators/:id", () =>
+      problemResponse(409, "conflict", CONFLICT),
+    ),
+  );
+  const { user } = await renderApp(EVALUATOR_URL);
+
+  await user.click(await screen.findByRole("button", { name: "Delete" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Delete Relevance?" });
+  await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+
+  expect(await within(dialog).findByText("online rules use this evaluator")).toBeInTheDocument();
+  expect(within(dialog).getByRole("link", { name: CONFLICT_MESSAGE })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/online-rules/${CONFLICT_RULE}`,
+  );
+});
+
+it("lists the rules that refuse a save", async () => {
+  server.use(
+    http.patch("/api/v1/projects/:project/evaluators/:id", () =>
+      problemResponse(409, "conflict", CONFLICT),
+    ),
+  );
+  const { user } = await renderApp(EVALUATOR_URL);
+
+  const name = await screen.findByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "Relevance v2");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  // The save's message is the rule's message (no detail): it is the form error, and the link to the rule.
+  expect(await screen.findByRole("link", { name: CONFLICT_MESSAGE })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/online-rules/${CONFLICT_RULE}`,
+  );
+});

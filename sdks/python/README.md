@@ -455,6 +455,21 @@ scores still sitting in the batch queue are lost.
   `@observe` (functions, coroutine functions and both generator wrappers)
   alike — ends the span with the status unset, records no output, and is
   re-raised unchanged.
+- **Zero-argument functions and `None`**: a call with no arguments records
+  `{}` as input; a `None` return records `null` as output. TypeScript records
+  no input for no arguments and no output for `undefined` (return `null` there
+  to record a JSON `null`).
+- **Integral floats**: Python writes `1.0` as a double; TypeScript has one
+  number type and writes an integral value as an int. The server reads both.
+- **Large integers**: Python ints beyond ±(2^53−1) inside JSON payloads are
+  written as JSON numbers; TypeScript `bigint` becomes a decimal string. As
+  metadata values both are JSON strings.
+- **Resource attributes**: Python reads `OTEL_RESOURCE_ATTRIBUTES`; TypeScript
+  reads only `OTEL_SERVICE_NAME`.
+- **Abandoned sync generators** that are garbage-collected half-consumed end
+  with status ok (TypeScript has no finalizer and leaves them unexported).
+- **Usage counts**: `set_usage` records any non-negative `int`, including
+  values beyond 2^53; TypeScript `setUsage` records only safe integers.
 - **Threads and serverless**: see [Threads](#threads) and
   [Serverless](#serverless).
 

@@ -483,9 +483,11 @@ Hetzner server with Hetzner Object Storage (D170). What N gives Q, and what Q ne
 4. **Backups:** M1 gives only cold snapshots (docs/self-hosting/backup.md), i.e. a minute of
    downtime per cell. Q's design asks for two things: R9, `llmobs admin backup [--meta-only] --to
    <dir>` run with `docker compose exec` while `llmobs serve` runs, writing `meta.db` and
-   `catalog.db` at the top of `<dir>`; and R10, `storage.gc.object_retention`, which Q sets to
-   `8d`. Both are N's M2 (§ After M1), not this plan. Q's M1 phases 10–11 (backups, restore
-   drill) wait for M2.
+   `catalog.db` at the top of `<dir>`; and R10, a longer object retention for meta-only backups. Both are N's M2 (§ After M1,
+   `docs/plans/n-packaging/m2/`), not this plan: R9 is `llmobs admin backup` through the control
+   socket `<data_dir>/admin.sock` (D-N-17), and R10 is `storage.gc.grace` allowed up to `30d`, which
+   Q sets to `8d` (D-N-20). There is no `storage.gc.object_retention` key, and the config loader
+   rejects unknown keys. Q's M1 phases 10–11 (backups, restore drill) wait for M2.
 
 Q's R8 (the official image) is this plan's N4 and N10. Two differences from Q's interim image
 (`llmobs-control/deploy/image/Dockerfile`):

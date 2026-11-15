@@ -52,6 +52,9 @@ use super::entitlements::{
     Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
     PutOrgTokenRequest, UsageNotice,
 };
+use super::eval_jobs::{
+    EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
+};
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
@@ -69,6 +72,11 @@ use super::keys::{
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::online_rules::{
+    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -286,6 +294,22 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AlertEvent>();
     set.insert_page::<AlertRule>("AlertRulePage");
     set.insert_page::<AlertEvent>("AlertEventPage");
+    set.insert::<BudgetPeriod>();
+    set.insert::<RuleTarget>();
+    set.insert::<PauseReason>();
+    set.insert::<RuleSpend>();
+    set.insert::<JobCounts>();
+    set.insert::<OnlineRule>();
+    set.insert::<OnlineRulePage>();
+    set.insert::<CreateOnlineRuleRequest>();
+    set.insert::<UpdateOnlineRuleRequest>();
+    set.insert::<OnlineRulePreviewRequest>();
+    set.insert::<OnlineRulePreview>();
+    set.insert::<EvalJobKind>();
+    set.insert::<EvalJobStatus>();
+    set.insert::<EvalJob>();
+    set.insert_page::<EvalJob>("EvalJobPage");
+    set.insert::<RunEvaluatorRequest>();
     set
 }
 
@@ -665,6 +689,8 @@ fn paths() -> Paths {
     let paths = session_paths(paths);
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
+    let paths = online_rule_paths(paths);
+    let paths = eval_job_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
@@ -2092,12 +2118,14 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete = operation("delete_evaluator", "evaluation", "Delete an evaluator")
-        .description(Some("Project members and above. API keys cannot call it."))
+        .description(Some(
+            "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
+        ))
         .parameters(Some(vec![project_param(), id]))
         .responses(responses(
             "204",
             ResponseBuilder::new().description("Deleted.").build(),
-            &[400, 401, 403, 404, 429],
+            &[400, 401, 403, 404, 409, 429],
         ))
         .build();
     let templates = operation(
@@ -2157,6 +2185,179 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/test"),
             PathItem::new(HttpMethod::Post, test),
+        )
+}
+
+fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation("list_online_rules", "evaluation", "List online rules")
+        .description(Some(
+            "Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("OnlineRulePage", "One page of online rules."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_online_rule", "evaluation", "Create an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateOnlineRuleRequest")))
+        .responses(responses(
+            "201",
+            json_of::<OnlineRule>("The created rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_online_rule", "evaluation", "Get an online rule")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The rule."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_online_rule", "evaluation", "Update an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateOnlineRuleRequest")))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The updated rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_online_rule", "evaluation", "Delete an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let preview = operation(
+        "post_online_rule_preview",
+        "evaluation",
+        "Count what a rule's filter matches",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("OnlineRulePreviewRequest")))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRulePreview>("What the filter matches."),
+        READ_ERRORS,
+    ))
+    .build();
+    let resume = operation(
+        "post_online_rule_resume",
+        "evaluation",
+        "Resume an online rule",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Clears the rule's pause.",
+    ))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRule>("The rule, not paused."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/preview"),
+            PathItem::new(HttpMethod::Post, preview),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/resume"),
+            PathItem::new(HttpMethod::Post, resume),
+        )
+}
+
+fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
+    let job_id = path_uuid("id", "Eval job id.");
+    let list = operation("list_eval_jobs", "evaluation", "List eval jobs")
+        .description(Some(
+            "Any project member can read. Newest first. Jobs are kept 7 days after they finish.",
+        ))
+        .parameters(Some(with_query::<EvalJobListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("EvalJobPage", "One page of eval jobs."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let get = operation("get_eval_job", "evaluation", "Get an eval job")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), job_id]))
+        .responses(responses(
+            "200",
+            json_of::<EvalJob>("The job."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let evaluator_id = path_uuid("id", "Evaluator id.");
+    let run = operation(
+        "post_evaluator_run",
+        "evaluation",
+        "Run an evaluator on one trace",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.",
+    ))
+    .parameters(Some(vec![project_param(), evaluator_id]))
+    .request_body(Some(json_body("RunEvaluatorRequest")))
+    .responses(responses(
+        "202",
+        json_of::<EvalJob>("The queued job."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/eval-jobs"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/eval-jobs/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}/run"),
+            PathItem::new(HttpMethod::Post, run),
         )
 }
 
@@ -2265,6 +2466,20 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let get = operation("get_saved_view", "saved_views", "Get a saved view")
+        .description(Some(
+            "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Saved view id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<SavedView>("The saved view."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let update = operation("update_saved_view", "saved_views", "Update a saved view")
         .description(Some(
             "The owner changes name, state, shared and is_default; sharing, or editing a shared view, needs role member. A project admin may also unshare another user's shared view. Setting is_default clears the other default of the same scope: the caller's private views of that kind, or the project's shared views of that kind.",
@@ -2302,6 +2517,10 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views"),
             PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),

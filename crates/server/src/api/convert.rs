@@ -902,6 +902,48 @@ pub(crate) fn score_value(
     }
 }
 
+/// One matched row of a trigger read: the trace, the span for a span rule, and the row's `start_time`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MatchRow {
+    pub(crate) trace_id: TraceId,
+    pub(crate) span_id: Option<SpanId>,
+    pub(crate) start_time: i64,
+}
+
+/// The rows of `trace_refresh` (`with_span: false`: columns `trace_id`, `start_time`) or
+/// `span_refresh` (`with_span: true`: `trace_id`, `span_id`, `start_time`), in row order.
+pub(crate) fn match_rows(
+    batches: &[RecordBatch],
+    with_span: bool,
+) -> Result<Vec<MatchRow>, ConvertError> {
+    let mut out = Vec::new();
+    for batch in batches {
+        let (trace_name, time_name) = if with_span {
+            (spans::TRACE_ID, spans::START_TIME)
+        } else {
+            (traces::TRACE_ID, traces::START_TIME)
+        };
+        let trace_id = strings(batch, trace_name)?;
+        let start_time = times(batch, time_name)?;
+        let span_id = if with_span {
+            Some(strings(batch, spans::SPAN_ID)?)
+        } else {
+            None
+        };
+        for row in 0..batch.num_rows() {
+            out.push(MatchRow {
+                trace_id: req_parsed(&trace_id, row, trace_name, TraceId::from_str)?,
+                span_id: match &span_id {
+                    Some(ids) => Some(req_parsed(ids, row, spans::SPAN_ID, SpanId::from_str)?),
+                    None => None,
+                },
+                start_time: req_time(&start_time, row, time_name)?,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Score rows of the scores view, in row order across batches. `project_id` is the caller's project.
 pub(crate) fn scores(
     batches: &[RecordBatch],
@@ -1176,6 +1218,7 @@ mod tests {
             TraceListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, include_eval, false).unwrap(),
                 sort: TraceSort::StartTime,
                 order: StorageSortOrder::Desc,
@@ -1195,6 +1238,7 @@ mod tests {
             SpanListRequest {
                 filter: None,
                 search: None,
+                strict_exclusions: false,
                 scope: list_scope(None, None, false, false).unwrap(),
                 sort: SpanSort::StartTime,
                 order: StorageSortOrder::Desc,
@@ -1396,5 +1440,47 @@ mod tests {
             })
             .collect();
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    #[test]
+    fn match_rows_reads_trace_and_span_batches() {
+        let trace_hex = "a1000000000000000000000000000001";
+        let span_hex = "0000000000000001";
+        let time =
+            || Arc::new(TimestampNanosecondArray::from(vec![7]).with_timezone("UTC")) as ArrayRef;
+        let trace_column = || Arc::new(StringArray::from(vec![trace_hex])) as ArrayRef;
+
+        let trace_batch = RecordBatch::try_from_iter([
+            (traces::TRACE_ID, trace_column()),
+            (traces::START_TIME, time()),
+        ])
+        .unwrap();
+        let rows = match_rows(&[trace_batch], false).unwrap();
+        let expected = MatchRow {
+            trace_id: trace_hex.parse().unwrap(),
+            span_id: None,
+            start_time: 7,
+        };
+        assert_eq!(rows, vec![expected]);
+
+        let span_batch = RecordBatch::try_from_iter([
+            (spans::TRACE_ID, trace_column()),
+            (
+                spans::SPAN_ID,
+                Arc::new(StringArray::from(vec![span_hex])) as ArrayRef,
+            ),
+            (spans::START_TIME, time()),
+        ])
+        .unwrap();
+        let rows = match_rows(std::slice::from_ref(&span_batch), true).unwrap();
+        assert_eq!(rows[0].span_id, Some(span_hex.parse().unwrap()));
+
+        // A span batch without its span id column does not convert.
+        let without_span = RecordBatch::try_from_iter([
+            (spans::TRACE_ID, trace_column()),
+            (spans::START_TIME, time()),
+        ])
+        .unwrap();
+        assert!(match_rows(&[without_span], true).is_err());
     }
 }

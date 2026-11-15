@@ -6,6 +6,7 @@
 //! truncated, its acks are `WalFailed`, and nothing is retried.
 
 use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,9 +23,9 @@ use crate::error::{AppendError, WalError};
 use crate::hooks::{HookPoint, Hooks};
 use crate::memtable::Memtable;
 use crate::read_state::{Published, ReadState};
-use crate::wal::Table;
 use crate::wal::record::encode;
 use crate::wal::segment::SegmentWriter;
+use crate::wal::{Table, segment_name, sync_dir};
 
 /// Queue depth for appends waiting on the writer.
 ///
@@ -44,12 +45,36 @@ pub(crate) struct AppendRequest {
     pub ack: oneshot::Sender<Result<AppendReceipt, AppendError>>,
 }
 
+/// Why [`WriterShared::rotate`] did not start a new segment.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RotateError {
+    /// The writer task has exited, so it cannot rotate.
+    #[error("the WAL writer stopped before rotating")]
+    Stopped,
+    /// The old segment could not be synced, or the new one not created.
+    #[error(transparent)]
+    Wal(#[from] WalError),
+}
+
+/// A flush asking the writer to start a new segment. See [`WriterShared::rotate`].
+struct RotateRequest {
+    ack: oneshot::Sender<Result<bool, WalError>>,
+}
+
+/// Queue depth for rotation requests. Only the table's flush task sends them, one at a time.
+const ROTATE_CAPACITY: usize = 1;
+
 /// State the append path reads without taking the memtable lock.
 #[derive(Debug)]
 pub(crate) struct WriterShared {
     failed: AtomicBool,
+    /// Set by [`crate::Storage::flush_now`]: the flush task flushes whatever the
+    /// memtable holds, regardless of `flush.max_bytes` and `flush.max_age`.
+    force_flush: AtomicBool,
     memtable_bytes: AtomicU64,
     memtable: Mutex<Memtable>,
+    /// Rotation requests from the flush task.
+    rotate_tx: mpsc::Sender<RotateRequest>,
     /// Wakes the table's flush task once the active memtable reaches `flush.max_bytes`.
     ///
     /// A notify with no waiter is kept, so a flush that is between waits still
@@ -62,6 +87,16 @@ impl WriterShared {
     /// The writer task has stopped on an I/O error.
     pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
+    }
+
+    /// Set or clear the forced flush of [`crate::Storage::flush_now`].
+    pub(crate) fn set_force_flush(&self, on: bool) {
+        self.force_flush.store(on, Ordering::Release);
+    }
+
+    /// A forced flush is requested.
+    pub(crate) fn force_flush(&self) -> bool {
+        self.force_flush.load(Ordering::Acquire)
     }
 
     /// Bytes of the active and frozen memtables, for the backpressure check.
@@ -77,6 +112,23 @@ impl WriterShared {
     /// The live memtable. Only the writer inserts.
     pub(crate) fn memtable(&self) -> &Mutex<Memtable> {
         &self.memtable
+    }
+
+    /// Asks the writer to start a new segment when the open one holds records, so
+    /// the flush that follows can delete the segment it leaves behind.
+    ///
+    /// The writer rotates between groups. It answers `Ok(false)` and creates
+    /// nothing when the open segment is empty. A writer that has exited answers
+    /// [`RotateError::Stopped`].
+    pub(crate) async fn rotate(&self) -> Result<bool, RotateError> {
+        let (ack, rx) = oneshot::channel();
+        self.rotate_tx
+            .send(RotateRequest { ack })
+            .await
+            .map_err(|_| RotateError::Stopped)?;
+        rx.await
+            .map_err(|_| RotateError::Stopped)?
+            .map_err(RotateError::Wal)
     }
 }
 
@@ -242,17 +294,20 @@ pub(crate) struct WriterParams {
 /// Spawns the writer on the current runtime.
 pub(crate) fn spawn(mut params: WriterParams) -> WalWriterHandle {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+    let (rotate_tx, rotate_rx) = mpsc::channel(ROTATE_CAPACITY);
     let bytes = u64::try_from(params.memtable.bytes()).unwrap_or(u64::MAX);
     // `run` reads the memtable from `state`. The empty table left behind is dropped.
     let memtable = std::mem::replace(&mut params.memtable, Memtable::new(params.table));
     let state = Arc::new(WriterShared {
         failed: AtomicBool::new(false),
+        force_flush: AtomicBool::new(false),
         memtable_bytes: AtomicU64::new(bytes),
         memtable: Mutex::new(memtable),
+        rotate_tx,
         flush_notify: Arc::new(Notify::new()),
     });
     let task_state = Arc::clone(&state);
-    let task = tokio::spawn(run(params, rx, task_state));
+    let task = tokio::spawn(run(params, rx, rotate_rx, task_state));
     WalWriterHandle {
         tx: Mutex::new(Some(tx)),
         state,
@@ -421,9 +476,39 @@ async fn sync_segment(mut segment: SegmentWriter) -> Result<SegmentWriter, Box<K
     }
 }
 
+/// Removes the empty segment file that a failed rotation left at its name.
+///
+/// Replay and truncation read the next segment's name as the end of the open
+/// one, so a stray file would make the open segment look finished. A missing
+/// file needs nothing. A non-empty one is not ours to delete. Either an error
+/// here, or a failed removal or directory fsync, returns `Err`, and the caller
+/// stops the writer.
+fn remove_stray_segment(dir: &Path, name: &str, hooks: &Hooks) -> Result<(), WalError> {
+    let path = dir.join(name);
+    let len = match std::fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(WalError::io("removing WAL segment", &path, source)),
+    };
+    if len != 0 {
+        return Err(WalError::io(
+            "removing WAL segment",
+            &path,
+            io::Error::other("the segment is not empty"),
+        ));
+    }
+    if let Some(source) = hooks.fail(HookPoint::WalSegmentCleanup) {
+        return Err(WalError::io("removing WAL segment", &path, source));
+    }
+    std::fs::remove_file(&path)
+        .map_err(|source| WalError::io("removing WAL segment", &path, source))?;
+    sync_dir(dir).map_err(|source| WalError::io("syncing WAL directory", dir, source))
+}
+
 async fn run(
     params: WriterParams,
     mut rx: mpsc::Receiver<AppendRequest>,
+    mut rotate_rx: mpsc::Receiver<RotateRequest>,
     shared: Arc<WriterShared>,
 ) {
     let WriterParams {
@@ -442,6 +527,7 @@ async fn run(
     } = params;
     let mut segment = segment;
     let mut pending: Option<AppendRequest> = None;
+    let mut rotate_now: Option<RotateRequest> = None;
     // A fast burst must not sync every group. The interval is measured from
     // task start, then from each sync.
     let mut last_sync = tokio::time::Instant::now();
@@ -452,6 +538,86 @@ async fn run(
     };
 
     loop {
+        // The select below prefers appends, so under sustained load it never sees
+        // a rotation. Take a pending one before the next group.
+        if rotate_now.is_none()
+            && let Ok(request) = rotate_rx.try_recv()
+        {
+            rotate_now = Some(request);
+        }
+        if let Some(request) = rotate_now.take() {
+            let wanted = segment.len() > 0;
+            if !wanted {
+                let _ = request.ack.send(Ok(false));
+                continue;
+            }
+            // Only unsynced bytes need a sync before the new file exists. A clean
+            // segment already has every acknowledged byte on disk, and a failing
+            // fdatasync on it must not stop the writer for an optional rotation.
+            // A crash between the two files leaves both, and replay reads the old
+            // one whole, so acknowledged records stay durable.
+            if dirty {
+                match sync_segment(segment).await {
+                    Ok(synced) => segment = synced,
+                    Err(kept) => {
+                        segment = kept.segment;
+                        let err = kept.error;
+                        tracing::error!(
+                            table = table.name(),
+                            segment = segment.name(),
+                            %err,
+                            "WAL sync failed before rotation"
+                        );
+                        // Set the failed flag before the ack, so a caller that sees the error
+                        // also sees the flag.
+                        fail_queued(&shared, &mut rx, table, segment.name(), next_seq, next_seq);
+                        let _ = request.ack.send(Err(err));
+                        break;
+                    }
+                }
+                dirty = false;
+                last_sync = tokio::time::Instant::now();
+            }
+            hooks.pause(HookPoint::WalRotate);
+            let create_dir = dir.clone();
+            let create_hooks = copy_hooks(&hooks);
+            let created = tokio::task::spawn_blocking(move || {
+                SegmentWriter::create(&create_dir, next_seq, segment_bytes, create_hooks)
+            })
+            .await;
+            match created {
+                Ok(Ok(next)) => {
+                    // The old segment was synced above, so dropping it loses nothing.
+                    segment = next;
+                    let _ = request.ack.send(Ok(true));
+                }
+                Ok(Err(error)) => {
+                    // The open segment is still in use, so the writer keeps going, but
+                    // only once the failed create's empty file at the next name is gone.
+                    tracing::warn!(table = table.name(), %error, "WAL rotation failed");
+                    let stray = segment_name(next_seq);
+                    let cleanup = remove_stray_segment(&dir, &stray, &hooks);
+                    let cleaned = cleanup.is_ok();
+                    if let Err(err) = cleanup {
+                        tracing::error!(
+                            table = table.name(),
+                            segment = stray.as_str(),
+                            %err,
+                            "WAL rotation cleanup failed"
+                        );
+                    }
+                    if !cleaned {
+                        fail_queued(&shared, &mut rx, table, segment.name(), next_seq, next_seq);
+                        let _ = request.ack.send(Err(error));
+                        break;
+                    }
+                    let _ = request.ack.send(Err(error));
+                }
+                // A panic in the blocking task is a bug. Propagate it, as `sync_segment` does.
+                Err(err) => std::panic::resume_unwind(err.into_panic()),
+            }
+            continue;
+        }
         let first = if let Some(request) = pending.take() {
             request
         } else {
@@ -504,6 +670,10 @@ async fn run(
                             break;
                         }
                     }
+                }
+                Some(request) = rotate_rx.recv() => {
+                    rotate_now = Some(request);
+                    continue;
                 }
             }
         };
@@ -774,7 +944,7 @@ mod tests {
     use crate::hooks::HookPoint;
     use crate::read_state::{Published, ReadState};
     use crate::wal::replay::replay;
-    use crate::wal::{Table, parse_segment_name, spans_at};
+    use crate::wal::{Table, parse_segment_name, segment_name, spans_at, truncate_segments};
 
     struct Running {
         handle: WalWriterHandle,
@@ -1236,5 +1406,252 @@ mod tests {
         )
         .await
         .expect("notified at the threshold");
+    }
+
+    fn segment_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rotation_declines_an_empty_segment() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        let shared = Arc::clone(running.handle.shared());
+        assert!(!shared.rotate().await.unwrap());
+        assert_eq!(segment_names(running.dir.path()), vec![segment_name(1)]);
+
+        append_at(&running.handle, 1).await.unwrap();
+        assert!(shared.rotate().await.unwrap());
+        assert_eq!(
+            segment_names(running.dir.path()),
+            vec![segment_name(1), segment_name(2)]
+        );
+        // The new segment is empty, so asking again creates nothing.
+        assert!(!shared.rotate().await.unwrap());
+        assert_eq!(
+            segment_names(running.dir.path()),
+            vec![segment_name(1), segment_name(2)]
+        );
+
+        append_at(&running.handle, 2).await.unwrap();
+        drop(shared);
+        running.handle.shutdown().await.unwrap();
+        assert_eq!(replay_seqs(running.dir.path()), vec![1, 2]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rotation_syncs_the_old_segment_before_creating_the_new_one() {
+        // Interval mode leaves the group unsynced, so only the rotation can sync it.
+        let running = open_writer(
+            WalSync::Interval(Duration::from_secs(3600)),
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        append_at(&running.handle, 1).await.unwrap();
+        assert_eq!(running.hooks.hits(HookPoint::WalSync), 0);
+        let shared = Arc::clone(running.handle.shared());
+        assert!(shared.rotate().await.unwrap());
+        let points = running.hooks.points();
+        let rotated_at = points
+            .iter()
+            .position(|point| *point == HookPoint::WalRotate)
+            .expect("rotation reached the WalRotate point");
+        assert!(
+            points[..rotated_at].contains(&HookPoint::WalSync),
+            "old segment not synced before the new one was created: {points:?}"
+        );
+        drop(shared);
+        running.handle.shutdown().await.unwrap();
+        assert_eq!(replay_seqs(running.dir.path()), vec![1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn appends_racing_rotations_keep_every_acked_record_once_in_order() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(1),
+            64 * 1024 * 1024,
+        );
+        let handle = Arc::new(running.handle);
+        let shared = Arc::clone(handle.shared());
+        let rotator = tokio::spawn(async move {
+            let mut rotated = 0;
+            for _ in 0..50 {
+                if shared.rotate().await.unwrap() {
+                    rotated += 1;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            rotated
+        });
+        let mut appenders = Vec::new();
+        for start in 0..4 {
+            let handle = Arc::clone(&handle);
+            appenders.push(tokio::spawn(async move {
+                let mut seqs = Vec::new();
+                for step in 0..25 {
+                    let receipt = append_at(&handle, start * 100 + step).await.unwrap();
+                    seqs.push(receipt.seq);
+                }
+                seqs
+            }));
+        }
+        let mut acked = Vec::new();
+        for task in appenders {
+            acked.extend(task.await.unwrap());
+        }
+        let rotated = rotator.await.unwrap();
+        assert!(rotated > 0, "no rotation happened during the appends");
+        acked.sort_unstable();
+        assert_eq!(acked, (1..=100).collect::<Vec<u64>>());
+        Arc::try_unwrap(handle).unwrap().shutdown().await.unwrap();
+        assert_eq!(replay_seqs(running.dir.path()), acked);
+        let segments = segment_names(running.dir.path()).len();
+        assert!(segments > 1, "rotation left one segment: {segments}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn replay_after_a_rotation_never_moves_next_seq_backwards() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        append_at(&running.handle, 1).await.unwrap();
+        append_at(&running.handle, 2).await.unwrap();
+        assert!(running.handle.shared().rotate().await.unwrap());
+        running.handle.shutdown().await.unwrap();
+        let dir = running.dir.path();
+        let outcome = replay(dir, Table::Spans, 0, false, &mut |_, _| Ok(())).unwrap();
+        assert_eq!(outcome.next_seq, 3);
+        // Everything through 2 was flushed, and the newest segment is empty.
+        let outcome = replay(dir, Table::Spans, 2, false, &mut |_, _| Ok(())).unwrap();
+        assert_eq!(outcome.next_seq, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_create_after_the_file_exists_leaves_no_stray_segment() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        let first = append_at(&running.handle, 1).await.unwrap();
+        let shared = Arc::clone(running.handle.shared());
+        running.hooks.arm_fail(HookPoint::WalSegmentDirSync);
+        assert!(matches!(
+            shared.rotate().await,
+            Err(RotateError::Wal(WalError::Io { .. }))
+        ));
+        assert!(!shared.failed());
+        assert_eq!(segment_names(running.dir.path()), vec![segment_name(1)]);
+
+        // The writer keeps appending to segment 1, and a flush through record 1
+        // must not delete it while record 2 is in it.
+        let second = append_at(&running.handle, 2).await.unwrap();
+        assert_eq!(second.seq, first.seq + 1);
+        drop(shared);
+        running.handle.shutdown().await.unwrap();
+        let dir = running.dir.path();
+        let outcome = truncate_segments(dir, first.seq).unwrap();
+        assert_eq!(outcome.deleted, 0);
+        assert_eq!(replay_seqs(dir), vec![first.seq, second.seq]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stray_segment_that_cannot_be_removed_stops_the_writer() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        append_at(&running.handle, 1).await.unwrap();
+        let shared = Arc::clone(running.handle.shared());
+        running.hooks.arm_fail(HookPoint::WalSegmentDirSync);
+        running.hooks.arm_fail(HookPoint::WalSegmentCleanup);
+        assert!(shared.rotate().await.is_err());
+        assert!(shared.failed());
+        assert_eq!(
+            append_at(&running.handle, 2).await,
+            Err(AppendError::WalFailed)
+        );
+        drop(shared);
+        assert!(matches!(
+            running.handle.shutdown().await,
+            Err(WriterExit::Failed)
+        ));
+        assert_eq!(replay_seqs(running.dir.path()), vec![1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_clean_segment_rotates_without_a_sync() {
+        let running = open_writer(
+            WalSync::Always,
+            u64::MAX,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        append_at(&running.handle, 1).await.unwrap();
+        let syncs = running.hooks.hits(HookPoint::WalSync);
+        // The rotation must not reach this fault, because nothing is unsynced.
+        running.hooks.arm_fail(HookPoint::WalSync);
+        let shared = Arc::clone(running.handle.shared());
+        assert!(shared.rotate().await.unwrap());
+        assert_eq!(running.hooks.hits(HookPoint::WalSync), syncs);
+        assert!(!shared.failed());
+        drop(shared);
+        running.handle.shutdown().await.unwrap();
+        assert_eq!(replay_seqs(running.dir.path()), vec![1]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rotation_is_not_starved_by_queued_appends() {
+        // One request per group, so the queue drains one group at a time.
+        let size = batch_bytes();
+        let running = open_writer(
+            WalSync::Always,
+            size,
+            Duration::from_millis(5),
+            64 * 1024 * 1024,
+        );
+        let hooks = running.hooks.clone();
+        let handle = Arc::new(running.handle);
+        hooks.hold(HookPoint::AfterWalSync);
+        let mut appends = Vec::new();
+        for start in 0..200 {
+            let handle = Arc::clone(&handle);
+            appends.push(tokio::spawn(async move { append_at(&handle, start).await }));
+        }
+        wait_for(|| hooks.waiting_at(HookPoint::AfterWalSync) > 0).await;
+        // The writer is paused after its first group, so 199 requests are queued.
+        hooks.hold(HookPoint::WalRotate);
+        let shared = Arc::clone(handle.shared());
+        let rotation = tokio::spawn(async move { shared.rotate().await });
+        // Give the rotation request time to reach the writer while it is paused.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        hooks.release(HookPoint::AfterWalSync);
+        wait_for(|| hooks.waiting_at(HookPoint::WalRotate) > 0).await;
+        let groups = hooks.groups().len();
+        assert!(groups <= 2, "the rotation waited behind {groups} groups");
+        hooks.release(HookPoint::WalRotate);
+        assert!(rotation.await.unwrap().unwrap());
+        for append in appends {
+            append.await.unwrap().unwrap();
+        }
+        Arc::try_unwrap(handle).unwrap().shutdown().await.unwrap();
     }
 }

@@ -1,12 +1,17 @@
 //! Local admin operations on an existing `meta.db` (spec 09 § CLI).
 //!
 //! These open the database without migrating and without the data-dir lock, so
-//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`
-//! is the exception: it takes the lock and needs the server stopped (D-I-3).
+//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`,
+//! `gc_orphans` and `migrate` are the exceptions: they take the lock (through
+//! `Maintenance::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
 
 use std::path::Path;
+use std::time::Duration;
 
 use llmobs_core::ids::OrgId;
+use llmobs_storage::Maintenance;
+use llmobs_storage::config::ObjectStoreUrl;
+use llmobs_storage::error::{OpenError, OrphanError, StorageError};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -114,9 +119,31 @@ pub enum AdminError {
     /// SQLite failed. The text is [`MetaError`]'s display, which names no row values.
     #[error("{0}")]
     Database(String),
-    /// Another process holds `<data_dir>/LOCK`.
-    #[error("the server is running: stop it before rotating the key")]
+    /// Another process holds `<data_dir>/LOCK`: the server is running.
+    #[error("the server is running: stop it first")]
     Locked,
+    /// `catalog.db` is missing. Opening the storage would create an empty one, and every
+    /// object would then look like an orphan.
+    #[error("no catalog.db in the data directory: check the data directory setting")]
+    NoCatalog,
+    /// `meta.db` is missing. Opening the database would create an empty one, so a wrong
+    /// data directory would look like a fresh instance.
+    #[error("no meta.db in the data directory: check the data directory setting")]
+    NoMetaDb,
+    /// A real `gc-orphans` run in S3 mode needs `--rollback-bucket`.
+    #[error(
+        "in S3 mode this deletes every object written after the backup from the live bucket; run with --dry-run first, then add --rollback-bucket"
+    )]
+    RollbackNeedsConfirmation,
+    /// The storage did not open.
+    #[error("opening the storage: {0}")]
+    Storage(OpenError),
+    /// Listing the store, or deleting an orphan, failed.
+    #[error("{0}")]
+    Orphans(OrphanError),
+    /// Closing the storage failed.
+    #[error("closing the storage: {0}")]
+    Close(StorageError),
     /// The key could not be loaded, does not match, or a value did not open.
     #[error("{0}")]
     Crypto(String),
@@ -126,9 +153,10 @@ pub enum AdminError {
     /// `--from` holds no `meta.db`.
     #[error("no meta.db in the --from directory")]
     SourceNotInitialized,
-    /// The `--from` database is at another schema version.
+    /// The `--from` database is at an older schema version. A newer one is read as it is
+    /// (D-M-9).
     #[error(
-        "the --from meta.db has schema {found}, this binary expects {expected}; run `llmobs serve` on a copy of it first"
+        "the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs admin migrate` on a copy of it first"
     )]
     SourceSchema {
         /// Migration version embedded in this binary.
@@ -295,6 +323,9 @@ pub struct ReapplyReport {
 
 /// Copies the deletions of `<from>/meta.db` that `config`'s `meta.db` lacks (D-M-9).
 ///
+/// The source may be at this binary's schema or a newer one (a rollback: the old binary
+/// reapplies from the kept, already migrated directory). An older source is refused.
+///
 /// Each copied row keeps its id, scope and cut-off and is opened again: the running
 /// (or next) `llmobs serve` registers or drops it through its worker. Each row is one
 /// transaction, so an interrupted run leaves whole rows, and a second run copies nothing
@@ -311,7 +342,8 @@ pub async fn reapply_deletions(
     from: &Path,
 ) -> Result<ReapplyReport, AdminError> {
     let target = open_meta(config).await?;
-    let source = match MetaDb::open_existing(from).await {
+    // A newer source is the rollback case (D-M-9): read it by column name.
+    let source = match MetaDb::open_existing_or_newer(from).await {
         Ok(db) => db,
         Err(error) => {
             target.close().await;
@@ -361,6 +393,96 @@ async fn copy_all(target: &MetaDb, source: &MetaDb) -> Result<ReapplyReport, Adm
         }
     }
     Ok(report)
+}
+
+/// What [`gc_orphans`] found: the storage's `OrphanReport`, as the CLI prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GcOrphansReport {
+    /// Unknown objects older than `min_age` (deleted unless `dry_run`).
+    pub orphans: u64,
+    /// Bytes of the objects counted in `orphans`.
+    pub orphan_bytes: u64,
+    /// Unknown objects younger than `min_age`, left alone.
+    pub recent_unknown: u64,
+    /// Objects the catalog needs that the store does not have.
+    pub missing: u64,
+    /// Media blobs the catalog references that the store does not have.
+    pub missing_media: u64,
+    /// Whether the run only reported and deleted nothing.
+    pub dry_run: bool,
+}
+
+/// Deletes the objects under `tables/` and `media/` that the catalog does not know and that
+/// are older than `min_age`, and reports the ones the catalog needs but the store lacks
+/// (N M2, D-N-21). With `dry_run`, it deletes nothing. The server must be stopped.
+///
+/// In S3 mode a real run rolls the live bucket back to the restored catalog, so it needs
+/// `rollback_bucket`.
+///
+/// # Errors
+///
+/// [`AdminError::NoCatalog`] without `catalog.db`, [`AdminError::RollbackNeedsConfirmation`]
+/// in S3 mode without `rollback_bucket`, [`AdminError::Locked`] while the server runs,
+/// [`AdminError::Storage`] when the storage does not open, and [`AdminError::Orphans`] or
+/// [`AdminError::Close`] when the listing, a deletion or the close fails.
+pub async fn gc_orphans(
+    config: &ServerConfig,
+    min_age: Duration,
+    dry_run: bool,
+    rollback_bucket: bool,
+) -> Result<GcOrphansReport, AdminError> {
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    let s3 = matches!(config.storage.object_store_url(), ObjectStoreUrl::S3 { .. });
+    if s3 && !dry_run && !rollback_bucket {
+        return Err(AdminError::RollbackNeedsConfirmation);
+    }
+    let maintenance = Maintenance::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let outcome = maintenance.collect_orphans(min_age, dry_run).await;
+    let closed = maintenance.close().await;
+    let report = outcome.map_err(AdminError::Orphans)?;
+    closed.map_err(AdminError::Close)?;
+    Ok(GcOrphansReport {
+        orphans: report.orphans,
+        orphan_bytes: report.orphan_bytes,
+        recent_unknown: report.recent_unknown,
+        missing: report.missing,
+        missing_media: report.missing_media,
+        dry_run: report.dry_run,
+    })
+}
+
+/// Migrates `meta.db` and `catalog.db` to this binary's schema, with the server stopped, and
+/// closes them (N M2, D-N-22: the pre-migration copies are taken on the way). A restore of an
+/// older backup runs it before `reapply_deletions`.
+///
+/// Both files must already exist, so a wrong data directory never creates an empty instance.
+/// The maintenance open comes next: its `LOCK` refuses a running server before `meta.db` is
+/// touched.
+///
+/// # Errors
+///
+/// [`AdminError::NoCatalog`] or [`AdminError::NoMetaDb`] without the file,
+/// [`AdminError::Locked`] while the server runs, [`AdminError::Storage`] when the storage
+/// does not open, [`AdminError::Database`] or [`AdminError::Schema`] for `meta.db`.
+pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError> {
+    if !config.data_dir.join("catalog.db").is_file() {
+        return Err(AdminError::NoCatalog);
+    }
+    if !config.data_dir.join("meta.db").is_file() {
+        return Err(AdminError::NoMetaDb);
+    }
+    let maintenance = Maintenance::open(config.storage_config())
+        .await
+        .map_err(map_open)?;
+    let opened = MetaDb::open(&config.data_dir).await;
+    let closed = maintenance.close().await;
+    let meta = opened.map_err(map_meta)?;
+    meta.close().await;
+    closed.map_err(AdminError::Close)
 }
 
 const PAGE: u32 = 500;
@@ -641,6 +763,13 @@ fn source_row_error(id: Option<Uuid>, error: &MetaError) -> AdminError {
     ))
 }
 
+fn map_open(error: OpenError) -> AdminError {
+    match error {
+        OpenError::Locked { .. } => AdminError::Locked,
+        other => AdminError::Storage(other),
+    }
+}
+
 fn map_meta(error: MetaError) -> AdminError {
     match error {
         MetaError::NotInitialized => AdminError::NotInitialized,
@@ -690,6 +819,22 @@ mod tests {
         let mut config = app.state.config.clone();
         config.data_dir = dir.path().to_path_buf();
         (dir, config)
+    }
+
+    #[tokio::test]
+    async fn migrate_without_a_meta_db_refuses_and_creates_nothing() {
+        let app = TestApp::new().await;
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::write(empty.path().join("catalog.db"), b"").unwrap();
+        let mut config = app.state.config.clone();
+        config.data_dir = empty.path().to_path_buf();
+
+        let error = migrate(&config).await.unwrap_err();
+
+        assert!(matches!(error, AdminError::NoMetaDb), "{error}");
+        assert!(error.to_string().contains("data directory setting"));
+        assert!(!empty.path().join("meta.db").exists());
+        assert!(!empty.path().join("LOCK").exists());
     }
 
     #[tokio::test]
@@ -1945,21 +2090,20 @@ mod tests {
         assert!(matches!(error, AdminError::SourceNotInitialized), "{error}");
     }
 
-    #[tokio::test]
-    async fn source_at_another_schema_is_refused() {
-        let (_dir, config) = ready_config().await;
-        let source = tempfile::tempdir().unwrap();
-        let db = MetaDb::open(source.path()).await.unwrap();
-        let expected = crate::meta::expected_version();
-        let future = expected + 1;
+    /// Adds a fake migration row `version` to `db` (a source written by another binary).
+    async fn set_schema(db: &MetaDb, version: i64) {
         db.write(move |connection| {
             Box::pin(async move {
+                sqlx::query("DELETE FROM _sqlx_migrations WHERE version > ?")
+                    .bind(version)
+                    .execute(&mut *connection)
+                    .await?;
                 sqlx::query(
-                    "INSERT INTO _sqlx_migrations \
+                    "INSERT OR IGNORE INTO _sqlx_migrations \
                      (version, description, success, checksum, execution_time) \
-                     VALUES (?, 'future', 1, ?, 0)",
+                     VALUES (?, 'other binary', 1, ?, 0)",
                 )
-                .bind(future)
+                .bind(version)
                 .bind(Vec::<u8>::new())
                 .execute(&mut *connection)
                 .await?;
@@ -1968,14 +2112,46 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_at_an_older_schema_is_refused() {
+        let (_dir, config) = ready_config().await;
+        let source = tempfile::tempdir().unwrap();
+        let db = MetaDb::open(source.path()).await.unwrap();
+        let expected = crate::meta::expected_version();
+        let older = expected - 1;
+        set_schema(&db, older).await;
         db.close().await;
         let error = reapply_deletions(&config, source.path()).await.unwrap_err();
         assert!(
             matches!(
                 error,
-                AdminError::SourceSchema { expected: e, found } if e == expected && found == future
+                AdminError::SourceSchema { expected: e, found } if e == expected && found == older
             ),
             "{error}"
+        );
+        assert!(error.to_string().contains("older than"), "{error}");
+    }
+
+    /// The rollback case (D-M-9, cross-track review X18): the kept directory was migrated
+    /// by a newer binary, and this one reads its deletions by column name.
+    #[tokio::test]
+    async fn source_at_a_newer_schema_is_copied() {
+        let (_dir, config) = ready_config().await;
+        let ids = target_with_projects(&config).await;
+        let source = build_source(&ids).await;
+        let db = MetaDb::open_existing(source.path()).await.unwrap();
+        set_schema(&db, crate::meta::expected_version() + 1).await;
+        db.close().await;
+        let report = reapply_deletions(&config, source.path()).await.unwrap();
+        assert_eq!(
+            report,
+            ReapplyReport {
+                reopened: 5,
+                failed_copied: 1,
+                present: 0
+            }
         );
     }
 

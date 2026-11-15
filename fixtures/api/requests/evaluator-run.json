@@ -1,0 +1,8 @@
+{
+  "trace_id": "a1000000000000000000000000000001",
+  "trace_start": "2026-01-01T10:00:00.000000000Z",
+  "variable_mapping": {
+    "input": "trace.input",
+    "output": "trace.output"
+  }
+}
