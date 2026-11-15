@@ -33,7 +33,7 @@ These are the decisions the plan implements, also in [`00-design.md`](00-design.
 | D-P-54 | **Domains.** Exact match on the email's domain (no subdomains, as `allowed_domains`). At most 20 per org. A domain is verified by at most one org at a time (unique partial index). A domain listed in `auth.enforce_sso_domains`, `auth.google.allowed_domains` or any `[[auth.oidc]].allowed_domains` cannot be added, and is ignored by org SSO if the config lists it later (an `error`-level startup log with a count). Proof: a TXT record `_llmobs-verify.<domain>` whose value is `llmobs-verify=<32 lowercase hex>` (a random token per org and domain, shown on the settings page; both names built from `llmobs_name!`, D46), queried as an absolute name with the resolver cache off. Verification is checked when the owner clicks Verify, at most 10 times a minute per org, and is not re-checked later. **A stale domain can be taken over:** when org B verifies a domain verified by org A, B's TXT value is present and A's is no longer, the domain moves to B (A's row returns to pending) and A's enforcement for it ends. |
 | D-P-55 | **What the org's provider may sign in.** Only emails whose domain is one of the org's verified domains (`domain_not_allowed` otherwise), for new and known identities alike. `email_verified` is read as an option: an explicit `false` is refused (`email_not_verified`); an absent claim is trusted (Entra omits it), since the org proved the domain and runs the IdP. An unknown identity whose email belongs to an existing account is linked to it (an org provider always links); when that account's email was never verified, linking also deletes its web sessions, revokes its personal access tokens and clears its password (D148's defence against a pre-registered account); a verified account is linked without revocation. Instance admins are never linked (`link_refused`, as D148). A disabled account is `account_disabled`. A new account is created verified and without a password; under `auth.signup = disabled` it is `signup_closed`, under `invite_only` the org's verified domain counts as the invitation, `signup_domains` do not apply. |
 | D-P-56 | **JIT provisioning (user).** A user who signs in through the org's provider and is not a member joins the org, including someone an owner removed earlier (removal does not block the next sign-in; the settings page says so, and blocking a person is done at the IdP). The role is the org's pending invitation's role when one exists for that email (the invitation is then accepted), else the org's `jit_role`, `viewer` (default) or `member`. Seats (D-P-20): a non-viewer role needs a free seat (`seat_members + seat_invites`, or `seat_members` alone when an invitation is accepted, as D-P-20's accept rule); over `max_seats`, a seat limit never locks anyone out of the orgs they already belong to (user): a user who already has another org membership, or a pending invitation to another org, signs in without joining and lands on `/sso/no-seat?org=<slug>` ("No seat available in <org>; ask an owner."); only a user who would end up with no membership at all is refused, before anything is written, with `/login?error=seat_limit`. While the org lacks `org_sso` (a lapse), sign-in keeps working but nobody joins (a new membership would widen access, D-P-8). |
-| D-P-57 | **Enabled, then enforced.** A new provider is disabled, and a disabled provider signs in only its own org's owners testing it: `GET /api/auth/sso/authorize` for a domain whose provider is disabled needs the session of an owner of that org and marks the login `test` in the state cookie; without it the answer is `sso_unavailable`, the same as for an unknown domain. A `test` login signs in only an existing owner of the org (their identity is recorded); it creates no user, adds no member and links no one else. Discovery (D-P-60) sends users only to an enabled provider. Enforcing needs the provider enabled, at least one successful sign-in through it (`last_login_at`), at least one verified domain, and, when the caller's own email is in one of those domains, a session started through this org's provider. While enforced, the provider cannot be disabled or deleted (409). |
+| D-P-57 | **Enabled, then enforced.** A new provider is disabled, and a disabled provider signs in only its own org's owners testing it: `GET /api/auth/sso/authorize` for a domain whose provider is disabled needs the session of an owner of that org and marks the login `test` in the state cookie; without it the answer is `sso_unavailable`, the same as for an unknown domain. A `test` login signs in only an existing owner of the org (their identity is recorded); it creates no user, adds no member and links no one else. An owner who is an instance admin (never linked, D-P-55) is signed in by a test login without an identity being written, so an operator who is the sole owner can still set `last_login_at` and reach enforcement. Discovery (D-P-60) sends users only to an enabled provider. Enforcing needs the provider enabled, at least one successful sign-in through it (`last_login_at`), at least one verified domain, and, when the caller's own email is in one of those domains, a session started through this org's provider. While enforced, the provider cannot be disabled or deleted (409). |
 | D-P-58 | **Enforcement revokes and is checked on every request (user).** When an org turns enforcement on, and when a domain is verified while it is on, every user of those domains who is not an instance admin loses at once: web sessions not started through this org's provider, all personal access tokens (the CLI's credential), pending password resets. On top of that clean-up, session and PAT resolution refuse such a user on every request (a session unless it was started through the enforcing org's provider; a PAT always), so a session or token created in the window before the revocation commits never works. Project API keys (`sk`, `pk`) are untouched. While enforced, for those users: password login answers `403 sso_required` (checked after the password verifies, so it reveals nothing to someone without the password); password signup and invitation signup answer `403 sso_required`; `password/forgot` sends nothing (still 204); `password/reset` answers `403 sso_required`; GitHub, Google and `[[auth.oidc]]` logins redirect to `/login?error=sso_required`. **Instance admins are exempt** (the operator's break-glass; they sign in with a password at `/login?password=1`). `auth.enforce_sso_domains` (instance-wide, D-P-8) is unchanged. |
 | D-P-59 | **Sessions record their org provider.** `web_sessions.sso_org_id` (nullable, `ON DELETE SET NULL`) is the org whose provider started the session. Enforcement keeps those sessions; D-P-57's caller check reads it. |
 | D-P-60 | **Email-first login (user).** `GET /api/auth/config` gains `sso_discovery` (true when at least one verified domain routes to an enabled org provider). When true, the login page asks for the email, posts it to `POST /api/auth/sso/discover`, and either navigates to `/api/auth/sso/authorize?domain=<domain>&redirect=…` or shows the password form and the instance providers as today. The answer is `{"sso": bool}`, a function of the domain only (never of an account), and an invalid email answers `{"sso": false}`. Discovery and authorize share one per-IP bucket of 300 per minute with a burst of 300 (D143; companies sit behind NAT). URLs carry the domain, never the org; nothing logs an email or a domain (ids and counts only). |
@@ -55,7 +55,7 @@ The same as M3 (`03-m3-units-and-limits.md` § Conventions) and M2 (`02-m2-org-e
 
 - `crates/server/src/ee/mod.rs` gains `pub(crate) mod org_sso;` (P3).
 - `crates/server/src/ee/org_sso/mod.rs` declares `pub(crate) mod store;` (P3), `pub(crate) mod dns;` (P5), `pub(crate) mod settings;` (P7), `pub(crate) mod login;` (P10).
-- `crates/server/src/api/mod.rs` gains `pub mod org_sso;` (P7).
+- `crates/server/src/api/mod.rs` gains `pub mod org_sso;` (P3, with `JitRole`; P7 adds the other types).
 - Route tables: `routes.extend(crate::ee::org_sso::settings::routes());` (P7) and `routes.extend(crate::ee::org_sso::login::routes());` (P10) in `http/access.rs`, after `crate::ee::project_roles::routes()`.
 
 ### Every new or changed API operation
@@ -115,7 +115,7 @@ just check
 | P15 | `Add the org SSO settings page` | `web/src/ee/org-sso/`, `/$org/settings/sso` | P13 |
 | P16 | `Close out M5` | dead-code attributes, specs check, changelog, roadmap | all |
 
-P1–P13 run in order, one at a time: they edit the same server files (`http/access.rs`, `api/openapi.rs`, `tests/openapi.rs`, `test_support/mod.rs`) and the generated contract. P14 and P15 touch disjoint web files and need only the contract of P1–P13, so they may run in parallel, each in its own worktree, after P13. P16 runs last.
+P1–P13 run in order, one at a time: they edit the same server files (`http/access.rs`, `api/openapi.rs`, `tests/openapi.rs`, `test_support/mod.rs`) and the generated contract. P14 and P15 touch disjoint web files and need only the contract and the shared web helpers of P1–P13 (`ssoAuthorizeHref` comes from P10), so they may run in parallel, each in its own worktree, after P13. P16 runs last.
 
 ---
 
@@ -326,15 +326,20 @@ pub(crate) mod store;
 
 and `pub(crate) mod org_sso;` in `ee/mod.rs`.
 
+### `crates/server/src/api/org_sso.rs` (new, MIT; `pub mod org_sso;` in `api/mod.rs`)
+
+P3 creates the file with `JitRole` only (the enum shown in P7, plus the three methods named in the store below); P7 adds the other types. Register `JitRole` in `collect_schemas` in P7, when an operation first uses it.
+
 ### `crates/server/src/ee/org_sso/store.rs` (new, `ee`)
 
 `#![cfg_attr(not(test), allow(dead_code))]` with `// Track P M5: P6–P10 use these outside tests.`
 
 ```rust
-/// `jit_role` (D-P-56). Never admin or owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum JitRole { Viewer, Member }
-// as_str: "viewer" | "member"; from_str_opt(&str) -> Option<Self>; fn org_role(self) -> OrgRole
+// `jit_role` (D-P-56): the store uses the API enum `crate::api::org_sso::JitRole` (P7
+// defines it; in P3 define it there already, with its serde and `ToSchema` derives, so there
+// is one enum). Add to `api/org_sso.rs`: `impl JitRole { pub(crate) fn as_str(self) -> &'static str;
+// pub(crate) fn from_str_opt(s: &str) -> Option<Self>; pub(crate) fn org_role(self) -> OrgRole }`.
+use crate::api::org_sso::JitRole;
 
 /// One `org_sso_providers` row. `Debug` omits the sealed secret.
 pub(crate) struct ProviderRow {
@@ -726,10 +731,10 @@ Use `TestApp::with_config(|c| c.security.allow_private_network_egress = true)` a
 
 ## P7 — The provider settings API
 
-### API types (`crates/server/src/api/org_sso.rs`, new, MIT; `pub mod org_sso;` in `api/mod.rs`)
+### API types (`crates/server/src/api/org_sso.rs`, created in P3)
 
 ```rust
-/// Role given to people who join through the org's provider (D-P-56).
+/// Role given to people who join through the org's provider (D-P-56). (Created in P3.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JitRole { Viewer, Member }
@@ -809,6 +814,8 @@ pub struct PutOrgSsoProvider {
 (Check `crate::api::keys::optional_time`'s exact path, as M1 notes.) `PutOrgSsoProvider` gets a manual `Debug` (no derive) that omits `client_secret`. Register every type in `collect_schemas`.
 
 ### Routes (`crates/server/src/ee/org_sso/settings.rs`, new, `ee`)
+
+The API's `OrgSso` and the state's `OrgSso` share a name: in `settings.rs` import the API types as `use crate::api::org_sso::{self as api, OrgSso as OrgSsoView, OrgSsoDomain, OrgSsoProvider, PutOrgSsoProvider};` and refer to the state only through `state.org_sso`; `view` returns `OrgSsoView`. `login.rs` imports `SsoDiscovery`, `SsoDiscoverRequest` only, so it has no clash.
 
 All three: `Access::Org { perm: OrgPerm::ManageSso, session_only: true }`, `documented: true`.
 
@@ -1032,7 +1039,7 @@ OpenAPI: `patch_org_sso` (`400, 401, 403, 404, 409, 429`, `QUERY_OR_BODY`); regi
 Accounts (all from P7's helpers; `seeded.cookie` is not used, it belongs to the instance admin `ada@example.com`):
 - `let (app, seeded, owner) = org_sso_app().await;` — `owner@acme.test`, a non-admin owner; its password-session cookie is `owner.cookie`;
 - the owner's provider session: `let owner_sso = session_cookie_via(&app, owner.id, Some(seeded.org_id)).await;` (the `Set-Cookie` value of `start_session(.., Some(org))` cut at its first `;`, i.e. `llmobs_session=<token>`, used as the `cookie` header);
-- `let ada = app.add_member(&seeded, "ada@acme.test", OrgRole::Member).await;` with `let ada_pat = app.personal_token(ada.id, true).await;` and a password reset row (`password_resets::insert` as `routes/auth.rs` tests create one);
+- `let ada = app.add_member(&seeded, "ada@acme.test", OrgRole::Member).await;` with `let ada_pat = app.personal_token(ada.id, true).await;` and a password reset row (`meta::password_resets::insert_reset(conn, &hash_token(&token), ada.id, now, now + 3_600_000_000_000)` in a `meta.write`);
 - `let (_, bob) = second_org(&app, "beta", "bob@other.test").await;`;
 - `let root = app.add_member(&seeded, "root@acme.test", OrgRole::Member).await; make_instance_admin(&app, root.id).await;`.
 `configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await`.
@@ -1042,6 +1049,8 @@ Accounts (all from P7's helpers; `seeded.cookie` is not used, it belongs to the 
 3. `disable_is_refused_while_enforced` (`{enabled: false}` → 409); `{enforced: false}` then `{enabled: false}` → 200.
 4. `lapse_allows_only_turning_off` (D-P-61): a provider enabled and enforced in `meta.db`, no licence → `{enforced: false}` → 200, `{enforced: true}` → 403 `plan_required`, `{enabled: true}` from disabled → 403.
 5. `verifying_under_enforcement_revokes`: enforced on `acme.test`; add and verify `acme.io` → a user `eve@acme.io`'s session and PAT are revoked.
+
+Once a test has enforced `acme.test`, `owner.cookie` (a password session of `owner@acme.test`) answers 401: from then on every settings call in that test, test 5 included, uses `owner_sso`.
 
 ### Spec
 
@@ -1097,7 +1106,23 @@ pub(crate) async fn finish(state: &AppState, headers: &HeaderMap, query_state: O
 1. `state.limits.sso_discover.check(&ip, now)` → `ApiError::RateLimited`.
 2. `query.domain.as_deref().and_then(normalize_domain)` → `route_domain` → `provider(route.org_id)`; any `None` → `redirect("/login?error=sso_unavailable", [])`.
 3. `route.enabled` → `test = false`. Disabled (D-P-57): `test = true` only when the request carries the session of an owner of `route.org_id` (`auth::session::resolve_cookie_header(&state, &headers, now)` → a row, then `members::org_role(reader, org, row.user.id) == Some(OrgRole::Owner)`); otherwise `redirect("/login?error=sso_unavailable", [])`, the same answer as an unknown domain (nothing tells a disabled provider from none).
-4. As `flow::start`: `redirect_uri = public_url.join("/api/auth/callback/sso")`, new `csrf` and `nonce` (`new_opaque_token`), `provider.oidc.authorization_url(..)` (`ExchangeError::Unavailable` → `redirect("/login?error=provider_unavailable", [])`), seal `OAuthState { provider: PROVIDER, org_id: Some(org uuid), test, setup_token: None, redirect: safe_redirect(query.redirect), .. }`, `redirect(&location, [cookie])`.
+4. As `flow::start`: `redirect_uri = public_url.join("/api/auth/callback/sso")`, new `csrf` and `nonce` (`new_opaque_token`), `provider.oidc.authorization_url(..)` (`ExchangeError::Unavailable` → `redirect("/login?error=provider_unavailable", [])`), seal
+
+```rust
+OAuthState {
+    provider: PROVIDER.to_owned(),
+    state: csrf,
+    nonce,
+    pkce_verifier: verifier,
+    redirect: state_cookie::safe_redirect(query.redirect.as_deref()),
+    setup_token: None,
+    created_ns: now,
+    org_id: Some(route.org_id.as_uuid()),
+    test,
+}
+```
+
+with `state_cookie::seal(&state.oauth_key, &saved, state.config.public_url.is_https())`, then `redirect(&location, [cookie])`.
 
 **finish:**
 1. `state_cookie::open(&state.oauth_key, headers, PROVIDER, query_state.unwrap_or(""), now)` → `InvalidState`; `saved.org_id` `None` → `InvalidState`.
@@ -1126,7 +1151,7 @@ enum Admitted {
 
 **`admit`** — all reads first, then writes, so a refusal writes nothing.
 
-**Test mode** (`test: true`, D-P-57): steps 1–2 run; the resolved user (Known or Link) must have `members::org_role_tx(conn, org, user.id) == Some(OrgRole::Owner)`, else `SsoUnavailable` (add that variant to `Admitted`); no New user (→ `SsoUnavailable`), no JIT (step 4 is skipped), and the only write besides `set_last_login` is the owner's own identity (Link: `insert_identity` with step 5's rules for that owner). Normal mode:
+**Test mode** (`test: true`, D-P-57): steps 1–2 run; the resolved user (Known or Link) must have `members::org_role_tx(conn, org, user.id) == Some(OrgRole::Owner)`, else `SsoUnavailable` (add that variant to `Admitted`); no New user (→ `SsoUnavailable`), no JIT (step 4 is skipped), and the only write besides `set_last_login` is the owner's own identity (Link: `insert_identity` with step 5's rules for that owner). **An instance admin who owns the org** (the usual self-hosted shape: the operator is the sole owner) is Link-refused in normal mode, so in test mode only: when step 2 finds an instance admin who is an owner of the org and whose email's domain is in `domains`, the outcome is `User { user_id, revoked: [], linked: false, joined: None, no_seat: false }` with **no identity written**; `set_last_login` still runs and the route starts the session with `sso_org: Some(org)`, so enforcement becomes reachable (D-P-57). Normal mode:
 1. `identities::identity_user_tx(conn, &identity, &subject)` → `Some(id)`: load `users::user_by_id_tx`; its email's domain not in `domains` → `DomainNotAllowed`; disabled → `AccountDisabled`. Case **Known(user)**.
 2. Else `users::user_by_email_tx(conn, &email)` → `Some(user)`: disabled → `AccountDisabled`; instance admin → `LinkRefused`. Case **Link(user)**.
 3. Else signup `Disabled` → `SignupClosed`. Case **New**.
@@ -1159,9 +1184,18 @@ Wire `routes()` into `http/access.rs`. `GET /api/auth/sso/authorize` is `Access:
 
 (`Record<OAuthErrorCode, string>` needs both, or `just check-web` fails.) Spec 08's list of codes gains both (with `sso_required` in P12).
 
+`web/src/lib/redirect.ts` gains the authorize link that P14 (login) and P15 (Test sign-in) both use, so those two phases share no file:
+
+```ts
+/** `/api/auth/sso/authorize?domain=…&redirect=…` (D-P-60). `redirect` omitted when undefined. */
+export function ssoAuthorizeHref(domain: string, redirect?: string): string
+```
+
+Built like `authorizeHref` (`URLSearchParams`, `domain` first). Tests next to `authorizeHref`'s: `ssoAuthorizeHref("acme.com")` is `/api/auth/sso/authorize?domain=acme.com`; with `"/acme/x?y=1"` the redirect is encoded.
+
 ### Test helpers
 
-Move `Pending`, `begin_with` (generalized to take the full authorize path and query, and an optional `cookie` header for the owner's session of a Test sign-in), `finish`, `grant`, `one_cookie`, `set_cookies`, `cookie_header`, `location` and `me` from `routes/oauth.rs`'s test module to `crates/server/src/test_support/oauth.rs`, declared with `pub(crate) mod oauth;` in `test_support/mod.rs` (the module is already test-only). `grant` gains a `subject: &str` first parameter (today it hard-codes `"grace"`); the existing callers pass `"grace"`. Make `routes/oauth.rs` tests use them. No behaviour change.
+Move `OAUTH_NAME`, `SESSION_NAME`, `MeBody`, `MeUser`, `saved_redirect`, `Pending`, `begin_with` (generalized to take the full authorize path and query, and an optional `cookie` header for the owner's session of a Test sign-in), `finish`, `grant`, `one_cookie`, `set_cookies`, `cookie_header`, `location` and `me` from `routes/oauth.rs`'s test module to `crates/server/src/test_support/oauth.rs`, declared with `pub(crate) mod oauth;` in `test_support/mod.rs` (the module is already test-only). `grant` gains a `subject: &str` first parameter (today it hard-codes `"grace"`); the existing callers pass `"grace"`. Make `routes/oauth.rs` tests use them. No behaviour change.
 
 ### Tests (`ee::org_sso::login::tests`)
 
@@ -1180,6 +1214,7 @@ Move `Pending`, `begin_with` (generalized to take the full authorize path and qu
 8. `lapse_signs_in_without_joining`: no licence (rows inserted directly) → a new user signs in, no membership.
 9. `authorize_without_a_route`: unknown domain, pending domain, and a **disabled** provider without an owner session (and with a non-owner's session: `add_member(.., OrgRole::Admin)`'s cookie) → all `/login?error=sso_unavailable`, no cookie set; the 301st authorize in a burst from one IP → 429.
 9b. `test_sign_in_of_a_disabled_provider`: `configure_org_sso(.., enabled: false, ..)`; authorize with `owner.cookie` → 302 to the mock; the grant for `owner@acme.test` → signs in, identity recorded, `last_login_at` set, the session's `sso_org_id` is the org; the same Test flow with a grant for `ada@acme.test` (no account) → `/login?error=sso_unavailable`, no user created; for an existing non-owner member → `sso_unavailable`, no identity added; a callback of a non-test cookie after the provider was disabled → `sso_unavailable`.
+9c. `an_instance_admin_owner_can_test`: `root@acme.test` made instance admin (`make_instance_admin`) and owner (`add_member(.., OrgRole::Owner)`), provider disabled, `last_login_at` cleared; Test sign-in with root's cookie and a grant for `root@acme.test` → signs in; no `identities` row for root; `last_login_at` set; the session row's `sso_org_id` is the org; then PATCH `{enabled: true}` then `{enforced: true}` with that session → 200 (an admin is exempt from the caller check, and `last_login_at` is now set). The same grant without the test flag (provider enabled, normal sign-in) → `link_refused`.
 10. `state_is_bound_to_the_org_flow`: a cookie from `/api/auth/authorize/oidc:mock` used on `/api/auth/callback/sso` → `invalid_state`, and an `sso` cookie on `/api/auth/callback/oidc:mock` → `invalid_state`.
 11. `logs_carry_no_email_or_domain`: `assert_logs_clean(&["ada@acme.test", "acme.test"], …)` around a full login (no URL needles: they carry the mock's port).
 
@@ -1259,6 +1294,8 @@ This covers GitHub, Google and `[[auth.oidc]]`. `get_oauth_callback`'s descripti
 
 `OAUTH_ERROR_CODES` gains `sso_required`; message: "Your organization requires signing in through its identity provider. Enter your email to continue." `loginErrorMessage`'s `sso_required` text becomes "Your organization requires single sign-on. Enter your email again to continue." (both the instance-wide and org cases). Two existing web tests assert the old text and change with it: `web/src/components/auth/messages.test.ts` (about line 23) and `web/src/routes/login.test.tsx` (about line 162).
 
+`web/src/routes/reset.tsx`: the reset form's error handling (where it reads `problemOf(reset.error)`) gains a branch before the generic message: `status === 403 && code === "sso_required"` → "Your organization requires single sign-on, so this account has no password to reset. Sign in through your identity provider." with a link to `/login`. Test in `web/src/routes/reset.test.tsx`: `server.use` the `POST /api/auth/password/reset` answering `problemResponse(403, "sso_required")` → that message and the link.
+
 ### Tests
 
 `routes::auth::tests`, on `org_sso_app()` + `configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true)`; users with a password are inserted the way the existing login tests do (`users::insert_user` with a hash from `app.state.passwords()`), `root@acme.test` then `make_instance_admin`, `bob@other.test` in `second_org`:
@@ -1323,14 +1360,7 @@ Open `meta.db` and resolve the org the way `entitlements` does; `meta.write` →
 
 `LoginSearch` gains `password?: boolean`; `parseLoginSearch` sets it when `search.password` is `"1"` or `1` (the instance admins' path, D-P-58). Tests in the existing search test file.
 
-### `web/src/lib/redirect.ts`
-
-```ts
-/** `/api/auth/sso/authorize?domain=…&redirect=…` (D-P-60). */
-export function ssoAuthorizeHref(domain: string, redirect?: string): string
-```
-
-Test next to `authorizeHref`'s.
+`ssoAuthorizeHref` (`web/src/lib/redirect.ts`) comes from P10's web contract.
 
 ### `web/src/routes/login.tsx`
 
