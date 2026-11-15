@@ -483,20 +483,23 @@ fn days(from: u8, to: u8) -> (i64, i64) {
 /// What the aggregate checks need from one project's visible copies.
 struct Copies {
     visible: Visible,
-    /// No key has two or more visible copies: every sum is exact.
-    settled: bool,
 }
 
 impl Copies {
     fn of(state: &ProjectModel) -> Self {
-        let visible = state.visible_spans();
-        let settled = visible.values().all(|ingests| ingests.len() == 1);
-        Self { visible, settled }
+        Self {
+            visible: state.visible_spans(),
+        }
     }
 
     /// The copies of `row`'s trace beyond one per visible key: what its unmerged re-sends add.
     fn extra(&self, row: &ExpectedTrace) -> i64 {
         copies_of(&self.visible, trace_number(&row.trace_id)) - row.span_count
+    }
+
+    /// A group is settled when none of its traces has extra copies, so its sums are exact.
+    fn group_settled(&self, rows: &[&ExpectedTrace]) -> bool {
+        rows.iter().all(|row| self.extra(row) == 0)
     }
 }
 
@@ -510,6 +513,8 @@ struct Sums {
     extra_errors: i64,
     total_tokens: Option<i64>,
     cost_total: Option<f64>,
+    /// No trace of the group has extra copies: its sums are exact.
+    settled: bool,
 }
 
 impl Sums {
@@ -526,26 +531,44 @@ impl Sums {
                 .iter()
                 .filter_map(|row| row.cost_total)
                 .reduce(|total, value| total + value),
+            settled: copies.group_settled(rows),
         }
     }
 }
 
-/// Sessions, users, the windowed and evaluation-excluded trace lists, the metrics KPIs, the
-/// filter deletion scope and the alert values (`check_full` only), per project.
+/// The window `from..to` one span long before `window`: the one `metrics` compares against.
+fn previous_window((from, to): (i64, i64)) -> (i64, i64) {
+    (from - (to - from), from)
+}
+
+/// Sessions, users, the windowed and evaluation-excluded trace lists, the metrics KPIs and their
+/// previous values, the filter deletion scope and the alert values (`check_full` only), per
+/// project.
 ///
 /// Set-valued parts are exact even when a trace is unsettled. A duplicate adds a copy of a key,
 /// never a trace, and copies of a key share their content, so the traces, their merged start
 /// times, `error_count > 0`, and the sessions and users they belong to are the same as with
-/// one copy each. Sums are exact when the project is settled. Otherwise a duplicate can only
-/// add: a token or cost sum is at least the expected one, and an error sum is at most the
-/// extra copies above it.
+/// one copy each. A sum is exact when no trace in its group has extra copies. Otherwise a
+/// duplicate can only add: a token or cost sum is at least the expected one, and an error sum
+/// is at most the extra copies above it.
 fn check_aggregates(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     let at = format!("op {index}, project {project:?}");
     let copies = Copies::of(state);
     check_trace_lists(h, state, &copies, project, &at);
     check_sessions_and_users(h, state, &copies, project, &at);
-    check_metrics_and_filter(h, state, &copies, project, &at);
-    check_alerts(h, state, &copies, project, &at);
+    // Days D..D+4 has every trace; D+2..D+4 leaves the previous window, D..D+2, non-empty.
+    for span in [(0, 4), (2, 4)] {
+        let label = format!("{at}: days D+{}..D+{}", span.0, span.1);
+        let window = days(span.0, span.1);
+        check_kpis(h, state, &copies, project, window, &label);
+        check_filter_ids(h, state, project, window, &label);
+    }
+    // Days D+1..D+2 holds a class-2 trace whose score is in the window but whose trace starts
+    // after it, so the semi-join excludes it.
+    for span in [(0, 4), (1, 2)] {
+        let label = format!("{at}: alerts over days D+{}..D+{}", span.0, span.1);
+        check_alerts(h, state, &copies, project, days(span.0, span.1), &label);
+    }
 }
 
 /// The trace list over days D+1..D+2 (merged `start_time`, evaluation traces kept) and the trace
@@ -652,10 +675,9 @@ fn sums_mismatch(
     errors: i64,
     tokens: Option<i64>,
     cost: Option<f64>,
-    settled: bool,
 ) -> Option<String> {
     let mut differing: Vec<&str> = Vec::new();
-    let errors_ok = if settled {
+    let errors_ok = if want.settled {
         errors == want.error_count
     } else {
         (want.error_count..=want.error_count + want.extra_errors).contains(&errors)
@@ -665,11 +687,11 @@ fn sums_mismatch(
     }
     let tokens_ok = match (want.total_tokens, tokens) {
         (None, None) => true,
-        (Some(want), Some(got)) => {
-            if settled {
-                want == got
+        (Some(expected), Some(got)) => {
+            if want.settled {
+                expected == got
             } else {
-                got >= want
+                got >= expected
             }
         }
         _ => false,
@@ -677,7 +699,7 @@ fn sums_mismatch(
     if !tokens_ok {
         differing.push("total_tokens");
     }
-    if !float_sum_matches(want.cost_total, cost, settled) {
+    if !float_sum_matches(want.cost_total, cost, want.settled) {
         differing.push("cost_total");
     }
     (!differing.is_empty()).then(|| format!("differing sums {differing:?}, expected {want:?}"))
@@ -722,13 +744,9 @@ fn check_sessions_and_users(
             got.trace_count, want.traces,
             "{at}: session {session} trace_count"
         );
-        if let Some(problem) = sums_mismatch(
-            &want,
-            got.error_count,
-            got.total_tokens,
-            got.cost_total,
-            copies.settled,
-        ) {
+        if let Some(problem) =
+            sums_mismatch(&want, got.error_count, got.total_tokens, got.cost_total)
+        {
             panic!("{at}: session {session}: {problem}\nobserved {got:?}");
         }
     }
@@ -756,68 +774,97 @@ fn kpi(kpis: &[Kpi], name: KpiName) -> Kpi {
     *kpi
 }
 
-/// The dashboard KPIs over days D..D+4, and `filter_trace_ids` over the same window.
-fn check_metrics_and_filter(
+/// The KPIs `window` gives, as `metrics` computes them: each KPI's expected value and whether it
+/// is exact. Counts and error shares are set-valued, so they are always exact.
+fn expected_kpis(
+    state: &ProjectModel,
+    copies: &Copies,
+    window: (i64, i64),
+) -> Vec<(KpiName, Option<f64>, bool)> {
+    let rows = state.traces_in(Some(window), false);
+    let refs: Vec<&ExpectedTrace> = rows.iter().collect();
+    let sums = Sums::of(&refs, copies);
+    let errors = i64::try_from(rows.iter().filter(|row| row.error_count > 0).count())
+        .expect("a model has few traces");
+    vec![
+        (
+            KpiName::Traces,
+            (sums.traces > 0).then_some(sums.traces as f64),
+            true,
+        ),
+        (
+            KpiName::ErrorRate,
+            (sums.traces > 0).then(|| errors as f64 / sums.traces as f64),
+            true,
+        ),
+        (KpiName::CostTotal, sums.cost_total, sums.settled),
+        (
+            KpiName::TotalTokens,
+            sums.total_tokens.map(|total| total as f64),
+            sums.settled,
+        ),
+    ]
+}
+
+/// The KPIs over `window` and their `previous` values, which cover `previous_window(window)`.
+/// The percentile is not compared (approximate); it must only be listed.
+fn check_kpis(
     h: &Harness,
     state: &ProjectModel,
     copies: &Copies,
     project: P,
-    at: &str,
+    window: (i64, i64),
+    label: &str,
 ) {
-    let window = days(0, 4);
-    let members = state.traces_in(Some(window), false);
-    let refs: Vec<&ExpectedTrace> = members.iter().collect();
-    let sums = Sums::of(&refs, copies);
-    let errors = i64::try_from(members.iter().filter(|row| row.error_count > 0).count())
-        .expect("a model has few traces");
-
     let kpis = observe_kpis(h, project, window);
-    assert!(
-        kpis.iter().all(|kpi| kpi.previous.is_none()),
-        "{at}: a KPI has a previous value, but no trace starts before day D"
-    );
-    let traces = kpi(&kpis, KpiName::Traces);
-    let want_traces = (sums.traces > 0).then_some(sums.traces as f64);
-    assert_eq!(
-        traces.value, want_traces,
-        "{at}: the Traces KPI over days D..D+4"
-    );
-    let error_rate = kpi(&kpis, KpiName::ErrorRate);
-    let want_rate = (sums.traces > 0).then(|| errors as f64 / sums.traces as f64);
-    assert!(
-        float_sum_matches(want_rate, error_rate.value, true),
-        "{at}: the ErrorRate KPI is {:?}, expected {want_rate:?}",
-        error_rate.value
-    );
-    let cost = kpi(&kpis, KpiName::CostTotal);
-    assert!(
-        float_sum_matches(sums.cost_total, cost.value, copies.settled),
-        "{at}: the CostTotal KPI is {:?}, expected {:?}",
-        cost.value,
-        sums.cost_total
-    );
-    let tokens = kpi(&kpis, KpiName::TotalTokens);
-    let want_tokens = sums.total_tokens.map(|total| total as f64);
-    assert!(
-        float_sum_matches(want_tokens, tokens.value, copies.settled),
-        "{at}: the TotalTokens KPI is {:?}, expected {want_tokens:?}",
-        tokens.value
-    );
-    // The approximate percentile is not compared; it must only be listed.
+    let current = expected_kpis(state, copies, window);
+    let previous = expected_kpis(state, copies, previous_window(window));
+    for ((name, want, exact), (_, want_previous, previous_exact)) in current.iter().zip(&previous) {
+        let got = kpi(&kpis, *name);
+        assert!(
+            float_sum_matches(*want, got.value, *exact),
+            "{label}: the {name:?} KPI is {:?}, expected {want:?}",
+            got.value
+        );
+        assert!(
+            float_sum_matches(*want_previous, got.previous, *previous_exact),
+            "{label}: the {name:?} KPI's previous value is {:?}, expected {want_previous:?}",
+            got.previous
+        );
+    }
     let _ = kpi(&kpis, KpiName::LatencyP95);
+}
 
-    let mut want_ids: Vec<String> = members.iter().map(|row| row.trace_id.clone()).collect();
+/// `filter_trace_ids` over `window`: the traces of the window's trace list, evaluation excluded.
+fn check_filter_ids(
+    h: &Harness,
+    state: &ProjectModel,
+    project: P,
+    window: (i64, i64),
+    label: &str,
+) {
+    let mut want_ids: Vec<String> = state
+        .traces_in(Some(window), false)
+        .into_iter()
+        .map(|row| row.trace_id)
+        .collect();
     want_ids.sort();
     assert_eq!(
         observe_filter_trace_ids(h, project, window),
         want_ids,
-        "{at}: filter_trace_ids over days D..D+4 differs from the trace list"
+        "{label}: filter_trace_ids differs from the trace list"
     );
 }
 
-/// `alert_value` over days D..D+4: the trace measures, and the average of each score name.
-fn check_alerts(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, at: &str) {
-    let window = days(0, 4);
+/// `alert_value` over `window`: the trace measures, and the average of each score name.
+fn check_alerts(
+    h: &Harness,
+    state: &ProjectModel,
+    copies: &Copies,
+    project: P,
+    window: (i64, i64),
+    at: &str,
+) {
     let members = state.traces_in(Some(window), false);
     let refs: Vec<&ExpectedTrace> = members.iter().collect();
     let sums = Sums::of(&refs, copies);
@@ -839,7 +886,7 @@ fn check_alerts(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, 
         float_sum_matches(
             Some(sums.cost_total.unwrap_or(0.0)),
             cost.value,
-            copies.settled
+            sums.settled
         ),
         "{at}: the Cost alert is {:?}, expected {:?}",
         cost.value,
@@ -856,8 +903,10 @@ fn check_alerts(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, 
             AlertMeasure::ScoreAvg { name: name.clone() },
         );
         assert_eq!(got.count, count, "{at}: the ScoreAvg {name} alert count");
-        // A duplicate span does not change which scores exist, so the mean is exact even when
-        // a trace is unsettled.
+        // Exact even when a trace is unsettled. Duplicates add copies, not traces, so the
+        // semi-join's trace set (and so the score set and its mean) is the same. That relies on
+        // the shapes keeping `start_time`, `end_time` and `environment` identical across the
+        // copies of a span: otherwise a copy could move a trace in or out of the window.
         assert!(
             float_sum_matches(mean, got.value, true),
             "{at}: the ScoreAvg {name} alert is {:?}, expected {mean:?}",
