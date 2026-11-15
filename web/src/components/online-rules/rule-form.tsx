@@ -579,16 +579,27 @@ export function RuleForm({ org, project, rule }: { org: string; project: string;
               </div>
               {values.limitSpend ? (
                 <div className="flex flex-col gap-4 sm:flex-row">
-                  <TextField
-                    id="rule-budget"
-                    type="number"
-                    label="Amount (USD)"
-                    value={values.budget}
-                    error={errors.budget_usd}
-                    onChange={(budget) => {
-                      set({ budget });
-                    }}
-                  />
+                  <div className="flex flex-col gap-2">
+                    <TextField
+                      id="rule-budget"
+                      type="number"
+                      label="Amount (USD)"
+                      value={values.budget}
+                      error={errors.budget_usd}
+                      onChange={(budget) => {
+                        set({ budget });
+                      }}
+                    />
+                    {errors.budget_usd?.includes("no price") ? (
+                      <Link
+                        to="/$org/$project/settings/models"
+                        params={{ org, project }}
+                        className="text-sm underline"
+                      >
+                        Add a model price
+                      </Link>
+                    ) : null}
+                  </div>
                   <div className="flex flex-col gap-2">
                     <Label htmlFor="rule-budget-period">Period</Label>
                     <Select

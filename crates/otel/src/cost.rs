@@ -3,6 +3,8 @@
 //! Spec 02 § Cost computation, D82 and D109. Reported cost wins outright.
 //! Otherwise an `llm` or `embedding` span is priced from the matching row.
 
+use std::sync::Arc;
+
 use llmobs_core::enums::{CostSource, SpanKind};
 use llmobs_core::names::attr;
 use regex::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
@@ -90,10 +92,15 @@ pub struct PriceRow {
 }
 
 /// Compiled price rows. Patterns are `^(?i:pattern)$`.
+///
+/// A table built by [`PriceTable::layered`] also prices with the rows of its base table: the
+/// lookup picks the same row a single table holding the base rows followed by these rows would
+/// pick (spec 02 § Cost computation, rule 2).
 #[derive(Debug, Clone)]
 pub struct PriceTable {
     rows: Vec<PriceRow>,
     set: RegexSet,
+    base: Option<Arc<PriceTable>>,
 }
 
 impl PriceTable {
@@ -104,10 +111,41 @@ impl PriceTable {
     /// [`PriceError::InvalidPattern`] carries the row index and no pattern text.
     /// [`PriceError::TooLarge`] is the compiled-size limit.
     pub fn new(rows: Vec<PriceRow>) -> Result<Self, PriceError> {
-        Self::compile(rows, PATTERN_SIZE_LIMIT)
+        Self::compile(rows, PATTERN_SIZE_LIMIT, None)
     }
 
-    fn compile(rows: Vec<PriceRow>, size_limit: usize) -> Result<Self, PriceError> {
+    /// Compile `rows` on top of `base`. Lookups consider the rows of both, as one table holding
+    /// `base`'s rows followed by `rows` would (spec 02 rule 2). `base` is shared, not copied.
+    ///
+    /// # Errors
+    ///
+    /// As [`PriceTable::new`]. An index in [`PriceError::InvalidPattern`] is a position in `rows`.
+    pub fn layered(base: Arc<PriceTable>, rows: Vec<PriceRow>) -> Result<Self, PriceError> {
+        Self::compile(rows, PATTERN_SIZE_LIMIT, Some(base))
+    }
+
+    /// This table's own rows, in the order they were given. The base table's rows are not included.
+    #[must_use]
+    pub fn rows(&self) -> &[PriceRow] {
+        &self.rows
+    }
+
+    /// The table this one was layered on, if any.
+    #[must_use]
+    pub fn base(&self) -> Option<&Arc<PriceTable>> {
+        self.base.as_ref()
+    }
+
+    /// Rows of this table and of every table below it.
+    fn total_rows(&self) -> usize {
+        self.rows.len() + self.base.as_ref().map_or(0, |base| base.total_rows())
+    }
+
+    fn compile(
+        rows: Vec<PriceRow>,
+        size_limit: usize,
+        base: Option<Arc<PriceTable>>,
+    ) -> Result<Self, PriceError> {
         let mut patterns = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().enumerate() {
             // The pattern must be a complete regex on its own. Checking only the
@@ -134,7 +172,7 @@ impl PriceTable {
                 regex::Error::CompiledTooBig(_) => PriceError::TooLarge,
                 _ => PriceError::InvalidPattern { index: 0 },
             })?;
-        Ok(Self { rows, set })
+        Ok(Self { rows, set, base })
     }
 
     /// The row that prices `model` for `provider` at `at`, as span costing would pick it.
@@ -154,6 +192,13 @@ pub fn builtin_price_rows() -> Vec<PriceRow> {
     // The snapshot is ours and `tests/prices.rs` checks it. A parse failure is a bug.
     serde_json::from_str(include_str!("../prices/builtin.json"))
         .expect("builtin.json parses; tests/prices.rs checks the snapshot")
+}
+
+/// The pattern that matches exactly `model_name` (case-insensitive once compiled): every regex
+/// metacharacter escaped.
+#[must_use]
+pub fn exact_pattern(model_name: &str) -> String {
+    regex::escape(model_name)
 }
 
 /// Cost columns for one span.
@@ -354,7 +399,23 @@ fn lookup<'a>(
     provider: Option<&str>,
     start_time: i64,
 ) -> Option<&'a PriceRow> {
-    let mut best: Option<(usize, &PriceRow)> = None;
+    ranked_lookup(prices, model, provider, start_time).map(|(_, row)| row)
+}
+
+/// The winning row and its index in the flat order: the base's rows, then this table's rows.
+fn ranked_lookup<'a>(
+    prices: &'a PriceTable,
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<(usize, &'a PriceRow)> {
+    let (offset, mut best) = match &prices.base {
+        Some(base) => (
+            base.total_rows(),
+            ranked_lookup(base, model, provider, start_time),
+        ),
+        None => (0, None),
+    };
     for index in prices.set.matches(model) {
         let Some(row) = prices.rows.get(index) else {
             continue;
@@ -362,13 +423,14 @@ fn lookup<'a>(
         if !row_matches(row, provider, start_time) {
             continue;
         }
+        let ranked = offset + index;
         let wins =
-            best.is_none_or(|(best_index, best_row)| row_beats(row, index, best_row, best_index));
+            best.is_none_or(|(best_index, best_row)| row_beats(row, ranked, best_row, best_index));
         if wins {
-            best = Some((index, row));
+            best = Some((ranked, row));
         }
     }
-    best.map(|(_, row)| row)
+    best
 }
 
 fn row_matches(row: &PriceRow, provider: Option<&str>, start_time: i64) -> bool {
@@ -625,8 +687,229 @@ mod tests {
     #[test]
     fn the_compiled_set_has_a_size_limit() {
         let rows = vec![row("abcdef", PriceScope::Builtin, None, 0, 1.0)];
-        let err = PriceTable::compile(rows, 1).expect_err("too large");
+        let err = PriceTable::compile(rows, 1, None).expect_err("too large");
         assert_eq!(err, PriceError::TooLarge);
+    }
+
+    fn layered(base: Vec<PriceRow>, rows: Vec<PriceRow>) -> PriceTable {
+        PriceTable::layered(Arc::new(table(base)), rows).expect("patterns")
+    }
+
+    fn input_price(
+        prices: &PriceTable,
+        model: &str,
+        provider: Option<&str>,
+        at: i64,
+    ) -> Option<f64> {
+        prices
+            .price_for(model, provider, at)
+            .and_then(|row| row.price_input)
+    }
+
+    #[test]
+    fn a_custom_row_overrides_the_base_row_of_the_same_model() {
+        let prices = layered(
+            vec![row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 2.5)],
+            vec![row("gpt-4o", PriceScope::Project, None, 0, 1.0)],
+        );
+        assert_eq!(
+            input_price(&prices, "gpt-4o", Some("openai"), 10),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn the_base_prices_models_no_custom_row_matches() {
+        let without_base = layered(
+            vec![row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 2.5)],
+            vec![row("gpt-4o", PriceScope::Project, None, 0, 1.0)],
+        );
+        assert_eq!(input_price(&without_base, "gpt-4o-mini", None, 0), None);
+        let with_base = layered(
+            vec![
+                row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 2.5),
+                row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 0.15),
+            ],
+            vec![row("gpt-4o", PriceScope::Project, None, 0, 1.0)],
+        );
+        assert_eq!(
+            input_price(&with_base, "gpt-4o-mini", Some("openai"), 0),
+            Some(0.15)
+        );
+    }
+
+    #[test]
+    fn scope_beats_a_later_valid_from_across_layers() {
+        let prices = layered(
+            vec![row("m", PriceScope::Builtin, None, 100, 9.0)],
+            vec![row("m", PriceScope::Org, None, 0, 1.0)],
+        );
+        assert_eq!(input_price(&prices, "m", None, 200), Some(1.0));
+    }
+
+    #[test]
+    fn project_beats_org_in_one_layer() {
+        let forward = layered(
+            vec![],
+            vec![
+                row("m", PriceScope::Org, None, 0, 1.0),
+                row("m", PriceScope::Project, None, 0, 2.0),
+            ],
+        );
+        assert_eq!(input_price(&forward, "m", None, 0), Some(2.0));
+        let reversed = layered(
+            vec![],
+            vec![
+                row("m", PriceScope::Project, None, 0, 2.0),
+                row("m", PriceScope::Org, None, 0, 1.0),
+            ],
+        );
+        assert_eq!(input_price(&reversed, "m", None, 0), Some(2.0));
+    }
+
+    #[test]
+    fn a_custom_row_with_a_provider_leaves_other_providers_to_the_base() {
+        let prices = layered(
+            vec![row("llama3", PriceScope::Builtin, Some("ollama"), 0, 0.5)],
+            vec![row("llama3", PriceScope::Project, Some("openai"), 0, 0.0)],
+        );
+        assert_eq!(input_price(&prices, "llama3", Some("openai"), 0), Some(0.0));
+        assert_eq!(input_price(&prices, "llama3", Some("ollama"), 0), Some(0.5));
+        assert_eq!(input_price(&prices, "llama3", None, 0), Some(0.0));
+    }
+
+    #[test]
+    fn a_custom_row_without_a_provider_prices_every_provider() {
+        let prices = layered(vec![], vec![row("llama3", PriceScope::Org, None, 0, 0.0)]);
+        assert_eq!(input_price(&prices, "llama3", Some("openai"), 0), Some(0.0));
+        assert_eq!(input_price(&prices, "llama3", Some("ollama"), 0), Some(0.0));
+        assert_eq!(input_price(&prices, "llama3", None, 0), Some(0.0));
+    }
+
+    #[test]
+    fn valid_from_still_applies_to_custom_rows() {
+        let prices = layered(
+            vec![row("m", PriceScope::Builtin, None, 0, 5.0)],
+            vec![row("m", PriceScope::Project, None, 100, 1.0)],
+        );
+        assert_eq!(input_price(&prices, "m", None, 50), Some(5.0));
+        assert_eq!(input_price(&prices, "m", None, 100), Some(1.0));
+    }
+
+    #[test]
+    fn ties_across_layers_prefer_the_base_row() {
+        let prices = layered(
+            vec![row("m", PriceScope::Org, None, 0, 1.0)],
+            vec![row("m", PriceScope::Org, None, 0, 2.0)],
+        );
+        assert_eq!(input_price(&prices, "m", None, 0), Some(1.0));
+    }
+
+    #[test]
+    fn layered_equals_one_flat_table() {
+        let base = vec![
+            row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 2.5),
+            row(
+                "gpt-4o",
+                PriceScope::Builtin,
+                Some("azure.ai.openai"),
+                0,
+                2.6,
+            ),
+            row("gpt-.*", PriceScope::Builtin, None, 0, 9.0),
+            row("claude-.*", PriceScope::Builtin, Some("anthropic"), 0, 3.0),
+        ];
+        let custom = vec![
+            row("gpt-4o", PriceScope::Org, Some("openai"), 50, 1.0),
+            row("gpt-4o.*", PriceScope::Project, None, 0, 1.5),
+            row("claude-3", PriceScope::Org, None, 0, 0.5),
+        ];
+        let mut flat_rows = base.clone();
+        flat_rows.extend(custom.clone());
+        let flat = table(flat_rows);
+        let stacked = layered(base, custom);
+        let models = [
+            "gpt-4o",
+            "GPT-4O",
+            "gpt-4o-mini",
+            "gpt-5",
+            "claude-3",
+            "claude-3-opus",
+            "llama3",
+        ];
+        let providers = [
+            None,
+            Some("openai"),
+            Some("azure.ai.openai"),
+            Some("anthropic"),
+            Some("gcp.gen_ai"),
+        ];
+        for model in models {
+            for provider in providers {
+                for at in [0, 49, 50, 1_000] {
+                    assert_eq!(
+                        stacked.price_for(model, provider, at),
+                        flat.price_for(model, provider, at),
+                        "model {model}, provider {provider:?}, at {at}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rows_and_base_describe_the_layers() {
+        let a = row("a", PriceScope::Builtin, None, 0, 1.0);
+        let b = row("b", PriceScope::Org, None, 0, 2.0);
+        let c = row("c", PriceScope::Project, None, 0, 3.0);
+        let stacked = layered(vec![a.clone()], vec![b.clone(), c.clone()]);
+        assert_eq!(stacked.rows(), &[b, c][..]);
+        let base = stacked.base().expect("base");
+        assert_eq!(base.rows(), &[a][..]);
+        assert!(
+            table(vec![row("a", PriceScope::Builtin, None, 0, 1.0)])
+                .base()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_invalid_custom_pattern_names_its_index_in_the_layer() {
+        let err = PriceTable::layered(
+            Arc::new(table(vec![row("ok", PriceScope::Builtin, None, 0, 1.0)])),
+            vec![
+                row("fine", PriceScope::Org, None, 0, 1.0),
+                row("(", PriceScope::Org, None, 0, 1.0),
+            ],
+        )
+        .expect_err("invalid");
+        assert_eq!(err, PriceError::InvalidPattern { index: 1 });
+    }
+
+    #[test]
+    fn apply_prices_a_span_with_a_layered_table() {
+        let prices = layered(
+            vec![row("gpt-4o", PriceScope::Builtin, Some("openai"), 0, 2.5)],
+            vec![row("gpt-4o", PriceScope::Project, None, 0, 1.0)],
+        );
+        let priced = priced_of(&prices, "gpt-4o", 1_000_000);
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.source, Some(CostSource::Computed));
+    }
+
+    #[test]
+    fn exact_pattern_matches_only_that_name() {
+        let prices = table(vec![row(
+            &exact_pattern("llama3.1:8b"),
+            PriceScope::Project,
+            None,
+            0,
+            1.0,
+        )]);
+        assert!(lookup(&prices, "llama3.1:8b", None, 0).is_some());
+        assert!(lookup(&prices, "LLAMA3.1:8B", None, 0).is_some());
+        assert!(lookup(&prices, "llama3x1:8b", None, 0).is_none());
+        assert!(lookup(&prices, "llama3.1:8b-q4", None, 0).is_none());
     }
 
     fn priced_of(prices: &PriceTable, model: &str, tokens: i64) -> Priced {
