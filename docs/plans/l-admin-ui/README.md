@@ -353,6 +353,16 @@ just web-dev
 
 Then open `http://localhost:5173/acme/support-bot/settings/general` (port from Vite's output). The mocks sign you in as Ada. Writes answer from `web/src/mocks/writes.ts` and keep no state, so a list does not change after a create or a delete.
 
+## Real-server check (2026-11-15, full plan review L-3)
+
+D-L-2 said G's M5 would check these pages on the real server; it did not, so the web-fix session did it by hand: a debug `llmobs serve` (fresh data dir, `LLMOBS_PUBLIC_URL=http://localhost:5173`, no SMTP, no licence) behind `just web-dev-server`, driven in a browser.
+
+Checked and working: `/setup` from the logged setup URL (cookie set, lands on `/acme`); org General, Members (invite without SMTP shows the copyable link), project General (retention in days, then "keep forever" saved as `null`), API keys (create shows the secret once with snippets), project Members (Teams gate shown without a licence); `/account` (tokens list with expiry); `/admin/users`, `/admin/settings` (test email disabled without SMTP); a session ended behind the app's back sends the next navigation to `/login?redirect=…`; `/invite/<token>` signed out creates the account and joins as Member; a Member gets the "no access" page on `/admin` and API keys and disabled controls on org General; sign-out from the user menu; `/login` wrong password ("Incorrect email or password.") and success; `/reset` without SMTP explains the admin path; `/verify` with a bad token offers a new link; `/cli-auth` Authorize (token POSTed to the callback, 90-day expiry accepted by the server) and Cancel (`error=access_denied`).
+
+Found and fixed: the org project list labelled a `null` retention "Default"; it means keep forever.
+
+Not checked: OAuth/OIDC sign-in and the `/login?error=` codes from a real provider, the SMTP paths (emails, verification required), password reset with a real token, `/setup` redirect from the gate on a fresh instance, and the origin check behind a reverse proxy.
+
 ## Notes for other tracks
 
 - **G (coordinator):** D-L-2 amends D-G-19. G's M5 no longer builds `/login` or the 401 handling; it checks L's pages against the real server. If G's M5 lands before L5, it must not add a second login page; it waits for L or uses L's branch.
