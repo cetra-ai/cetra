@@ -19,3 +19,6 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   output, or a query whose encoding does not fit the query memory pool, is `422 query_too_large`
   (D98). Aliasing a heavy column or cross-joining heavy rows could previously multiply the output
   past any memory limit.
+- CSV exports prefix a string cell or header name that starts with `=`, `+`, `-`, `@`, tab or CR
+  with `'`, so a spreadsheet shows it as text instead of running it (D-A2-5). NDJSON and Parquet
+  are unchanged.

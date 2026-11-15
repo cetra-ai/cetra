@@ -1027,6 +1027,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn csv_guards_formula_cells_and_names_but_not_numbers() {
+        let values = [
+            "=1+1", "+x", "-x", "@x", "\tx", "\rx", "=1,2", "a=b", "plain",
+        ];
+        let ctx = context();
+        let cells: Vec<Option<&str>> = values.iter().map(|value| Some(*value)).collect();
+        ctx.register_sqlite_view(SqliteView::ExperimentItems, string_table(&cells))
+            .expect("register");
+        let query = "SELECT s AS \"=cmd\", -1 AS n FROM experiment_items";
+
+        let bytes = export_bytes(&ctx, query, ExportFormat::Csv, EXPORT_MAX_ROWS).await;
+        let lines = csv_lines(&bytes);
+        let expected = [
+            "'=1+1,-1",
+            "'+x,-1",
+            "'-x,-1",
+            "'@x,-1",
+            "'\tx,-1",
+            "\"'\rx\",-1",
+            "\"'=1,2\",-1",
+            "a=b,-1",
+            "plain,-1",
+        ];
+        assert_eq!(lines[0], "'=cmd,n");
+        assert_eq!(lines.len(), expected.len() + 1, "{lines:?}");
+        for (line, want) in lines[1..].iter().zip(expected) {
+            assert_eq!(line, want);
+        }
+
+        // NDJSON is exact: the text is unchanged and -1 is still a number.
+        let bytes = export_bytes(&ctx, query, ExportFormat::Ndjson, EXPORT_MAX_ROWS).await;
+        let rows = ndjson_rows(&bytes);
+        assert_eq!(rows.len(), values.len());
+        for (row, value) in rows.iter().zip(values) {
+            assert_eq!(row["=cmd"], Value::String(value.to_owned()));
+            assert_eq!(row["n"], Value::from(-1));
+        }
+    }
+
+    #[tokio::test]
     async fn ndjson_matches_sql_json_rows() {
         let query = "SELECT trace_id, name, tags FROM traces ORDER BY start_time";
         let ctx = context();

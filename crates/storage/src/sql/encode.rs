@@ -201,7 +201,7 @@ pub(crate) fn csv_header(schema: &Schema) -> Bytes {
         if index > 0 {
             line.push(',');
         }
-        push_csv_field(&mut line, field.name());
+        push_csv_field(&mut line, &guard_formula(field.name()));
     }
     line.push_str("\r\n");
     Bytes::from(line)
@@ -243,10 +243,22 @@ pub(crate) fn csv_rows(
 fn csv_text(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
-        Value::String(text) => text.clone(),
+        Value::String(text) => guard_formula(text),
         Value::Number(number) => number.to_string(),
         Value::Bool(value) => value.to_string(),
         other => other.to_string(),
+    }
+}
+
+/// Stop a spreadsheet from running a text cell as a formula (OWASP). A string
+/// that starts with `=`, `+`, `-`, `@`, tab or CR gets a leading `'`, which
+/// spreadsheets show as text. Only CSV string cells and header names pass
+/// through here; numbers, bools, nulls and JSON arrays and objects do not.
+fn guard_formula(text: &str) -> String {
+    if text.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{text}")
+    } else {
+        text.to_owned()
     }
 }
 
