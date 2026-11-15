@@ -12,7 +12,9 @@ use super::header::{EdgeGroup, PayloadHeader, RefPage};
 use super::refs::{RowRefs, encode_page};
 use super::search::{Filters, FrameFilter, encode_edge_group};
 use super::trigram::{add_trigrams, filter_bit, filter_bits, set_bit};
-use super::{EDGE_GROUP_CHUNKS, FILTER_MAX_SHARE, REFS_PAGE_ROWS, ROLLUP_BITS, ROLLUP_MAX_FILL};
+use super::{
+    EDGE_GROUP_CHUNKS, FILTER_MAX_SHARE, MAX_PAGE_IDS, REFS_PAGE_ROWS, ROLLUP_BITS, ROLLUP_MAX_FILL,
+};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{Out, SEGMENT_HEADER_LEN};
@@ -125,6 +127,14 @@ pub(crate) fn write_payload_column(
     let mut ref_pages = Vec::with_capacity(rows.len().div_ceil(REFS_PAGE_ROWS));
     let mut ref_bytes = 0u64;
     for (group_index, group) in rows.chunks(REFS_PAGE_ROWS).enumerate() {
+        let page_ids = group.iter().fold(0usize, |total, row| {
+            total.saturating_add(row.as_ref().map_or(0, Vec::len))
+        });
+        if page_ids > MAX_PAGE_IDS {
+            return Err(StrataError::Unsupported {
+                what: "more than 2^24 chunk ids in one refs page".to_string(),
+            });
+        }
         let refs: Vec<RowRefs<'_>> = group
             .iter()
             .map(|row| match row {

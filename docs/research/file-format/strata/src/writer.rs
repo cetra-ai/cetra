@@ -10,7 +10,9 @@ use arrow::row::{OwnedRow, RowConverter, SortField};
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, Out, VERSION, checksum32};
+use crate::format::{
+    MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, MAX_ROWS, Out, VERSION, checksum32,
+};
 use crate::hot::{
     DirectoryRecord, HotTail, Layer, MapKey, MapLayout, PageRef, Postscript, write_file_header,
 };
@@ -147,7 +149,7 @@ impl StrataWriter {
             return Ok(());
         }
         let total = self.rows + n as u64;
-        if total >= 1 << 32 {
+        if total > MAX_ROWS {
             return Err(StrataError::TooManyRows { rows: total });
         }
 

@@ -121,7 +121,7 @@ What these add:
 - Every offset stored in the file is an **absolute byte offset from the start of the file**, unless stated otherwise.
 - Any length or offset read from a file is bounds-checked. A violation returns `StrataError::Corrupt { what, offset }` and never panics.
 - Limits: a file holds fewer than 2³² rows, and a merge has at most 255 inputs. Exceeding either is an error.
-- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. The writer keeps every chunk and page within them.
+- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. `MAX_ROWS` (2³² − 1) bounds the rows of a file. A refs page holds exactly 4,096 rows, the last one fewer, so a column has one refs page per started block of 4,096 rows. `MAX_PAGE_IDS` (2²⁴) bounds the chunk ids of one refs page after tail sharing is expanded. The writer keeps every chunk and page within them.
 
 ## Design decisions for v0
 
@@ -429,7 +429,7 @@ Applies to `Map<Utf8, Utf8>` columns.
 
 **Residual.** Keys that are not promoted form the residual map column (layer 4, `MAP` encoding).
 
-**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. llmobs-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys.
+**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. llmobs-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys. `unshred` returns each row's entries sorted bytewise by key (stable for equal keys); the original entry order is not kept.
 
 **Hot-tail section 5 layout:** `u32 n_maps`, then per map: `u32 map_column_id` · `u32 residual_column_id` · `u32 n_keys` · `n_keys × (u32 child_column_id · u32 residual_hits · u16 key_len · key bytes)`.
 

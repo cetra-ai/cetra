@@ -28,6 +28,9 @@ pub(crate) const FRAME_INITIAL_RATIO: f64 = 4.0;
 pub(crate) const FRAME_ZSTD_LEVEL: i32 = 3;
 /// Rows per refs page.
 pub(crate) const REFS_PAGE_ROWS: usize = 4096;
+/// Largest total number of chunk ids over the rows of one refs page, after tail sharing is
+/// expanded. Bounds the memory a crafted page can make the reader allocate.
+pub(crate) const MAX_PAGE_IDS: usize = 1 << 24;
 /// A based refs record looks at most this many rows back.
 pub(crate) const REFS_MAX_BACK: usize = 32;
 /// Keyframe depth is 0; a based record has depth base + 1, at most this value.

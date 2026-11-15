@@ -13,7 +13,7 @@ use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{
-    Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
+    Cursor, HEADER_LEN, MAX_PAGE_ENTRIES, MAX_ROWS, POSTSCRIPT_LEN, SEGMENT_HEADER_LEN, checksum32,
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
@@ -190,6 +190,12 @@ impl StrataFile {
             .and_then(|s| s.try_into().ok())
             .ok_or_else(too_small)?;
         let postscript = Postscript::decode(ps, size.saturating_sub(POSTSCRIPT_LEN))?;
+        if postscript.row_count > MAX_ROWS {
+            return Err(StrataError::Corrupt {
+                what: "row count",
+                offset: size.saturating_sub(POSTSCRIPT_LEN),
+            });
+        }
 
         if postscript.hot_offset < HEADER_LEN {
             return Err(StrataError::Corrupt {
@@ -675,6 +681,53 @@ mod tests {
             // `Map<Utf8, Utf8>` columns of the spans schema each add a residual, and no key.
             assert_eq!(file.directory().len(), spans_schema().fields().len() + 3);
             assert!(file.directory().iter().all(|r| r.n_chunks == 0));
+        });
+    }
+
+    #[test]
+    fn row_count_past_the_limit_is_corrupt() {
+        runtime().block_on(async {
+            let mut bytes = write_empty_file(spans_schema());
+            let ps_at = bytes.len() - 64;
+            bytes[ps_at + 16..ps_at + 24].copy_from_slice(&(1u64 << 32).to_le_bytes());
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            put(store.as_ref(), bytes).await;
+            let result = StrataFile::open(store, path(), None, &Config::default()).await;
+            assert!(matches!(
+                result,
+                Err(StrataError::Corrupt {
+                    what: "row count",
+                    ..
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn constant_sort_key_chunk_answers_by_its_zone() {
+        runtime().block_on(async {
+            let n = 1_000usize;
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+                Field::new("n", DataType::Int64, false),
+            ]));
+            let ids = FixedSizeBinaryArray::try_new(16, Buffer::from_vec(vec![7u8; 16 * n]), None)
+                .unwrap();
+            let values = arrow::array::Int64Array::from_iter_values(0..n as i64);
+            let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ids), Arc::new(values)])
+                .unwrap();
+            let mut writer = StrataWriter::new(schema, &["trace_id"], Config::default()).unwrap();
+            writer.write(&batch).unwrap();
+            let (bytes, _) = writer.finish().unwrap();
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            put(store.as_ref(), bytes).await;
+            let file = StrataFile::open(store, path(), None, &Config::default())
+                .await
+                .unwrap();
+            // A key outside the single constant chunk's zone finds nothing.
+            assert!(file.lookup(&[8u8; 16]).await.unwrap().is_empty());
+            // The key of the chunk finds every row, as one range.
+            assert_eq!(file.lookup(&[7u8; 16]).await.unwrap(), vec![0..n as u32]);
         });
     }
 

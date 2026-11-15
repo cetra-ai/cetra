@@ -272,6 +272,9 @@ pub(crate) async fn payload_contains(
             .any(|&h| !get_bit(rollup, h & (ROLLUP_BITS - 1)))
     });
     if rollup_misses {
+        // `n_rows` is bounded by the header: the refs pages hold one 16-byte page reference per
+        // 4,096 rows (checked in `PayloadHeader::decode`), so this allocation is at most 256 times
+        // the header's size.
         return Ok(ContainsResult {
             rows: vec![false; n_rows],
             frames_read: 0,
@@ -487,6 +490,8 @@ mod tests {
     use crate::config::Config;
     use crate::payload::chunk::chunk_value;
     use crate::payload::write::PayloadStats;
+    use crate::reader::read_column;
+    use crate::testgen::assert_same;
     use crate::writer::{FileSummary, StrataWriter};
     use arrow::array::{BinaryArray, FixedSizeBinaryArray, RecordBatch, StringArray};
     use arrow::buffer::Buffer;
@@ -1073,6 +1078,83 @@ mod tests {
             let got = contains(&file, &needle).await;
             assert!(got.rows.iter().all(|&m| !m));
         }
+    }
+
+    #[tokio::test]
+    async fn needles_across_the_first_edge_group_boundary_match_brute_force() {
+        let mut rng = Rng::new(0xED6E_0001);
+        let column: Vec<Option<String>> = (0..1_500)
+            .map(|_| Some(String::from_utf8(rng.bytes(1_000, LOWER)).unwrap()))
+            .collect();
+        let batch = table(&column);
+        let (file, _) = write_and_open(&batch, Config::default()).await;
+        let record = &file.directory()[1];
+        assert_eq!(record.layer, Layer::Payload);
+        let header = read_header(&file, record).await.unwrap();
+        assert!(header.n_chunks > 1_024, "{} chunks", header.n_chunks);
+        let bytes = as_bytes(&column);
+
+        // The rows whose chunk ids include chunk 1,023 or 1,024: the last chunk of the first edge
+        // group and the first chunk of the second.
+        let rows = read_rows(&file, &header, record.payload_offset)
+            .await
+            .unwrap();
+        let picked: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, ids)| {
+                ids.as_ref()
+                    .is_some_and(|ids| ids.iter().any(|&id| id == 1_023 || id == 1_024))
+            })
+            .map(|(r, _)| r)
+            .collect();
+        assert!(!picked.is_empty());
+
+        // Every 16-byte window of those rows, at offsets 0, 8, 16, ... (at most 2,000 needles).
+        let mut needles: Vec<Vec<u8>> = Vec::new();
+        for &r in &picked {
+            let value = bytes[r].unwrap();
+            for start in (0..=value.len() - 16).step_by(8) {
+                needles.push(value[start..start + 16].to_vec());
+            }
+        }
+        needles.truncate(2_000);
+        // Thirty random 16-byte substrings of other rows.
+        let others: Vec<usize> = (0..column.len()).filter(|r| !picked.contains(r)).collect();
+        for _ in 0..30 {
+            let value = bytes[others[rng.below(others.len())]].unwrap();
+            let start = rng.below(value.len() - 16 + 1);
+            needles.push(value[start..start + 16].to_vec());
+        }
+
+        for needle in &needles {
+            let got = contains(&file, needle).await;
+            assert_eq!(got.rows, brute(&bytes, needle), "needle {needle:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_values_contain_no_needle_and_round_trip() {
+        let column: Vec<Option<String>> = (0..50)
+            .map(|i| {
+                if i % 10 == 0 {
+                    None
+                } else {
+                    Some(String::new())
+                }
+            })
+            .collect();
+        let batch = table(&column);
+        let (file, _) = write_and_open(&batch, payload_config()).await;
+        assert_eq!(file.directory()[1].layer, Layer::Payload);
+        let bytes = as_bytes(&column);
+        for needle in [b"a".as_slice(), b"ab", b"abc"] {
+            let got = contains(&file, needle).await;
+            assert!(got.rows.iter().all(|&m| !m), "needle {needle:?}");
+            assert_eq!(got.rows, brute(&bytes, needle));
+        }
+        let decoded = read_column(&file, 1).await.unwrap();
+        assert_same(decoded.as_ref(), batch.column(1).as_ref());
     }
 
     /// The payload column of the SWE-agent trajectories, when `FMT_SWE_SHARDS` names its

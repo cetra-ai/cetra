@@ -42,6 +42,8 @@ pub const MAX_DICT_VALUES: usize = 1 << 20;
 pub const MAX_PROMOTED_KEYS: usize = 64;
 /// Longest map key that may be promoted to a child column, in bytes.
 pub const MAX_PROMOTED_KEY_LEN: usize = 1024;
+/// Largest number of rows in one file: row ids are `u32`, and `row_count` itself must fit.
+pub const MAX_ROWS: u64 = u32::MAX as u64;
 
 /// The little-endian value of `bytes`, zero-extended to 64 bits. `None` when there are
 /// more than eight bytes.

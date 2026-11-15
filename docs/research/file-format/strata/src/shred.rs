@@ -42,6 +42,16 @@ fn offset_of(total: usize) -> Result<i32> {
     i32::try_from(total).map_err(|_| corrupt())
 }
 
+/// Checks that the bytes one string builder receives fit its `i32` offsets. Arrow's builders
+/// panic past `i32::MAX`, so this runs before anything is appended.
+fn check_offsets(total: u64, err: impl FnOnce() -> StrataError) -> Result<()> {
+    if total > i32::MAX as u64 {
+        Err(err())
+    } else {
+        Ok(())
+    }
+}
+
 /// The key and value columns of a map's entries. Both are `StringArray`s of one length.
 fn entry_columns(entries: &StructArray) -> Result<(&StringArray, &StringArray)> {
     let [keys, values] = entries.columns() else {
@@ -183,6 +193,42 @@ fn build_map(
         .map_err(|_| corrupt())
 }
 
+/// The bytes the builders of [`shred`] will receive: one total per promoted key (its child), then
+/// the residual's key bytes and value bytes. Makes the same moving decisions as the build loop.
+fn shred_bytes(
+    keys: &StringArray,
+    values: &StringArray,
+    rows: &[Option<Range<usize>>],
+    promoted: &[Vec<u8>],
+) -> Result<(Vec<u64>, u64, u64)> {
+    let mut children = vec![0u64; promoted.len()];
+    let mut residual_keys = 0u64;
+    let mut residual_values = 0u64;
+    for range in rows.iter().flatten() {
+        let occ = occurrences(keys, values, range.clone())?;
+        for i in range.clone() {
+            let key = keys.value(i).as_bytes();
+            let value_len = if values.is_valid(i) {
+                values.value(i).len() as u64
+            } else {
+                0
+            };
+            match promoted_index(promoted, key) {
+                Some(p) if is_moved(&occ, key, promoted) => {
+                    if let Some(total) = children.get_mut(p) {
+                        *total = total.saturating_add(value_len);
+                    }
+                }
+                _ => {
+                    residual_keys = residual_keys.saturating_add(key.len() as u64);
+                    residual_values = residual_values.saturating_add(value_len);
+                }
+            }
+        }
+    }
+    Ok((children, residual_keys, residual_values))
+}
+
 /// Splits `map` into promoted-key children and a residual map.
 ///
 /// The residual has the map's `DataType`. A null map gives a null child and residual row; a
@@ -191,6 +237,17 @@ pub(crate) fn shred(map: &MapArray) -> Result<Shredded> {
     let (keys, values) = entry_columns(map.entries())?;
     let rows = row_ranges(map, keys.len())?;
     let promoted = promoted_keys(keys, values, &rows)?;
+
+    let too_big = || StrataError::Unsupported {
+        what: "map column larger than 2 GiB".to_string(),
+    };
+    let (child_bytes, residual_key_bytes, residual_value_bytes) =
+        shred_bytes(keys, values, &rows, &promoted)?;
+    for total in child_bytes {
+        check_offsets(total, too_big)?;
+    }
+    check_offsets(residual_key_bytes, too_big)?;
+    check_offsets(residual_value_bytes, too_big)?;
 
     let mut children: Vec<StringBuilder> = promoted.iter().map(|_| StringBuilder::new()).collect();
     let mut residual_hits = vec![0u32; promoted.len()];
@@ -318,6 +375,30 @@ pub(crate) fn unshred(
     let (res_keys, res_values) = entry_columns(residual.entries())?;
     let ranges = row_ranges(residual, res_keys.len())?;
 
+    // The key builder receives the residual keys and the promoted names; the value builder the
+    // residual values and the child values. Checked before anything is appended.
+    let mut key_bytes = 0u64;
+    let mut value_bytes = 0u64;
+    for (r, range) in ranges.iter().enumerate() {
+        let Some(range) = range else {
+            continue;
+        };
+        for i in range.clone() {
+            key_bytes = key_bytes.saturating_add(res_keys.value(i).len() as u64);
+            if res_values.is_valid(i) {
+                value_bytes = value_bytes.saturating_add(res_values.value(i).len() as u64);
+            }
+        }
+        for (name, column) in names.iter().zip(&columns) {
+            if column.is_valid(r) {
+                key_bytes = key_bytes.saturating_add(name.len() as u64);
+                value_bytes = value_bytes.saturating_add(column.value(r).len() as u64);
+            }
+        }
+    }
+    check_offsets(key_bytes, corrupt)?;
+    check_offsets(value_bytes, corrupt)?;
+
     let mut out_keys = StringBuilder::new();
     let mut out_values = StringBuilder::new();
     let mut offsets: Vec<i32> = Vec::with_capacity(n + 1);
@@ -388,6 +469,16 @@ mod tests {
     use super::*;
     use arrow::array::{Int32Array, MapBuilder};
     use proptest::prelude::*;
+
+    #[test]
+    fn offsets_fit_i32_up_to_i32_max_and_not_past_it() {
+        let limit = i32::MAX as u64;
+        assert!(check_offsets(limit, corrupt).is_ok());
+        assert!(matches!(
+            check_offsets(limit + 1, corrupt),
+            Err(StrataError::Corrupt { .. })
+        ));
+    }
 
     /// One map row: `None` is a null map, otherwise its entries in order.
     type Row = Option<Vec<(String, Option<String>)>>;

@@ -60,7 +60,8 @@ pub(crate) async fn read_rows(
 
     // Page i holds exactly the rows from its first row up to the next page's first row (or to
     // the end of the column).
-    let mut rows: Vec<Option<Vec<u32>>> = Vec::with_capacity(header.n_rows as usize);
+    // Not sized from `n_rows`: rows are added page by page, after each page's count is checked.
+    let mut rows: Vec<Option<Vec<u32>>> = Vec::new();
     for (i, (page, page_rows)) in header.ref_pages.iter().zip(pages).enumerate() {
         let next_first = match header.ref_pages.get(i + 1) {
             Some(next) => next.first_row,

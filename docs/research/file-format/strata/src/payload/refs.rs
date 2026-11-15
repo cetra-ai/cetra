@@ -11,7 +11,7 @@
 //!   its difference from the base's last id, the others as above).
 
 use super::varint::{get_uvarint, put_uvarint, unzigzag, zigzag};
-use super::{REFS_MAX_BACK, REFS_MAX_DEPTH};
+use super::{MAX_PAGE_IDS, REFS_MAX_BACK, REFS_MAX_DEPTH};
 use crate::error::{Result, StrataError};
 use crate::format::Cursor;
 
@@ -174,6 +174,17 @@ fn count(c: &mut Cursor<'_>, what: &'static str, offset: u64) -> Result<usize> {
         .ok_or(StrataError::Corrupt { what, offset })
 }
 
+/// Adds `extra` chunk ids to the running total of a page, and fails past `MAX_PAGE_IDS`.
+fn add_page_ids(total: usize, extra: usize, offset: u64) -> Result<usize> {
+    total
+        .checked_add(extra)
+        .filter(|sum| *sum <= MAX_PAGE_IDS)
+        .ok_or(StrataError::Corrupt {
+            what: "refs ids",
+            offset,
+        })
+}
+
 /// Decodes a refs page: one entry per row, the row's full list of chunk ids, or `None` for a
 /// null row. `offset` is the page's file offset, used in errors.
 pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u32>>>> {
@@ -206,6 +217,8 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
 
     let mut lists: Vec<Option<Vec<u32>>> = Vec::with_capacity(n_rows);
     let mut depths: Vec<u8> = Vec::with_capacity(n_rows);
+    // The chunk ids of the rows decoded so far, with tail sharing expanded.
+    let mut total_ids = 0usize;
     for (r, window) in row_offsets.windows(2).enumerate() {
         let [start, end] = window else {
             return Err(corrupt("refs offset"));
@@ -219,6 +232,7 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
             TAG_NULL => (None, 0),
             TAG_KEYFRAME => {
                 let n = count(&mut rc, "refs keyframe", offset)?;
+                total_ids = add_page_ids(total_ids, n, offset)?;
                 (Some(read_ids(&mut rc, n, None, offset)?), 0)
             }
             TAG_BASED => {
@@ -239,6 +253,7 @@ pub(crate) fn decode_page(bytes: &[u8], offset: u64) -> Result<Vec<Option<Vec<u3
                     .filter(|d| *d <= REFS_MAX_DEPTH)
                     .ok_or_else(|| corrupt("refs depth"))?;
                 let n_new = count(&mut rc, "refs new ids", offset)?;
+                total_ids = add_page_ids(total_ids, base.len().saturating_add(n_new), offset)?;
                 let new_ids = read_ids(&mut rc, n_new, base.last().copied(), offset)?;
                 let mut full = base.clone();
                 full.extend_from_slice(&new_ids);
@@ -283,6 +298,47 @@ mod tests {
 
     fn is_corrupt<T: std::fmt::Debug>(result: Result<T>) -> bool {
         matches!(result, Err(StrataError::Corrupt { .. }))
+    }
+
+    /// The id lists of the id-cap tests: group `g` is `g × 16_384 .. (g + 1) × 16_384`, and row
+    /// `r` of a page of `rows` rows holds group `r / 16`.
+    fn cap_groups(rows: usize) -> Vec<Vec<u32>> {
+        (0..rows.div_ceil(16))
+            .map(|g| {
+                let start = (g * 16_384) as u32;
+                (start..start + 16_384).collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn page_with_more_than_2_pow_24_expanded_ids_is_corrupt() {
+        // 4,096 rows of 16,384 ids each: 2^26 ids once expanded, which is over the cap.
+        let groups = cap_groups(4_096);
+        let refs: Vec<RowRefs<'_>> = (0..4_096)
+            .map(|r| RowRefs::Ids(groups[r / 16].as_slice()))
+            .collect();
+        let mut bytes = Vec::new();
+        encode_page(&refs, &mut bytes).unwrap();
+        assert!(matches!(
+            decode_page(&bytes, 0),
+            Err(StrataError::Corrupt {
+                what: "refs ids",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn page_at_exactly_2_pow_24_expanded_ids_decodes() {
+        // 1,024 rows of 16,384 ids each: exactly 2^24 ids.
+        let groups = cap_groups(1_024);
+        let rows: Vec<Option<Vec<u32>>> =
+            (0..1_024).map(|r| Some(groups[r / 16].clone())).collect();
+        let refs: Vec<RowRefs<'_>> = rows.iter().map(to_refs).collect();
+        let mut bytes = Vec::new();
+        encode_page(&refs, &mut bytes).unwrap();
+        assert_eq!(decode_page(&bytes, 0).unwrap(), rows);
     }
 
     /// Row 0 is the keyframe [7]; each later row adds the id 1 more, based on the row before.

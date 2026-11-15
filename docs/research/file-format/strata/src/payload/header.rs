@@ -3,7 +3,7 @@
 //! segment; this module encodes and decodes its body.
 
 use super::frames::FrameEntry;
-use super::{EDGE_GROUP_CHUNKS, HEADER_FIXED_LEN};
+use super::{EDGE_GROUP_CHUNKS, HEADER_FIXED_LEN, REFS_PAGE_ROWS};
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, Out};
 
@@ -173,21 +173,17 @@ impl PayloadHeader {
             }
         }
 
-        // The refs pages start at row 0, are strictly increasing, and lie inside the column.
-        if n_rows > 0 && ref_pages.is_empty() {
+        // Every refs page holds exactly REFS_PAGE_ROWS rows (the last one fewer), so there is one
+        // page per started block of rows, and page `i` starts at row `i × REFS_PAGE_ROWS`. The
+        // arithmetic is in u64, so no row count can wrap.
+        let pages_needed = u64::from(n_rows).div_ceil(REFS_PAGE_ROWS as u64);
+        if ref_pages.len() as u64 != pages_needed {
             return Err(corrupt("payload ref pages"));
         }
-        if ref_pages.first().is_some_and(|page| page.first_row != 0) {
-            return Err(corrupt("payload ref pages"));
-        }
-        if ref_pages
-            .windows(2)
-            .any(|w| matches!(w, [a, b] if b.first_row <= a.first_row))
-        {
-            return Err(corrupt("payload ref pages"));
-        }
-        if ref_pages.iter().any(|page| page.first_row >= n_rows) {
-            return Err(corrupt("payload ref pages"));
+        for (i, page) in ref_pages.iter().enumerate() {
+            if u64::from(page.first_row) != (i as u64) * (REFS_PAGE_ROWS as u64) {
+                return Err(corrupt("payload ref pages"));
+            }
         }
 
         Ok(Self {
@@ -371,6 +367,37 @@ mod tests {
         let mut h = sample();
         h.ref_pages[1].first_row = 0;
         assert!(is_corrupt(PayloadHeader::decode(&encoded(&h), 0)));
+    }
+
+    #[test]
+    fn ref_pages_are_one_per_4096_rows() {
+        let page = |first_row: u32| RefPage {
+            offset: 166,
+            len: 40,
+            first_row,
+        };
+        let with_pages = |n_rows: u32, ref_pages: Vec<RefPage>| PayloadHeader {
+            n_rows,
+            n_chunks: 0,
+            filters_offset: 0,
+            filters_len: 0,
+            ref_pages,
+            edge_groups: Vec::new(),
+            frames: Vec::new(),
+        };
+        // 4,097 rows need two pages, at rows 0 and 4,096.
+        assert!(is_corrupt(PayloadHeader::decode(
+            &encoded(&with_pages(4_097, vec![page(0)])),
+            0
+        )));
+        assert!(
+            PayloadHeader::decode(&encoded(&with_pages(4_097, vec![page(0), page(4_096)])), 0)
+                .is_ok()
+        );
+        assert!(is_corrupt(PayloadHeader::decode(
+            &encoded(&with_pages(4_097, vec![page(0), page(4_000)])),
+            0
+        )));
     }
 
     proptest! {
