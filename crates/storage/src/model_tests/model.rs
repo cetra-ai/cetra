@@ -93,6 +93,7 @@ pub(super) struct ExpectedScore {
     pub(super) session_id: Option<String>,
     pub(super) value_num: f64,
     pub(super) created_at: i64,
+    pub(super) user_id: Option<String>,
 }
 
 impl Model {
@@ -332,7 +333,7 @@ impl ProjectModel {
             if newest.deleted {
                 continue;
             }
-            let (trace, session, _) = score_context(self.project, key);
+            let (trace, session, user) = score_context(self.project, key);
             live.push(ExpectedScore {
                 score_id: score_id(key).to_string(),
                 name: format!("n{}", key.name),
@@ -344,6 +345,7 @@ impl ProjectModel {
                 session_id: session,
                 value_num: f64::from(newest.version),
                 created_at,
+                user_id: user,
             });
         }
         live

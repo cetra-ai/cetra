@@ -77,6 +77,16 @@ pub(super) enum Op {
         project: P,
         pick: u8,
     },
+    /// Writes an older version of one score the model has written (`pick % len`, in key
+    /// order; a no-op when the project has none). `back % 3 == 0` re-sends the newest
+    /// version `last` at a later ingest: a tie on `updated_at`, broken by ingest. Otherwise
+    /// it writes `max(1, last - 1)`. Its `updated_at` is `created_at + version`, so the live
+    /// score stays the newest version, whatever its ingest.
+    StaleScore {
+        project: P,
+        pick: u8,
+        back: u8,
+    },
 }
 
 impl Op {
@@ -86,7 +96,8 @@ impl Op {
             Self::Append { project, .. }
             | Self::Resend { project, .. }
             | Self::Score { project, .. }
-            | Self::DeleteScore { project, .. } => Some(project),
+            | Self::DeleteScore { project, .. }
+            | Self::StaleScore { project, .. } => Some(project),
             Self::Restart | Self::Crash | Self::Compact { .. } | Self::Gc | Self::Settle => None,
         }
     }
@@ -115,6 +126,9 @@ fn op() -> impl Strategy<Value = Op> {
         ),
         2 => (project(), any::<u8>()).prop_map(
             |(project, pick)| Op::DeleteScore { project, pick }
+        ),
+        2 => (project(), any::<u8>(), any::<u8>()).prop_map(
+            |(project, pick, back)| Op::StaleScore { project, pick, back }
         ),
     ]
 }
@@ -163,6 +177,11 @@ pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &m
             name,
         } => put_score(harness, model, project, target, name, *clock),
         Op::DeleteScore { project, pick } => delete_score(harness, model, project, pick, *clock),
+        Op::StaleScore {
+            project,
+            pick,
+            back,
+        } => stale_score(harness, model, project, pick, back, *clock),
     }
 }
 
@@ -238,6 +257,24 @@ fn target_of(target: u8) -> Target {
     }
 }
 
+/// Every score key the ops can write: both projects, every target, every name (96 keys).
+/// Keys the model has dropped or hides still have ids, so reads by id can check them.
+pub(super) fn score_key_space() -> Vec<ScoreKey> {
+    let mut keys = Vec::new();
+    for project in [P::A, P::B] {
+        for target in 0..SCORE_TARGETS {
+            for name in 0..SCORE_NAMES {
+                keys.push(ScoreKey {
+                    project,
+                    target: target_of(target),
+                    name,
+                });
+            }
+        }
+    }
+    keys
+}
+
 /// Writes the next version of `(project, target, name)`: version 1 when the key has none.
 fn put_score(harness: &Harness, model: &mut Model, project: P, target: u8, name: u8, clock: i64) {
     let key = ScoreKey {
@@ -260,19 +297,51 @@ fn put_score(harness: &Harness, model: &mut Model, project: P, target: u8, name:
     );
 }
 
-/// Writes `last + 1` of a score the model has written, as a deletion. `pick % len` in key order.
-fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
+/// The score `pick % len` of `project` in key order, or `None` when the project has none.
+fn picked_score(model: &Model, project: P, pick: u8) -> Option<ScoreKey> {
     let keys: Vec<ScoreKey> = model.project(project).scores.keys().copied().collect();
     if keys.is_empty() {
-        return;
+        return None;
     }
-    let key = keys[usize::from(pick) % keys.len()];
-    let last = model.project(project).scores[&key]
+    Some(keys[usize::from(pick) % keys.len()])
+}
+
+/// The newest version the model has of `key`.
+fn last_version(model: &Model, key: ScoreKey) -> u32 {
+    model.project(key.project).scores[&key]
         .iter()
         .map(|version| version.version)
         .max()
-        .expect("a key in the model has a version");
+        .expect("a key in the model has a version")
+}
+
+/// Writes `last + 1` of a score the model has written, as a deletion. `pick % len` in key order.
+fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
+    let Some(key) = picked_score(model, project, pick) else {
+        return;
+    };
+    let last = last_version(model, key);
     send_score(harness, model, key, last + 1, true, clock);
+}
+
+/// Writes an older (or equal, see `Op::StaleScore`) version of a score the model has written.
+/// The version repeats the `deleted` flag of the stored version it names, if one exists.
+fn stale_score(harness: &Harness, model: &mut Model, project: P, pick: u8, back: u8, clock: i64) {
+    let Some(key) = picked_score(model, project, pick) else {
+        return;
+    };
+    let last = last_version(model, key);
+    let version = if back.is_multiple_of(3) {
+        last
+    } else {
+        last.saturating_sub(1).max(1)
+    };
+    let deleted = model.project(project).scores[&key]
+        .iter()
+        .filter(|stored| stored.version == version)
+        .max_by_key(|stored| stored.ingest)
+        .is_some_and(|stored| stored.deleted);
+    send_score(harness, model, key, version, deleted, clock);
 }
 
 /// Sends one score version (a one-row batch). A dropped project refuses it, and the model

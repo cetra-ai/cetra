@@ -12,7 +12,7 @@ use super::observe::{
     ALL_ROWS, LatestScore, observe_latest, observe_scores, observe_scores_by_id,
     observe_span_detail, observe_spans, observe_trace_detail, observe_traces,
 };
-use super::ops::{SPANS, TRACES};
+use super::ops::{SPANS, TRACES, score_key_space};
 use super::shape::{P, hex, score_id, span_id, trace_id};
 use crate::reads::MAX_PAGE;
 
@@ -67,9 +67,18 @@ fn check_paging(h: &Harness, project: P, index: usize) {
     );
 }
 
-/// The live scores of `project` are the model's live scores, each field equal.
+/// The live scores of `project` are the model's live scores, each field equal, and the rows
+/// come in `created_at DESC, score_id DESC` order as read (`reads/scores.rs`).
 fn check_scores(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     let observed = observe_scores(h, project, MAX_PAGE);
+    let mut ordered = state.expected_scores();
+    ordered.sort_by(|a, b| (b.created_at, &b.score_id).cmp(&(a.created_at, &a.score_id)));
+    let observed_ids: Vec<String> = observed.iter().map(|row| row.score_id.clone()).collect();
+    let expected_ids: Vec<String> = ordered.iter().map(|row| row.score_id.clone()).collect();
+    assert_eq!(
+        observed_ids, expected_ids,
+        "op {index}, project {project:?}: score rows are not in created_at DESC, score_id DESC order"
+    );
     assert_same_scores(
         observed,
         state.expected_scores(),
@@ -77,13 +86,14 @@ fn check_scores(h: &Harness, state: &ProjectModel, project: P, index: usize) {
     );
 }
 
-/// `scores_by_id` over every score id either project ever wrote returns exactly this
-/// project's live scores, and `latest_scores` returns the live score of each key.
+/// `scores_by_id` over every score key either project can write (`score_key_space`) returns
+/// exactly this project's live scores, so ids the model hides or never saw are tested too.
+/// `latest_scores` returns the live score of each key.
 fn check_score_reads(h: &Harness, model: &Model, project: P, index: usize) {
     let state = model.project(project);
-    let ids: Vec<String> = [&model.a, &model.b]
-        .into_iter()
-        .flat_map(|written| written.scores.keys().map(|key| score_id(key).to_string()))
+    let ids: Vec<String> = score_key_space()
+        .iter()
+        .map(|key| score_id(key).to_string())
         .collect();
     assert_same_scores(
         observe_scores_by_id(h, project, &ids),
@@ -161,10 +171,9 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
     compare("target_kind", expected.target_kind == observed.target_kind);
     compare("trace_id", expected.trace_id == observed.trace_id);
     compare("session_id", expected.session_id == observed.session_id);
-    compare(
-        "value_num",
-        (expected.value_num - observed.value_num).abs() <= 1e-9,
-    );
+    // Versions are small integers, so the values are exact.
+    compare("value_num", expected.value_num == observed.value_num);
+    compare("user_id", expected.user_id == observed.user_id);
     compare("created_at", expected.created_at == observed.created_at);
     (!differing.is_empty()).then(|| format!("differing fields: {differing:?}"))
 }

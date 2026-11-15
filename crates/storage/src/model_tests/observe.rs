@@ -300,6 +300,7 @@ fn score_from_batch(batch: &RecordBatch, row: usize) -> ExpectedScore {
         )
         .expect("a generated score is numeric"),
         created_at: timestamp(batch, scores::CREATED_AT, row),
+        user_id: opt_string(utf8(batch, scores::USER_ID), row),
     }
 }
 
