@@ -180,6 +180,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | Command | Purpose |
 |---|---|
 | `llmobs serve [--config llmobs.toml]` | run the server |
+| `llmobs admin org-sso disable <org>` | turns an org's provider and enforcement off, for a broken identity provider; a running server applies it within a minute (D-P-63) |
 | `llmobs admin entitlements show <org> [--format table\|json]` | an org's resolved plan, features, limits and retention window, read offline from the data dir (D-P-32) |
 | `llmobs admin create-user / reset-password / list-users / rotate-encryption-key / check` | local admin on the data dir (works offline, server may be running, except `rotate-encryption-key [--new-from-stdin]`, which needs the server stopped; D-I-3) |
 | `llmobs admin reapply-deletions --from <data_dir>` | after a backup restore: copies the deletions that the current `meta.db` lacks from another data directory's `meta.db`; the server redoes them (D-M-9, 12 § Backups) |

@@ -144,6 +144,24 @@ enum AdminCommand {
         #[command(subcommand)]
         command: EntitlementsCommand,
     },
+    /// An org's single sign-on (track P M5).
+    OrgSso {
+        #[command(subcommand)]
+        command: OrgSsoCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OrgSsoCommand {
+    /// Turn an org's identity provider and its enforcement off, for a broken provider.
+    /// A running server applies it within a minute.
+    Disable {
+        /// Org id or slug.
+        org: String,
+        /// Config file. Overrides `LLMOBS_CONFIG`.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -420,6 +438,23 @@ async fn admin_command(command: AdminCommand) -> anyhow::Result<()> {
                 }
             }
         }
+        AdminCommand::OrgSso {
+            command: OrgSsoCommand::Disable { org, config },
+        } => {
+            let loaded = load_config(config.as_deref())?;
+            let changed = admin::org_sso_disable(&loaded, &org)
+                .await
+                .context("disabling the org's SSO")?;
+            let mut stdout = io::stdout().lock();
+            if changed {
+                writeln!(
+                    stdout,
+                    "org SSO disabled for {org}; a running server applies it within a minute"
+                )?;
+            } else {
+                writeln!(stdout, "{org} has no identity provider")?;
+            }
+        }
         AdminCommand::RotateEncryptionKey {
             new_from_stdin,
             config,
@@ -662,7 +697,9 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{AdminCommand, Cli, Command, EntitlementsCommand, log_filter, run_cli};
+    use super::{
+        AdminCommand, Cli, Command, EntitlementsCommand, OrgSsoCommand, log_filter, run_cli,
+    };
     use crate::output;
     use llmobs_server::admin::EntitlementsReport;
     use llmobs_server::api::entitlements::{Feature, OrgLimits};
@@ -781,6 +818,25 @@ mod tests {
         let error =
             Cli::try_parse_from(["llmobs", "admin", "list-users", "--format", "xml"]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn admin_org_sso_disable_takes_an_org() {
+        let parsed =
+            Cli::try_parse_from(["llmobs", "admin", "org-sso", "disable", "acme"]).unwrap();
+        match parsed.command {
+            Command::Admin {
+                command:
+                    AdminCommand::OrgSso {
+                        command: OrgSsoCommand::Disable { org, config },
+                    },
+            } => {
+                assert_eq!(org, "acme");
+                assert_eq!(config, None);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["llmobs", "admin", "org-sso", "disable"]).is_err());
     }
 
     #[test]
