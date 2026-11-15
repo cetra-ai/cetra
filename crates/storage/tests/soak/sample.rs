@@ -330,6 +330,11 @@ impl Sampler {
         }
     }
 
+    /// Orphan suspects of the last sample.
+    pub(crate) fn suspect_count(&self) -> usize {
+        self.suspects.len()
+    }
+
     /// Takes one sample. Counters are cumulative; query latencies are since the last sample.
     pub(crate) async fn sample(&mut self, shared: &Shared) -> Sample {
         let now = now_ns();

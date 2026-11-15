@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use super::config::{QueryKind, SoakConfig};
 use super::failures::{FailureKind, Failures};
+use super::registry::{Registry, near_midnight};
 use super::sample::{QuerySample, now_ns};
 use crate::common::payload::{self, GeneratedTrace, Payloads, span_payload_bytes};
 use crate::common::rng::{Rng, mix};
@@ -221,6 +222,8 @@ pub(crate) struct Shared {
     pub(crate) deletions: Mutex<DeletionStats>,
     /// (files, bytes) removed by each retention call.
     pub(crate) retention: Mutex<Vec<(u64, u64)>>,
+    /// The sampled traces and what storage must show for each (R7.6).
+    pub(crate) registry: Mutex<Registry>,
 }
 
 impl Shared {
@@ -237,6 +240,7 @@ impl Shared {
             queries: Mutex::new(QueryStats::default()),
             deletions: Mutex::new(DeletionStats::default()),
             retention: Mutex::new(Vec::new()),
+            registry: Mutex::new(Registry::default()),
         }
     }
 
@@ -306,8 +310,8 @@ struct LateGroup {
     complete: Vec<Candidate>,
 }
 
-/// Appends one batch of spans and, once it is acknowledged, counts it and
-/// publishes the traces it completes.
+/// Appends one batch of spans and, once it is acknowledged, counts it, updates
+/// the registry and publishes the traces it completes.
 async fn flush_spans(
     shared: &Shared,
     index: usize,
@@ -332,7 +336,6 @@ async fn flush_spans(
             return;
         }
     };
-    drop(batch);
     match append_with_retry(shared, true, project_id(index), rows).await {
         Ok(()) => {
             shared
@@ -343,6 +346,18 @@ async fn flush_spans(
                 .counters
                 .late_spans
                 .fetch_add(late, Ordering::Relaxed);
+            {
+                let mut registry = shared
+                    .registry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                for span in &batch {
+                    registry.touch(index, span.trace_id, ingest);
+                }
+                for candidate in &complete {
+                    registry.complete(index, candidate.trace_id);
+                }
+            }
             for candidate in complete {
                 if candidate.sampled {
                     shared
@@ -436,12 +451,25 @@ pub(crate) async fn ingest(
                 .counters
                 .payload_bytes
                 .fetch_add(bytes as u64, Ordering::Relaxed);
+            let sampled = is_sampled(seed);
+            let near_day_end = generated
+                .first
+                .iter()
+                .chain(&generated.late)
+                .any(|s| near_midnight(s.start_time) || near_midnight(s.end_time));
+            if sampled && !near_day_end {
+                shared
+                    .registry
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(index, generated.summary.clone(), generated.late.is_empty());
+            }
             let candidate = Candidate {
                 trace_id: generated.summary.trace_id,
                 start: generated.summary.start_time,
                 user_id: generated.summary.user_id.clone(),
                 session_id: generated.summary.session_id.clone(),
-                sampled: is_sampled(seed),
+                sampled,
             };
             first_spans += first_len as u64;
             batch.extend(generated.first);
@@ -589,13 +617,19 @@ pub(crate) async fn context(
 /// covered traces must not be found.
 async fn register(shared: &Shared, index: usize, scope: DeletionScope, covered: &[Candidate]) {
     let _gate = shared.gate.lock().await;
+    let (listed, user) = match &scope {
+        DeletionScope::Traces { trace_ids } => (trace_ids.clone(), None),
+        DeletionScope::User {
+            user_id, trace_ids, ..
+        } => (trace_ids.clone(), Some(user_id.clone())),
+    };
     let deletion = Deletion {
         id: Uuid::now_v7(),
         project: project_id(index),
         cutoff: now_ns(),
         scope,
     };
-    let (id, project) = (deletion.id, deletion.project);
+    let (id, project, cutoff) = (deletion.id, deletion.project, deletion.cutoff);
     if let Err(error) = shared.storage.register_deletion(deletion).await {
         shared
             .failures
@@ -610,6 +644,11 @@ async fn register(shared: &Shared, index: usize, scope: DeletionScope, covered: 
         stats.pending.push((id, Instant::now()));
         stats.registered += 1;
     }
+    shared
+        .registry
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .apply_deletion(index, &listed, user.as_deref(), cutoff);
     for candidate in covered.iter().take(5) {
         let hex = candidate.trace_id.to_hex();
         let visible = match context(&shared.storage, project, Some(candidate.start)).await {
@@ -667,6 +706,13 @@ pub(crate) async fn deletions(shared: Arc<Shared>, stop: watch::Receiver<bool>) 
             let index = pick_project(&mut rng, projects);
             if let Some((user_id, traces)) = shared.candidates.pick_user(index, &mut rng) {
                 let mut trace_ids: Vec<TraceId> = traces.iter().map(|c| c.trace_id).collect();
+                trace_ids.extend(
+                    shared
+                        .registry
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .user_trace_ids(index, &user_id),
+                );
                 trace_ids.sort();
                 trace_ids.dedup();
                 let mut session_ids: Vec<String> =
@@ -689,7 +735,7 @@ pub(crate) async fn deletions(shared: Arc<Shared>, stop: watch::Receiver<bool>) 
 }
 
 /// Polls every pending deletion once; each that is `Applied` records its lag.
-async fn poll_status(shared: &Shared) {
+pub(crate) async fn poll_status(shared: &Shared) {
     let pending = shared
         .deletions
         .lock()
@@ -735,11 +781,18 @@ pub(crate) async fn retention(shared: Arc<Shared>, stop: watch::Receiver<bool>) 
                 .apply_retention(project_id(index), keep)
                 .await
             {
-                Ok(report) => shared
-                    .retention
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((report.files, report.bytes)),
+                Ok(report) => {
+                    shared
+                        .registry
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .apply_retention(index, keep);
+                    shared
+                        .retention
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((report.files, report.bytes));
+                }
                 Err(error) => shared
                     .failures
                     .record(FailureKind::Retention, format!("project {index}: {error}")),
@@ -872,6 +925,30 @@ async fn run_query(
         }
     }
     Ok(true)
+}
+
+/// The sampled-trace oracle: 200 live traces and up to 50 deleted and 50 retained, hourly.
+pub(crate) async fn oracle(shared: Arc<Shared>, stop: watch::Receiver<bool>) {
+    let mut round = 0_u64;
+    loop {
+        for _ in 0..3600 {
+            if *stop.borrow() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        round += 1;
+        super::registry::check_sample(
+            &shared.storage,
+            &shared.registry,
+            &shared.gate,
+            &shared.failures,
+            200,
+            50,
+            round,
+        )
+        .await;
+    }
 }
 
 /// Queries at `qps` per second, each kind by the mix weights, each project by rate share.

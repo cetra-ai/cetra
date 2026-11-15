@@ -16,6 +16,8 @@ pub(crate) enum FailureKind {
     Deletion,
     /// A covered trace was still visible after `register_deletion` returned.
     DeletionVisible,
+    /// The oracle read a trace that does not match the registry.
+    Oracle,
 }
 
 impl FailureKind {
