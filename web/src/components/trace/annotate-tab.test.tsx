@@ -72,6 +72,8 @@ function captureScores(
 /**
  * The trace split pane (react-resizable-panels) cancels pointerdown in jsdom, so user.click never
  * focuses a field and user.type loses its keys. Focus the field first, then type.
+ * jsdom has no geometry, so react-resizable-panels treats every pointerdown as a separator hit;
+ * in a real browser only the separator's hit margin is affected.
  */
 async function typeIn(user: UserEvent, field: HTMLElement, text: string) {
   field.focus();
@@ -98,9 +100,13 @@ describe("annotate tab", () => {
     serveScores([]);
     const { panel, form } = await openAnnotate();
 
-    expect(within(form).getByRole("spinbutton", { name: "helpfulness" })).toBeInTheDocument();
+    const helpfulness = within(form).getByRole("spinbutton", { name: "helpfulness" });
+    expect(helpfulness).toBeInTheDocument();
     expect(within(form).getByText("How helpful the answer is, from 0 to 1.")).toBeInTheDocument();
     expect(within(form).getByText("0 – 1")).toBeInTheDocument();
+    expect(helpfulness).toHaveAccessibleDescription(
+      "How helpful the answer is, from 0 to 1. 0 – 1",
+    );
     const resolved = within(form).getByRole("radiogroup", { name: "resolved" });
     expect(within(resolved).getByRole("radio", { name: "Yes" })).toBeInTheDocument();
     expect(within(resolved).getByRole("radio", { name: "No" })).toBeInTheDocument();
@@ -201,8 +207,116 @@ describe("annotate tab", () => {
 
     expect(await within(form).findByText("Enter a number from 0 to 1.")).toBeInTheDocument();
     expect(helpfulness).toHaveAttribute("aria-invalid", "true");
+    expect(helpfulness).toHaveAccessibleDescription(
+      "How helpful the answer is, from 0 to 1. 0 – 1 Enter a number from 0 to 1.",
+    );
     expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
     expect(bodies).toEqual([]);
+  });
+
+  it("does not flag an unchanged prefilled score that its definition now rejects", async () => {
+    serveAnnotationDefinitions();
+    serveScores([scoreFor({ value: { data_type: "numeric", value: 1.5 } })]);
+    const { form } = await openAnnotate();
+
+    const helpfulness = within(form).getByRole("spinbutton", { name: "helpfulness" });
+    expect(helpfulness).toHaveValue(1.5);
+    expect(helpfulness).toHaveAttribute("aria-invalid", "false");
+    expect(within(form).queryByText("Enter a number from 0 to 1.")).not.toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("says what a row needs before it saves", async () => {
+    serveAnnotationDefinitions();
+    serveScores([ADA_SCORE]);
+    const { user, form } = await openAnnotate();
+
+    await typeIn(user, within(form).getByRole("textbox", { name: "helpfulness reason" }), "why");
+    expect(within(form).queryByText("Use Clear to remove your score.")).not.toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Save" })).toBeEnabled();
+
+    const helpfulness = within(form).getByRole("spinbutton", { name: "helpfulness" });
+    helpfulness.focus();
+    await user.clear(helpfulness);
+    expect(within(form).getByText("Use Clear to remove your score.")).toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
+  it("asks for a value on a new row with only a reason", async () => {
+    serveAnnotationDefinitions();
+    serveScores([]);
+    const { user, form } = await openAnnotate();
+
+    await typeIn(user, within(form).getByRole("textbox", { name: "helpfulness reason" }), "why");
+    expect(within(form).getByText("Set a value to save this row.")).toBeInTheDocument();
+    expect(within(form).queryByText(/Enter a number/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the fields focusable while a save is in flight", async () => {
+    serveAnnotationDefinitions();
+    serveScores([]);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post("/api/v1/projects/:project/scores", async () => {
+        await gate;
+        return HttpResponse.json({ score_ids: [ADA_SCORE_ID] });
+      }),
+    );
+    const { user, form } = await openAnnotate();
+
+    await setValue(user, within(form).getByRole("spinbutton", { name: "helpfulness" }), "0.5");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+    });
+
+    const note = within(form).getByRole("textbox", { name: "note" });
+    await typeIn(user, note, "typed while saving");
+    expect(note).toHaveFocus();
+    expect(note).not.toBeDisabled();
+    expect(note).toHaveAttribute("aria-disabled", "true");
+    expect(note).toHaveValue("");
+
+    release();
+    expect(await within(form).findByText("Saved.")).toBeInTheDocument();
+  });
+
+  it("keeps the score when a clear fails", async () => {
+    serveAnnotationDefinitions();
+    serveScores([ADA_SCORE, BOB_SCORE]);
+    server.use(
+      http.delete("/api/v1/projects/:project/scores/:score_id", () =>
+        problemResponse(500, "internal", { detail: "The score store is unavailable." }),
+      ),
+    );
+    const { user, form } = await openAnnotate();
+
+    await user.click(within(form).getByRole("button", { name: "Clear helpfulness" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent(
+      "The score store is unavailable.",
+    );
+    expect(within(form).getByRole("spinbutton", { name: "helpfulness" })).toHaveValue(0.7);
+    expect(within(form).getByRole("button", { name: "Clear helpfulness" })).toBeInTheDocument();
+  });
+
+  it("shows a save the server refuses for the caller's role", async () => {
+    serveAnnotationDefinitions();
+    serveScores([]);
+    captureScores(() =>
+      problemResponse(403, "forbidden", { detail: "Your role cannot write scores." }),
+    );
+    const { user, form } = await openAnnotate();
+
+    await setValue(user, within(form).getByRole("spinbutton", { name: "helpfulness" }), "0.5");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent(
+      "Your role cannot write scores.",
+    );
   });
 
   it("shows a server error on its row", async () => {

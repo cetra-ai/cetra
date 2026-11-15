@@ -108,6 +108,7 @@ function AnnotationRows({
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [success, setSuccess] = useState(false);
   const [formError, setFormError] = useState<string | undefined>();
+  const [refreshing, setRefreshing] = useState(false);
 
   const rows = [...definitions].sort((left, right) => left.name.localeCompare(right.name));
   const savedOf = (definition: ScoreDefinition) => draftOf(own.get(definition.name), definition);
@@ -116,17 +117,30 @@ function AnnotationRows({
     const draft = draftOfRow(definition);
     return isSet(draft) && isDirty(draft, savedOf(definition));
   });
-  const busy = create.isPending || remove.isPending;
+  // Still busy while the score reads refresh, so the form keeps its fields locked until it shows the saved values.
+  const busy = create.isPending || remove.isPending || refreshing;
   const canSave =
     changed.length > 0 &&
     changed.every((definition) => draftError(draftOfRow(definition), definition) === undefined) &&
     !busy;
 
   function change(definition: ScoreDefinition, draft: Draft) {
+    if (busy) {
+      return;
+    }
     setEdits((current) => ({ ...current, [definition.id]: draft }));
-    setServerErrors((current) => without(current, definition.id));
+    setServerErrors((current) => without(current, [definition.id]));
     setSuccess(false);
     setFormError(undefined);
+  }
+
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      await invalidateScoreReads(queryClient);
+    } finally {
+      setRefreshing(false);
+    }
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -135,6 +149,7 @@ function AnnotationRows({
       return;
     }
     const sent = changed;
+    const sentIds = sent.map((definition) => definition.id);
     setSuccess(false);
     setFormError(undefined);
     try {
@@ -147,10 +162,7 @@ function AnnotationRows({
         },
       });
     } catch (error) {
-      const rowsError = rowErrors(
-        error,
-        sent.map((definition) => definition.id),
-      );
+      const rowsError = rowErrors(error, sentIds);
       if (Object.keys(rowsError).length > 0) {
         setServerErrors(rowsError);
       } else {
@@ -158,9 +170,9 @@ function AnnotationRows({
       }
       return;
     }
-    await invalidateScoreReads(queryClient);
-    setEdits({});
-    setServerErrors({});
+    await refresh();
+    setEdits((current) => without(current, sentIds));
+    setServerErrors((current) => without(current, sentIds));
     setSuccess(true);
   }
 
@@ -179,23 +191,29 @@ function AnnotationRows({
       setFormError(problemMessage(error, "Could not clear the score."));
       return;
     }
-    await invalidateScoreReads(queryClient);
-    setEdits((current) => without(current, definition.id));
-    setServerErrors((current) => without(current, definition.id));
+    await refresh();
+    setEdits((current) => without(current, [definition.id]));
+    setServerErrors((current) => without(current, [definition.id]));
   }
 
   return (
-    <form aria-label="Annotations" className="flex flex-col gap-3" onSubmit={save}>
+    <form aria-label="Annotations" noValidate className="flex flex-col gap-3" onSubmit={save}>
       {rows.map((definition) => {
         const draft = draftOfRow(definition);
+        const dirty = isDirty(draft, savedOf(definition));
+        const saved = own.get(definition.name);
+        // Only a row the user changed reports its own problems; an unchanged prefilled row does not.
+        const error =
+          (dirty ? draftError(draft, definition) : undefined) ?? serverErrors[definition.id];
         return (
           <DefinitionRow
             key={definition.id}
             definition={definition}
             draft={draft}
-            own={own.get(definition.name)}
-            error={draftError(draft, definition) ?? serverErrors[definition.id]}
-            disabled={busy}
+            own={saved}
+            error={error}
+            hint={dirty ? unsavedHint(draft, saved) : undefined}
+            busy={busy}
             onChange={(next) => {
               change(definition, next);
             }}
@@ -216,12 +234,27 @@ function AnnotationRows({
   );
 }
 
+/** Why a changed row is not saved, in words for the row, or `undefined` when it is saved or reported. */
+function unsavedHint(draft: Draft, own: Score | undefined): string | undefined {
+  if (isSet(draft)) {
+    return undefined;
+  }
+  if (own !== undefined) {
+    return "Use Clear to remove your score.";
+  }
+  if (draft.reason.trim() !== "") {
+    return "Set a value to save this row.";
+  }
+  return undefined;
+}
+
 function DefinitionRow({
   definition,
   draft,
   own,
   error,
-  disabled,
+  hint,
+  busy,
   onChange,
   onClear,
 }: {
@@ -229,29 +262,52 @@ function DefinitionRow({
   draft: Draft;
   own: Score | undefined;
   error: string | undefined;
-  disabled: boolean;
+  hint: string | undefined;
+  busy: boolean;
   onChange: (draft: Draft) => void;
   onClear: () => void;
 }) {
   const id = useId();
+  const descriptionId = `${id}-description`;
+  const rangeId = `${id}-range`;
   const errorId = `${id}-error`;
   const invalid = error !== undefined;
-  const describedBy = invalid ? errorId : undefined;
   const { name } = definition;
+  const range =
+    definition.data_type === "numeric"
+      ? rangeText(definition.min_value, definition.max_value)
+      : undefined;
+  const controlDescribedBy = joinIds([
+    definition.description ? descriptionId : undefined,
+    range ? rangeId : undefined,
+    invalid ? errorId : undefined,
+  ]);
 
   return (
     <fieldset className="flex flex-col gap-1">
       <legend className="text-xs font-medium">{name}</legend>
       {definition.description ? (
-        <p className="text-xs text-muted-foreground">{definition.description}</p>
+        <p id={descriptionId} className="text-xs text-muted-foreground">
+          {definition.description}
+        </p>
       ) : null}
-      {renderControl(definition, draft, { id, invalid, describedBy, disabled, onChange })}
+      {renderControl(definition, draft, {
+        id,
+        busy,
+        invalid,
+        describedBy: controlDescribedBy,
+        range,
+        rangeId,
+        onChange,
+      })}
       <div className="flex items-center gap-2">
         <Input
           aria-label={`${name} reason`}
           placeholder="Reason (optional)"
           value={draft.reason}
-          disabled={disabled}
+          aria-disabled={busy}
+          aria-describedby={invalid ? errorId : undefined}
+          className="aria-[disabled=true]:opacity-50"
           onChange={(event) => {
             onChange({ ...draft, reason: event.target.value });
           }}
@@ -262,13 +318,14 @@ function DefinitionRow({
             variant="ghost"
             size="xs"
             aria-label={`Clear ${name}`}
-            disabled={disabled}
+            disabled={busy}
             onClick={onClear}
           >
             Clear
           </Button>
         ) : null}
       </div>
+      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
       {invalid ? (
         <p id={errorId} className="text-xs text-destructive">
           {error}
@@ -283,17 +340,21 @@ function renderControl(
   draft: Draft,
   control: {
     id: string;
+    busy: boolean;
     invalid: boolean;
     describedBy: string | undefined;
-    disabled: boolean;
+    range: string | undefined;
+    rangeId: string;
     onChange: (draft: Draft) => void;
   },
 ) {
-  const { id, invalid, describedBy, disabled, onChange } = control;
+  const { id, busy, invalid, describedBy, range, rangeId, onChange } = control;
   const { name } = definition;
+  // Fields stay focusable while busy (aria-disabled, not disabled), so a save never drops focus.
+  // Their changes are ignored in AnnotationRows.change.
+  const fieldClass = "aria-[disabled=true]:opacity-50";
   switch (definition.data_type) {
-    case "numeric": {
-      const range = rangeText(definition.min_value, definition.max_value);
+    case "numeric":
       return (
         <div className="flex flex-col gap-0.5">
           <Input
@@ -306,27 +367,31 @@ function renderControl(
             value={draft.value}
             aria-invalid={invalid}
             aria-describedby={describedBy}
-            disabled={disabled}
+            aria-disabled={busy}
+            className={fieldClass}
             onChange={(event) => {
               onChange({ ...draft, value: event.target.value });
             }}
           />
-          {range ? <span className="text-xs text-muted-foreground">{range}</span> : null}
+          {range ? (
+            <span id={rangeId} className="text-xs text-muted-foreground">
+              {range}
+            </span>
+          ) : null}
         </div>
       );
-    }
     case "boolean":
       return (
         <RadioGroup
           aria-label={name}
           value={draft.value}
-          disabled={disabled}
+          aria-disabled={busy}
           aria-invalid={invalid}
           aria-describedby={describedBy}
           onValueChange={(value) => {
             onChange({ ...draft, value });
           }}
-          className="flex gap-3"
+          className="flex gap-3 aria-[disabled=true]:opacity-50"
         >
           <div className="flex items-center gap-2">
             <RadioGroupItem value="true" id={`${id}-true`} />
@@ -343,13 +408,13 @@ function renderControl(
         <RadioGroup
           aria-label={name}
           value={draft.value}
-          disabled={disabled}
+          aria-disabled={busy}
           aria-invalid={invalid}
           aria-describedby={describedBy}
           onValueChange={(value) => {
             onChange({ ...draft, value });
           }}
-          className="flex flex-wrap gap-3"
+          className="flex flex-wrap gap-3 aria-[disabled=true]:opacity-50"
         >
           {definition.categories.map((category, index) => (
             <div key={category.label} className="flex items-center gap-2">
@@ -367,7 +432,8 @@ function renderControl(
           value={draft.value}
           aria-invalid={invalid}
           aria-describedby={describedBy}
-          disabled={disabled}
+          aria-disabled={busy}
+          className={fieldClass}
           onChange={(event) => {
             onChange({ ...draft, value: event.target.value });
           }}
@@ -390,6 +456,11 @@ function rangeText(min: number | undefined, max: number | undefined): string | u
   return undefined;
 }
 
-function without<T>(record: Record<string, T>, key: string): Record<string, T> {
-  return Object.fromEntries(Object.entries(record).filter(([name]) => name !== key));
+function joinIds(ids: (string | undefined)[]): string | undefined {
+  const joined = ids.filter((id) => id !== undefined).join(" ");
+  return joined === "" ? undefined : joined;
+}
+
+function without<T>(record: Record<string, T>, keys: readonly string[]): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([name]) => !keys.includes(name)));
 }
