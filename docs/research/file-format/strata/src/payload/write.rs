@@ -13,7 +13,8 @@ use super::refs::{RowRefs, encode_page};
 use super::search::{Filters, FrameFilter, encode_edge_group};
 use super::trigram::{add_trigrams, filter_bit, filter_bits, set_bit};
 use super::{
-    EDGE_GROUP_CHUNKS, FILTER_MAX_SHARE, MAX_PAGE_IDS, REFS_PAGE_ROWS, ROLLUP_BITS, ROLLUP_MAX_FILL,
+    EDGE_GROUP_CHUNKS, FILTER_MAX_SHARE, MAX_PAGE_IDS, MAX_READ_IDS, REFS_PAGE_ROWS, ROLLUP_BITS,
+    ROLLUP_MAX_FILL,
 };
 use crate::config::Config;
 use crate::error::{Result, StrataError};
@@ -121,6 +122,11 @@ pub(crate) fn write_payload_column(
         }
         chunk_refs += ids.len() as u64;
         rows.push(Some(ids));
+    }
+    if chunk_refs > MAX_READ_IDS as u64 {
+        return Err(StrataError::Unsupported {
+            what: "more than 2^28 chunk references in one column".to_string(),
+        });
     }
     frames.finish(frame_codec, out)?;
 

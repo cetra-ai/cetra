@@ -32,6 +32,9 @@ pub(crate) const SCAN_GAP: u64 = 1024 * 1024;
 /// Largest merged range for [`ScanKind::Scan`], unless a single input is larger.
 pub(crate) const SCAN_MAX_RANGE: u64 = 16 * 1024 * 1024;
 
+/// Most ranged GET requests of one wave that are in flight at once.
+pub(crate) const MAX_CONCURRENT_GETS: usize = 64;
+
 /// Merged byte ranges covering `ranges`, plus for each input the index of the merged range
 /// holding it. Inputs may overlap or repeat; output ranges are sorted and disjoint.
 pub(crate) fn coalesce(ranges: &[Range<u64>], kind: ScanKind) -> (Vec<Range<u64>>, Vec<usize>) {

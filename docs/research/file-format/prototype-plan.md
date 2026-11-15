@@ -123,6 +123,12 @@ What these add:
 - Limits: a file holds fewer than 2³² rows, and a merge has at most 255 inputs. Exceeding either is an error.
 - **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. `MAX_ROWS` (2³² − 1) bounds the rows of a file. A refs page holds exactly 4,096 rows, the last one fewer, so a column has one refs page per started block of 4,096 rows. `MAX_PAGE_IDS` (2²⁴) bounds the chunk ids of one refs page after tail sharing is expanded. The writer keeps every chunk and page within them.
 
+**Limits of the reader (scan, M4F).** These bound the work and memory one request may cause; they are not format rules.
+- `MAX_PREDICATE_DEPTH` (64) and `MAX_PREDICATE_NODES` (4,096) bound a predicate: each `In` literal counts as one node. A larger predicate fails with `Unsupported` before any recursion.
+- `MAX_READ_IDS` (2²⁸) bounds the chunk ids one read of a payload column returns, summed over its rows. Above it the read fails with `Corrupt`; the writer refuses a column with more chunk references.
+- `MAX_CONCURRENT_GETS` (64) bounds the ranged GETs of one wave that are in flight at once. Counters and waves do not change.
+- With a predicate, `limit` does not bound the bytes fetched: the filter wave still fetches every surviving predicate chunk. `limit` bounds the evaluation (per window of 65,536 rows) and the output.
+
 ## Design decisions for v0
 
 ### S1. File layout

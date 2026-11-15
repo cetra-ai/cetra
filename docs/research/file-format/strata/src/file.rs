@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use futures::future::try_join_all;
+use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
@@ -18,7 +18,7 @@ use crate::format::{
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
-use crate::io::{IoStats, ScanKind, coalesce};
+use crate::io::{IoStats, MAX_CONCURRENT_GETS, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
 use crate::payload::{PayloadHeader, decode_header};
 use crate::segment::{Kind, SegmentRef, decode_segment};
@@ -466,12 +466,12 @@ impl StrataFile {
             ranges.push(r.offset..end);
         }
         let (merged, owner) = coalesce(&ranges, kind);
-        let parts = try_join_all(
-            merged
-                .iter()
-                .map(|range| self.store.get_range(&self.path, range.clone())),
-        )
-        .await?;
+        // At most `MAX_CONCURRENT_GETS` requests in flight; `buffered` keeps the order.
+        let parts: Vec<bytes::Bytes> = futures::stream::iter(merged.iter().cloned())
+            .map(|range| self.store.get_range(&self.path, range))
+            .buffered(MAX_CONCURRENT_GETS)
+            .try_collect()
+            .await?;
 
         let mut bodies = Vec::with_capacity(segments.len());
         for (((r, segment_kind), range), &m) in segments.iter().zip(&ranges).zip(&owner) {

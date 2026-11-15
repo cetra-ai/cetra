@@ -9,6 +9,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, BinaryBuilder, StringBuilder};
 use arrow::datatypes::{DataType, Field};
 
+use super::MAX_READ_IDS;
 use super::frames::{FrameEntry, decode_fetched_frame, frame_of};
 use super::header::PayloadHeader;
 use super::refs::decode_page;
@@ -91,9 +92,24 @@ pub(crate) fn refs_segments(
     Ok((segments, pages))
 }
 
+/// The most chunk ids one read may return, summed over its rows. Above it the read fails with
+/// `Corrupt { what: "refs ids" }`; the writer refuses a column that would need more.
+pub(crate) fn add_ids(total: usize, added: usize, at: u64) -> Result<usize> {
+    total
+        .checked_add(added)
+        .filter(|sum| *sum <= MAX_READ_IDS)
+        .ok_or(StrataError::Corrupt {
+            what: "refs ids",
+            offset: at,
+        })
+}
+
 /// Decodes the refs pages `pages` (indexes into `header.ref_pages`, with their fetched bodies in
-/// the same order), and returns the chunk ids of each row in `rows` (sorted), `None` for a null
-/// row. `at` is the header's offset, used in errors.
+/// the same order), and returns the chunk ids of each row in `rows` (sorted and unique), `None`
+/// for a null row. `at` is the header's offset, used in errors.
+///
+/// Pages are decoded one at a time, in order. Each row's ids are moved out of its page, and the
+/// page is dropped before the next one is decoded.
 pub(crate) fn ids_of(
     header: &PayloadHeader,
     pages: &[usize],
@@ -105,9 +121,20 @@ pub(crate) fn ids_of(
     if pages.len() != bodies.len() {
         return Err(corrupt("segment range"));
     }
-    // Page i holds exactly the rows from its first row up to the next page's first row (or to
-    // the end of the column). Every decoded page is checked before its rows are used.
-    let mut decoded: HashMap<usize, Vec<Option<Vec<u32>>>> = HashMap::with_capacity(pages.len());
+    // Moving ids out of a page takes each row once, so a repeated row would read as null.
+    if rows.windows(2).any(|pair| match pair {
+        [a, b] => a >= b,
+        _ => false,
+    }) {
+        return Err(StrataError::Schema {
+            reason: "internal: rows out of order".to_string(),
+        });
+    }
+    let mut out: Vec<Option<Vec<u32>>> = vec![None; rows.len()];
+    let mut total = 0usize;
+    // The first position of `rows` not answered yet. Rows are sorted, so the rows of a page
+    // are the run of `rows` below the next page's first row.
+    let mut next = 0usize;
     for (&page_index, body) in pages.iter().zip(bodies) {
         let page = header
             .ref_pages
@@ -120,27 +147,34 @@ pub(crate) fn ids_of(
         let want = next_first
             .checked_sub(page.first_row)
             .ok_or_else(|| corrupt("payload ref page rows"))?;
-        let page_rows = decode_page(body, page.offset)?;
+        // Page i holds exactly the rows from its first row up to the next page's first row (or
+        // to the end of the column). The decoded page is checked before its rows are used.
+        let mut page_rows = decode_page(body, page.offset)?;
         if usize::try_from(want).ok() != Some(page_rows.len()) {
             return Err(corrupt("payload ref page rows"));
         }
-        decoded.insert(page_index, page_rows);
+        while let Some(&row) = rows.get(next) {
+            if row >= next_first {
+                break;
+            }
+            let local = usize::try_from(
+                row.checked_sub(page.first_row)
+                    .ok_or_else(|| corrupt("payload chunk id"))?,
+            )
+            .map_err(|_| corrupt("payload chunk id"))?;
+            let ids = page_rows
+                .get_mut(local)
+                .map(std::mem::take)
+                .ok_or_else(|| corrupt("payload ref page rows"))?;
+            total = add_ids(total, ids.as_ref().map_or(0, Vec::len), at)?;
+            if let Some(slot) = out.get_mut(next) {
+                *slot = ids;
+            }
+            next += 1;
+        }
     }
-
-    let mut out = Vec::with_capacity(rows.len());
-    for &row in rows {
-        let index = page_of(header, row).ok_or_else(|| corrupt("payload chunk id"))?;
-        let page = header
-            .ref_pages
-            .get(index)
-            .ok_or_else(|| corrupt("payload chunk id"))?;
-        let local =
-            usize::try_from(row - page.first_row).map_err(|_| corrupt("payload chunk id"))?;
-        let ids = decoded
-            .get(&index)
-            .and_then(|page_rows| page_rows.get(local))
-            .ok_or_else(|| corrupt("payload ref page rows"))?;
-        out.push(ids.clone());
+    if next != rows.len() {
+        return Err(corrupt("payload chunk id"));
     }
     Ok(out)
 }
@@ -338,7 +372,7 @@ mod tests {
     }
 
     /// The `blob` column of `wide_batch(2_000)`, written as a payload column, and its index.
-    async fn blob_file() -> (StrataFile, usize) {
+    async fn blob_file(rows: usize) -> (StrataFile, usize) {
         let schema = crate::testgen::wide_schema();
         let column = schema.index_of("blob").unwrap();
         let config = Config {
@@ -346,7 +380,7 @@ mod tests {
             ..Config::default()
         };
         let mut w = StrataWriter::new(schema, &["trace_id", "start_time"], config).unwrap();
-        w.write(&wide_batch(2_000)).unwrap();
+        w.write(&wide_batch(rows)).unwrap();
         let (bytes, _) = w.finish().unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("blob.strata");
@@ -360,7 +394,7 @@ mod tests {
     #[test]
     fn point_reads_give_the_rows_of_read_payload_column() {
         runtime().block_on(async {
-            let (file, column) = blob_file().await;
+            let (file, column) = blob_file(2_000).await;
             let whole = crate::reader::read_column(&file, column).await.unwrap();
             let rows: Vec<u32> = {
                 let mut rows: Vec<u32> = (0..50u32).map(|i| (i * 37) % 2_000).collect();
@@ -388,9 +422,54 @@ mod tests {
     }
 
     #[test]
+    fn ids_of_over_two_pages_matches_the_whole_column() {
+        runtime().block_on(async {
+            // 9,000 rows make three refs pages (REFS_PAGE_ROWS is 4,096).
+            let (file, column) = blob_file(9_000).await;
+            let whole = crate::reader::read_column(&file, column).await.unwrap();
+            // Rows on both sides of each page boundary, and the last row.
+            let rows: Vec<u32> = vec![0, 4_095, 4_096, 4_097, 8_191, 8_192, 8_999];
+            let header = read_header(&file, column).await.unwrap();
+            assert!(header.ref_pages.len() >= 3);
+            let (segments, pages) = refs_segments(&header, &rows).unwrap();
+            assert_eq!(pages.len(), 3);
+            let bodies = file.fetch(&segments, ScanKind::Point).await.unwrap();
+            let ids = ids_of(&header, &pages, &bodies, &rows, 0).unwrap();
+            let (segments, frames) = frame_segments(&header, &ids).unwrap();
+            let bodies = file.fetch(&segments, ScanKind::Point).await.unwrap();
+            let decoded = decode_frames(&header, &frames, bodies).unwrap();
+            let field = schema_field(&file, column);
+            let got = build_values(&header, &decoded, &ids, &field, 0).unwrap();
+            let want = arrow::compute::take(
+                whole.as_ref(),
+                &arrow::array::UInt32Array::from(rows.clone()),
+                None,
+            )
+            .unwrap();
+            assert_eq!(got.as_ref(), want.as_ref());
+        });
+    }
+
+    #[test]
+    fn add_ids_fails_only_above_the_cap() {
+        assert_eq!(add_ids(0, MAX_READ_IDS, 7).unwrap(), MAX_READ_IDS);
+        assert_eq!(add_ids(MAX_READ_IDS - 1, 1, 7).unwrap(), MAX_READ_IDS);
+        for (total, added) in [(MAX_READ_IDS, 1), (MAX_READ_IDS / 2 + 1, MAX_READ_IDS / 2)] {
+            match add_ids(total, added, 7) {
+                Err(StrataError::Corrupt { what, offset }) => {
+                    assert_eq!(what, "refs ids");
+                    assert_eq!(offset, 7);
+                }
+                other => panic!("expected Corrupt, got {other:?}"),
+            }
+        }
+        assert!(add_ids(usize::MAX, 1, 0).is_err());
+    }
+
+    #[test]
     fn no_rows_give_no_segments_and_an_empty_array() {
         runtime().block_on(async {
-            let (file, column) = blob_file().await;
+            let (file, column) = blob_file(2_000).await;
             let header = read_header(&file, column).await.unwrap();
             let (segments, pages) = refs_segments(&header, &[]).unwrap();
             assert!(segments.is_empty() && pages.is_empty());

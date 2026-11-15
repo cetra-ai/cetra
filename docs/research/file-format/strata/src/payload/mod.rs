@@ -36,6 +36,9 @@ pub(crate) const REFS_PAGE_ROWS: usize = 4096;
 /// Largest total number of chunk ids over the rows of one refs page, after tail sharing is
 /// expanded. Bounds the memory a crafted page can make the reader allocate.
 pub(crate) const MAX_PAGE_IDS: usize = 1 << 24;
+/// Largest total number of chunk ids one read of a payload column may return. The writer
+/// refuses a column with more chunk references, so every valid file reads back.
+pub(crate) const MAX_READ_IDS: usize = 1 << 28;
 /// A based refs record looks at most this many rows back.
 pub(crate) const REFS_MAX_BACK: usize = 32;
 /// Keyframe depth is 0; a based record has depth base + 1, at most this value.

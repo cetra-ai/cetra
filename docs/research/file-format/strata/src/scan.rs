@@ -37,6 +37,10 @@ use crate::shred::unshred;
 /// Rows per output batch.
 const BATCH_ROWS: usize = 8_192;
 
+/// Rows evaluated per window by the filter: a candidate range longer than this is evaluated in
+/// windows, so no evaluation holds more rows than this.
+const FILTER_WINDOW: u32 = 65_536;
+
 /// What to read from a file.
 #[derive(Debug, Clone)]
 pub struct ScanRequest {
@@ -95,39 +99,60 @@ struct PayloadRead {
     n_frames: usize,
 }
 
-/// Removes `remove` from `ranges`, which are sorted and disjoint. The result is sorted,
-/// disjoint and has no empty range.
-pub(crate) fn subtract(ranges: &[Range<u32>], remove: Range<u32>) -> Vec<Range<u32>> {
-    let mut out = Vec::with_capacity(ranges.len() + 1);
+/// Removes every range of `remove` from `ranges`. Both lists are sorted and disjoint. The
+/// result is sorted, disjoint and has no empty range. A single merge pass: linear in the
+/// number of ranges in both lists.
+pub(crate) fn subtract_all(ranges: &[Range<u32>], remove: &[Range<u32>]) -> Vec<Range<u32>> {
+    let mut out = Vec::with_capacity(ranges.len());
+    // The first removal that may still overlap a range: earlier ones end before every later
+    // range starts, because the ranges are sorted.
+    let mut first = 0usize;
     for range in ranges {
-        if remove.end <= range.start || range.end <= remove.start {
-            out.push(range.clone());
-            continue;
+        let mut start = range.start;
+        while remove.get(first).is_some_and(|r| r.end <= start) {
+            first += 1;
         }
-        if range.start < remove.start {
-            out.push(range.start..remove.start);
+        let mut index = first;
+        while let Some(r) = remove.get(index) {
+            if r.start >= range.end {
+                break;
+            }
+            if r.start > start {
+                out.push(start..r.start);
+            }
+            start = start.max(r.end);
+            index += 1;
         }
-        if remove.end < range.end {
-            out.push(remove.end..range.end);
+        if start < range.end {
+            out.push(start..range.end);
         }
     }
     out
 }
 
-/// The indexes of the chunks in `entries` that overlap one of `ranges`, in order.
+/// The indexes of the chunks in `entries` that overlap one of `ranges`, in order. `entries` is
+/// sorted and disjoint, so each range is found by binary search and walked forward.
 fn overlapping_chunks(entries: &[BlockEntry], ranges: &[Range<u32>]) -> Vec<usize> {
-    entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| {
-            let first = u64::from(entry.first_row);
-            let end = first + u64::from(entry.n_rows);
-            ranges
-                .iter()
-                .any(|range| u64::from(range.start) < end && first < u64::from(range.end))
-        })
-        .map(|(index, _)| index)
-        .collect()
+    let mut out = Vec::new();
+    for range in ranges {
+        if range.start >= range.end {
+            continue;
+        }
+        let start = u64::from(range.start);
+        let end = u64::from(range.end);
+        let mut index =
+            entries.partition_point(|e| u64::from(e.first_row) + u64::from(e.n_rows) <= start);
+        while let Some(entry) = entries.get(index) {
+            if u64::from(entry.first_row) >= end {
+                break;
+            }
+            out.push(index);
+            index += 1;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The index of the chunk of `entries` that holds `row`.
@@ -227,9 +252,14 @@ fn take_rows(
     }
 }
 
-/// The rows of the (sorted, disjoint) ranges, in order.
-fn rows_in(ranges: &[Range<u32>]) -> Vec<u32> {
-    ranges.iter().flat_map(|range| range.clone()).collect()
+/// The rows of the (sorted, disjoint) ranges, in order, or only the first `limit` of them. It
+/// never builds more rows than it returns.
+fn rows_in(ranges: &[Range<u32>], limit: Option<usize>) -> Vec<u32> {
+    let rows = ranges.iter().flat_map(|range| range.clone());
+    match limit {
+        Some(n) => rows.take(n).collect(),
+        None => rows.collect(),
+    }
 }
 
 /// The segments of the chunks of `candidates` that have one, in order.
@@ -462,6 +492,10 @@ impl StrataFile {
     /// pages and the frames. A wave with nothing to fetch makes no request.
     /// `MapKeyEq` and map or payload projections are supported; `Cmp`, `In`, `IsNull` and
     /// `IsNotNull` take narrow columns only.
+    ///
+    /// Without a predicate, `limit` bounds the rows built and fetched. With a predicate, `limit`
+    /// bounds the evaluation and the output, but not the bytes fetched: the filter wave still
+    /// fetches every surviving predicate chunk.
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
         // 1. Validate. Every error is found before any read.
         self.check_projection(&req.projection)?;
@@ -528,6 +562,7 @@ impl StrataFile {
             for column in pruned_columns(b) {
                 let info = info_of(&infos, column)?;
                 let codes = matching_codes(b, column, info.dict.as_deref())?;
+                let mut pruned: Vec<Range<u32>> = Vec::new();
                 for entry in info.entries.iter() {
                     let may = chunk_may_match(
                         b,
@@ -544,9 +579,10 @@ impl StrataFile {
                                 offset: u64::from(entry.first_row),
                             }
                         })?;
-                        candidates = subtract(&candidates, entry.first_row..end);
+                        pruned.push(entry.first_row..end);
                     }
                 }
+                candidates = subtract_all(&candidates, &pruned);
                 if candidates.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -572,15 +608,22 @@ impl StrataFile {
         // 5. Filter wave: the surviving chunks of the predicate columns, then the mask.
         let mut decoded: Decoded = HashMap::new();
         let mut selection: Vec<u32> = match &bound {
-            None => rows_in(&candidates),
+            None => rows_in(&candidates, req.limit),
             Some(b) => {
                 let plan = FilterPlan {
                     bound: b,
                     masks: &masks,
                     columns: &filter_columns,
                 };
-                self.filter(&plan, &infos, &candidates, req.kind, &mut decoded)
-                    .await?
+                self.filter(
+                    &plan,
+                    &infos,
+                    &candidates,
+                    req.kind,
+                    req.limit,
+                    &mut decoded,
+                )
+                .await?
             }
         };
 
@@ -633,7 +676,6 @@ impl StrataFile {
                 what: "lookup on this sort key".to_string(),
             })?;
         let span = span_of(&candidates)?;
-        let span_rows: Vec<u32> = (span.start..span.end).collect();
         let narrow = narrow_reads(self, projection)?;
         let payload = payload_projection(self, projection);
         let mut meta_columns: BTreeSet<usize> = narrow.clone();
@@ -659,7 +701,7 @@ impl StrataFile {
             self.store_metadata(meta_plan, &meta_bodies)?;
             let cand_bodies = with_gaps(&candidates, bodies)?;
             let exact_ranges = self.rows_of_key(&candidates, &cand_bodies, key)?;
-            exact = rows_in(&exact_ranges);
+            exact = rows_in(&exact_ranges, None);
             infos = HashMap::new();
             for &column in &narrow_vec {
                 infos.insert(
@@ -727,6 +769,7 @@ impl StrataFile {
             let n_cand = cand_segments.len();
             let (narrow_segments, pending) = plan_chunks(&infos, &wanted, &mut decoded)?;
             let n_narrow = narrow_segments.len();
+            let span_rows: Vec<u32> = (span.start..span.end).collect();
             let (planned, refs) = self.plan_refs(&payload, &span_rows).await?;
             reads = planned;
             let mut segments = cand_segments;
@@ -737,7 +780,7 @@ impl StrataFile {
             let refs_bodies = rest.split_off(n_narrow);
             let cand_bodies = with_gaps(&candidates, bodies)?;
             let exact_ranges = self.rows_of_key(&candidates, &cand_bodies, key)?;
-            exact = rows_in(&exact_ranges);
+            exact = rows_in(&exact_ranges, None);
             decode_chunks(&infos, pending, rest, &mut decoded)?;
             Self::take_ids(&mut reads, refs_bodies, &exact)?;
         }
@@ -802,6 +845,7 @@ impl StrataFile {
         infos: &HashMap<usize, ColumnInfo>,
         candidates: &[Range<u32>],
         kind: ScanKind,
+        limit: Option<usize>,
         decoded: &mut Decoded,
     ) -> Result<Vec<u32>> {
         let (b, masks, columns) = (plan.bound, plan.masks, plan.columns);
@@ -816,58 +860,66 @@ impl StrataFile {
 
         let n_dirs = self.directory().len();
         let mut selection = Vec::new();
-        for range in candidates {
-            let len = range
-                .end
-                .checked_sub(range.start)
-                .and_then(|len| usize::try_from(len).ok())
-                .ok_or_else(|| StrataError::Corrupt {
-                    what: "row range",
-                    offset: u64::from(range.start),
+        let mut arrays: Vec<Option<ArrayRef>> = vec![None; n_dirs];
+        for candidate in candidates {
+            let mut window_start = candidate.start;
+            while window_start < candidate.end {
+                if limit.is_some_and(|n| selection.len() >= n) {
+                    return Ok(selection);
+                }
+                // The rows of this window: at most `FILTER_WINDOW` rows of the candidate.
+                let window_end = candidate
+                    .end
+                    .min(window_start.saturating_add(FILTER_WINDOW));
+                let range = window_start..window_end;
+                let len = usize::try_from(window_end - window_start).map_err(|_| {
+                    StrataError::Corrupt {
+                        what: "row range",
+                        offset: u64::from(window_start),
+                    }
                 })?;
-            let mut arrays: Vec<Option<ArrayRef>> = vec![None; n_dirs];
-            for &column in columns {
-                let info = info_of(infos, column)?;
-                let mut pieces: Vec<ArrayRef> = Vec::new();
-                for index in overlapping_chunks(&info.entries, std::slice::from_ref(range)) {
-                    let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
-                        reason: "internal: missing chunk".to_string(),
-                    })?;
-                    let first = entry.first_row;
-                    let end =
-                        first
-                            .checked_add(entry.n_rows)
-                            .ok_or_else(|| StrataError::Corrupt {
+                arrays.fill(None);
+                for &column in columns {
+                    let info = info_of(infos, column)?;
+                    let mut pieces: Vec<ArrayRef> = Vec::new();
+                    for index in overlapping_chunks(&info.entries, std::slice::from_ref(&range)) {
+                        let entry = info.entries.get(index).ok_or_else(|| StrataError::Schema {
+                            reason: "internal: missing chunk".to_string(),
+                        })?;
+                        let first = entry.first_row;
+                        let end = first.checked_add(entry.n_rows).ok_or_else(|| {
+                            StrataError::Corrupt {
                                 what: "block row order",
                                 offset: u64::from(first),
-                            })?;
-                    let from = range.start.max(first);
-                    let to = range.end.min(end);
-                    let chunk = decoded_chunk(decoded, column, index)?;
-                    let offset =
-                        usize::try_from(from - first).map_err(|_| StrataError::Corrupt {
-                            what: "chunk row",
-                            offset: u64::from(first),
+                            }
                         })?;
-                    let length = usize::try_from(to - from).map_err(|_| StrataError::Corrupt {
-                        what: "row range",
-                        offset: u64::from(from),
-                    })?;
-                    pieces.push(chunk.slice(offset, length));
+                        let from = range.start.max(first);
+                        let to = range.end.min(end);
+                        let chunk = decoded_chunk(decoded, column, index)?;
+                        let offset =
+                            usize::try_from(from - first).map_err(|_| StrataError::Corrupt {
+                                what: "chunk row",
+                                offset: u64::from(first),
+                            })?;
+                        let length =
+                            usize::try_from(to - from).map_err(|_| StrataError::Corrupt {
+                                what: "row range",
+                                offset: u64::from(from),
+                            })?;
+                        pieces.push(chunk.slice(offset, length));
+                    }
+                    let refs: Vec<&dyn Array> = pieces.iter().map(|piece| piece.as_ref()).collect();
+                    let assembled = concat(&refs)?;
+                    if let Some(slot) = arrays.get_mut(column) {
+                        *slot = Some(assembled);
+                    }
                 }
-                let refs: Vec<&dyn Array> = pieces.iter().map(|piece| piece.as_ref()).collect();
-                let assembled = concat(&refs)?;
-                if let Some(slot) = arrays.get_mut(column) {
-                    *slot = Some(assembled);
-                }
-            }
 
-            // The masks of this range: `Contains` masks are sliced, `MapKeyEq` masks are built
-            // from the residual's rows.
-            let mut range_masks: Vec<BooleanArray> = Vec::with_capacity(masks.sources.len());
-            for (index, source) in masks.sources.iter().enumerate() {
-                let mask =
-                    match source {
+                // The masks of this range: `Contains` masks are sliced, `MapKeyEq` masks are built
+                // from the residual's rows.
+                let mut range_masks: Vec<BooleanArray> = Vec::with_capacity(masks.sources.len());
+                for (index, source) in masks.sources.iter().enumerate() {
+                    let mask = match source {
                         MaskSource::Contains(..) => {
                             let full = masks.full.get(index).and_then(Option::as_ref).ok_or_else(
                                 || StrataError::Schema {
@@ -890,13 +942,15 @@ impl StrataFile {
                             map_key_mask(map.as_ref(), key, lit.as_ref())?
                         }
                     };
-                range_masks.push(mask);
-            }
-            let mask = evaluate(b, &arrays, &range_masks, len)?;
-            for i in 0..len {
-                if mask.is_valid(i) && mask.value(i) {
-                    selection.push(row_at(range.start, i)?);
+                    range_masks.push(mask);
                 }
+                let mask = evaluate(b, &arrays, &range_masks, len)?;
+                for i in 0..len {
+                    if mask.is_valid(i) && mask.value(i) {
+                        selection.push(row_at(range.start, i)?);
+                    }
+                }
+                window_start = window_end;
             }
         }
         Ok(selection)
@@ -1221,16 +1275,43 @@ mod tests {
 
     #[test]
     #[allow(clippy::single_range_in_vec_init)]
-    fn subtract_splits_trims_drops_and_keeps() {
+    fn subtract_all_splits_trims_drops_and_keeps() {
         // A split.
-        assert_eq!(subtract(&[0..10], 3..5), vec![0..3, 5..10]);
+        assert_eq!(subtract_all(&[0..10], &[3..5]), vec![0..3, 5..10]);
         // A trim at either end.
-        assert_eq!(subtract(&[0..10], 0..4), vec![4..10]);
-        assert_eq!(subtract(&[0..10], 7..12), vec![0..7]);
+        assert_eq!(subtract_all(&[0..10], &[0..4]), vec![4..10]);
+        assert_eq!(subtract_all(&[0..10], &[7..12]), vec![0..7]);
         // A dropped range.
-        assert_eq!(subtract(&[0..5, 8..9], 0..5), vec![8..9]);
+        assert_eq!(subtract_all(&[0..5, 8..9], &[0..5]), vec![8..9]);
         // A no-op.
-        assert_eq!(subtract(&[0..5], 7..9), vec![0..5]);
+        assert_eq!(subtract_all(&[0..5], &[7..9]), vec![0..5]);
+        // One removal spanning several candidate ranges, and several removals in one range.
+        assert_eq!(
+            subtract_all(&[0..4, 6..10, 12..14], &[2..13]),
+            vec![0..2, 13..14]
+        );
+        assert_eq!(
+            subtract_all(&[0..10, 20..30], &[1..2, 4..5, 8..25]),
+            vec![0..1, 2..4, 5..8, 25..30]
+        );
+        assert!(subtract_all(&[3..6], &[0..10]).is_empty());
+        assert_eq!(subtract_all(&[0..10], &[]), vec![0..10]);
+    }
+
+    #[test]
+    fn subtract_all_matches_a_brute_force_removal() {
+        let ranges = vec![0..3, 5..9, 10..11, 14..20];
+        let remove = vec![2..6, 7..8, 9..15];
+        let want: Vec<u32> = (0..20u32)
+            .filter(|row| {
+                ranges.iter().any(|r| r.contains(row)) && !remove.iter().any(|r| r.contains(row))
+            })
+            .collect();
+        let got: Vec<u32> = subtract_all(&ranges, &remove)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -1830,6 +1911,46 @@ mod tests {
                 })
                 .await;
             assert!(matches!(long, Err(StrataError::Unsupported { .. })));
+        });
+    }
+
+    #[test]
+    fn a_candidate_longer_than_the_filter_window_matches_the_oracle() {
+        runtime().block_on(async {
+            // One candidate range of 150,000 rows: the filter evaluates it in three windows.
+            let file = open_batch(150_000).await;
+            let (start, input) = (col("start_time"), col("input_tokens"));
+            let at = |row: i64| Lit::Int(1_700_000_000_000_000_000 + row * 1_000_003);
+            let rows_either_side = [65_535, 65_536, 131_071, 131_072];
+            let mut terms: Vec<Predicate> = rows_either_side
+                .iter()
+                .map(|&row| Predicate::Cmp(start, CmpOp::Eq, at(row)))
+                .collect();
+            terms.push(Predicate::Cmp(start, CmpOp::Gt, at(140_000)));
+            check(&file, Predicate::Or(terms), &[input, start]).await;
+        });
+    }
+
+    #[test]
+    fn a_contains_scan_takes_at_most_seven_waves() {
+        runtime().block_on(async {
+            let file = open_wide(20_000, &payload_config()).await;
+            let (blob, uid) = (col("blob"), col("uid"));
+            let needle = Predicate::Contains(blob, vec![7u8; 4]);
+            file.reset_io_stats();
+            let req = ScanRequest {
+                projection: vec![uid],
+                predicate: Some(needle.clone()),
+                row_ranges: None,
+                limit: None,
+                kind: ScanKind::Scan,
+            };
+            file.scan(&req).await.unwrap();
+            // Metadata, up to four `Contains` waves, the filter and the projection.
+            let waves = file.io_stats().waves;
+            println!("Contains scan on blob: {waves} waves");
+            assert!(waves <= 1 + 4 + 2, "{waves} waves");
+            check(&file, needle, &[uid]).await;
         });
     }
 

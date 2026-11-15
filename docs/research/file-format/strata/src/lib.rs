@@ -12,8 +12,11 @@
 //! - sort-key lookup and key filters (M3.1); maps are shredded (M3.2);
 //! - segment reads go in waves, coalesced by scan kind, and are counted (M4.1);
 //! - `scan` over narrow columns: predicates, zone and dictionary pruning, limits (M4.2);
-//! - `scan` does not read payload or map columns, and has no `Contains`, `MapKeyEq` or
-//!   `lookup_scan` (M4.3);
+//! - `scan` reads payload and map columns, with `Contains`, `MapKeyEq` and `lookup_scan`
+//!   (M4.3);
+//! - predicates are bounded to depth 64 and 4,096 nodes; a column read returns at most 2^28
+//!   chunk ids; at most 64 ranged GETs of one wave are in flight; with a predicate, `limit`
+//!   does not bound the bytes fetched (M4F);
 //! - there is no DataFusion integration (M5).
 
 #![forbid(unsafe_code)]

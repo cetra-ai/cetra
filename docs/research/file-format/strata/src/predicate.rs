@@ -240,9 +240,54 @@ pub(crate) fn literal(column: usize, dt: &DataType, lit: &Lit) -> Result<ArrayRe
 /// Errors are reported before any read, so they never depend on pruning. A `MapKeyEq` on a
 /// promoted key binds to the key's child column; on any other key it becomes a mask.
 pub(crate) fn bind(p: &Predicate, file: &StrataFile) -> Result<(Bound, Vec<MaskSource>)> {
+    check_size(p)?;
     let mut masks = Vec::new();
     let bound = bind_into(p, file, &mut masks)?;
     Ok((bound, masks))
+}
+
+/// The deepest predicate `bind` accepts. Deeper predicates are rejected before any recursion.
+pub(crate) const MAX_PREDICATE_DEPTH: usize = 64;
+
+/// The largest number of nodes `bind` accepts. Each node counts once, and each literal of an
+/// `In` counts once more.
+pub(crate) const MAX_PREDICATE_NODES: usize = 4_096;
+
+/// Rejects a predicate deeper than [`MAX_PREDICATE_DEPTH`] or larger than
+/// [`MAX_PREDICATE_NODES`]. It walks the predicate with an explicit stack, so the check itself
+/// never recurses.
+fn check_size(p: &Predicate) -> Result<()> {
+    let too_large = || StrataError::Unsupported {
+        what: "predicate too large".to_string(),
+    };
+    let mut stack: Vec<(&Predicate, usize)> = vec![(p, 1)];
+    let mut nodes = 0usize;
+    while let Some((node, depth)) = stack.pop() {
+        if depth > MAX_PREDICATE_DEPTH {
+            return Err(too_large());
+        }
+        nodes = nodes.checked_add(1).ok_or_else(too_large)?;
+        match node {
+            Predicate::And(terms) | Predicate::Or(terms) => {
+                for term in terms {
+                    stack.push((term, depth + 1));
+                }
+            }
+            Predicate::Not(inner) => stack.push((inner.as_ref(), depth + 1)),
+            Predicate::In(_, lits) => {
+                nodes = nodes.checked_add(lits.len()).ok_or_else(too_large)?;
+            }
+            Predicate::Cmp(..)
+            | Predicate::IsNull(_)
+            | Predicate::IsNotNull(_)
+            | Predicate::MapKeyEq(..)
+            | Predicate::Contains(..) => {}
+        }
+        if nodes > MAX_PREDICATE_NODES {
+            return Err(too_large());
+        }
+    }
+    Ok(())
 }
 
 /// The layer of schema column `column`.
@@ -846,5 +891,29 @@ mod tests {
         let field = Field::new("x", DataType::Int64, true);
         let null: ArrayRef = new_null_array(field.data_type(), 1);
         assert!(!term_may_match(&entry, &field, CmpOp::Eq, &null).unwrap());
+    }
+
+    #[test]
+    fn a_very_deep_predicate_is_rejected_without_recursion() {
+        let mut p = Predicate::IsNull(0);
+        for _ in 0..20_000 {
+            p = Predicate::Not(Box::new(p));
+        }
+        match check_size(&p) {
+            Err(StrataError::Unsupported { what }) => assert_eq!(what, "predicate too large"),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        // A chain of exactly the depth limit is accepted.
+        let mut q = Predicate::IsNull(0);
+        for _ in 0..MAX_PREDICATE_DEPTH - 1 {
+            q = Predicate::Not(Box::new(q));
+        }
+        assert!(check_size(&q).is_ok());
+        // One more level is rejected.
+        q = Predicate::Not(Box::new(q));
+        assert!(check_size(&q).is_err());
+        // An In with too many literals is rejected by the node count.
+        let lits = vec![Lit::Null; MAX_PREDICATE_NODES];
+        assert!(check_size(&Predicate::In(0, lits)).is_err());
     }
 }
