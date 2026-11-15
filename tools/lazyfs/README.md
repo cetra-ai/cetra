@@ -20,7 +20,9 @@ LazyFS has no releases. The check is pinned to commit
 
 ## Prerequisites
 
-- Linux with FUSE 3: `sudo apt-get install -y g++ cmake libfuse3-dev fuse3`.
+- Build dependencies: `sudo apt-get install -y g++ cmake fuse3 libfuse3-dev libspdlog-dev libfmt-dev`.
+  `lazyfs.sh build` checks for them (`pkg-config` for fuse3, spdlog and fmt) and exits with the
+  missing names.
 - `user_allow_other` in `/etc/fuse.conf`. `lazyfs.sh run` prints the line to add and exits if
   it is missing. The script never edits `/etc`.
 - `/dev/fuse` readable by your user.
@@ -33,6 +35,11 @@ tools/lazyfs/lazyfs.sh probe   # mount, sync some files, drop unsynced data, pri
 tools/lazyfs/lazyfs.sh run     # mount, run the crash children and a short ingest, unmount
 just lazyfs                    # build, then run
 ```
+
+`build` configures libpcache and LazyFS with `-DCMAKE_POLICY_VERSION_MINIMUM=3.5`, which the
+pinned commit needs with CMake 4: its bundled toml11 declares an older `cmake_minimum_required`.
+The build scripts call plain `cmake`, so `build` puts a `cmake` wrapper on their `PATH` that adds
+the flag to each configure.
 
 `run` makes a work directory with `mktemp -d` (its path is printed by the mount log on failure),
 mounts LazyFS on `W/mnt` over `W/root`, and unmounts on exit.

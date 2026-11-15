@@ -114,7 +114,9 @@ What the tests cover:
 - **File descriptors (`model_tests/resources/descriptors.rs`):** a load under a lowered `RLIMIT_NOFILE`, the peak of open descriptors, and opening under a low limit.
 
 Environment:
-- **Small filesystem:** an unprivileged `unshare -rm` 64 MiB tmpfs. Tmpfs misses what a disk does: `fdatasync` is a no-op, so a sync never reports `ENOSPC`, and `remount,size=` fails in the namespace, so the tests free space by removing a ballast file. The ext4 loop device (`LLMOBS_TEST_SMALL_FS`) is not run yet.
+- **Small filesystem:** an unprivileged `unshare -rm` 64 MiB tmpfs. On Ubuntu 24.04 and later the
+  namespace is refused unless `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` is set
+  (until the next reboot). Tmpfs misses what a disk does: `fdatasync` is a no-op, so a sync never reports `ENOSPC`, and `remount,size=` fails in the namespace, so the tests free space by removing a ballast file. The ext4 loop device (`LLMOBS_TEST_SMALL_FS`) is not run yet.
 - **Memory:** a systemd user scope (`systemd-run --user`). Its limit is honoured by the query pool from R5.6, not before.
 - **Cgroup namespace:** the sandbox this plan was written in has a `/proc/self/cgroup` path that starts with `/../..`, which the sysinfo reader cannot resolve. The memory probe (`child_sees_the_scope_limit`) reports whether it applies.
 

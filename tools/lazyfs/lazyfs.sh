@@ -24,15 +24,42 @@ usage() {
   exit 2
 }
 
+# Runs the libpcache and LazyFS build scripts with a `cmake` that configures with
+# -DCMAKE_POLICY_VERSION_MINIMUM=3.5. The pinned commit's bundled toml11 declares
+# cmake_minimum_required below 3.5, which CMake 4 rejects, and the build scripts call plain
+# cmake. Build, install and query calls pass through unchanged.
+build_components() {
+  local real shim
+  real="$(command -v cmake)"
+  shim="$(mktemp -d)"
+  cat >"$shim/cmake" <<SHIM
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --build|--install|--version|--help|--help-*|-E) ;;
+  *) set -- -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "\$@" ;;
+esac
+exec "$real" "\$@"
+SHIM
+  chmod +x "$shim/cmake"
+  (
+    export PATH="$shim:$PATH"
+    cd "$LAZYFS_HOME/libs/libpcache" && ./build.sh
+    cd "$LAZYFS_HOME/lazyfs" && ./build.sh
+  )
+  rm -rf "$shim"
+}
+
 build() {
   local missing=()
   command -v g++ >/dev/null || missing+=(g++)
   command -v cmake >/dev/null || missing+=(cmake)
   pkg-config --exists fuse3 || missing+=(libfuse3-dev)
   command -v fusermount3 >/dev/null || missing+=(fuse3)
+  pkg-config --exists spdlog || missing+=(libspdlog-dev)
+  pkg-config --exists fmt || missing+=(libfmt-dev)
   if ((${#missing[@]})); then
     echo "missing: ${missing[*]}" >&2
-    echo "install: sudo apt-get install -y g++ cmake libfuse3-dev fuse3" >&2
+    echo "install: sudo apt-get install -y g++ cmake fuse3 libfuse3-dev libspdlog-dev libfmt-dev" >&2
     exit 1
   fi
 
@@ -44,8 +71,7 @@ build() {
   fi
   git -C "$LAZYFS_HOME" checkout --quiet --detach "$LAZYFS_SHA"
 
-  (cd "$LAZYFS_HOME/libs/libpcache" && ./build.sh)
-  (cd "$LAZYFS_HOME/lazyfs" && ./build.sh)
+  build_components
   echo "built LazyFS at $LAZYFS_SHA in $LAZYFS_HOME"
 }
 
@@ -73,7 +99,8 @@ mount_lazyfs() {
   mkdir -p "$work/mnt" "$work/root"
   write_config
   trap unmount EXIT
-  (cd "$LAZYFS_HOME" && scripts/mount-lazyfs.sh -c "$work/config.toml" -m "$work/mnt" -r "$work/root") \
+  # The mount script finds the binary at ./build/lazyfs, so it runs from the lazyfs directory.
+  (cd "$LAZYFS_HOME/lazyfs" && scripts/mount-lazyfs.sh -c "$work/config.toml" -m "$work/mnt" -r "$work/root") \
     >"$work/lazyfs.out" 2>&1 &
   local waited=0
   until mountpoint -q "$work/mnt"; do
@@ -90,7 +117,7 @@ mount_lazyfs() {
 unmount() {
   [[ -n "$work" ]] || return 0
   if mountpoint -q "$work/mnt"; then
-    (cd "$LAZYFS_HOME" && scripts/umount-lazyfs.sh -m "$work/mnt") >/dev/null 2>&1 ||
+    (cd "$LAZYFS_HOME/lazyfs" && scripts/umount-lazyfs.sh -m "$work/mnt") >/dev/null 2>&1 ||
       fusermount3 -uz "$work/mnt" >/dev/null 2>&1 || true
   fi
   wait 2>/dev/null || true

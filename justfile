@@ -39,6 +39,8 @@ model cases="500":
 
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
 # Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
+# Ubuntu 24.04 and later restrict them with AppArmor: run
+# `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` first (until the next reboot).
 resources:
     cargo test --workspace --all-features -- --ignored --test-threads=1 model_tests::resources::small_fs:: model_tests::resources::disk_full:: model_tests::resources::descriptors::
 
