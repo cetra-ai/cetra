@@ -58,6 +58,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Online evaluation: an exhausted Anthropic credit balance or Gemini daily quota now pauses the rule at once, like OpenAI's; the egress guard also denies `0.0.0.0/8`, `240.0.0.0/4`, `::/96`, `64:ff9b:1::/48`, `2002::/16` and `fec0::/10`; a judge or webhook header can no longer override `content-type` or the auth header.
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
 - A local object write that fails, for example on a full disk, no longer leaves its temporary file until the next start.
 - A query that would spill past the free disk above `storage.min_free_bytes` now fails as too large (422) instead of filling the disk.
