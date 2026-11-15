@@ -1,14 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
 import { FlaskConical, Loader2 } from "lucide-react";
 import { $api } from "@/api/client";
-import { problemOf } from "@/api/problem";
+import { problemMessage, problemOf } from "@/api/problem";
 import { experimentQuery, experimentResultsInit } from "@/api/queries-experiments";
 import { EmptyState } from "@/components/empty-state";
 import { EvaluateSnippet } from "@/components/experiments/evaluate-snippet";
 import { StatusBadge } from "@/components/experiments/experiments-table";
 import { ResultsTable } from "@/components/experiments/results-table";
 import { ScoreSummaryCards } from "@/components/experiments/score-summary";
+import { NotFound } from "@/components/not-found";
 import { JsonView } from "@/components/payload/json-view";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
@@ -16,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { parseExperimentSearch } from "@/lib/experiments";
+import { isLiveExperiment, LIVE_POLL_MS, parseExperimentSearch } from "@/lib/experiments";
 
 export const Route = createFileRoute("/$org/$project/experiments/$experimentId")({
   validateSearch: (search) => parseExperimentSearch(search),
@@ -40,7 +41,12 @@ function ExperimentPage() {
   const { experimentId } = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate();
-  const experimentData = useQuery(experimentQuery(org, project, experimentId));
+  // A running experiment is polled until it finishes (or is a day old).
+  const experimentData = useQuery({
+    ...experimentQuery(org, project, experimentId),
+    refetchInterval: (state) =>
+      isLiveExperiment(state.state.data, Date.now()) ? LIVE_POLL_MS : false,
+  });
   const query = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/experiments/{id}/results",
@@ -49,15 +55,24 @@ function ExperimentPage() {
       pageParamName: "cursor",
       initialPageParam: null,
       getNextPageParam: (page) => page.next_cursor ?? undefined,
+      placeholderData: keepPreviousData,
+      refetchInterval: isLiveExperiment(experimentData.data, Date.now()) ? LIVE_POLL_MS : false,
     },
   );
 
-  if (experimentData.error) {
+  // A failure with no data yet is the page's error; after data, a failed refetch or "Load more"
+  // is shown inline. A results 404 is the experiment not found.
+  if (experimentData.error && experimentData.data === undefined) {
     throw experimentData.error;
   }
-  if (query.error) {
+  if (query.error && query.data === undefined) {
+    if (problemOf(query.error)?.status === 404) {
+      // A component cannot throw notFound() to the router, so it renders the same page.
+      return <NotFound />;
+    }
     throw query.error;
   }
+  const inlineFailure = query.data === undefined ? undefined : (query.error ?? undefined);
 
   // Every page repeats the summary, so the first one holds it.
   const summary = query.data?.pages[0]?.summary;
@@ -157,7 +172,7 @@ function ExperimentPage() {
         </div>
         {query.isPending ? (
           <Skeleton className="h-8 w-full" />
-        ) : rows.length === 0 ? (
+        ) : rows.length === 0 && query.hasNextPage ? null : rows.length === 0 ? (
           search.errors === 1 ? (
             <EmptyState icon={FlaskConical} title="No errors" />
           ) : experiment.status === "running" ? (
@@ -174,6 +189,11 @@ function ExperimentPage() {
             scoreNames={summary?.scores.map((score) => score.name) ?? []}
             repetitions={experiment.repetitions}
           />
+        )}
+        {inlineFailure === undefined ? null : (
+          <p role="alert" className="text-sm text-status-error">
+            {problemMessage(inlineFailure, "The results could not be loaded")}
+          </p>
         )}
         {query.hasNextPage ? (
           <Button

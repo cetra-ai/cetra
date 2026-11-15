@@ -3,6 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { FlaskConical, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { $api } from "@/api/client";
+import { problemMessage } from "@/api/problem";
 import { datasetsInit } from "@/api/queries-datasets";
 import { experimentsInit } from "@/api/queries-experiments";
 import type { Schema } from "@/api/types";
@@ -52,9 +53,11 @@ function ExperimentsPage() {
     },
   );
 
-  if (query.error) {
+  // A failure with no rows yet is the page's error; after rows, a failed "Load more" is inline.
+  if (query.error && query.data === undefined) {
     throw query.error;
   }
+  const nextPageFailure = query.data === undefined ? undefined : (query.error ?? undefined);
 
   const rows = query.data?.pages.flatMap((page) => page.data) ?? [];
   const selectedRows = selected
@@ -116,6 +119,11 @@ function ExperimentsPage() {
         </div>
       ) : (
         <ExperimentsTable rows={rows} selected={selected} onSelectedChange={setSelected} />
+      )}
+      {nextPageFailure === undefined ? null : (
+        <p role="alert" className="text-sm text-status-error">
+          {problemMessage(nextPageFailure, "The next page could not be loaded")}
+        </p>
       )}
       {query.hasNextPage ? (
         <Button

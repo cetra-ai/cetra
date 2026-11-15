@@ -1,6 +1,11 @@
 import type { Schema } from "@/api/types";
+import { parseFlag } from "@/lib/search/common";
 
 export const DEFAULT_THRESHOLD = 0.1;
+/** A running experiment younger than this is polled for results (CG-J5). */
+const LIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** How often a live experiment and its results are refetched. */
+export const LIVE_POLL_MS = 5000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_COMPARE_IDS = 4;
@@ -12,10 +17,6 @@ const MINUS = "−";
 function stringParam(search: Record<string, unknown>, key: string): string | undefined {
   const value = search[key];
   return typeof value === "string" ? value.trim() : undefined;
-}
-
-function isFlag(value: unknown): boolean {
-  return value === "1" || value === true;
 }
 
 /** `?dataset=` of the list: a UUID string, else undefined. */
@@ -31,7 +32,33 @@ export function compareIdList(ids: string): string[] {
 
 /** `?errors=1` of the experiment page. */
 export function parseExperimentSearch(search: Record<string, unknown>): { errors?: 1 } {
-  return isFlag(search.errors) ? { errors: 1 } : {};
+  return parseFlag(search.errors) ? { errors: 1 } : {};
+}
+
+/**
+ * Whether an experiment is still running and younger than a day, so its page polls
+ * (`LIVE_POLL_MS`). `now` is `Date.now()`.
+ */
+export function isLiveExperiment(
+  experiment: Schema<"Experiment"> | undefined,
+  now: number,
+): boolean {
+  if (experiment?.status !== "running") {
+    return false;
+  }
+  const started = Date.parse(experiment.created_at);
+  return !Number.isNaN(started) && now - started < LIVE_WINDOW_MS;
+}
+
+/** A threshold from the URL: a finite number, or a numeric string, in [0, 1000]. */
+function thresholdOf(value: unknown): number | undefined {
+  let number = Number.NaN;
+  if (typeof value === "number") {
+    number = value;
+  } else if (typeof value === "string" && value.trim() !== "") {
+    number = Number(value);
+  }
+  return Number.isFinite(number) && number >= 0 && number <= MAX_THRESHOLD ? number : undefined;
 }
 
 /**
@@ -52,14 +79,11 @@ export function parseCompareSearch(search: Record<string, unknown>): {
       ids.push(id);
     }
   }
-  const raw = stringParam(search, "threshold");
-  const value = raw ? Number(raw) : Number.NaN;
-  const threshold =
-    Number.isFinite(value) && value >= 0 && value <= MAX_THRESHOLD ? value : undefined;
+  const threshold = thresholdOf(search.threshold);
   return {
     ids: ids.join(","),
     ...(threshold !== undefined ? { threshold } : {}),
-    ...(isFlag(search.regressions) ? { regressions: 1 as const } : {}),
+    ...(parseFlag(search.regressions) ? { regressions: 1 as const } : {}),
   };
 }
 
@@ -108,28 +132,35 @@ export function scoreSummaryText(summary: Schema<"ScoreSummary">): string {
   }
 }
 
+type DataType = Schema<"ScoreSummary">["data_type"];
+
+/** The magnitude as `deltaText` prints it: points for a boolean score, three decimals otherwise. */
+function printedMagnitude(delta: number, dataType: DataType): { value: number; digits: number } {
+  const scale = dataType === "boolean" ? 100 : 1;
+  const digits = dataType === "boolean" ? 1 : 3;
+  return { value: Number((Math.abs(delta) * scale).toFixed(digits)), digits };
+}
+
 /**
  * A delta as "+0.120" / "−0.050" (U+2212) / "0.000", three decimals; a boolean score's delta
  * in points: "+12.5 pts".
  */
-export function deltaText(delta: number, dataType: Schema<"ScoreSummary">["data_type"]): string {
-  const scale = dataType === "boolean" ? 100 : 1;
-  const digits = dataType === "boolean" ? 1 : 3;
-  const magnitude = Number((Math.abs(delta) * scale).toFixed(digits));
-  const sign = magnitude === 0 ? "" : delta > 0 ? "+" : MINUS;
-  const number = magnitude.toFixed(digits);
+export function deltaText(delta: number, dataType: DataType): string {
+  const { value, digits } = printedMagnitude(delta, dataType);
+  const sign = value === 0 ? "" : delta > 0 ? "+" : MINUS;
+  const number = value.toFixed(digits);
   return dataType === "boolean" ? `${sign}${number} pts` : `${sign}${number}`;
 }
 
-/** "better" when delta > 0, "worse" when delta < 0, "same" at 0 (CG-J1: higher is better). */
-export function deltaDirection(delta: number): "better" | "worse" | "same" {
-  if (delta > 0) {
-    return "better";
+/**
+ * "better" when the printed delta is above 0, "worse" when below, "same" when it prints as zero
+ * (CG-J1: higher is better). It reads the rounded value, so −0.0004 is "same".
+ */
+export function deltaDirection(delta: number, dataType: DataType): "better" | "worse" | "same" {
+  if (printedMagnitude(delta, dataType).value === 0) {
+    return "same";
   }
-  if (delta < 0) {
-    return "worse";
-  }
-  return "same";
+  return delta > 0 ? "better" : "worse";
 }
 
 /**

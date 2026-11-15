@@ -1,6 +1,7 @@
+import { keepPreviousData } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { FlaskConical, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { compareInit } from "@/api/queries-experiments";
@@ -80,6 +81,7 @@ function CompareView() {
       pageParamName: "cursor",
       initialPageParam: null,
       getNextPageParam: (page) => page.next_cursor ?? undefined,
+      placeholderData: keepPreviousData,
     },
   );
 
@@ -94,9 +96,12 @@ function CompareView() {
     </Link>
   );
 
-  // A refused comparison (400) and a hidden experiment (404) are shown on the page; anything else
-  // goes to the error boundary.
-  const failure = query.error ?? undefined;
+  // With no page loaded, a refused comparison (400) and a hidden experiment (404) are shown on the
+  // page and anything else goes to the error boundary. After a page, a failed "Load more" is shown
+  // next to the button.
+  const hasPages = query.data !== undefined;
+  const failure = hasPages ? undefined : (query.error ?? undefined);
+  const nextPageFailure = hasPages ? (query.error ?? undefined) : undefined;
   const failureStatus = problemOf(failure)?.status;
   if (failure !== undefined && failureStatus !== 400 && failureStatus !== 404) {
     throw failure;
@@ -164,10 +169,17 @@ function CompareView() {
         <>
           <ScoreTable experiments={experiments} deltas={first?.deltas ?? []} />
           <section className="flex flex-col gap-3">
-            {rows.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No items to compare</p>
-            ) : (
+            {rows.length > 0 ? (
               <CompareTable rows={rows} experiments={experiments} />
+            ) : query.hasNextPage ? null : (
+              <p className="text-sm text-muted-foreground">
+                {regressionsOnly ? "No regressions at this threshold" : "No items to compare"}
+              </p>
+            )}
+            {nextPageFailure === undefined ? null : (
+              <p role="alert" className="text-sm text-status-error">
+                {problemMessage(nextPageFailure, "The next page could not be loaded")}
+              </p>
             )}
             {query.hasNextPage ? (
               <Button
@@ -190,21 +202,35 @@ function CompareView() {
   );
 }
 
-/** The regression threshold: written to `?threshold` after the typing pauses. */
+/** The draft as a threshold: a number in [0, 1000], or undefined when empty, not a number or out of range. */
+function draftThreshold(draft: string): number | undefined {
+  if (draft.trim() === "") {
+    return undefined;
+  }
+  const value = Number(draft);
+  return Number.isFinite(value) && value >= 0 && value <= MAX_THRESHOLD ? value : undefined;
+}
+
+/**
+ * The regression threshold: written to `?threshold` after the typing pauses. When the URL changes
+ * the draft takes the new value, unless the input has focus (the user is typing).
+ */
 function ThresholdInput({ threshold }: { threshold: number }) {
   const { org, project } = useProject();
   const navigate = useNavigate();
   const [draft, setDraft] = useState(String(threshold));
+  const inputRef = useRef<HTMLInputElement>(null);
+  const invalid = draft.trim() !== "" && draftThreshold(draft) === undefined;
 
   useEffect(() => {
-    const value = Number(draft);
-    if (
-      draft.trim() === "" ||
-      !Number.isFinite(value) ||
-      value < 0 ||
-      value > MAX_THRESHOLD ||
-      value === threshold
-    ) {
+    if (document.activeElement !== inputRef.current) {
+      setDraft(String(threshold));
+    }
+  }, [threshold]);
+
+  useEffect(() => {
+    const value = draftThreshold(draft);
+    if (value === undefined || value === threshold) {
       return;
     }
     const timer = window.setTimeout(() => {
@@ -221,10 +247,16 @@ function ThresholdInput({ threshold }: { threshold: number }) {
     <div className="flex flex-col gap-1">
       <Label htmlFor="regression-threshold">Regression threshold</Label>
       <Input
+        ref={inputRef}
         id="regression-threshold"
         type="number"
         aria-label="Regression threshold"
-        aria-describedby="regression-threshold-help"
+        aria-invalid={invalid || undefined}
+        aria-describedby={
+          invalid
+            ? "regression-threshold-help regression-threshold-range"
+            : "regression-threshold-help"
+        }
         className="w-32"
         step={0.05}
         min={0}
@@ -238,6 +270,11 @@ function ThresholdInput({ threshold }: { threshold: number }) {
         A score that drops by more than this, or a new error, marks a regression. Higher scores are
         better.
       </p>
+      {invalid ? (
+        <p id="regression-threshold-range" className="text-xs text-status-error">
+          Between 0 and 1000
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -314,10 +351,10 @@ function ScoreTable({
                         <span>{text}</span>
                         <Badge
                           variant="outline"
-                          aria-label={`${deltaText(delta.delta, dataType)} versus baseline`}
-                          className={DIRECTION_CLASS[deltaDirection(delta.delta)]}
+                          className={DIRECTION_CLASS[deltaDirection(delta.delta, dataType)]}
                         >
                           {deltaText(delta.delta, dataType)}
+                          <span className="sr-only"> versus baseline</span>
                         </Badge>
                         <span className="text-xs text-muted-foreground">
                           {`n = ${delta.n_compared}`}

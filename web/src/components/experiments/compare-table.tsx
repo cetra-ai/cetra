@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { memo } from "react";
 import type { Schema } from "@/api/types";
 import { useProject } from "@/components/shell/project-context";
 import { Badge } from "@/components/ui/badge";
@@ -116,7 +117,8 @@ export function CompareTable({
   );
 }
 
-function CellView({
+/** One cell. Memoized so that loading more rows does not re-diff the rows already shown. */
+const CellView = memo(function CellView({
   cell,
   baseline,
   baselineOutput,
@@ -129,7 +131,9 @@ function CellView({
   const scores = Object.entries(cell.scores);
   return (
     <div className="flex max-w-sm flex-col gap-2">
-      {baseline ? (
+      {cell.output === undefined ? (
+        <p className="text-xs text-muted-foreground">No output</p>
+      ) : baseline ? (
         <p className="whitespace-pre-wrap font-mono text-xs">
           {previewJson(cell.output, BASELINE_OUTPUT_CHARS)}
         </p>
@@ -144,11 +148,7 @@ function CellView({
           <TooltipContent>{cell.error}</TooltipContent>
         </Tooltip>
       )}
-      {cell.regressed ? (
-        <Badge variant="destructive" aria-label="Regressed">
-          Regressed
-        </Badge>
-      ) : null}
+      {cell.regressed ? <Badge variant="destructive">Regressed</Badge> : null}
       {scores.length > 0 ? (
         <div className="flex flex-wrap gap-1">
           {scores.map(([name, value]) => (
@@ -172,4 +172,4 @@ function CellView({
       </div>
     </div>
   );
-}
+});

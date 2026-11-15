@@ -93,6 +93,46 @@ it("filters to errors", async () => {
   await waitFor(() => expect(router.state.location.href).toContain("errors=1"));
 });
 
+it("filters to errors from a deep link with errors=1", async () => {
+  const requested: (string | null)[] = [];
+  server.use(
+    http.get(RESULTS_PATH, ({ request }) => {
+      requested.push(new URL(request.url).searchParams.get("errors_only"));
+      return HttpResponse.json(resultsFixture);
+    }),
+  );
+
+  await renderApp(`${EXPERIMENT_URL}?errors=1`);
+
+  await screen.findByRole("table", { name: "Results" });
+  expect(requested.at(-1)).toBe("true");
+  expect(screen.getByRole("switch", { name: "Errors only" })).toBeChecked();
+});
+
+it("shows the mean latency when the p95 is absent", async () => {
+  const { latency_p95_ns: _p95, ...summary } = resultsFixture.summary;
+  server.use(http.get(RESULTS_PATH, () => HttpResponse.json({ ...resultsFixture, summary })));
+
+  await renderApp(EXPERIMENT_URL);
+
+  const list = await screen.findByRole("list", { name: "Summary" });
+  const latency = within(list)
+    .getAllByRole("listitem")
+    .find((card) => within(card).queryByText("Latency"));
+  expect(latency).toHaveTextContent(/^Latency\s*mean /);
+  expect(latency).not.toHaveTextContent("p95");
+});
+
+it("answers not found when the results are not found", async () => {
+  server.use(
+    http.get(RESULTS_PATH, () => problemResponse(404, "not_found", { detail: "no such results" })),
+  );
+
+  await renderApp(EXPERIMENT_URL);
+
+  expect(await screen.findByText("Page not found")).toBeInTheDocument();
+});
+
 it("answers not found", async () => {
   server.use(
     http.get(EXPERIMENT_PATH, () =>

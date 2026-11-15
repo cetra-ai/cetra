@@ -6,6 +6,7 @@ import {
   deltaDirection,
   deltaText,
   expectedRuns,
+  isLiveExperiment,
   parseCompareSearch,
   parseExperimentSearch,
   parseExperimentsSearch,
@@ -45,6 +46,26 @@ describe("parseCompareSearch", () => {
     expect(parseCompareSearch({ ids: A, regressions: "1" }).regressions).toBe(1);
     expect(parseCompareSearch({ ids: A }).regressions).toBeUndefined();
   });
+
+  it("reads the router's numeric values (TanStack parses the URL as JSON)", () => {
+    expect(parseCompareSearch({ ids: A, regressions: 1 }).regressions).toBe(1);
+    expect(parseCompareSearch({ ids: A, threshold: 0.25 }).threshold).toBe(0.25);
+    expect(parseCompareSearch({ ids: A, threshold: 0 }).threshold).toBe(0);
+    expect(parseCompareSearch({ ids: A, threshold: 1000 }).threshold).toBe(1000);
+    expect(parseCompareSearch({ ids: A, threshold: 1001 }).threshold).toBeUndefined();
+    expect(parseCompareSearch({ ids: A, threshold: -0.5 }).threshold).toBeUndefined();
+  });
+
+  it("drops a threshold that is empty or not finite", () => {
+    expect(parseCompareSearch({ ids: A, threshold: "" }).threshold).toBeUndefined();
+    expect(parseCompareSearch({ ids: A, threshold: "Infinity" }).threshold).toBeUndefined();
+    expect(parseCompareSearch({ ids: A, threshold: Number.NaN }).threshold).toBeUndefined();
+  });
+
+  it("keeps ids only when the router gives a string", () => {
+    expect(parseCompareSearch({ ids: 42 }).ids).toBe("");
+    expect(parseCompareSearch({ ids: A }).ids).toBe(A);
+  });
 });
 
 describe("parseExperimentsSearch and parseExperimentSearch", () => {
@@ -55,7 +76,25 @@ describe("parseExperimentsSearch and parseExperimentSearch", () => {
 
   it("reads the errors flag of the experiment page", () => {
     expect(parseExperimentSearch({ errors: "1" })).toEqual({ errors: 1 });
+    expect(parseExperimentSearch({ errors: 1 })).toEqual({ errors: 1 });
+    expect(parseExperimentSearch({ errors: 0 })).toEqual({});
     expect(parseExperimentSearch({})).toEqual({});
+  });
+});
+
+describe("isLiveExperiment", () => {
+  const now = Date.parse("2026-11-16T12:00:00Z");
+  const experiment = (status: "running" | "completed", createdAt: string) =>
+    ({ status, created_at: createdAt }) as Schema<"Experiment">;
+
+  it("is true for a running experiment less than a day old", () => {
+    expect(isLiveExperiment(experiment("running", "2026-11-16T00:00:00Z"), now)).toBe(true);
+  });
+
+  it("is false once it is a day old, when completed, or when unknown", () => {
+    expect(isLiveExperiment(experiment("running", "2026-11-15T11:00:00Z"), now)).toBe(false);
+    expect(isLiveExperiment(experiment("completed", "2026-11-16T11:00:00Z"), now)).toBe(false);
+    expect(isLiveExperiment(undefined, now)).toBe(false);
   });
 });
 
@@ -102,9 +141,21 @@ describe("deltaText and deltaDirection", () => {
   });
 
   it("reads the direction of a delta, higher is better", () => {
-    expect(deltaDirection(0.1)).toBe("better");
-    expect(deltaDirection(-0.1)).toBe("worse");
-    expect(deltaDirection(0)).toBe("same");
+    expect(deltaDirection(0.1, "numeric")).toBe("better");
+    expect(deltaDirection(-0.1, "numeric")).toBe("worse");
+    expect(deltaDirection(0, "numeric")).toBe("same");
+  });
+
+  it("reads a delta that prints as zero as same", () => {
+    expect(deltaText(-0.0004, "numeric")).toBe("0.000");
+    expect(deltaDirection(-0.0004, "numeric")).toBe("same");
+    expect(deltaDirection(0.0004, "numeric")).toBe("same");
+  });
+
+  it("reads a boolean delta that prints as 0.0 pts as same", () => {
+    expect(deltaText(-0.0001, "boolean")).toBe("0.0 pts");
+    expect(deltaDirection(-0.0001, "boolean")).toBe("same");
+    expect(deltaDirection(-0.01, "boolean")).toBe("worse");
   });
 });
 

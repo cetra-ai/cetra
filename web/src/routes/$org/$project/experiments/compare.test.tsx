@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
@@ -41,7 +41,8 @@ it("shows the scores with deltas", async () => {
   for (const [name, entry] of Object.entries(comparisonFixture.deltas[0]?.scores ?? {})) {
     const score = candidateScore(name);
     const text = deltaText(entry.delta, score.data_type as Schema<"ScoreSummary">["data_type"]);
-    expect(within(table).getByLabelText(`${text} versus baseline`)).toHaveTextContent(text);
+    expect(within(table).getAllByText(text).length).toBeGreaterThan(0);
+    expect(within(table).getAllByText("versus baseline").length).toBeGreaterThan(0);
     expect(within(table).getAllByText(`n = ${entry.n_compared}`).length).toBeGreaterThan(0);
   }
 });
@@ -57,7 +58,7 @@ it("highlights regressed items", async () => {
     .getByText(/Which plans include SSO/)
     .closest("tr");
   expect(regressedRow).toHaveAttribute("data-regressed", "true");
-  expect(within(regressedRow as HTMLElement).getByLabelText("Regressed")).toBeInTheDocument();
+  expect(within(regressedRow as HTMLElement).getByText("Regressed")).toBeInTheDocument();
   expect(plainRow).not.toHaveAttribute("data-regressed");
 });
 
@@ -87,6 +88,95 @@ it("passes the threshold and the regressions filter", async () => {
   );
   await waitFor(() => expect(router.state.location.href).toContain("threshold=0.25"));
   expect(router.state.location.href).toContain("regressions=1");
+});
+
+it("reads the threshold and the regressions flag the router parses as numbers", async () => {
+  const requested: URLSearchParams[] = [];
+  server.use(
+    http.get(COMPARE_PATH, ({ request }) => {
+      requested.push(new URL(request.url).searchParams);
+      return HttpResponse.json(comparisonFixture);
+    }),
+  );
+
+  await renderApp(`${COMPARE_URL}&threshold=0.25&regressions=1`);
+
+  await screen.findByRole("table", { name: "Items" });
+  expect(requested.at(-1)?.get("threshold")).toBe("0.25");
+  expect(requested.at(-1)?.get("regressions_only")).toBe("true");
+  expect(screen.getByRole("spinbutton", { name: "Regression threshold" })).toHaveValue(0.25);
+});
+
+it("updates the threshold field when the URL changes", async () => {
+  const { router } = await renderApp(COMPARE_URL);
+  const input = await screen.findByRole("spinbutton", { name: "Regression threshold" });
+
+  await act(() =>
+    router.navigate({
+      to: "/$org/$project/experiments/compare",
+      params: { org: "acme", project: "support-bot" },
+      search: { ids: `${BASELINE_ID},${CANDIDATE_ID}`, threshold: 0.4 },
+    }),
+  );
+
+  await waitFor(() => expect(input).toHaveValue(0.4));
+});
+
+it("says so when regressions-only has no rows and no next page", async () => {
+  server.use(
+    http.get(COMPARE_PATH, () =>
+      HttpResponse.json({ ...comparisonFixture, rows: [], next_cursor: null }),
+    ),
+  );
+
+  await renderApp(`${COMPARE_URL}&regressions=1`);
+
+  expect(await screen.findByText("No regressions at this threshold")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load more" })).toBeNull();
+});
+
+it("shows Load more instead of the empty message when a page has a cursor", async () => {
+  server.use(
+    http.get(COMPARE_PATH, () =>
+      HttpResponse.json({ ...comparisonFixture, rows: [], next_cursor: "page-2" }),
+    ),
+  );
+
+  await renderApp(`${COMPARE_URL}&regressions=1`);
+
+  expect(await screen.findByRole("button", { name: "Load more" })).toBeInTheDocument();
+  expect(screen.queryByText("No regressions at this threshold")).toBeNull();
+});
+
+it("marks an out-of-range threshold", async () => {
+  const user = userEvent.setup();
+  await renderApp(COMPARE_URL);
+  const input = await screen.findByRole("spinbutton", { name: "Regression threshold" });
+
+  await user.clear(input);
+  await user.type(input, "2000");
+
+  expect(input).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByText("Between 0 and 1000")).toBeInTheDocument();
+});
+
+it("keeps the rows and shows the error when Load more fails", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.get(COMPARE_PATH, ({ request }) => {
+      if (new URL(request.url).searchParams.get("cursor")) {
+        return problemResponse(500, "internal", { detail: "the next page broke" });
+      }
+      return HttpResponse.json({ ...comparisonFixture, next_cursor: "page-2" });
+    }),
+  );
+  await renderApp(COMPARE_URL);
+  await screen.findByRole("table", { name: "Items" });
+
+  await user.click(screen.getByRole("button", { name: "Load more" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("the next page broke");
+  expect(screen.getByRole("table", { name: "Items" })).toBeInTheDocument();
 });
 
 it("shows the version warning", async () => {
@@ -132,7 +222,8 @@ it("matches cells by experiment id", async () => {
     .getByText(/Can I export my traces/)
     .closest("tr") as HTMLElement;
   expect(within(row).getByText("Not run")).toBeInTheDocument();
-  expect(within(row).getByText(/"answer": "No\./, { selector: "ins" })).toBeInTheDocument();
+  expect(within(row).getByText("No baseline output")).toBeInTheDocument();
+  expect(within(row).getByText(/"answer": "No\./)).toBeInTheDocument();
 });
 
 it("explains a refused comparison", async () => {

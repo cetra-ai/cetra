@@ -115,14 +115,13 @@ export function ResultsTable({
 }
 
 function JsonCell({ value }: { value: unknown }) {
-  const full = value === undefined ? "—" : (JSON.stringify(value) ?? "—");
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="block max-w-xs truncate font-mono text-xs">{previewJson(value)}</span>
       </TooltipTrigger>
       <TooltipContent className="max-w-lg break-all font-mono text-xs">
-        {full.length > TOOLTIP_CHARS ? `${full.slice(0, TOOLTIP_CHARS)}…` : full}
+        <span className="block whitespace-pre-wrap">{previewJson(value, TOOLTIP_CHARS)}</span>
       </TooltipContent>
     </Tooltip>
   );

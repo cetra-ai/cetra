@@ -6,9 +6,14 @@ import { formatCost, formatDuration } from "@/lib/format";
 export function ScoreSummaryCards({ summary }: { summary: Schema<"ExperimentSummary"> }) {
   const expected = summary.experiment.item_count * summary.experiment.repetitions;
   const latency =
-    summary.latency_mean_ns === undefined || summary.latency_p95_ns === undefined
+    summary.latency_mean_ns === undefined
       ? "—"
-      : `mean ${formatDuration(summary.latency_mean_ns)} · p95 ${formatDuration(summary.latency_p95_ns)}`;
+      : [
+          `mean ${formatDuration(summary.latency_mean_ns)}`,
+          ...(summary.latency_p95_ns === undefined
+            ? []
+            : [`p95 ${formatDuration(summary.latency_p95_ns)}`]),
+        ].join(" · ");
   return (
     <ul aria-label="Summary" className="grid grid-cols-2 gap-3 md:grid-cols-4">
       <Card title="Results" text={`${summary.result_count} of ${expected}`} />
