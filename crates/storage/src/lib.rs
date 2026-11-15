@@ -3012,7 +3012,7 @@ mod tests {
     /// Spans rows that `project` sees through a query.
     async fn span_count(storage: &Storage) -> i64 {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
