@@ -38,12 +38,16 @@ pub struct InternalOrg {
     pub slug: String,
 }
 
-/// Body of the `users` routes (D-P-39): the user's subject at the control plane's provider.
+/// Body of the `users` routes (D-P-39, D-S-9): the user's subject at the control plane's
+/// provider, and its email for a user the subject does not find.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InternalUserRef {
     /// The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`.
     pub subject: String,
+    /// Email, normalized like every email (D136). Used only when no identity has the subject,
+    /// and then only for a user with no identity at that provider (D-S-9).
+    pub email: String,
 }
 
 /// Answer of `POST /api/internal/v1/users/delete`.

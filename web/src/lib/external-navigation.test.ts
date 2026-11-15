@@ -1,8 +1,36 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { submitExternalForm } from "@/lib/external-navigation";
+import {
+  replaceExternal,
+  setExternalNavigator,
+  submitExternalForm,
+} from "@/lib/external-navigation";
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+it("replaceExternal goes through the navigator's replace", () => {
+  const navigated: string[] = [];
+  const replaced: string[] = [];
+  const submitted: string[] = [];
+  setExternalNavigator({
+    navigate: (url) => {
+      navigated.push(url);
+    },
+    replace: (url) => {
+      replaced.push(url);
+    },
+    submit: (url) => {
+      submitted.push(url);
+    },
+  });
+
+  replaceExternal("/api/auth/authorize/github");
+
+  setExternalNavigator(undefined);
+  expect(replaced).toEqual(["/api/auth/authorize/github"]);
+  expect(navigated).toEqual([]);
+  expect(submitted).toEqual([]);
 });
 
 it("posts the fields as hidden inputs, submits once, and removes the form", () => {

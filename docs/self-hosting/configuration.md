@@ -37,6 +37,11 @@ Keep secrets in environment variables from a file only the service can read (`ll
 compose, an `EnvironmentFile` with systemd, a Secret with Helm), not in `llmobs.toml` if that file
 is shared. Logs never contain secret values.
 
+An OpenID Connect provider (`[[auth.oidc]]` in `llmobs.toml`) takes its client secret from
+`LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, with the provider's `name` in upper case and `-`
+written `_` (`name = "my-idp"` → `LLMOBS_AUTH__OIDC__MY_IDP__CLIENT_SECRET`). Leave
+`client_secret` out of the file then.
+
 The encryption key protects stored LLM connection keys and webhook secrets. Back it up with the
 data: a backup without its key cannot be read ([backup.md](backup.md)). `llmobs admin
 rotate-encryption-key` replaces it while the server is stopped.

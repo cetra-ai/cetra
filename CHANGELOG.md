@@ -9,6 +9,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Upgrade notes
 
+- The control plane's `users/revoke`, `users/disable` and `users/delete` calls must now send
+  `email` with `subject`; a body without it is refused with 400.
 - Migration `0015` adds `users.email_verified_via` and `web_sessions.via_provider`. Verified accounts
   that exist already have no recorded origin and count as unproven: when an identity provider links
   one of them, its password is cleared. With `auth.enforce_sso_domains`, sessions that predate the
@@ -20,9 +22,15 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
+- An `LLMOBS_AUTH__OIDC__*` environment variable other than
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
+  server at start; such variables used to be ignored. Remove them.
 
 ### Added
 
+- Auth: an `[[auth.oidc]]` provider's client secret can come from
+  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
+  `llmobs.toml` (D-S-2).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
@@ -49,6 +57,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- Auth: with `auth.disable_password = true`, instance admins can still sign in with their
+  password at `/login?password=1`, change it, and set it from a reset link
+  (`llmobs admin reset-password`) (D-S-3).
 - Deletion, project and organization drop dialogs no longer promise erasure within 24 hours: data is hidden within seconds, removed within 24 hours, and its stored copies are purged after the storage grace period (`storage.gc.grace`, D181).
 - Alert email is capped at 1,000 messages per org per UTC day, "Send test" is limited to 5 a minute
   per user and per channel, and when signup is open an email channel may only list verified
@@ -64,6 +75,12 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   days; run `llmobs login` again when it does.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
   `api_key` again (400 on `api_key`), so a new host never receives the stored key.
+- Web UI: with password sign-in off and exactly one sign-in provider, the login page and, for a
+  visitor without a session, the invite page go straight to that provider; signing out lands on a
+  page that does not. Instance admins sign in with their password at `/login?password=1`, which the
+  login page links to (D-S-4, D-S-5, D-S-6).
+- Internal API: `POST /api/internal/v1/users/{revoke,disable,delete}` take `{subject, email}` and
+  find a user who never signed in through the control plane by email (D-S-9).
 
 ### Fixed
 
