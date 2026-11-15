@@ -246,3 +246,11 @@ function zoneOffsetMs(zone: string): number {
   const minutes = Number(zone.slice(4, 6));
   return sign * (hours * 60 + minutes) * 60_000;
 }
+
+/** A project's retention: `null` or absent keeps data forever (spec 09, `retention_days`). */
+export function formatRetention(days: number | null | undefined): string {
+  if (days == null) {
+    return "Forever";
+  }
+  return days === 1 ? "1 day" : `${days} days`;
+}
