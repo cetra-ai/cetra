@@ -1,0 +1,4 @@
+{
+  "target": "trace",
+  "filter": "status = 'ok'"
+}

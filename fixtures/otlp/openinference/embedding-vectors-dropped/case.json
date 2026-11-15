@@ -7,5 +7,5 @@
     "02 § Mapping tables / Model, provider, usage",
     "02 § Cost computation"
   ],
-  "notes": "hand-written from openinference-instrumentation-openai; re-check against a B2 capture"
+  "notes": "hand-written from openinference-instrumentation-openai. Confirmed by openinference/openai-embeddings: two embedding texts, the embedding.embeddings.N.embedding.vector attributes are in input.json and no vector appears in expected.json."
 }

@@ -84,6 +84,44 @@ pub struct InternalUsageQuery {
     pub cursor: Option<String>,
 }
 
+/// A drop kind in the feed of `GET /api/internal/v1/deletions` (D-P-49).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalDropKind {
+    /// A project drop.
+    Project,
+    /// An org drop.
+    Org,
+}
+
+/// One applied drop in the feed (D-P-49).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InternalDrop {
+    /// The deletion id.
+    pub id: Uuid,
+    pub kind: InternalDropKind,
+    pub org_id: Uuid,
+    /// Project drops only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<Uuid>,
+    /// When the drop was applied.
+    #[serde(with = "llmobs_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub applied_at: i64,
+}
+
+/// Query of `GET /api/internal/v1/deletions`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct InternalDropsQuery {
+    /// `project` or `org`; both when omitted.
+    pub kind: Option<InternalDropKind>,
+    /// Rows per page, 1–10 000. Default 1 000.
+    pub limit: Option<u32>,
+    /// Opaque cursor from a previous page.
+    pub cursor: Option<String>,
+}
+
 /// Body of `POST /api/internal/v1/memberships/lookup` (D-P-40). The subject is tried first;
 /// the email only when no identity has the subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

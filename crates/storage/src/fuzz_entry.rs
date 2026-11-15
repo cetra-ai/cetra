@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -92,6 +92,18 @@ impl<'a> Cursor<'a> {
 }
 
 /// A scratch directory under the system temp dir, removed on drop.
+/// A disk manager that spills under `dir`, as the query runtime's does.
+fn spill_manager(dir: &Path) -> Arc<datafusion::execution::disk_manager::DiskManager> {
+    use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+    Arc::new(
+        DiskManagerBuilder::default()
+            .with_mode(DiskManagerMode::Directories(vec![dir.to_path_buf()]))
+            .build()
+            // Harness setup, not input-dependent.
+            .expect("build the spill manager"),
+    )
+}
+
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -315,7 +327,7 @@ pub(crate) fn parquet_query(
         raise: Vec::new(),
         quarantine: Vec::new(),
     };
-    let (catalog, _) = Catalog::empty()
+    let (catalog, _, _) = Catalog::empty()
         .apply(&edit)
         .expect("one new file applies to an empty catalog");
     let state = ReadState {
@@ -331,7 +343,7 @@ pub(crate) fn parquet_query(
     let query = project_query(
         &state,
         project(),
-        QueryOptions::default(),
+        QueryOptions::new(None, None),
         &runtime_env,
         two(),
         DAY_NS,
@@ -392,6 +404,7 @@ pub fn parquet_file(data: &[u8]) {
         let _ = span_list(
             &ctx,
             SpanListRequest {
+                strict_exclusions: false,
                 filter: None,
                 search: None,
                 scope: scope(None),
@@ -406,6 +419,7 @@ pub fn parquet_file(data: &[u8]) {
         let _ = span_list(
             &ctx,
             SpanListRequest {
+                strict_exclusions: false,
                 filter: Some("status = 'error'"),
                 search: None,
                 scope: scope(window()),
@@ -420,6 +434,7 @@ pub fn parquet_file(data: &[u8]) {
         let _ = trace_list(
             &ctx,
             TraceListRequest {
+                strict_exclusions: false,
                 filter: None,
                 search: None,
                 scope: scope(None),
@@ -434,6 +449,7 @@ pub fn parquet_file(data: &[u8]) {
         let _ = trace_list(
             &ctx,
             TraceListRequest {
+                strict_exclusions: false,
                 filter: Some("status = 'error'"),
                 search: None,
                 scope: scope(window()),
@@ -449,6 +465,8 @@ pub fn parquet_file(data: &[u8]) {
         let _ = score_list(
             &ctx,
             ScoreListRequest {
+                evaluator_id: None,
+                rule_id: None,
                 target: None,
                 trace_id: None,
                 span_id: None,
@@ -529,7 +547,7 @@ fn run_filter(view: FilterView, text: &str) {
     let query = project_query(
         &ReadState::empty(),
         project(),
-        QueryOptions::default(),
+        QueryOptions::new(None, None),
         &runtime_env,
         two(),
         DAY_NS,
@@ -609,7 +627,7 @@ fn good_block(content: &[u8], index: usize) -> Vec<u8> {
 }
 
 /// Writes the cache directory of one object: its `size` file and the block files `input` describes.
-fn write_cache_files(cache: &std::path::Path, input: &CacheInput, len: u64) {
+fn write_cache_files(cache: &Path, input: &CacheInput, len: u64) {
     let object = cache.join(CACHE_NAME);
     std::fs::create_dir_all(&object).expect("create the cached object's directory");
     match &input.size_file {
@@ -668,9 +686,11 @@ fn check_cache(input: &CacheInput) {
         .expect("store the cached object");
 
     for _round in 0..2 {
-        let disk = Arc::new(Disk::open(vec![scratch.0.clone()], 0)
+        let disk = Arc::new(
+            Disk::open(vec![scratch.0.clone()], 0, spill_manager(&scratch.0))
                 // Harness setup, not input-dependent.
-                .expect("open the disk"));
+                .expect("open the disk"),
+        );
         let cache = Arc::new(
             ReadCache::open(cache_dir.clone(), 64 << 20, disk, 0)
                 // Harness setup, not input-dependent.
@@ -1050,6 +1070,7 @@ pub(crate) mod tests {
     fn parquet_file_reads_a_seed() {
         let (ctx, _, _) = stored_query(FileTable::Spans);
         let request = SpanListRequest {
+            strict_exclusions: false,
             filter: None,
             search: None,
             scope: scope(None),

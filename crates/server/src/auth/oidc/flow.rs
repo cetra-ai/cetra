@@ -19,6 +19,7 @@ use crate::http::AppState;
 use crate::meta::identities::{self, identity_user};
 use crate::meta::users::{self, NewUser, normalize_email};
 use crate::meta::{MetaError, invites, members, orgs, personal_tokens, web_sessions};
+use llmobs_core::ids::OrgId;
 
 /// Why `GET /authorize` did not redirect to the provider.
 pub(crate) enum StartError {
@@ -36,6 +37,8 @@ pub(crate) struct LoggedIn {
     pub(crate) user_id: Uuid,
     /// Sanitized relative path from the state cookie.
     pub(crate) redirect: String,
+    /// The org whose provider signed the user in (D-P-59). `None` for the instance providers.
+    pub(crate) sso_org: Option<OrgId>,
 }
 
 /// Why the callback redirects to `/login`. [`LoginError::Internal`] is HTTP 500.
@@ -58,6 +61,12 @@ pub(crate) enum LoginError {
     LinkRefused,
     /// The users table is empty and the setup token did not match.
     SetupRequired,
+    /// The org's seats are full and this person has no other org (D-P-56).
+    SeatLimit,
+    /// No usable provider for this login: unknown domain, disabled provider, or no owner test (D-P-57, D-P-60).
+    SsoUnavailable,
+    /// The email's domain is enforced by its org, and this person is not an instance admin (D-P-58).
+    SsoRequired,
     /// The database or the random source failed.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -75,6 +84,9 @@ impl LoginError {
             Self::AccountDisabled => "account_disabled",
             Self::LinkRefused => "link_refused",
             Self::SetupRequired => "setup_required",
+            Self::SeatLimit => "seat_limit",
+            Self::SsoUnavailable => "sso_unavailable",
+            Self::SsoRequired => "sso_required",
             Self::Internal(_) => return None,
         })
     }
@@ -139,6 +151,9 @@ pub(crate) async fn start(
             redirect: state_cookie::safe_redirect(redirect),
             setup_token,
             created_ns: now,
+            org_id: None,
+            test: false,
+            test_owner: None,
         },
         state.config.public_url.is_https(),
     )
@@ -186,6 +201,7 @@ pub(crate) async fn finish(
     Ok(LoggedIn {
         user_id,
         redirect: saved.redirect,
+        sso_org: None,
     })
 }
 
@@ -215,7 +231,7 @@ async fn exchange(
                 .map_err(login_exchange)?;
             LoginClaims {
                 subject: profile.subject,
-                email_verified: profile.email.is_some(),
+                email_verified: Some(profile.email.is_some()),
                 email: profile.email,
                 hd: None,
                 name: profile.name,
@@ -241,12 +257,26 @@ async fn resolve(
         .map_err(internal)?
     {
         let user_id = active(state, user_id).await?;
+        if enforced_for_user(state, user_id).await? {
+            return Err(LoginError::SsoRequired);
+        }
         provision_org(state, &rules, user_id).await?;
         return Ok(user_id);
     }
     let Some(email) = verified_email(claims) else {
         return Err(LoginError::EmailNotVerified);
     };
+    // D-P-58: an enforcing org's domain signs in only through the org's provider. An instance
+    // admin is the operator's break-glass and is still admitted.
+    if crate::ee::org_sso::enforces(state, &email) {
+        let admin = users::user_by_email(state.meta.reader(), &email)
+            .await
+            .map_err(internal)?
+            .is_some_and(|user| user.is_instance_admin);
+        if !admin {
+            return Err(LoginError::SsoRequired);
+        }
+    }
     let user_id = admit(
         state,
         &Admission {
@@ -310,7 +340,7 @@ fn check_domain(rules: &LoginRules, claims: &LoginClaims) -> Result<(), LoginErr
 }
 
 fn verified_email(claims: &LoginClaims) -> Option<String> {
-    if !claims.email_verified {
+    if claims.email_verified != Some(true) {
         return None;
     }
     let email = claims.email.as_deref()?;
@@ -335,7 +365,7 @@ fn setup_matches(state: &AppState, presented: Option<&str>) -> Result<bool, Logi
 }
 
 /// 1 to 100 characters after trimming. Anything else is stored as no name.
-fn display_name(value: Option<String>) -> Option<String> {
+pub(crate) fn display_name(value: Option<String>) -> Option<String> {
     let name = value.unwrap_or_default();
     let name = name.trim();
     let length = name.chars().count();
@@ -568,6 +598,17 @@ async fn provision_org(
         .map_err(internal)
 }
 
+/// Whether an org's enforcement refuses this user at an instance provider (D-P-58).
+async fn enforced_for_user(state: &AppState, user_id: Uuid) -> Result<bool, LoginError> {
+    let Some(user) = users::user_by_id(state.meta.reader(), user_id)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(false);
+    };
+    Ok(crate::ee::org_sso::enforces(state, &user.email) && !user.is_instance_admin)
+}
+
 async fn active(state: &AppState, user_id: Uuid) -> Result<Uuid, LoginError> {
     let user = users::user_by_id(state.meta.reader(), user_id)
         .await
@@ -586,7 +627,7 @@ async fn active(state: &AppState, user_id: Uuid) -> Result<Uuid, LoginError> {
 
 fn start_exchange(error: ExchangeError) -> StartError {
     match error {
-        ExchangeError::Unavailable => StartError::Unavailable,
+        ExchangeError::Unavailable | ExchangeError::Refused => StartError::Unavailable,
         ExchangeError::Rejected => internal_start(io::Error::new(
             io::ErrorKind::InvalidData,
             "oauth authorization url",
@@ -594,14 +635,14 @@ fn start_exchange(error: ExchangeError) -> StartError {
     }
 }
 
-fn login_exchange(error: ExchangeError) -> LoginError {
+pub(crate) fn login_exchange(error: ExchangeError) -> LoginError {
     match error {
-        ExchangeError::Unavailable => LoginError::ProviderUnavailable,
+        ExchangeError::Unavailable | ExchangeError::Refused => LoginError::ProviderUnavailable,
         ExchangeError::Rejected => LoginError::ProviderError,
     }
 }
 
-fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LoginError {
+pub(crate) fn internal(error: impl std::error::Error + Send + Sync + 'static) -> LoginError {
     LoginError::Internal(Box::new(error))
 }
 

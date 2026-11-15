@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8c65b9dc1383df0cdf6ac932ac67336a922d112de681e5b64408161734df1a3e # shrinks to ops = [DeleteTraces { project: P(0), picks: [11] }, Append { project: P(0), trace: 11, count: 1, split: false }, Restart, DeleteTraces { project: P(0), picks: [0] }]

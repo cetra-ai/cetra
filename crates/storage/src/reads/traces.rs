@@ -3,20 +3,24 @@
 //! Without score functions, the default list is `Limit(n+1) ← Sort(start_time DESC NULLS LAST, trace_id DESC) ← Filter ← traces view`.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::compute::concat_batches;
+use arrow::array::BooleanArray;
+use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::record_batch::RecordBatch;
+use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Expr, col, lit};
+use datafusion::functions_window::expr_fn::row_number;
+use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
 use datafusion::prelude::DataFrame;
 use llmobs_core::schema::{spans, traces};
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present};
-use crate::filter::{Filter, FilterView, exclusions, search, time_window};
+use crate::filter::{Filter, FilterView, exclusions, search, strict_exclusions, time_window};
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, TimeWindow};
+use crate::views::{QueryContext, TimeWindow, ViewName};
 
 const LIST: &str = "traces";
 const SPANS: &str = "spans";
@@ -24,12 +28,21 @@ const DURATION_NS: &str = "duration_ns";
 const DURATION_MS: &str = "duration_ms";
 const TRACE_TIES: &[&str] = &[traces::TRACE_ID];
 const SPAN_TIES: &[&str] = &[spans::SPAN_ID, spans::TRACE_ID];
+/// The columns that name one span in a list: copies agree on all three.
+const SPAN_KEY: &[&str] = &[spans::START_TIME, spans::SPAN_ID, spans::TRACE_ID];
+/// Most rows one list attempt reads, 64 × [`super::MAX_PAGE`]. A span stored many times, or a
+/// filter matching many copies, can't make the refetch read more than this.
+const MAX_FETCH: usize = 64 * super::MAX_PAGE;
+const SPAN_RANK: &str = "rn";
 
 /// Most spans `trace_detail` returns for one trace.
 pub const MAX_TRACE_SPANS: usize = 20_000;
 
 /// Max ids of one [`trace_refresh`].
 pub const MAX_REFRESH_IDS: usize = 500;
+
+/// Most spans `span_refresh` returns for one trace (D-I-9).
+pub const MAX_REFRESH_SPANS_PER_TRACE: usize = 200;
 
 /// Traces the live stream re-reads (D-G-13, D-G-31).
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +57,50 @@ pub struct TraceRefreshRequest<'a> {
     pub include_eval: bool,
     /// Keep rows that belong to an experiment.
     pub include_experiments: bool,
+    /// Apply [`strict_exclusions`]: evaluation and experiment rows are left out even when the
+    /// filter names `environment` or the include flags are set (D-I-9).
+    pub strict_exclusions: bool,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// Spans of the given traces that match a span filter, for the online-rule sweeper (D-I-9).
+#[derive(Debug, Clone, Copy)]
+pub struct SpanRefreshRequest<'a> {
+    /// Filter text over `spans`. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// Trace ids, 32 hex digits, either case. At most [`MAX_REFRESH_IDS`].
+    pub trace_ids: &'a [&'a str],
+    /// Most spans kept per trace, 1 to [`MAX_REFRESH_SPANS_PER_TRACE`].
+    pub per_trace: usize,
+    /// Apply [`strict_exclusions`] instead of the default exclusions.
+    pub strict_exclusions: bool,
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// The columns `span_refresh` returns, in this order.
+pub const SPAN_REFRESH_COLUMNS: &[&str] = &[spans::TRACE_ID, spans::SPAN_ID, spans::START_TIME];
+
+/// The columns `trace_refresh` returns with `strict_exclusions: true`, in this order.
+pub const TRACE_REFRESH_STRICT_COLUMNS: &[&str] = &[traces::TRACE_ID, traces::START_TIME];
+
+/// Most rows [`match_count`] counts (D-I-9's preview).
+pub const MAX_MATCH_COUNT: usize = 10_000;
+
+/// Rows of a view that match a filter in a window, for the online-rule preview (D-I-9).
+#[derive(Debug, Clone, Copy)]
+pub struct MatchCountRequest<'a> {
+    /// `ViewName::Traces` or `ViewName::Spans`.
+    pub view: ViewName,
+    /// Filter text over the view. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// `start_time ∈ [from, to)`.
+    pub window: TimeWindow,
+    /// The count stops at `cap + 1`. From 1 to [`MAX_MATCH_COUNT`].
+    pub cap: usize,
+    /// Apply [`strict_exclusions`] instead of the default exclusions.
+    pub strict_exclusions: bool,
     /// Time allowed for planning and running.
     pub timeout: Duration,
 }
@@ -120,6 +177,9 @@ pub struct TraceListRequest<'a> {
     pub search: Option<&'a str>,
     /// Window and default exclusions.
     pub scope: ListScope,
+    /// Apply [`strict_exclusions`]: evaluation and experiment rows are left out even when the
+    /// filter names `environment` or the include flags are set (D-I-9).
+    pub strict_exclusions: bool,
     /// Sort column.
     pub sort: TraceSort,
     /// Sort direction. Nulls are last.
@@ -165,6 +225,9 @@ pub struct SpanListRequest<'a> {
     pub search: Option<&'a str>,
     /// Window and default exclusions.
     pub scope: ListScope,
+    /// Apply [`strict_exclusions`]: evaluation and experiment rows are left out even when the
+    /// filter names `environment` or the include flags are set (D-I-9).
+    pub strict_exclusions: bool,
     /// Sort column.
     pub sort: SpanSort,
     /// Sort direction. Nulls are last.
@@ -199,20 +262,35 @@ pub async fn trace_list(
     ctx: &QueryContext,
     request: TraceListRequest<'_>,
 ) -> Result<Page, RunError> {
-    run_timed(request.limit, request.timeout, async {
-        let frame = trace_frame(ctx, &request).await?;
-        finish(ctx, frame, &ListPlan::traces(&request)).await
-    })
-    .await
+    run_list(ctx, ListPlan::traces(&request), request.timeout, MAX_FETCH).await
 }
 
 /// One page of spans. Exclusions use the span's own environment and metadata.
 ///
+/// A span stored more than once (a re-send not yet compacted) is listed once, as its copy with
+/// the greatest `ingest_time`.
+///
 /// # Errors
 ///
 /// Same as [`trace_list`].
+///
+/// A page reads at most [`MAX_FETCH`] rows to find `limit` distinct spans. When that cap comes
+/// first, the page holds the distinct spans read so far: fewer than `limit` is possible, and the
+/// cursor is still set, so paging goes on from the last span returned.
+///
+/// The filter, the search and the default exclusions apply before de-duplication. If the newest
+/// copy of a span fails them and an older copy passes, the older copy is listed.
 pub async fn span_list(ctx: &QueryContext, request: SpanListRequest<'_>) -> Result<Page, RunError> {
-    run_list(ctx, ListPlan::spans(&request), request.timeout).await
+    span_list_capped(ctx, request, MAX_FETCH).await
+}
+
+/// [`span_list`] with a caller-chosen read cap. Tests pass a small one.
+async fn span_list_capped(
+    ctx: &QueryContext,
+    request: SpanListRequest<'_>,
+    cap: usize,
+) -> Result<Page, RunError> {
+    run_list(ctx, ListPlan::spans(&request), request.timeout, cap).await
 }
 
 /// The trace and its spans. Default exclusions do not apply.
@@ -376,7 +454,8 @@ async fn load_trace_spans(
 }
 
 /// The traces-view rows (every column, no order) of `trace_ids` that pass the default
-/// exclusions, the filter and the search. No time window applies to the traces: the query
+/// exclusions, the filter and the search. With `strict_exclusions`, only the
+/// [`TRACE_REFRESH_STRICT_COLUMNS`] are returned. No time window applies to the traces: the query
 /// scans the project's traces once per call.
 ///
 /// An empty `trace_ids` parses the filter and returns no batches without running a query:
@@ -424,7 +503,9 @@ async fn refresh(
         .is_some_and(|filter| filter.references_environment);
     let mut frame = ctx.session().table(LIST).await.map_err(classify)?;
     let mut conjuncts = Vec::new();
-    if let Some(expr) = exclusions(
+    if request.strict_exclusions {
+        conjuncts.push(strict_exclusions(ctx, FilterView::Traces, Some(ids)).await?);
+    } else if let Some(expr) = exclusions(
         ctx,
         FilterView::Traces,
         request.include_eval,
@@ -447,7 +528,186 @@ async fn refresh(
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
+    if request.strict_exclusions {
+        frame = frame
+            .select(TRACE_REFRESH_STRICT_COLUMNS.iter().copied().map(col))
+            .map_err(classify)?;
+    }
     frame.collect().await.map_err(|error| ctx.fail(error))
+}
+
+/// Spans of `trace_ids` that pass the exclusions and the filter, the first `per_trace` of each
+/// trace by `start_time`, then `span_id` (D-I-9). The rows are the [`SPAN_REFRESH_COLUMNS`],
+/// ordered by trace, then `start_time`, then `span_id`.
+///
+/// An empty `trace_ids` parses the filter and returns no batches without running a query.
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] for filter text; [`RunError::InvalidRequest`] for more than
+/// [`MAX_REFRESH_IDS`] ids, an id that is not 32 hex digits, or a `per_trace` outside
+/// `1..=`[`MAX_REFRESH_SPANS_PER_TRACE`]; [`RunError::Timeout`].
+pub async fn span_refresh(
+    ctx: &QueryContext,
+    request: SpanRefreshRequest<'_>,
+) -> Result<Vec<RecordBatch>, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Spans, text)?),
+        None => None,
+    };
+    if request.trace_ids.len() > MAX_REFRESH_IDS {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_REFRESH_IDS} trace ids"
+        )));
+    }
+    let ids = request
+        .trace_ids
+        .iter()
+        .map(|id| hex_id(id, 32, "trace_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if !(1..=MAX_REFRESH_SPANS_PER_TRACE).contains(&request.per_trace) {
+        return Err(RunError::InvalidRequest(format!(
+            "per_trace must be between 1 and {MAX_REFRESH_SPANS_PER_TRACE}"
+        )));
+    }
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(request.timeout, refresh_spans(ctx, &request, filter, &ids)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn refresh_spans(
+    ctx: &QueryContext,
+    request: &SpanRefreshRequest<'_>,
+    filter: Option<Filter>,
+    ids: &[String],
+) -> Result<Vec<RecordBatch>, RunError> {
+    let references_environment = filter
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let mut frame = ctx.session().table(SPANS).await.map_err(classify)?;
+    let mut conjuncts = Vec::new();
+    if request.strict_exclusions {
+        conjuncts.push(strict_exclusions(ctx, FilterView::Spans, Some(ids)).await?);
+    } else if let Some(expr) =
+        exclusions(ctx, FilterView::Spans, false, false, references_environment)?
+    {
+        conjuncts.push(expr);
+    }
+    let literals = ids.iter().map(|id| lit(id.as_str())).collect();
+    conjuncts.push(col(spans::TRACE_ID).in_list(literals, false));
+    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
+        frame = frame.filter(predicate).map_err(classify)?;
+    }
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    let rank = row_number()
+        .partition_by(vec![col(spans::TRACE_ID)])
+        .order_by(vec![
+            col(spans::START_TIME).sort(true, false),
+            col(spans::SPAN_ID).sort(true, false),
+        ])
+        .build()
+        .map_err(classify)?
+        .alias(SPAN_RANK);
+    frame = frame.window(vec![rank]).map_err(classify)?;
+    let per_trace = u64::try_from(request.per_trace)
+        .map_err(|error| RunError::InvalidRequest(format!("per_trace is out of range: {error}")))?;
+    frame = frame
+        .filter(col(SPAN_RANK).lt_eq(lit(per_trace)))
+        .map_err(classify)?
+        .sort(order_by(
+            spans::TRACE_ID,
+            &[spans::START_TIME, spans::SPAN_ID],
+            SortOrder::Asc,
+        ))
+        .map_err(classify)?
+        .select(SPAN_REFRESH_COLUMNS.iter().copied().map(col))
+        .map_err(classify)?;
+    frame.collect().await.map_err(|error| ctx.fail(error))
+}
+
+/// Counts the rows of the traces or spans view that match a filter in a window, at most
+/// `cap + 1` (D-I-9). A result above `cap` means "more than `cap`".
+///
+/// # Errors
+///
+/// [`RunError::InvalidRequest`] for another view or a `cap` outside `1..=`[`MAX_MATCH_COUNT`];
+/// [`RunError::Invalid`] for filter text; [`RunError::Timeout`]; DataFusion failures through
+/// [`classify`] and `ctx.fail`.
+pub async fn match_count(
+    ctx: &QueryContext,
+    request: MatchCountRequest<'_>,
+) -> Result<usize, RunError> {
+    let (table, view) = match request.view {
+        ViewName::Traces => (LIST, FilterView::Traces),
+        ViewName::Spans => (SPANS, FilterView::Spans),
+        _ => {
+            return Err(RunError::InvalidRequest(
+                "match counts are for traces and spans only".to_owned(),
+            ));
+        }
+    };
+    if !(1..=MAX_MATCH_COUNT).contains(&request.cap) {
+        return Err(RunError::InvalidRequest(format!(
+            "cap must be between 1 and {MAX_MATCH_COUNT}"
+        )));
+    }
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(view, text)?),
+        None => None,
+    };
+    match tokio::time::timeout(
+        request.timeout,
+        count_matches(ctx, &request, table, view, filter),
+    )
+    .await
+    {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn count_matches(
+    ctx: &QueryContext,
+    request: &MatchCountRequest<'_>,
+    table: &str,
+    view: FilterView,
+    filter: Option<Filter>,
+) -> Result<usize, RunError> {
+    let references_environment = filter
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let mut frame = ctx.session().table(table).await.map_err(classify)?;
+    let mut conjuncts = vec![time_window(request.window)];
+    if request.strict_exclusions {
+        conjuncts.push(strict_exclusions(ctx, view, None).await?);
+    } else if let Some(expr) = exclusions(ctx, view, false, false, references_environment)? {
+        conjuncts.push(expr);
+    }
+    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
+        frame = frame.filter(predicate).map_err(classify)?;
+    }
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    frame
+        .limit(0, Some(request.cap.saturating_add(1)))
+        .map_err(classify)?
+        .count()
+        .await
+        .map_err(|error| ctx.fail(error))
+}
+
+/// Copies of one row. Rows that agree on `key` and sort next to each other are copies; the
+/// sort puts the copy with the greatest `newest` first, and that copy is the one kept.
+struct Dedup {
+    key: &'static [&'static str],
+    newest: &'static str,
 }
 
 struct ListPlan<'a> {
@@ -456,9 +716,11 @@ struct ListPlan<'a> {
     list: &'static str,
     sort: &'static str,
     ties: &'static [&'static str],
+    dedup: Option<Dedup>,
     filter: Option<&'a str>,
     search: Option<&'a str>,
     scope: ListScope,
+    strict: bool,
     order: SortOrder,
     limit: usize,
     cursor: Option<&'a str>,
@@ -473,9 +735,11 @@ impl<'a> ListPlan<'a> {
             list: LIST,
             sort: request.sort.column(),
             ties: TRACE_TIES,
+            dedup: None,
             filter: request.filter,
             search: request.search,
             scope: request.scope,
+            strict: request.strict_exclusions,
             order: request.order,
             limit: request.limit,
             cursor: request.cursor,
@@ -490,9 +754,14 @@ impl<'a> ListPlan<'a> {
             list: SPANS,
             sort: request.sort.column(),
             ties: SPAN_TIES,
+            dedup: Some(Dedup {
+                key: SPAN_KEY,
+                newest: spans::INGEST_TIME,
+            }),
             filter: request.filter,
             search: request.search,
             scope: request.scope,
+            strict: request.strict_exclusions,
             order: request.order,
             limit: request.limit,
             cursor: request.cursor,
@@ -505,12 +774,104 @@ async fn run_list(
     ctx: &QueryContext,
     plan: ListPlan<'_>,
     timeout: Duration,
+    cap: usize,
 ) -> Result<Page, RunError> {
     run_timed(plan.limit, timeout, async {
-        let frame = list_frame(ctx, &plan).await?;
-        finish(ctx, frame, &plan).await
+        // A de-duplicating list reads a margin for the copies it drops. When the rows left after
+        // de-duplication don't fill the page and the read stopped at its own limit, read again
+        // with a doubled limit, up to `cap`. Without de-duplication the first read always settles it.
+        let mut fetch = plan.limit + 1;
+        if plan.dedup.is_some() {
+            fetch *= 2;
+        }
+        fetch = fetch.min(cap);
+        loop {
+            let frame = list_frame(ctx, &plan, fetch).await?;
+            let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
+            let read: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            let batches = match &plan.dedup {
+                Some(dedup) => drop_adjacent_copies(&batches, dedup.key)?,
+                None => batches,
+            };
+            let distinct: usize = batches.iter().map(RecordBatch::num_rows).sum();
+            // `limit + 1` distinct rows, or a read that ended before its limit, settle the page.
+            if distinct > plan.limit || read < fetch {
+                return assemble(
+                    batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
+                );
+            }
+            if fetch >= cap {
+                return capped_page(batches, &plan);
+            }
+            fetch = fetch.saturating_mul(2).min(cap);
+        }
     })
     .await
+}
+
+/// The page when the read cap comes first: the distinct rows read, at most `limit`. When fewer
+/// than `limit` rows came back, the page has a cursor anyway, taken from its last row. The
+/// cursor's strict `after` skips the rest of that row's copies, and copies that were read but
+/// dropped share its key.
+fn capped_page(batches: Vec<RecordBatch>, plan: &ListPlan<'_>) -> Result<Page, RunError> {
+    let distinct: usize = batches.iter().map(RecordBatch::num_rows).sum();
+    if distinct > plan.limit {
+        return assemble(
+            batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
+        );
+    }
+    // One more row than the page: `assemble` then cuts the page at `distinct` rows and cursors
+    // from its last row, which is the last distinct row.
+    let mut batches = batches;
+    if let Some(last) = batches.iter().rev().find(|batch| batch.num_rows() > 0) {
+        let tail = last.slice(last.num_rows() - 1, 1);
+        batches.push(tail);
+    }
+    assemble(
+        batches, distinct, plan.list, plan.sort, plan.order, plan.ties,
+    )
+}
+
+/// Drops each row whose `key` columns equal the previous row's. The rows arrive in sort order,
+/// so the copies of one row are adjacent and the first of each run is kept. One pass with no
+/// window or aggregate: the batches keep their order and only lose rows.
+fn drop_adjacent_copies(
+    batches: &[RecordBatch],
+    key: &[&str],
+) -> Result<Vec<RecordBatch>, RunError> {
+    let mut previous: Option<Vec<ScalarValue>> = None;
+    let mut kept = Vec::with_capacity(batches.len());
+    for batch in batches {
+        let columns = key
+            .iter()
+            .map(|name| {
+                batch.column_by_name(name).map(Arc::clone).ok_or_else(|| {
+                    RunError::Internal(DataFusionError::Internal(format!(
+                        "missing key column {name}"
+                    )))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut keep = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let values = columns
+                .iter()
+                .map(|column| ScalarValue::try_from_array(column.as_ref(), row))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RunError::Internal)?;
+            keep.push(previous.as_ref() != Some(&values));
+            previous = Some(values);
+        }
+        let filtered = filter_record_batch(batch, &BooleanArray::from(keep)).map_err(|error| {
+            RunError::Internal(DataFusionError::Internal(format!(
+                "dropping copies: {error}"
+            )))
+        })?;
+        if filtered.num_rows() > 0 {
+            kept.push(filtered);
+        }
+    }
+    Ok(kept)
 }
 
 async fn run_timed<F>(limit: usize, timeout: Duration, future: F) -> Result<Page, RunError>
@@ -528,23 +889,12 @@ where
     }
 }
 
-async fn finish(
-    ctx: &QueryContext,
-    frame: DataFrame,
-    plan: &ListPlan<'_>,
-) -> Result<Page, RunError> {
-    let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    assemble(
-        batches, plan.limit, plan.list, plan.sort, plan.order, plan.ties,
-    )
-}
-
 /// The planned frame, before it is collected. Tests read the plan from this.
 async fn trace_frame(
     ctx: &QueryContext,
     request: &TraceListRequest<'_>,
 ) -> Result<DataFrame, RunError> {
-    list_frame(ctx, &ListPlan::traces(request)).await
+    list_frame(ctx, &ListPlan::traces(request), request.limit + 1).await
 }
 
 /// The physical plan A2 builds for `trace_list`, as a display string.
@@ -566,7 +916,13 @@ pub async fn trace_list_plan(
     ))
 }
 
-async fn list_frame(ctx: &QueryContext, plan: &ListPlan<'_>) -> Result<DataFrame, RunError> {
+/// The list's frame, sorted and cut to `fetch` rows. A de-duplicating plan also sorts by the
+/// newest copy's `ingest_time` last, and the frame keeps only the listed columns.
+async fn list_frame(
+    ctx: &QueryContext,
+    plan: &ListPlan<'_>,
+    fetch: usize,
+) -> Result<DataFrame, RunError> {
     let filter = match present(plan.filter) {
         Some(text) => Some(ctx.parse_filter(plan.view, text)?),
         None => None,
@@ -590,7 +946,9 @@ async fn list_frame(ctx: &QueryContext, plan: &ListPlan<'_>) -> Result<DataFrame
     if let Some(window) = plan.scope.window {
         conjuncts.push(time_window(window));
     }
-    if let Some(expr) = exclusions(
+    if plan.strict {
+        conjuncts.push(strict_exclusions(ctx, plan.view, None).await?);
+    } else if let Some(expr) = exclusions(
         ctx,
         plan.view,
         plan.scope.include_eval,
@@ -613,10 +971,14 @@ async fn list_frame(ctx: &QueryContext, plan: &ListPlan<'_>) -> Result<DataFrame
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
+    let mut sorts = order_by(plan.sort, plan.ties, plan.order);
+    if let Some(dedup) = &plan.dedup {
+        sorts.push(col(dedup.newest).sort(false, false));
+    }
     frame = frame
-        .sort(order_by(plan.sort, plan.ties, plan.order))
+        .sort(sorts)
         .map_err(classify)?
-        .limit(0, Some(plan.limit + 1))
+        .limit(0, Some(fetch))
         .map_err(classify)?;
     if let Some(columns) = plan.columns {
         frame = frame
@@ -753,16 +1115,21 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::physical_plan::displayable;
+    use llmobs_core::enums::{SpanKind, SpanStatus};
     use llmobs_core::ids::{SpanId, TraceId};
+    use llmobs_core::names::{environment, metadata_key};
     use llmobs_core::schema::{SPANS_LIGHT_COLUMNS, spans};
     use llmobs_core::span::Span;
     use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::Value;
 
     use super::{
-        MAX_REFRESH_IDS, SPAN_LIST_COLUMNS, SpanListRequest, SpanSort, TraceListRequest,
-        TraceRefreshRequest, TraceSort, TraceSpansRequest, span_detail, span_list, trace_detail,
-        trace_detail_limited, trace_frame, trace_list, trace_refresh, trace_spans,
+        MAX_FETCH, MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE,
+        MatchCountRequest, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest,
+        SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest,
+        TraceRefreshRequest, TraceSort, TraceSpansRequest, match_count, span_detail, span_list,
+        span_list_capped, span_refresh, trace_detail, trace_detail_limited, trace_frame,
+        trace_list, trace_refresh, trace_spans,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};
@@ -770,7 +1137,7 @@ mod tests {
         dataset_scores, dataset_spans, example_query, live_scores_table, span_row, spans_table,
         traces_table,
     };
-    use crate::views::{ProjectQuery, QueryContext, TimeWindow};
+    use crate::views::{ProjectQuery, QueryContext, TimeWindow, ViewName};
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -795,6 +1162,7 @@ mod tests {
         TraceListRequest {
             filter: None,
             search: None,
+            strict_exclusions: false,
             scope,
             sort,
             order,
@@ -943,6 +1311,7 @@ mod tests {
             trace_ids,
             include_eval,
             include_experiments: false,
+            strict_exclusions: false,
             timeout: TIMEOUT,
         }
     }
@@ -1350,6 +1719,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )
@@ -1374,6 +1744,7 @@ mod tests {
         SpanListRequest {
             filter: None,
             search: None,
+            strict_exclusions: false,
             scope,
             sort,
             order,
@@ -1500,6 +1871,164 @@ mod tests {
                 .any(|row| row["total_tokens"].is_null()),
             "total_tokens has a null"
         );
+    }
+
+    /// `copies` copies of one span starting at `start`. Copy `i` (from 1) has `ingest_time = i`
+    /// and `name = "copy i"`, so the newest copy is the last one.
+    fn copies_of(trace: u16, span: u8, start: i64, copies: i64) -> Vec<Span> {
+        (1..=copies)
+            .map(|ingest| {
+                let mut copy = span_row(trace, span, start, ingest);
+                copy.name = format!("copy {ingest}");
+                copy
+            })
+            .collect()
+    }
+
+    /// (trace_id, span_id, name) of a span row of the test project.
+    fn expected_row(trace: u16, span: u8, name: &str) -> (String, String, String) {
+        let row = span_row(trace, span, 0, 0);
+        (row.trace_id.to_hex(), row.span_id.to_hex(), name.to_owned())
+    }
+
+    fn listed_triples(rows: &[Value]) -> Vec<(String, String, String)> {
+        rows.iter()
+            .map(|row| {
+                (
+                    row["trace_id"].as_str().expect("trace_id").to_owned(),
+                    row["span_id"].as_str().expect("span_id").to_owned(),
+                    row["name"].as_str().expect("name").to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Every row of the span list read in pages of `limit`, with a read cap of `cap`, in order.
+    async fn walk_spans(ctx: &QueryContext, limit: usize, cap: usize) -> Vec<Value> {
+        let mut walked = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut request = span_request(
+                scope(None, true),
+                SpanSort::StartTime,
+                SortOrder::Desc,
+                limit,
+            );
+            request.cursor = cursor.as_deref();
+            let page = span_list_capped(ctx, request, cap).await.expect("page");
+            assert!(row_count(&page.batches) <= limit);
+            walked.extend(rows(&page));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return walked,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_shows_a_resent_span_once() {
+        let ctx = context_for(&copies_of(0, 0, 1_000, 2));
+        let page = span_list(
+            &ctx,
+            span_request(scope(None, true), SpanSort::StartTime, SortOrder::Desc, 50),
+        )
+        .await
+        .expect("list");
+        assert_eq!(
+            listed_triples(&rows(&page)),
+            vec![expected_row(0, 0, "copy 2")]
+        );
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn span_list_pages_are_independent_of_page_size() {
+        // Traces 0 and 1 start together, so ties cut across pages. Trace 0 and 2 re-send
+        // span 1; trace 3 span 0 is sent five times, so one page needs more rows than it asks.
+        let mut spans = Vec::new();
+        let mut expected = Vec::new();
+        for trace in 0..4u16 {
+            let start = 1_000 * (1 + i64::from(trace / 2));
+            for span in 0..3u8 {
+                let copies = match (trace, span) {
+                    (3, 0) => 5,
+                    (0 | 2, 1) => 2,
+                    _ => 1,
+                };
+                spans.extend(copies_of(trace, span, start, copies));
+                expected.push(expected_row(trace, span, &format!("copy {copies}")));
+            }
+        }
+        let ctx = context_for(&spans);
+        let single = listed_triples(&walk_spans(&ctx, 1000, MAX_FETCH).await);
+        let mut sorted = single.clone();
+        sorted.sort();
+        expected.sort();
+        assert_eq!(sorted, expected, "one row per span, the newest copy");
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                single,
+                "pages of {limit}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_boundary_between_copies() {
+        // Start order: B, then the two copies of X, then A. A page of two rows ends between the
+        // copies of X unless the list shows X once.
+        let mut spans = copies_of(2, 0, 3_000, 1);
+        spans.extend(copies_of(1, 0, 2_000, 2));
+        spans.extend(copies_of(0, 0, 1_000, 1));
+        let ctx = context_for(&spans);
+        let expected = vec![
+            expected_row(2, 0, "copy 1"),
+            expected_row(1, 0, "copy 2"),
+            expected_row(0, 0, "copy 1"),
+        ];
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                expected,
+                "pages of {limit}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn span_list_bounds_the_refetch_and_keeps_paging() {
+        // Newest first: Z (one copy), X (five copies), Y (one copy). With a read cap of 4, a page
+        // reads Z and the first three copies of X, so it stops with two distinct spans.
+        let mut spans = copies_of(2, 0, 3_000, 1);
+        spans.extend(copies_of(1, 0, 2_000, 5));
+        spans.extend(copies_of(0, 0, 1_000, 1));
+        let ctx = context_for(&spans);
+        let expected = vec![
+            expected_row(2, 0, "copy 1"),
+            expected_row(1, 0, "copy 5"),
+            expected_row(0, 0, "copy 1"),
+        ];
+        for limit in [1, 2, 3, 1000] {
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, MAX_FETCH).await),
+                expected,
+                "pages of {limit}, no cap"
+            );
+            assert_eq!(
+                listed_triples(&walk_spans(&ctx, limit, 4).await),
+                expected,
+                "pages of {limit}, a read cap of 4"
+            );
+        }
+        let request = span_request(scope(None, true), SpanSort::StartTime, SortOrder::Desc, 3);
+        let page = span_list_capped(&ctx, request, 4).await.expect("page");
+        assert_eq!(
+            listed_triples(&rows(&page)),
+            vec![expected[0].clone(), expected[1].clone()],
+            "the short page at the cap"
+        );
+        assert!(page.next_cursor.is_some(), "the capped page still pages on");
     }
 
     #[tokio::test]
@@ -1796,5 +2325,550 @@ mod tests {
             max_required: 10,
             timeout: TIMEOUT,
         }
+    }
+
+    /// Two spans of one trace: a `root` and a `child` whose parent is the root. An experiment
+    /// trace has the experiment key on both spans, so span-level exclusions see it too.
+    fn trace_pair(trace: u16, environment: &str, experiment: bool) -> Vec<Span> {
+        let mut root = span_row(trace, 0, 100 + i64::from(trace) * 1_000, 100);
+        let mut child = span_row(trace, 1, 200 + i64::from(trace) * 1_000, 200);
+        child.name = "child".to_owned();
+        for span in [&mut root, &mut child] {
+            span.environment = Some(environment.to_owned());
+            if experiment {
+                span.metadata
+                    .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
+            }
+        }
+        child.parent_span_id = Some(root.span_id);
+        vec![root, child]
+    }
+
+    /// Trace 0 is plain, trace 1 is an evaluation trace, trace 2 is an experiment trace whose
+    /// root is in `production`.
+    fn strict_spans() -> Vec<Span> {
+        let mut spans = trace_pair(0, "production", false);
+        spans.extend(trace_pair(1, environment::EVAL, false));
+        spans.extend(trace_pair(2, "production", true));
+        spans
+    }
+
+    /// The trace ids of [`strict_spans`]: plain, evaluation and experiment.
+    fn strict_trace_ids(spans: &[Span]) -> [String; 3] {
+        [
+            spans[0].trace_id.to_string(),
+            spans[2].trace_id.to_string(),
+            spans[4].trace_id.to_string(),
+        ]
+    }
+
+    /// Like `trace_pair(trace, environment, true)`, but only the root carries the experiment
+    /// key. The child has none, so a span-level default exclusion keeps it and only a
+    /// trace-level test (strict) drops it.
+    fn root_tagged_pair(trace: u16, environment: &str) -> Vec<Span> {
+        let mut spans = trace_pair(trace, environment, false);
+        spans[0]
+            .metadata
+            .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
+        spans
+    }
+
+    /// Like [`strict_spans`], but trace 2 is tagged on its root span only.
+    fn root_tagged_spans() -> Vec<Span> {
+        let mut spans = trace_pair(0, "production", false);
+        spans.extend(trace_pair(1, environment::EVAL, false));
+        spans.extend(root_tagged_pair(2, "production"));
+        spans
+    }
+
+    #[tokio::test]
+    async fn refresh_strict_drops_eval_and_experiment_traces() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
+        let filter = "environment = 'llmobs-eval'";
+
+        let open = TraceRefreshRequest {
+            include_experiments: true,
+            ..refresh_request(&ids, None, None, true)
+        };
+        let batches = trace_refresh(&ctx, open).await.expect("open");
+        assert_eq!(refreshed_ids(&batches), [ids[0], ids[1], ids[2]]);
+
+        let strict = TraceRefreshRequest {
+            strict_exclusions: true,
+            ..open
+        };
+        let batches = trace_refresh(&ctx, strict).await.expect("strict");
+        assert_eq!(refreshed_ids(&batches), [ids[0]]);
+
+        let strict_named = TraceRefreshRequest {
+            strict_exclusions: true,
+            ..refresh_request(&ids, Some(filter), None, true)
+        };
+        let batches = trace_refresh(&ctx, strict_named)
+            .await
+            .expect("strict filter");
+        assert!(refreshed_ids(&batches).is_empty());
+
+        let named = refresh_request(&ids, Some(filter), None, true);
+        let batches = trace_refresh(&ctx, named).await.expect("named");
+        assert_eq!(refreshed_ids(&batches), [ids[1]]);
+    }
+
+    #[tokio::test]
+    async fn trace_list_strict_ignores_the_include_flags() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let scope = ListScope {
+            window: None,
+            include_eval: true,
+            include_experiments: true,
+        };
+        let open = listed(scope, TraceSort::StartTime, SortOrder::Asc, 50);
+        let page = trace_list(&ctx, open).await.expect("open");
+        assert_eq!(ids(&page), owned.to_vec());
+
+        let strict = TraceListRequest {
+            strict_exclusions: true,
+            ..listed(scope, TraceSort::StartTime, SortOrder::Asc, 50)
+        };
+        let page = trace_list(&ctx, strict).await.expect("strict");
+        assert_eq!(ids(&page), [owned[0].clone()]);
+    }
+
+    #[tokio::test]
+    async fn span_list_strict_tests_the_trace() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let scope = ListScope {
+            window: None,
+            include_eval: true,
+            include_experiments: true,
+        };
+        let open = span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50);
+        let page = span_list(&ctx, open).await.expect("open");
+        assert_eq!(ids(&page).len(), 6);
+
+        let strict = SpanListRequest {
+            strict_exclusions: true,
+            ..span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50)
+        };
+        let page = span_list(&ctx, strict).await.expect("strict");
+        assert_eq!(ids(&page), [owned[0].clone(), owned[0].clone()]);
+    }
+
+    /// A `span_refresh` request over `trace_ids`.
+    fn span_refresh_request<'a>(
+        filter: Option<&'a str>,
+        trace_ids: &'a [&'a str],
+        per_trace: usize,
+        strict_exclusions: bool,
+    ) -> SpanRefreshRequest<'a> {
+        SpanRefreshRequest {
+            filter,
+            trace_ids,
+            per_trace,
+            strict_exclusions,
+            timeout: TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn span_refresh_caps_each_trace_and_orders_by_start() {
+        // Trace 0 has five spans, started out of order; trace 1 has two.
+        let spans = vec![
+            span_row(0, 0, 500, 100),
+            span_row(0, 1, 100, 100),
+            span_row(0, 2, 300, 100),
+            span_row(0, 3, 200, 100),
+            span_row(0, 4, 400, 100),
+            span_row(1, 0, 50, 100),
+            span_row(1, 1, 60, 100),
+        ];
+        let ctx = context_for(&spans);
+        let a = spans[0].trace_id.to_string();
+        let b = spans[5].trace_id.to_string();
+        let ids = [a.as_str(), b.as_str()];
+        let batches = span_refresh(&ctx, span_refresh_request(None, &ids, 3, false))
+            .await
+            .expect("refresh");
+
+        let schema = batches.first().expect("a batch").schema();
+        let columns: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(columns, SPAN_REFRESH_COLUMNS);
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [
+                (a.clone(), "0202020202020202".to_owned()),
+                (a.clone(), "0404040404040404".to_owned()),
+                (a.clone(), "0303030303030303".to_owned()),
+                (b.clone(), "0101010101010101".to_owned()),
+                (b.clone(), "0202020202020202".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn span_refresh_applies_the_filter_and_strict_exclusions() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
+        let named = "name = 'child'";
+        let eval = "environment = 'llmobs-eval'";
+
+        let batches = span_refresh(&ctx, span_refresh_request(Some(named), &ids, 10, false))
+            .await
+            .expect("named");
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [(owned[0].clone(), "0202020202020202".to_owned())]
+        );
+
+        let batches = span_refresh(&ctx, span_refresh_request(Some(eval), &ids, 10, false))
+            .await
+            .expect("eval by default");
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [
+                (owned[1].clone(), "0101010101010101".to_owned()),
+                (owned[1].clone(), "0202020202020202".to_owned()),
+            ]
+        );
+
+        let batches = span_refresh(&ctx, span_refresh_request(Some(eval), &ids, 10, true))
+            .await
+            .expect("eval strict");
+        assert!(json_rows(&batches).is_empty());
+
+        let batches = span_refresh(&ctx, span_refresh_request(Some(named), &ids, 10, true))
+            .await
+            .expect("named strict");
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [(owned[0].clone(), "0202020202020202".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn span_list_keeps_a_child_of_a_root_tagged_experiment_unless_strict() {
+        let spans = root_tagged_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let scope = ListScope {
+            window: None,
+            include_eval: true,
+            include_experiments: false,
+        };
+        let default = span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50);
+        let page = span_list(&ctx, default).await.expect("default");
+        let mut kept = pairs(&rows(&page), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+            (owned[1].clone(), "0101010101010101".to_owned()),
+            (owned[1].clone(), "0202020202020202".to_owned()),
+            (owned[2].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+
+        let strict = SpanListRequest {
+            strict_exclusions: true,
+            ..span_request(scope, SpanSort::StartTime, SortOrder::Asc, 50)
+        };
+        let page = span_list(&ctx, strict).await.expect("strict");
+        let mut kept = pairs(&rows(&page), "trace_id", "span_id");
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                (owned[0].clone(), "0101010101010101".to_owned()),
+                (owned[0].clone(), "0202020202020202".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn span_refresh_keeps_a_child_of_a_root_tagged_experiment_unless_strict() {
+        let spans = root_tagged_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
+
+        let batches = span_refresh(&ctx, span_refresh_request(None, &ids, 10, false))
+            .await
+            .expect("default");
+        let mut kept = pairs(&json_rows(&batches), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+            (owned[2].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+
+        let batches = span_refresh(&ctx, span_refresh_request(None, &ids, 10, true))
+            .await
+            .expect("strict");
+        let mut kept = pairs(&json_rows(&batches), "trace_id", "span_id");
+        kept.sort();
+        let mut expected = vec![
+            (owned[0].clone(), "0101010101010101".to_owned()),
+            (owned[0].clone(), "0202020202020202".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(kept, expected);
+    }
+
+    #[tokio::test]
+    async fn span_refresh_validates_its_request() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        let owned = strict_trace_ids(&spans);
+        let one = [owned[0].as_str()];
+        let many = vec![owned[0].as_str(); MAX_REFRESH_IDS + 1];
+        let short = [&ID_ANSWER[1..]];
+
+        for request in [
+            span_refresh_request(None, &many, 3, false),
+            span_refresh_request(None, &short, 3, false),
+            span_refresh_request(None, &one, 0, false),
+            span_refresh_request(None, &one, MAX_REFRESH_SPANS_PER_TRACE + 1, false),
+        ] {
+            let result = span_refresh(&ctx, request).await;
+            assert!(
+                matches!(result, Err(RunError::InvalidRequest(_))),
+                "{result:?}"
+            );
+        }
+        assert!(matches!(
+            span_refresh(
+                &ctx,
+                span_refresh_request(Some("nonsense_column = 1"), &one, 3, false)
+            )
+            .await,
+            Err(RunError::Invalid(_))
+        ));
+        let none: [&str; 0] = [];
+        let batches = span_refresh(&ctx, span_refresh_request(None, &none, 3, false))
+            .await
+            .expect("no ids");
+        assert!(batches.is_empty());
+    }
+
+    /// A `match_count` request over `view` and `window`.
+    fn count_request<'a>(
+        view: ViewName,
+        filter: Option<&'a str>,
+        window: TimeWindow,
+        cap: usize,
+        strict_exclusions: bool,
+    ) -> MatchCountRequest<'a> {
+        MatchCountRequest {
+            view,
+            filter,
+            window,
+            cap,
+            strict_exclusions,
+            timeout: TIMEOUT,
+        }
+    }
+
+    /// One trace of one span per start time, the trace index being the position.
+    fn one_span_traces(starts: &[i64]) -> Vec<Span> {
+        starts
+            .iter()
+            .enumerate()
+            .map(|(index, start)| {
+                span_row(u16::try_from(index).expect("few traces"), 0, *start, 100)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn match_count_counts_in_the_window() {
+        let spans = one_span_traces(&[
+            nanos("2026-01-01T09:00:00Z"),
+            nanos("2026-01-01T10:00:00Z"),
+            nanos("2026-01-01T10:30:00Z"),
+            nanos("2026-01-01T11:00:00Z"),
+        ]);
+        let ctx = context_for(&spans);
+        let window = TimeWindow::new(nanos("2026-01-01T10:00:00Z"), nanos("2026-01-01T11:00:00Z"))
+            .expect("window");
+        let count = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, window, 100, false),
+        )
+        .await
+        .expect("count");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn match_count_applies_the_filter() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let mut failed = span_row(2, 0, base, 100);
+        failed.status = SpanStatus::Error;
+        let spans = vec![
+            span_row(0, 0, base, 100),
+            span_row(1, 0, base + 1, 100),
+            failed,
+        ];
+        let ctx = context_for(&spans);
+        let count = match_count(
+            &ctx,
+            count_request(
+                ViewName::Traces,
+                Some("status = 'error'"),
+                day(),
+                100,
+                false,
+            ),
+        )
+        .await
+        .expect("filtered");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn match_count_strict_drops_eval_and_experiment_traces() {
+        let spans = strict_spans();
+        let ctx = context_for(&spans);
+        // The strict test traces start within the first microsecond after the epoch.
+        let window = TimeWindow::new(0, 1_000_000).expect("window");
+        let filter = Some("environment = 'llmobs-eval'");
+        let named = match_count(
+            &ctx,
+            count_request(ViewName::Traces, filter, window, 100, false),
+        )
+        .await
+        .expect("named");
+        assert_eq!(named, 1);
+        let strict = match_count(
+            &ctx,
+            count_request(ViewName::Traces, filter, window, 100, true),
+        )
+        .await
+        .expect("strict");
+        assert_eq!(strict, 0);
+    }
+
+    #[tokio::test]
+    async fn match_count_counts_spans() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let mut first = span_row(0, 0, base, 100);
+        first.span_kind = SpanKind::Llm;
+        let mut second = span_row(0, 1, base + 1, 100);
+        second.span_kind = SpanKind::Llm;
+        let other = span_row(0, 2, base + 2, 100);
+        let spans = vec![first, second, other];
+        let ctx = context_for(&spans);
+        let count = match_count(
+            &ctx,
+            count_request(
+                ViewName::Spans,
+                Some("span_kind = 'llm'"),
+                day(),
+                100,
+                false,
+            ),
+        )
+        .await
+        .expect("spans");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn match_count_stops_at_cap_plus_one() {
+        let base = nanos("2026-01-01T10:00:00Z");
+        let spans: Vec<Span> = (0..5_u16)
+            .map(|trace| span_row(trace, 0, base + i64::from(trace), 100))
+            .collect();
+        let ctx = context_for(&spans);
+        let capped = match_count(&ctx, count_request(ViewName::Traces, None, day(), 2, false))
+            .await
+            .expect("capped");
+        assert_eq!(capped, 3);
+        let whole = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, day(), 10, false),
+        )
+        .await
+        .expect("whole");
+        assert_eq!(whole, 5);
+    }
+
+    #[tokio::test]
+    async fn match_count_validates_its_request() {
+        let ctx = context();
+        let window = day();
+        let sessions = match_count(
+            &ctx,
+            count_request(ViewName::Sessions, None, window, 10, false),
+        )
+        .await;
+        assert!(
+            matches!(sessions, Err(RunError::InvalidRequest(_))),
+            "{sessions:?}"
+        );
+        for cap in [0, MAX_MATCH_COUNT + 1] {
+            let result = match_count(
+                &ctx,
+                count_request(ViewName::Traces, None, window, cap, false),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(RunError::InvalidRequest(_))),
+                "{result:?}"
+            );
+        }
+        let bad = match_count(
+            &ctx,
+            count_request(ViewName::Traces, Some("error_count >"), window, 10, false),
+        )
+        .await;
+        assert!(matches!(bad, Err(RunError::Invalid(_))), "{bad:?}");
+        let largest = match_count(
+            &ctx,
+            count_request(ViewName::Traces, None, window, MAX_MATCH_COUNT, false),
+        )
+        .await;
+        assert!(largest.is_ok(), "{largest:?}");
+    }
+
+    #[tokio::test]
+    async fn strict_refresh_returns_the_two_trigger_columns() {
+        let ctx = context();
+        let ids = [ID_ANSWER];
+        let strict = TraceRefreshRequest {
+            strict_exclusions: true,
+            ..refresh_request(&ids, None, None, false)
+        };
+        let batches = trace_refresh(&ctx, strict).await.expect("strict");
+        let schema = batches.first().expect("a batch").schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, TRACE_REFRESH_STRICT_COLUMNS);
+        assert_eq!(refreshed_ids(&batches), [ID_ANSWER]);
+
+        let full = trace_refresh(&ctx, refresh_request(&ids, None, None, false))
+            .await
+            .expect("full");
+        assert!(full.first().expect("a batch").num_columns() > TRACE_REFRESH_STRICT_COLUMNS.len());
     }
 }

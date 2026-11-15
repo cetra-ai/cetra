@@ -90,7 +90,7 @@ sqlx = { version = "0.9.0", default-features = false, features = [
 ] }
 
 # --- runtime basics ---
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "fs", "io-util", "net"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # RFC 9535 JSONPath on mapping expressions (D162).
@@ -207,6 +207,8 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 openidconnect = { version = "4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 # GitHub's OAuth 2 flow. Same HTTP backend as `openidconnect`.
 oauth2 = { version = "5.0.0", default-features = false, features = ["reqwest", "rustls-tls"] }
+# DNS TXT lookups for org domain verification (track P M5, D-P-64). System resolver config.
+hickory-resolver = "0.26.3"
 # HMAC-SHA256 for webhook signatures (D165) and the OAuth state cookie (P24). RustCrypto 0.13, matching `sha2` 0.11.
 hmac = "0.13.0"
 # AES-256-GCM for sealed columns (D-I-2). Nonces come from the server's own random source, so the `getrandom` feature is not needed.

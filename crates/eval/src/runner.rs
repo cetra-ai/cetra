@@ -44,7 +44,7 @@ pub struct RunInput<'a> {
     pub target: EvalTarget,
     /// Rule, experiment, or the test panel.
     pub origin: EvalOrigin,
-    /// Id of the judge trace. A retry reuses the job's id.
+    /// Id of the judge trace. The server derives one per attempt (D-I-16).
     pub judge_trace_id: TraceId,
     /// Project, clock, and limits for normalization. The project is `project_id`.
     pub ingest: &'a IngestContext,

@@ -16,12 +16,25 @@ use reqwest::{StatusCode, Url};
 use crate::error::EgressError;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request timeout of an identity provider's request (D-P-53).
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether resolved and literal addresses in a private range may be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EgressPolicy {
     /// Keep addresses that [`is_denied`] would drop.
     pub allow_private_network: bool,
+}
+
+impl EgressPolicy {
+    /// Whether a request to `url` may be attempted: `http` or `https`, and a literal IP host
+    /// that is not denied (D166) unless private networks are allowed. A host name is allowed
+    /// here; the resolver checks its addresses.
+    #[must_use]
+    pub fn allows_url(&self, url: &Url) -> bool {
+        matches!(url.scheme(), "http" | "https")
+            && (self.allow_private_network || !literal_ip(url).is_some_and(is_denied))
+    }
 }
 
 /// One shared client with the SSRF guard (D166). Redirects are not followed; proxies are ignored.
@@ -55,6 +68,35 @@ pub struct EgressResponse {
     pub body: Bytes,
 }
 
+/// A client for an identity provider an org registered (D-P-53): the same guarded
+/// resolver as [`EgressClient`], no redirects, no proxy, rustls, a 10 s whole-request timeout.
+///
+/// This client does **not** guard IP-literal hosts: reqwest does not call the resolver for
+/// them. Every caller checks [`EgressPolicy::allows_url`] before sending, as
+/// [`EgressClient::post`] does.
+///
+/// # Errors
+///
+/// Returns [`EgressError::Request`] when the TLS backend cannot be initialized.
+pub fn identity_http_client(policy: EgressPolicy) -> Result<reqwest::Client, EgressError> {
+    client_builder(policy)
+        .timeout(IDENTITY_TIMEOUT)
+        .build()
+        .map_err(|_| EgressError::Request)
+}
+
+fn client_builder(policy: EgressPolicy) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(user_agent())
+        .use_rustls_tls()
+        .dns_resolver(Arc::new(GuardedResolver {
+            allow_private_network: policy.allow_private_network,
+        }))
+}
+
 impl EgressClient {
     /// Builds a rustls client that resolves through [`GuardedResolver`].
     ///
@@ -62,15 +104,7 @@ impl EgressClient {
     ///
     /// Returns [`EgressError::Request`] when the TLS backend cannot be initialized.
     pub fn new(policy: EgressPolicy) -> Result<Self, EgressError> {
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .user_agent(user_agent())
-            .use_rustls_tls()
-            .dns_resolver(Arc::new(GuardedResolver {
-                allow_private_network: policy.allow_private_network,
-            }))
+        let http = client_builder(policy)
             .build()
             .map_err(|_| EgressError::Request)?;
         Ok(Self { http, policy })
@@ -91,7 +125,7 @@ impl EgressClient {
             return Err(EgressError::Scheme);
         }
         let host = host_label(req.url);
-        if !self.policy.allow_private_network && literal_ip(req.url).is_some_and(is_denied) {
+        if !self.policy.allows_url(req.url) {
             return Err(EgressError::Denied { host });
         }
 
@@ -296,7 +330,7 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use reqwest::Url;
 
-    use super::{EgressClient, EgressPolicy, EgressRequest, is_denied};
+    use super::{EgressClient, EgressPolicy, EgressRequest, identity_http_client, is_denied};
     use crate::error::{EgressError, assert_no_payload};
 
     const PLANTED: &str = "SECRET-PAYLOAD";
@@ -394,6 +428,53 @@ mod tests {
         for text in allowed {
             assert!(!is_denied(addr(text)), "{text} is denied");
         }
+    }
+
+    #[test]
+    fn allows_url_checks_scheme_and_literal_addresses() {
+        let strict = EgressPolicy {
+            allow_private_network: false,
+        };
+        let open = EgressPolicy {
+            allow_private_network: true,
+        };
+        let url = |text: &str| Url::parse(text).unwrap();
+
+        assert!(strict.allows_url(&url("https://idp.example/.well-known")));
+        assert!(strict.allows_url(&url("http://idp.example/")));
+        assert!(!strict.allows_url(&url("http://10.0.0.1/")));
+        assert!(open.allows_url(&url("http://10.0.0.1/")));
+        assert!(!strict.allows_url(&url("https://[::1]/")));
+        assert!(!strict.allows_url(&url("http://169.254.169.254/latest")));
+        assert!(!strict.allows_url(&url("ftp://x")));
+        assert!(!open.allows_url(&url("ftp://x")));
+    }
+
+    #[tokio::test]
+    async fn identity_client_guards_host_names_and_follows_no_redirects() {
+        let mock = Mock::start().await;
+        let name = mock.url(true);
+
+        let strict = identity_http_client(EgressPolicy {
+            allow_private_network: false,
+        })
+        .expect("client");
+        strict
+            .get(name.clone())
+            .send()
+            .await
+            .expect_err("localhost is refused by the resolver");
+        assert_eq!(mock.hits(), 0);
+
+        let open = identity_http_client(EgressPolicy {
+            allow_private_network: true,
+        })
+        .expect("client");
+        let response = open.get(mock.path("/redirect")).send().await.expect("send");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let response = open.get(name).send().await.expect("localhost allowed");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mock.hits(), 2);
     }
 
     #[tokio::test]

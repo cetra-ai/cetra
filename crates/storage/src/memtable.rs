@@ -163,6 +163,12 @@ impl Memtable {
         self.active.max_seq
     }
 
+    /// Highest WAL seq held, active or frozen. `0` when the memtable holds nothing.
+    pub(crate) fn max_seq(&self) -> u64 {
+        let frozen = self.frozen.as_ref().map_or(0, |frozen| frozen.max_seq);
+        self.active.max_seq.max(frozen)
+    }
+
     /// When the first batch of the active memtable was inserted.
     ///
     /// The age flush trigger (M2.6) waits until this plus `flush.max_age`.

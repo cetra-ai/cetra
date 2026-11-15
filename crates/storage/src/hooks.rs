@@ -17,7 +17,12 @@ pub(crate) enum HookPoint {
     /// `SegmentWriter::sync`, before `sync_data`.
     WalSync,
     /// After the group is durable, before it is inserted into the memtable.
+    ///
+    /// `fail` takes the memtable-insert failure path: the durable group is
+    /// discarded and the writer stops.
     AfterWalSync,
+    /// After the open segment is synced, before the next one is created.
+    WalRotate,
     /// After the memtable insert, before the read state is published.
     BeforePublish,
     /// After the read state is published, before the group is acknowledged.
@@ -26,6 +31,13 @@ pub(crate) enum HookPoint {
     ///
     /// `fail` rolls the transaction back. The in-memory catalog stays as it was.
     CatalogCommit,
+    /// Replaces the SQLite commit of `commit_inner`, after `CatalogCommit`.
+    ///
+    /// `fail` rolls the transaction back and returns `SQLITE_IOERR_FSYNC` as the
+    /// commit's error, as a failed fsync would (D-R-6). At a statement outside
+    /// a transaction, the statement's success becomes that error.
+    #[cfg(test)]
+    CatalogFsync,
     /// Before the bytes of a local object are written to the temp file.
     ObjectWrite,
     /// Before `sync_all` on a local object temp file.
@@ -49,6 +61,17 @@ pub(crate) enum HookPoint {
     FlushAfterCommit,
     /// After WAL segments covered by `flushed_seq` are deleted and the directory is fsynced.
     FlushAfterTruncate,
+    /// After a new WAL segment file is created, before the directory fsync.
+    ///
+    /// A fault here leaves the empty file behind, as a create that fails after
+    /// `create_new` does.
+    WalSegmentDirSync,
+    /// Before a failed rotation removes the empty file it left at the new name.
+    WalSegmentCleanup,
+    /// After the flush asked the writer to rotate, before truncation deletes the old segment.
+    ///
+    /// A crash here leaves the drained segment and the new one on disk.
+    FlushAfterRotate,
     /// Before GC deletes a staged object that is not in the catalog.
     GcBeforeDelete,
     /// Before GC deletes an obsolete file's object.
@@ -78,13 +101,16 @@ pub(crate) enum HookPoint {
 
 #[cfg(test)]
 impl HookPoint {
-    const COUNT: usize = 24;
+    const COUNT: usize = 29;
 
     const fn index(self) -> usize {
         match self {
             Self::WalWrite => 0,
             Self::WalSync => 1,
             Self::AfterWalSync => 2,
+            Self::WalRotate => 24,
+            Self::WalSegmentDirSync => 26,
+            Self::WalSegmentCleanup => 27,
             Self::BeforePublish => 3,
             Self::AfterPublish => 4,
             Self::CatalogCommit => 5,
@@ -97,6 +123,7 @@ impl HookPoint {
             Self::FlushAfterWrite => 12,
             Self::FlushAfterCommit => 13,
             Self::FlushAfterTruncate => 14,
+            Self::FlushAfterRotate => 25,
             Self::GcBeforeDelete => 15,
             Self::GcObsoleteBeforeDelete => 16,
             Self::GcObsoleteAfterDelete => 17,
@@ -106,6 +133,7 @@ impl HookPoint {
             Self::MediaAfterPut => 21,
             Self::MediaBeforeDelete => 22,
             Self::QuarantineBeforeCommit => 23,
+            Self::CatalogFsync => 28,
         }
     }
 }
@@ -199,6 +227,23 @@ mod fault {
             let aborting = lock(&self.inner.abort_at).contains(&point);
             if aborting {
                 // The crash child is a separate process. Aborting it is the point.
+                // A lossy root of the child first loses what a power loss may drop
+                // (track R, D-R-4); the guards stay held until the abort.
+                #[cfg(test)]
+                let _lossy_guards = {
+                    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        crate::fs::lossy::crash_before_abort,
+                    ));
+                    crashed.unwrap_or_else(|_| {
+                        eprintln!("lossy crash before abort panicked; aborting without it");
+                        Vec::new()
+                    })
+                };
+                // The hook-crash child of the model test checks for this line in its stderr,
+                // so the abort is known to come from this point (R2.11).
+                if std::env::var_os("LLMOBS_ABORT_MARKER").is_some() {
+                    eprintln!("aborting at {point:?}");
+                }
                 #[allow(clippy::exit)]
                 std::process::abort();
             }

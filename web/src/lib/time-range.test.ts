@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseTypedRange, rangeFromSearch, rangeLabel, resolveRange } from "./time-range";
+import {
+  beyondWindow,
+  parseTypedRange,
+  rangeFromSearch,
+  rangeLabel,
+  resolveRange,
+} from "./time-range";
 
 const FROM = "2026-01-01T10:00:00.000Z";
 const TO = "2026-01-01T12:00:00.000Z";
@@ -80,5 +86,27 @@ describe("rangeLabel", () => {
     expect(rangeLabel({ kind: "absolute", from: FROM, to: TO }, "utc")).toBe(
       "Jan 1 10:00 → Jan 1 12:00",
     );
+  });
+});
+
+describe("beyondWindow", () => {
+  const NOW = Date.parse("2026-06-10T00:00:00.000Z");
+  const DAY = 86_400_000;
+
+  it("never locks without a window", () => {
+    expect(beyondWindow({ kind: "preset", preset: "30d" }, undefined, NOW)).toBe(false);
+  });
+
+  it("compares a preset with the window", () => {
+    expect(beyondWindow({ kind: "preset", preset: "30d" }, 30, NOW)).toBe(false);
+    expect(beyondWindow({ kind: "preset", preset: "30d" }, 7, NOW)).toBe(true);
+    expect(beyondWindow({ kind: "preset", preset: "24h" }, 1, NOW)).toBe(false);
+  });
+
+  it("compares an absolute start with the window", () => {
+    const from = (days: number) => new Date(NOW - days * DAY).toISOString();
+    const to = new Date(NOW).toISOString();
+    expect(beyondWindow({ kind: "absolute", from: from(8), to }, 7, NOW)).toBe(true);
+    expect(beyondWindow({ kind: "absolute", from: from(6), to }, 7, NOW)).toBe(false);
   });
 });

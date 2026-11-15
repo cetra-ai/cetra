@@ -1,4 +1,8 @@
+import { useParams } from "@tanstack/react-router";
+import { Lock } from "lucide-react";
 import { useState } from "react";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -6,6 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Toggle } from "@/components/ui/toggle";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 import {
+  beyondWindow,
   PRESETS,
   type Preset,
   parseTypedRange,
@@ -25,18 +30,28 @@ export function TimeRangePicker({
   onChange: (state: RangeState) => void;
 }) {
   const zone = useTimeZone();
+  const { org } = useParams({ from: "/$org" });
+  const { query, upgradeUrl } = useOrgEntitlements(org);
+  const windowDays = query.data?.limits.data_access_days;
   const [open, setOpen] = useState(false);
   const [typed, setTyped] = useState("");
   const [typedError, setTypedError] = useState(false);
+  const [typedWindowError, setTypedWindowError] = useState(false);
   const [custom, setCustom] = useState(() => customSeed(state, zone));
   const [customError, setCustomError] = useState(false);
+  const [customWindowError, setCustomWindowError] = useState(false);
+  const lockedPresets = PRESETS.some((preset) =>
+    beyondWindow({ kind: "preset", preset }, windowDays, Date.now()),
+  );
 
   function apply(next: RangeState) {
     onChange(next);
     setOpen(false);
     setTyped("");
     setTypedError(false);
+    setTypedWindowError(false);
     setCustomError(false);
+    setCustomWindowError(false);
   }
 
   function applyTyped() {
@@ -46,15 +61,25 @@ export function TimeRangePicker({
       return;
     }
     if (typeof parsed === "string") {
-      apply({ kind: "preset", preset: parsed });
+      const next: RangeState = { kind: "preset", preset: parsed };
+      if (beyondWindow(next, windowDays, Date.now())) {
+        setTypedWindowError(true);
+        return;
+      }
+      apply(next);
       return;
     }
     const now = Date.now();
-    apply({
+    const next: RangeState = {
       kind: "absolute",
       from: new Date(now - parsed.durationMs).toISOString(),
       to: new Date(now).toISOString(),
-    });
+    };
+    if (beyondWindow(next, windowDays, now)) {
+      setTypedWindowError(true);
+      return;
+    }
+    apply(next);
   }
 
   function applyCustom() {
@@ -64,7 +89,12 @@ export function TimeRangePicker({
       setCustomError(true);
       return;
     }
-    apply({ kind: "absolute", from, to });
+    const next: RangeState = { kind: "absolute", from, to };
+    if (beyondWindow(next, windowDays, Date.now())) {
+      setCustomWindowError(true);
+      return;
+    }
+    apply(next);
   }
 
   return (
@@ -75,7 +105,9 @@ export function TimeRangePicker({
         if (next) {
           setCustom(customSeed(state, zone));
           setCustomError(false);
+          setCustomWindowError(false);
           setTypedError(false);
+          setTypedWindowError(false);
         }
       }}
     >
@@ -91,9 +123,13 @@ export function TimeRangePicker({
               key={preset}
               preset={preset}
               pressed={state.kind === "preset" && state.preset === preset}
+              locked={beyondWindow({ kind: "preset", preset }, windowDays, Date.now())}
               onSelect={() => apply({ kind: "preset", preset })}
             />
           ))}
+          {lockedPresets && windowDays !== undefined ? (
+            <WindowNote windowDays={windowDays} upgradeUrl={upgradeUrl} />
+          ) : null}
         </div>
         <form
           className="flex flex-col gap-1"
@@ -114,9 +150,13 @@ export function TimeRangePicker({
             onChange={(event) => {
               setTyped(event.target.value);
               setTypedError(false);
+              setTypedWindowError(false);
             }}
           />
           {typedError ? <p className="text-xs text-destructive">{TYPED_HINT}</p> : null}
+          {typedWindowError && windowDays !== undefined ? (
+            <WindowNote windowDays={windowDays} upgradeUrl={upgradeUrl} error />
+          ) : null}
         </form>
         <form
           className="flex flex-col gap-2"
@@ -138,6 +178,7 @@ export function TimeRangePicker({
               onChange={(event) => {
                 setCustom((current) => ({ ...current, from: event.target.value }));
                 setCustomError(false);
+                setCustomWindowError(false);
               }}
             />
           </div>
@@ -154,10 +195,14 @@ export function TimeRangePicker({
               onChange={(event) => {
                 setCustom((current) => ({ ...current, to: event.target.value }));
                 setCustomError(false);
+                setCustomWindowError(false);
               }}
             />
           </div>
           {customError ? <p className="text-xs text-destructive">From must be before to.</p> : null}
+          {customWindowError && windowDays !== undefined ? (
+            <WindowNote windowDays={windowDays} upgradeUrl={upgradeUrl} error />
+          ) : null}
           <Button type="submit" size="xs" variant="secondary">
             Apply
           </Button>
@@ -170,21 +215,50 @@ export function TimeRangePicker({
 function PresetRow({
   preset,
   pressed,
+  locked,
   onSelect,
 }: {
   preset: Preset;
   pressed: boolean;
+  locked: boolean;
   onSelect: () => void;
 }) {
+  const label = presetLabel(preset);
   return (
     <Toggle
       pressed={pressed}
+      disabled={locked}
       size="sm"
       className="h-7 w-full justify-start px-2 text-xs font-normal"
+      aria-label={locked ? `${label}, available on a paid plan` : undefined}
       onPressedChange={onSelect}
     >
-      {presetLabel(preset)}
+      {locked ? <Lock className="size-3" aria-hidden="true" /> : null}
+      {label}
     </Toggle>
+  );
+}
+
+/** The data-window note: under the presets when some are locked, under a form it refused. */
+function WindowNote({
+  windowDays,
+  upgradeUrl,
+  error = false,
+}: {
+  windowDays: number;
+  upgradeUrl: string | undefined;
+  error?: boolean;
+}) {
+  const span = windowDays === 1 ? "1 day" : `${windowDays} days`;
+  return (
+    <p
+      role="note"
+      className={`flex flex-wrap items-center gap-1 text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}
+    >
+      <Lock className="size-3" aria-hidden="true" />
+      Data older than {span}: available on a paid plan.
+      <UpgradeButton url={upgradeUrl} />
+    </p>
   );
 }
 

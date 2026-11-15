@@ -21,7 +21,7 @@ it("maps login problems to messages", () => {
 
   expect(loginErrorMessage(problem(401, "unauthorized"))).toBe("Incorrect email or password.");
   expect(loginErrorMessage(problem(403, "sso_required"))).toBe(
-    "Your email domain must sign in with single sign-on. Use a button above.",
+    "Your organization requires single sign-on. Enter your email again to continue.",
   );
   expect(loginErrorMessage(problem(403, "email_not_verified"))).toBe(
     "Verify your email address before signing in.",

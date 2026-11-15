@@ -608,7 +608,11 @@ pub(crate) fn scan_union(
 ///
 /// The predicate is built against every pending deletion of the project, not
 /// only the applicable ones: applying a deletion to a file already clean of it
-/// removes nothing, and the cut-off is tested per row.
+/// removes nothing, and the cut-off is tested per row. That shortcut holds only
+/// for a table with a per-row cut-off (`spans`, `scores`, the only tables
+/// [`scan_union`] serves). A `traces` partial carries no ingest time, so the
+/// traces gate is built per group of files from the deletions each has not
+/// applied (`traces.rs`, `build_range_plan`).
 fn gated_file_plan(
     scan: &ScanUnion<'_>,
     gated: &[Arc<FileMeta>],

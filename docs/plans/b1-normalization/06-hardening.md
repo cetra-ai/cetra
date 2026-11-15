@@ -33,7 +33,7 @@ Run each property with `ProptestConfig { cases: 256, .. }`, which keeps `just te
    - `media_refs` is a subset of `Normalized.media` hashes;
    - `truncated` is sorted and unique;
    - `conventions` is in precedence order without duplicates.
-4. Every stored string field and attribute value is ≤ `max_attribute_bytes` plus the marker length.
+4. Every stored string field and attribute value is ≤ `max_attribute_bytes` plus the marker length. The check covers every `String`, `Option<String>` and `Vec<String>` column of `Span`, each `metadata` and `attributes` value, and event names and attributes and link attributes (fix B-2; map keys are not checked, spec 02 § Truncation).
 5. Rule 3: on a span whose kind isn't `llm` or `embedding`, all token and cost columns are `None`.
 6. `decode_protobuf` never panics on arbitrary bytes, and `decode_json` never panics on arbitrary strings, including deep nesting (`[[[[…]]]]` 10 000 levels). `serde_json`'s recursion limit must turn that into an error; assert it does.
 7. `Rejections::message()` never contains any string from the input. Seed the input with a sentinel such as `SENTINEL-7f3a` in names, keys and values, and check that it never appears.

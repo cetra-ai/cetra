@@ -715,6 +715,8 @@ just check
 
 **Goal.** D-L-9: `llmobs login` opens `/cli-auth?port=&state=&host=`. The signed-in user confirms, the page creates a personal access token and hands it to the CLI's localhost callback. The page is not public. A signed-out user goes through `/login?redirect=…` (L5) and comes back.
 
+Hardening (L-4): the token expires after 90 days; Authorize sends it by a form POST to the callback, not in a URL; the page warns about a crafted link and labels the host "reported by the CLI". The CLI side (the POST callback and the expiry) is owned by the CLI and server sessions.
+
 **Edit only:**
 - `web/src/lib/external-navigation.ts` (new);
 - `web/src/lib/cli-auth.ts` (new);
@@ -734,24 +736,18 @@ just check
 This is a test seam. jsdom does not implement `window.location.assign`, and tests never mock modules (D132). The pattern is the same as `setOnboardingPollMs` in `web/src/components/onboarding/poll.ts`.
 
 ```ts
-type Navigate = (url: string) => void;
-
-function browserNavigate(url: string): void {
-  window.location.assign(url);
-}
-
-let current: Navigate = browserNavigate;
-
-/** Leaves the app for `url` (a full URL outside the router). */
-export function navigateExternal(url: string): void {
-  current(url);
-}
-
-/** Tests replace the navigation; `undefined` restores the browser's. */
-export function setExternalNavigator(next: Navigate | undefined): void {
-  current = next ?? browserNavigate;
-}
+type ExternalNavigator = {
+  /** Leaves the app for a URL with a GET navigation (a history entry is added). */
+  navigate: (url: string) => void;
+  /** Leaves the app with a top-level form POST; the fields are the body, not the URL. */
+  submit: (url: string, fields: Record<string, string>) => void;
+};
 ```
+
+- `browserNavigator.navigate` calls `window.location.assign(url)`.
+- `browserNavigator.submit` builds a `<form method="post">` with one hidden `<input>` per field, appends it to `document.body`, calls `form.submit()` and removes the form again (the secret does not stay in the DOM).
+- `navigateExternal(url)` and `submitExternalForm(url, fields)` delegate to the current navigator. `setExternalNavigator(next | undefined)` replaces both; `undefined` restores the browser's.
+- `web/src/lib/external-navigation.test.ts` spies on `HTMLFormElement.prototype.submit` and checks the POST form, its hidden inputs, one submit call and the removal.
 
 ### 2. `web/src/lib/cli-auth.ts` (new)
 
@@ -814,19 +810,30 @@ export function cliTokenName(request: CliRequest): string {
   return request.host ? `CLI on ${request.host}` : "CLI";
 }
 
-/** The CLI's callback. The host is always 127.0.0.1; only the port comes from the link (spec 08). */
-export function cliCallbackUrl(
-  request: CliRequest,
-  result: { token: string } | { error: "access_denied" },
-): string {
+/** D-L-9: the token lives 90 days; `expires_at` is an RFC 3339 timestamp (`TimeParam`). */
+const TOKEN_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
+
+export function cliTokenExpiry(now: Date): string {
+  return new Date(now.getTime() + TOKEN_LIFETIME_MS).toISOString();
+}
+
+/** The CLI's cancel callback: a GET navigation with no secret. The host is always 127.0.0.1 (spec 08). */
+export function cliCancelUrl(request: CliRequest): string {
   const url = new URL(`http://127.0.0.1:${request.port}/callback`);
-  if ("token" in result) {
-    url.searchParams.set("token", result.token);
-  } else {
-    url.searchParams.set("error", result.error);
-  }
+  url.searchParams.set("error", "access_denied");
   url.searchParams.set("state", request.state);
   return url.toString();
+}
+
+/** The CLI's authorize callback: a form POST, so the token is in the body and never in a URL (D-L-9). */
+export function cliCallbackForm(
+  request: CliRequest,
+  token: string,
+): { action: string; fields: Record<string, string> } {
+  return {
+    action: `http://127.0.0.1:${request.port}/callback`,
+    fields: { token, state: request.state },
+  };
 }
 ```
 
@@ -850,7 +857,7 @@ const create = $api.useMutation("post", "/api/v1/me/tokens", { gcTime: 0 }); // 
 const [outcome, setOutcome] = useState<"pending" | "authorized" | "cancelled">("pending");
 ```
 
-Import `useRouter` from `@tanstack/react-router`, and `cliAuthSearchFrom`, `parseCliRequest`, `cliTokenName`, `cliCallbackUrl` from `@/lib/cli-auth`. Then the render branches below, in order. In branch 4, `request` is defined; declare `authorize` and `cancel` as `const` arrow functions after the `request === undefined` return, so TypeScript keeps the narrowing inside them.
+Import `useRouter` from `@tanstack/react-router`, `cliAuthSearchFrom`, `parseCliRequest`, `cliTokenName`, `cliCallbackForm`, `cliCancelUrl` and `cliTokenExpiry` from `@/lib/cli-auth`, and `navigateExternal` and `submitExternalForm` from `@/lib/external-navigation`. Then the render branches below, in order. In branch 4, `request` is defined; declare `authorize` and `cancel` as `const` arrow functions after the `request === undefined` return, so TypeScript keeps the narrowing inside them.
 
 **Render**, always inside `AuthLayout`:
 
@@ -861,7 +868,8 @@ Import `useRouter` from `@tanstack/react-router`, and `cliAuthSearchFrom`, `pars
    - Title `` `Authorize the ${PRODUCT_NAME} CLI` `` (import `PRODUCT_NAME` from `@/product`).
    - Description `<>Signed in as <strong>{me.user.email}</strong>.</>`.
    - Body:
-     - `<p className="text-sm">The CLI on <strong>{request.host ?? "this computer"}</strong> will get a personal access token named <strong>{cliTokenName(request)}</strong> with read and write access. You can revoke it on your account page.</p>`
+     - A warning above the buttons: "Only continue if you just ran `llmobs login` on this computer. Someone who sent you this link could otherwise get access to your account."
+     - `<p className="text-sm">Computer name reported by the CLI: <code>{request.host ?? "not reported"}</code></p>`, then the token name `cliTokenName(request)` with read and write access that expires in 90 days. You can revoke it on your account page.
      - `<FormError message={create.error ? problemMessage(create.error, "Could not create the token. Try again.") : undefined} />`
      - Two buttons in a row, `<div className="flex gap-2">…</div>`: `<Button type="button" disabled={create.isPending} onClick={authorize}>{create.isPending ? <Loader2 className="animate-spin" /> : null}Authorize</Button>` and `<Button type="button" variant="outline" disabled={create.isPending} onClick={cancel}>Cancel</Button>`.
      - No `autoFocus`; Tab reaches "Authorize" first.
@@ -870,19 +878,25 @@ Import `useRouter` from `@tanstack/react-router`, and `cliAuthSearchFrom`, `pars
 
 ```ts
 create.mutate(
-  { body: { name: cliTokenName(request), scopes: ["read", "write"] } },
+  {
+    body: {
+      name: cliTokenName(request),
+      scopes: ["read", "write"],
+      expires_at: cliTokenExpiry(new Date()),
+    },
+  },
   {
     onSuccess: (data) => {
-      const url = cliCallbackUrl(request, { token: data.secret });
+      const callback = cliCallbackForm(request, data.secret);
       create.reset();
       setOutcome("authorized");
-      navigateExternal(url);
+      submitExternalForm(callback.action, callback.fields);
     },
   },
 );
 ```
 
-No `expires_at`: the CLI token does not expire. The user revokes it on `/account` or with `llmobs logout`.
+The token expires 90 days after it is created (`expires_at`, D-L-9). The user can revoke it on `/account` or with `llmobs logout`.
 
 Accepted risk: if the CLI's callback server is gone (a stale link), the token exists but the CLI never receives it. The page cannot detect this; the "You're signed in" copy tells the user what to do, and the token is visible and revocable on `/account`.
 
@@ -890,7 +904,7 @@ Accepted risk: if the CLI's callback server is gone (a stale link), the token ex
 
 ```ts
 setOutcome("cancelled");
-navigateExternal(cliCallbackUrl(request, { error: "access_denied" }));
+navigateExternal(cliCancelUrl(request));
 ```
 
 The gate (L5) runs first. A signed-out user is redirected to `/login?redirect=%2Fcli-auth%3Fport%3D…` and comes back with the same search after signing in.
@@ -917,8 +931,9 @@ pnpm gen:routes
      - state missing, `""`, `"has space"`, 257 × `"a"`, all digits (`"12345678901234567890"`, `"7"`), or a JSON number (`"1e5"`, `"1E5"`, `"-123"`, `"123e10"`);
      - host `"bad/host"`, `""`, or 65 × `"a"`.
 3. `cliTokenName({ port: 5000, state: "s" })` is `"CLI"`. With `host: "laptop"` it is `"CLI on laptop"`.
-4. `cliCallbackUrl({ port: 54321, state: "xyz" }, { token: "pat-llmobs-A+B" })` is `"http://127.0.0.1:54321/callback?token=pat-llmobs-A%2BB&state=xyz"`.
-5. `cliCallbackUrl({ port: 54321, state: "xyz" }, { error: "access_denied" })` is `"http://127.0.0.1:54321/callback?error=access_denied&state=xyz"`.
+4. `cliCallbackForm({ port: 54321, state: "xyz" }, "pat-llmobs-A+B")` is `{ action: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-A+B", state: "xyz" } }`.
+5. `cliCancelUrl({ port: 54321, state: "xyz" })` is `"http://127.0.0.1:54321/callback?error=access_denied&state=xyz"`.
+6. `cliTokenExpiry(new Date("2026-11-15T10:30:00.000Z"))` is `"2027-02-13T10:30:00.000Z"`.
 
 ### `web/src/routes/cli-auth.test.tsx`
 
@@ -928,10 +943,17 @@ At the top of the file:
 
 ```ts
 let urls: string[] = [];
+let forms: { url: string; fields: Record<string, string> }[] = [];
 beforeEach(() => {
   urls = [];
-  setExternalNavigator((url) => {
-    urls.push(url);
+  forms = [];
+  setExternalNavigator({
+    navigate: (url) => {
+      urls.push(url);
+    },
+    submit: (url, fields) => {
+      forms.push({ url, fields });
+    },
   });
 });
 afterEach(() => {
@@ -948,7 +970,7 @@ Each test destructures what it uses from `await renderApp(url)`. The heading che
    - Capture the POST body. Answer `HttpResponse.json({ token: { id: "01900000-0000-7000-8000-000000000203", name: "CLI on laptop", prefix: "pat-llmobs-CLITOK", scopes: ["read", "write"], created_at: "2026-01-05T00:00:00.000000000Z" }, secret: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT" }, { status: 201 })`.
    - Click "Authorize".
    - Expect the body to equal `{ name: "CLI on laptop", scopes: ["read", "write"] }`.
-   - `await waitFor(() => expect(urls).toEqual(["http://127.0.0.1:54321/callback?token=pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT&state=s1"]))`.
+   - `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s1" } }]))`, and `urls` is empty: the token is posted in the body, never navigated to.
    - `findByRole("heading", { name: "You're signed in", level: 1 })`.
    - `screen.queryByText(/pat-llmobs-CLITOKEN/)` is `null`: the secret is never shown on the page.
    - The secret left TanStack's mutation cache (D-L-5): with `queryClient` from `renderApp`, `await waitFor(() => expect(JSON.stringify(queryClient.getMutationCache().getAll().map((m) => m.state.data ?? null))).not.toContain("pat-llmobs-CLITOKEN0"))`.
@@ -973,7 +995,7 @@ Each test destructures what it uses from `await renderApp(url)`. The heading che
    - The heading "This sign-in link is invalid" is shown, and `calls` and `urls` are empty.
 8. **"returns a long state with digits byte for byte"**
    - Answer the POST as in test 2. Render `/cli-auth?port=54321&state=s_12345678901234567890`.
-   - Click "Authorize". `await waitFor(() => expect(urls).toEqual(["http://127.0.0.1:54321/callback?token=pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT&state=s_12345678901234567890"]))`.
+   - Click "Authorize". `await waitFor(() => expect(forms).toEqual([{ url: "http://127.0.0.1:54321/callback", fields: { token: "pat-llmobs-CLITOKEN0CLITOKEN0CLITOKEN0CLIT", state: "s_12345678901234567890" } }]))`.
 9. **"shows a failure and stays on the page"**
    - The POST answers `problemResponse(429, "rate_limited", { detail: "slow down" })`.
    - Click "Authorize". `findByRole("alert")` has the text "slow down".

@@ -26,7 +26,7 @@ See [README.md](README.md). From here on, each sub-phase adds scenarios and capt
 - **`description`** says what is exercised. **`notes`** records:
   - the content-capture switches;
   - any behaviour that surprised you;
-  - "Covers D111 (…)" when the case pins one of B1's single-source behaviours.
+  - "Covers D113 (…)" when the case pins one of B1's single-source behaviours.
 - **After each capture:**
   - run `just fixtures-check`;
   - recapture with `just check-capture`;
@@ -70,7 +70,7 @@ See [README.md](README.md). From here on, each sub-phase adds scenarios and capt
 | `openai-chat-stream` | One streamed answer with `include_usage`. |
 | `openai-embeddings` | Embeddings with two inputs. The vectors must not end up in `attributes` after B1's N18; this case lets B1 check that. |
 | `openai-responses-tool` | The Responses API (`client.responses.create`) with a function tool call, then an answer. Agents frameworks use this API. |
-| `anthropic-cache-tokens` | One `messages.create` with a long system prompt marked `cache_control`; usage `{input: 2100, output: 40, cache_read: 1800, cache_write: 200}`. Anthropic's raw `input_tokens` is then 100, which pins the add-back of spec 02's token semantics. Covers D111 for OpenInference + Anthropic. |
+| `anthropic-cache-tokens` | One `messages.create` with a long system prompt marked `cache_control`; usage `{input: 2100, output: 40, cache_read: 1800, cache_write: 200}`. Anthropic's raw `input_tokens` is then 100, which pins the add-back of spec 02's token semantics. Covers D113 for OpenInference + Anthropic. |
 | `anthropic-stream-tool` | A streamed message with text plus one `tool_use` block. |
 | `anthropic-thinking` | A non-streamed message with a `thinking` block, then text. |
 | `google-genai-multimodal` | As in K11, through OpenInference. |

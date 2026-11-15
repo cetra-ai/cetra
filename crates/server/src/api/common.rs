@@ -120,7 +120,7 @@ pub enum ProblemCode {
     QueryFailed,
     /// The query exceeded its time limit.
     QueryTimeout,
-    /// The query needed more memory than the cap.
+    /// The query needed more memory or temporary disk space than the cap.
     QueryTooLarge,
     /// A filter deletion would cover more than 100,000 traces.
     TooManyTraces,

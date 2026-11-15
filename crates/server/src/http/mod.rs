@@ -68,6 +68,8 @@ pub(crate) struct AppInner {
     pub(crate) metrics_cache: crate::routes::metrics::MetricsCache,
     /// Usage counters, flushed every 10 s (D-G-11).
     pub(crate) usage: crate::usage::Usage,
+    /// Alert emails sent per org on the current UTC day (D-K-19).
+    pub(crate) alert_email_count: crate::alerts::quota::DailyEmailCount,
     /// Deletion worker state: wake-up, guard, attempts (D-M-3).
     pub(crate) deletions: crate::deletion::Deletions,
     /// Seals and opens secret columns (D-I-2).
@@ -82,8 +84,16 @@ pub(crate) struct AppInner {
     pub(crate) definitions: crate::eval::definitions::DefinitionCache,
     /// Licence and (from M2) org entitlements (D179, D-P-10).
     pub(crate) entitlements: crate::entitlements::EntitlementsState,
+    /// The single backup slot: a second backup answers `busy` (N M2, D-N-19).
+    pub(crate) backup_slot: tokio::sync::Mutex<()>,
+    /// The eval queue's in-memory state (D-I-6).
+    pub(crate) eval: crate::eval::EvalQueue,
+    /// Traces the online-rule trigger waits on (D-I-8).
+    pub(crate) pending: crate::eval::pending::PendingTraces,
     /// Per-org span rate (D-P-19, D-P-35).
     pub(crate) ingest_rate: crate::entitlements::rate::IngestRate,
+    /// Per-org SSO routing (track P M5).
+    pub(crate) org_sso: crate::ee::org_sso::OrgSso,
 }
 
 impl AppState {

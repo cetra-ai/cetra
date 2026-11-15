@@ -56,17 +56,35 @@ export function cliTokenName(request: CliRequest): string {
   return request.host ? `CLI on ${request.host}` : "CLI";
 }
 
-/** The CLI's callback. The host is always 127.0.0.1; only the port comes from the link (spec 08). */
-export function cliCallbackUrl(
-  request: CliRequest,
-  result: { token: string } | { error: "access_denied" },
-): string {
+/** D-L-9: the token is created with this lifetime, so a copy kept in history or elsewhere stops working. */
+const TOKEN_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** `expires_at` for the CLI token: 90 days after `now`, as an RFC 3339 timestamp (`TimeParam`). */
+export function cliTokenExpiry(now: Date): string {
+  return new Date(now.getTime() + TOKEN_LIFETIME_MS).toISOString();
+}
+
+/**
+ * The CLI's callback for a cancel: a GET navigation carrying no secret.
+ * The host is always 127.0.0.1; only the port comes from the link (spec 08).
+ */
+export function cliCancelUrl(request: CliRequest): string {
   const url = new URL(`http://127.0.0.1:${request.port}/callback`);
-  if ("token" in result) {
-    url.searchParams.set("token", result.token);
-  } else {
-    url.searchParams.set("error", result.error);
-  }
+  url.searchParams.set("error", "access_denied");
   url.searchParams.set("state", request.state);
   return url.toString();
+}
+
+/**
+ * The CLI's callback for an authorization: a form POST, so the token is sent in the request body
+ * and never in a URL the browser keeps in its history (D-L-9, spec 08).
+ */
+export function cliCallbackForm(
+  request: CliRequest,
+  token: string,
+): { action: string; fields: Record<string, string> } {
+  return {
+    action: `http://127.0.0.1:${request.port}/callback`,
+    fields: { token, state: request.state },
+  };
 }

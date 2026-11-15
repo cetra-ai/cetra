@@ -33,4 +33,6 @@ Fixes made during the review, all inside `sdks/`:
 - **TS README test.** The score example's cleanup flush posts to a stubbed `fetch` instead of retrying real refused connections to 127.0.0.1:9; the byte-identical README check is unchanged.
 - **TS `.gitignore`.** `sdks/typescript/.vitest/` (Vitest's JSON reporter output) is ignored.
 
-Accepted differences left as is: TS `setUsage` accepts only safe integers (Python writes any non-negative int; JS numbers cannot hold more), Python's `Retry-After` parsing accepts `"+5"` via `int()` (TS's digit regex does not).
+Accepted differences left as is: TS `setUsage` accepts only safe integers (Python writes any non-negative int; JS numbers cannot hold more). Listed in spec 10 § Language differences and both READMEs.
+
+Removed after review: Python's `Retry-After` parsing accepted `"+5"` via `int()`, unlike TS's digit regex. It now uses the same ASCII-digit grammar as TS and spec 10 (`sdks/python/src/llmobs/_scores.py`).

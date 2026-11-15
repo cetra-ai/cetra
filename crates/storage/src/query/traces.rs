@@ -90,7 +90,8 @@ pub(crate) struct TracesProvider {
     lookback: i64,
     partitions: usize,
     /// The project's pending deletions (spec 03 §7). The `traces` view hides a
-    /// covered trace's partials by trace id alone.
+    /// covered trace's partials by trace id alone. The deletions apply per file:
+    /// a file is gated only by those above its `deletions_applied_seq`.
     deletions: Arc<[Arc<PendingDeletion>]>,
     suspects: Suspects,
 }
@@ -175,7 +176,7 @@ impl ScanContext {
             lookback: provider.lookback,
             partitions: provider.partitions,
             filters: filters.to_vec(),
-            around: provider.options.around,
+            around: provider.options.around(),
             deletions: Arc::clone(&provider.deletions),
             suspects: provider.suspects.clone(),
         })
@@ -290,16 +291,27 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
     );
     // A `traces` file is gated by `deletions_applied_seq` alone: its
     // `min_ingest_time` is the smallest per-trace *latest* ingest time, so it
-    // cannot bound a cut-off (spec 03 §7).
+    // cannot bound a cut-off (spec 03 §7). Gated files are grouped by the
+    // sequences of their pending deletions: files with the same pending set
+    // share one gate, and the group keeps those deletions to apply.
+    // A gated group: the pending deletions shared by its files, and the files.
+    type GatedGroup = (Vec<Arc<PendingDeletion>>, Vec<Arc<FileMeta>>);
     let mut clean = Vec::with_capacity(files.len());
-    let mut gated = Vec::with_capacity(files.len());
+    let mut gated: BTreeMap<Vec<u64>, GatedGroup> = BTreeMap::new();
     for file in files {
-        if applicable(&ctx.deletions, Some(file.deletions_applied_seq), i64::MIN).is_empty() {
+        let pending = applicable(&ctx.deletions, Some(file.deletions_applied_seq), i64::MIN);
+        if pending.is_empty() {
             clean.push(file);
         } else {
-            gated.push(file);
+            let key: Vec<u64> = pending.iter().map(|deletion| deletion.seq).collect();
+            gated
+                .entry(key)
+                .or_insert_with(|| (pending, Vec::new()))
+                .1
+                .push(file);
         }
     }
+    let gated_files: usize = gated.values().map(|(_, group)| group.len()).sum();
     let batches = mem_batches(&ctx.spans_mem, ctx.project, &padded);
     let mut partials = Vec::with_capacity(batches.len());
     for batch in &batches {
@@ -319,21 +331,23 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
             &ctx.suspects,
         )?);
     }
-    if !gated.is_empty() {
+    for (pending, group) in gated.values() {
+        // The deletions this group has not applied. A deletion the file already
+        // applied must not hide a trace ingested after it: a traces partial has
+        // no per-row ingest time to test the cut-off against (spec 03 §7).
         // The merge input always holds `trace_id`, so the trace-id-only rule
         // fits the input schema. A `None` predicate (no deletion has trace
         // ids) means no filter.
         let gated_plan = file_plan(
             &schema,
             &input_indices,
-            &gated,
+            group,
             &input_df,
             file_pred.as_ref(),
             ctx.partitions,
             &ctx.suspects,
         )?;
-        let gated_plan = match covered_predicate(FileTable::Traces, &input_schema, &ctx.deletions)?
-        {
+        let gated_plan = match covered_predicate(FileTable::Traces, &input_schema, pending)? {
             Some(predicate) => Arc::new(FilterExec::try_new(
                 Arc::new(NotExpr::new(predicate)),
                 gated_plan,
@@ -389,7 +403,7 @@ fn build_range_plan(ctx: &ScanContext, spec: RangeSpec) -> DfResult<Arc<dyn Exec
     let display = format!(
         "TracesExec: mode={}, files={}, mem_batches={}, columns=[{columns}]",
         spec.mode.as_str(),
-        clean.len() + gated.len(),
+        clean.len() + gated_files,
         batches.len(),
     );
 
@@ -1794,7 +1808,10 @@ mod tests {
             .unwrap();
         let storage = reopen(dir.path(), storage).await;
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -1890,7 +1907,7 @@ mod tests {
         }
 
         let query = storage
-            .query(dataset_project(), Default::default())
+            .query(dataset_project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = match batch_size {
@@ -1943,7 +1960,10 @@ mod tests {
             .await
             .unwrap();
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -1974,7 +1994,10 @@ mod tests {
                 .unwrap();
             storage = reopen(dir.path(), storage).await;
         }
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2000,7 +2023,10 @@ mod tests {
             .unwrap();
         let storage = reopen(dir.path(), storage).await;
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2058,10 +2084,8 @@ mod tests {
         };
 
         for options in [
-            QueryOptions::default(),
-            QueryOptions {
-                around: Some(d + 100),
-            },
+            QueryOptions::new(None, None),
+            QueryOptions::new(Some(d + 100), None),
         ] {
             let query = storage.query(project(), options).await.unwrap();
             let ctx = session(&query);
@@ -2072,7 +2096,10 @@ mod tests {
             assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         }
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2212,7 +2239,10 @@ mod tests {
             .unwrap();
         let storage = reopen(dir.path(), storage).await;
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         let in_window = scan_with(
             &ctx,
@@ -2273,7 +2303,10 @@ mod tests {
             .await
             .unwrap();
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2310,7 +2343,10 @@ mod tests {
         // window and the trace is not returned.
         let dir1 = tempfile::tempdir().unwrap();
         let s1 = window_storage(dir1.path(), root, 50 * MIN).await;
-        let q1 = s1.query(project(), Default::default()).await.unwrap();
+        let q1 = s1
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx1 = session(&q1);
         let early = scan_with(
             &ctx1,
@@ -2328,7 +2364,10 @@ mod tests {
         // with the late partial's start. This is the documented window limit.
         let dir2 = tempfile::tempdir().unwrap();
         let s2 = window_storage(dir2.path(), root, 70 * MIN).await;
-        let q2 = s2.query(project(), Default::default()).await.unwrap();
+        let q2 = s2
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx2 = session(&q2);
         let late = scan_with(
             &ctx2,
@@ -2365,7 +2404,10 @@ mod tests {
             .unwrap();
         wait_held(&storage, HookPoint::FlushAfterWrite).await;
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let before = concat(
             &collect_off(&query, "SELECT * FROM traces").await,
             traces_schema(),
@@ -2381,7 +2423,10 @@ mod tests {
         };
         drop(release);
         wait_held(&storage, HookPoint::FlushAfterCommit).await;
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let after = concat(
             &collect_off(&query, "SELECT * FROM traces").await,
             traces_schema(),
@@ -2455,7 +2500,10 @@ mod tests {
 
         let expected = {
             let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
-            let query = storage.query(project(), Default::default()).await.unwrap();
+            let query = storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap();
             let ctx = session(&query);
             ctx.register_table("traces", Arc::clone(&query.traces))
                 .unwrap();
@@ -2472,7 +2520,10 @@ mod tests {
         config.query.initial_memory = ByteSize::mib(1);
         config.query.max_memory_total = Some(ByteSize::mib(8));
         let storage = crate::Storage::open(config).await.unwrap();
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         // Each sort reserves 1 MiB to merge its spill files, not the default 10 MiB.
         let ctx = SessionContext::new_with_config_rt(
             SessionConfig::new()
@@ -2516,7 +2567,10 @@ mod tests {
         config.query.max_memory_total = Some(ByteSize::mib(1));
         let storage = crate::Storage::open(config).await.unwrap();
         let ctx = QueryContext::new(
-            storage.query(project(), Default::default()).await.unwrap(),
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
             None,
         )
         .unwrap();
@@ -2580,7 +2634,10 @@ mod tests {
         }
 
         let storage = crate::Storage::open(config).await.unwrap();
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2603,7 +2660,10 @@ mod tests {
             .await
             .unwrap();
         let storage = reopen(dir.path(), storage).await;
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2656,7 +2716,7 @@ mod tests {
 
         let real = QueryContext::new(
             storage
-                .query(dataset_project(), Default::default())
+                .query(dataset_project(), QueryOptions::new(None, None))
                 .await
                 .unwrap(),
             None,
@@ -2667,6 +2727,7 @@ mod tests {
         let request = |include_eval: bool| TraceListRequest {
             filter: None,
             search: None,
+            strict_exclusions: false,
             scope: ListScope {
                 window: None,
                 include_eval,
@@ -2713,7 +2774,10 @@ mod tests {
             .unwrap();
         let storage = reopen(dir.path(), storage).await;
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = session(&query);
         ctx.register_table("traces", Arc::clone(&query.traces))
             .unwrap();
@@ -2756,7 +2820,10 @@ mod tests {
         storage: &crate::Storage,
         project: ProjectId,
     ) -> (QueryContext, QueryContext) {
-        let query = storage.query(project, Default::default()).await.unwrap();
+        let query = storage
+            .query(project, QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let range = ProjectQuery {
             spans: Arc::clone(&query.spans),
             traces: Arc::clone(&query.traces),
@@ -2766,6 +2833,7 @@ mod tests {
             optimizer_rules: Vec::new(),
 
             suspects: crate::verify::Suspects::detached(),
+            visible_from: None,
         };
         (
             QueryContext::new(query, None).unwrap(),
@@ -2781,6 +2849,7 @@ mod tests {
         TraceListRequest {
             filter,
             search: None,
+            strict_exclusions: false,
             scope: ListScope {
                 window: None,
                 include_eval: true,
@@ -3266,6 +3335,246 @@ mod tests {
             .downcast_ref::<arrow::array::TimestampNanosecondArray>()
             .unwrap();
         assert_eq!(start.value(0), late, "list mode uses the late start");
+        storage.shutdown().await.unwrap();
+    }
+
+    /// D-P-21, D-P-44: a trace is hidden by its merged `start_time`, its spans by their own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn visible_from_hides_a_trace_by_its_merged_start() {
+        let t = trace_id(1);
+        let first = 20_000 * DAY + 100;
+        let second = first + 10_000_000_000;
+        let bound = first + 5_000_000_000;
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(
+                project(),
+                spans_batch(&[
+                    base_span(t, span_id(1), first),
+                    base_span(t, span_id(2), second),
+                ]),
+            )
+            .await
+            .unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, Some(bound)))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(query, None).unwrap();
+        assert_eq!(
+            count_of(&collect(ctx.session(), "SELECT count(*) FROM traces").await),
+            0
+        );
+        assert_eq!(
+            count_of(&collect(ctx.session(), "SELECT count(*) FROM spans").await),
+            1
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    /// D-P-21, D-P-44: the bound hides rows that were flushed to Parquet too, not only the
+    /// memtable's: spans, traces and scores.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn visible_from_hides_flushed_rows() {
+        let (old_trace, new_trace) = (trace_id(1), trace_id(2));
+        let old = 20_000 * DAY + 100;
+        let new = old + 10_000_000_000;
+        let bound = old + 5_000_000_000;
+        let mut live = crate::test_support::live_scores(&crate::test_support::dataset_scores());
+        live.truncate(2);
+        assert_eq!(live.len(), 2, "the dataset has two live scores");
+        for (score, at) in live.iter_mut().zip([old, new]) {
+            score.project_id = project();
+            score.created_at = at;
+            score.updated_at = at;
+            score.deleted = false;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(
+                project(),
+                spans_batch(&[
+                    base_span(old_trace, span_id(1), old),
+                    base_span(new_trace, span_id(1), new),
+                ]),
+            )
+            .await
+            .unwrap();
+        storage
+            .append_scores(
+                project(),
+                llmobs_core::batch::scores_to_record_batch(&live).unwrap(),
+            )
+            .await
+            .unwrap();
+        // `shutdown` flushes the memtables to Parquet; the reopened storage has them empty.
+        storage = reopen(dir.path(), storage).await;
+
+        let all = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(all, None).unwrap();
+        for table in ["spans", "traces", "scores"] {
+            assert_eq!(
+                count_of(&collect(ctx.session(), &format!("SELECT count(*) FROM {table}")).await),
+                2,
+                "{table} unbounded"
+            );
+        }
+        let bounded = storage
+            .query(project(), QueryOptions::new(None, Some(bound)))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(bounded, None).unwrap();
+        for table in ["spans", "traces", "scores"] {
+            assert_eq!(
+                count_of(&collect(ctx.session(), &format!("SELECT count(*) FROM {table}")).await),
+                1,
+                "{table} bounded"
+            );
+        }
+        storage.shutdown().await.unwrap();
+    }
+
+    /// Spec 03 §7: a traces file is gated only by the deletions it has not applied. Deletion A
+    /// covers trace 1 and the traces file flushed after it records A's sequence. Trace 1 is
+    /// then ingested again after A's cut-off, and deletion B (of trace 2) gates that file: A
+    /// must not hide the new partial.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn applied_deletion_does_not_hide_a_later_trace() {
+        let (covered, other) = (trace_id(1), trace_id(2));
+        let deletion = |trace: TraceId, cutoff: i64| crate::deletion::Deletion {
+            id: uuid::Uuid::now_v7(),
+            project: project(),
+            cutoff,
+            scope: crate::deletion::DeletionScope::Traces {
+                trace_ids: vec![trace],
+            },
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        // The span is ingested after deletion A's cut-off, as a request received later is.
+        let cutoff = crate::catalog::now_ns();
+        storage
+            .register_deletion(deletion(covered, cutoff))
+            .await
+            .unwrap();
+        let mut span = base_span(covered, span_id(1), 20_000 * DAY + 100);
+        span.ingest_time = cutoff + 1;
+        storage
+            .append_spans(project(), spans_batch(&[span]))
+            .await
+            .unwrap();
+        // The shutdown flushes the spans, and the traces file records deletion A as applied.
+        let storage = reopen(dir.path(), storage).await;
+        storage
+            .register_deletion(deletion(other, crate::catalog::now_ns()))
+            .await
+            .unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(query, None).unwrap();
+        assert_eq!(
+            count_of(&collect(ctx.session(), "SELECT count(*) FROM traces").await),
+            1,
+            "trace 1 was ingested after deletion A and must stay visible"
+        );
+        storage.shutdown().await.unwrap();
+    }
+
+    /// Spec 03 §7: each traces file is gated by its own pending deletions. Deletion A covers
+    /// trace 1 and is applied by file 1 (which holds traces 2 to 4). Trace 1 is ingested again
+    /// after A's cut-off and flushed into file 2 with deletion B (of trace 2), which file 2
+    /// records as applied together with A. Deletion C (of trace 3) stays pending. File 1 is
+    /// gated by B and C, file 2 by C alone: A must not hide the re-ingested trace 1 in file 2.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_traces_file_is_gated_by_its_own_pending_deletions() {
+        let deletion = |trace: TraceId, cutoff: i64| crate::deletion::Deletion {
+            id: uuid::Uuid::now_v7(),
+            project: project(),
+            cutoff,
+            scope: crate::deletion::DeletionScope::Traces {
+                trace_ids: vec![trace],
+            },
+        };
+        let spans_at_ingest = |trace: u8, span: u8, ingest: i64| {
+            let mut span = base_span(trace_id(trace), span_id(span), 20_000 * DAY + 100);
+            span.ingest_time = ingest;
+            span
+        };
+        let base = crate::catalog::now_ns();
+        let (cutoff_a, cutoff_b, cutoff_c) = (base + 10, base + 30, base + 40);
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let first: Vec<Span> = (1..=4)
+            .map(|trace| spans_at_ingest(trace, 1, base))
+            .collect();
+        storage
+            .append_spans(project(), spans_batch(&first))
+            .await
+            .unwrap();
+        storage
+            .register_deletion(deletion(trace_id(1), cutoff_a))
+            .await
+            .unwrap();
+        // Shutdown flushes the spans into file 1, which records A as applied.
+        let storage = reopen(dir.path(), storage).await;
+        storage
+            .append_spans(
+                project(),
+                spans_batch(&[spans_at_ingest(1, 2, cutoff_a + 10)]),
+            )
+            .await
+            .unwrap();
+        storage
+            .register_deletion(deletion(trace_id(2), cutoff_b))
+            .await
+            .unwrap();
+        // Shutdown flushes the re-ingested trace 1 into file 2, which records A and B.
+        let storage = reopen(dir.path(), storage).await;
+        storage
+            .register_deletion(deletion(trace_id(3), cutoff_c))
+            .await
+            .unwrap();
+
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
+        let ctx = QueryContext::new(query, None).unwrap();
+        for (trace, visible) in [(1, 1), (2, 0), (3, 0), (4, 1)] {
+            let sql = format!(
+                "SELECT count(*) FROM traces WHERE trace_id = '{}'",
+                trace_id(trace).to_hex()
+            );
+            assert_eq!(
+                count_of(&collect(ctx.session(), &sql).await),
+                visible,
+                "trace {trace}: covered traces stay hidden, the others stay visible"
+            );
+        }
+        let explained = collect(ctx.session(), "EXPLAIN SELECT * FROM traces").await;
+        let text = plan_text(&explained);
+        assert!(text.contains("files=2"), "one gate per file: {text}");
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_options_carry_visible_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, Some(42)))
+            .await
+            .unwrap();
+        assert_eq!(query.visible_from, Some(42));
+        assert_eq!(QueryOptions::new(Some(7), None).around(), Some(7));
+        assert_eq!(QueryOptions::new(Some(7), None).visible_from(), None);
         storage.shutdown().await.unwrap();
     }
 }

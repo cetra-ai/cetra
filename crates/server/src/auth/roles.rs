@@ -87,6 +87,8 @@ pub(crate) enum OrgPerm {
     Delete,
     /// The org's deletion history (D-M-8).
     ViewDeletions,
+    /// The org's identity provider, domains and enforcement (owner only, D-P-51).
+    ManageSso,
 }
 
 /// What a project route requires.
@@ -199,7 +201,7 @@ impl OrgPerm {
             | Self::ManageMembers
             | Self::ManageConnections
             | Self::ViewDeletions => OrgRole::Admin,
-            Self::Delete => OrgRole::Owner,
+            Self::Delete | Self::ManageSso => OrgRole::Owner,
         }
     }
 }
@@ -280,6 +282,7 @@ mod tests {
         assert_eq!(OrgPerm::ManageConnections.min_role(), OrgRole::Admin);
         assert_eq!(OrgPerm::Delete.min_role(), OrgRole::Owner);
         assert_eq!(OrgPerm::ViewDeletions.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::ManageSso.min_role(), OrgRole::Owner);
         assert_eq!(ProjectPerm::View.min_role(), Role::Viewer);
         assert_eq!(ProjectPerm::ManageSettings.min_role(), Role::Admin);
         assert_eq!(ProjectPerm::ManageMembers.min_role(), Role::Admin);

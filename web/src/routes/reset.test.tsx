@@ -163,6 +163,16 @@ it("says when the link is invalid", async () => {
   expect(router.state.location.search).toEqual({});
 });
 
+it("says when the account signs in through single sign-on", async () => {
+  server.use(http.post("/api/auth/password/reset", () => problemResponse(403, "sso_required")));
+  const { user } = await renderApp("/reset?token=tok123");
+  await fillNewPassword(user);
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Your organization requires single sign-on, so this account has no password to reset.",
+  );
+  expect(screen.getByRole("link", { name: "Go to sign in" })).toHaveAttribute("href", "/login");
+});
+
 it("shows the password policy error under the field", async () => {
   server.use(
     http.post("/api/auth/password/reset", () =>

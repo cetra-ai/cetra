@@ -74,3 +74,11 @@ export function orgEntitlementsQuery(org: string) {
 export function orgUsageQuery(org: string) {
   return $api.queryOptions("get", "/api/v1/orgs/{org}/usage", orgInit(org));
 }
+
+export function orgSsoInit(org: string) {
+  return { params: { path: { org } } };
+}
+
+export function orgSsoQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/sso", orgSsoInit(org));
+}

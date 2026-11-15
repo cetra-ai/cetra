@@ -7,7 +7,9 @@ expression: "serde_json::to_string_pretty(&me).unwrap()"
     "id": "01900000-0000-7000-8000-000000000100",
     "email": "ada@example.com",
     "name": "Ada Example",
-    "is_instance_admin": true
+    "is_instance_admin": true,
+    "email_verified": true,
+    "has_password": true
   },
   "orgs": [
     {

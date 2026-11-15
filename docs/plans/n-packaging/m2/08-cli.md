@@ -3,6 +3,17 @@
 Read [00-design.md](00-design.md) first, especially § Design › Trigger and § Design › Restore
 (D-N-17, D-N-21).
 
+**Also (cross-track review X15):** `llmobs admin migrate [--config <file>]` requires `catalog.db`
+(`AdminError::NoCatalog`) and `meta.db` (`AdminError::NoMetaDb`), then opens the storage with
+`Maintenance::open` **first** (the server must be stopped: a held `LOCK` maps to
+`AdminError::Locked` before `meta.db` is touched), then `meta.db` with `MetaDb::open`. That runs both
+databases' migrations (and B9's pre-migration copies); it then closes both and exits, printing `meta.db and catalog.db are at this version's
+schema`. A restore of an older backup runs it before `reapply-deletions`, so the server never starts
+on restored data before the deletions are re-applied. Test `migrate_on_a_stopped_server_succeeds` and
+`migrate_while_the_server_runs_is_refused`; spec 09 § CLI gets the row `| \`llmobs admin migrate\` |
+with the server stopped: run the migrations of \`meta.db\` and \`catalog.db\`, then exit (restores of
+older backups, D-N-22) |`.
+
 **Goal:**
 - `llmobs admin backup --to <dir> [--meta-only] [--config <file>]` asks the running server, through
   `<data_dir>/admin.sock`, for a backup, and prints the report.
@@ -86,13 +97,13 @@ intended.
 5. On `Failed`, bail with `backup failed (<code>): <message>`.
 
 **`GcOrphans`:** call `llmobs_server::admin::gc_orphans(&config, min_age, dry_run)`. That function
-opens `Storage::open(config.storage_config())`.
+opens `Maintenance::open(config.storage_config())`.
 - In S3 mode, without `--dry-run`, `--rollback-bucket` must be given, else a new
   `AdminError::RollbackNeedsConfirmation` (`in S3 mode this deletes every object written after the
   backup from the live bucket; run with --dry-run first, then add --rollback-bucket`).
 - First, `<data_dir>/catalog.db` must exist, else a new
   `AdminError::NoCatalog` (`no catalog.db in the data directory: restore it before running
-  gc-orphans`). `Storage::open` would otherwise create an empty catalog, and every object would
+  gc-orphans`). `Maintenance::open` would otherwise create an empty catalog, and every object would
   then look like an orphan.
 - `OpenError::Locked { .. }` maps to the existing `AdminError::Locked`. Its message becomes `the
   server is running: stop it first`; update the rotate-key tests that assert the old text.

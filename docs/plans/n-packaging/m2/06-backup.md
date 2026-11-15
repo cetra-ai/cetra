@@ -200,7 +200,7 @@ just check
 
 ## Done when
 
-- [ ] `backup::run`, `BackupReport`, `BackupMode` and `BackupError` exist, with the six tests and
+- [ ] `backup::run`, `BackupReport`, `BackupMode` and `BackupError` exist, with the eight tests and
       the manifest unit tests.
 - [ ] The manifest matches the design exactly.
 - [ ] `just check` passes. One commit: `Add online backups to the server`.

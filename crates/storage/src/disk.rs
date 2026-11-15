@@ -8,21 +8,25 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
 use std::time::Duration;
 
+use datafusion::execution::disk_manager::DiskManager;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::error::OpenError;
+use crate::fs;
 use crate::open_io;
 use crate::read_cache::{self, ReadCache};
 
 /// How often the monitor measures free disk.
 const INTERVAL: Duration = Duration::from_secs(1);
 
-/// Free disk, refreshed by the monitor, and the bytes compaction reserved.
+/// Free disk, refreshed by the monitor, and the bytes compaction reserved. It also caps
+/// the query spill that the query runtimes share (spec 03 §6).
 #[derive(Debug)]
 pub(crate) struct Disk {
     /// `data_dir`, plus the object store root in local mode.
@@ -31,19 +35,30 @@ pub(crate) struct Disk {
     free: AtomicU64,
     /// Bytes held by running compaction jobs.
     reserved: Mutex<u64>,
+    /// The disk manager of the query runtime, which every query's runtime shares.
+    spill: Arc<DiskManager>,
+    /// Set once a failed spill-limit update has been logged.
+    spill_cap_warned: AtomicBool,
     /// Tests set this to stand in for `statvfs`.
     #[cfg(test)]
     fake_free: Mutex<Option<u64>>,
 }
 
 impl Disk {
-    /// Measures once. A `statvfs` error is an [`OpenError::Io`].
-    pub(crate) fn open(paths: Vec<PathBuf>, min_free: u64) -> Result<Self, OpenError> {
+    /// Measures once, and applies the spill cap to `spill` from that measurement. A
+    /// `statvfs` error is an [`OpenError::Io`].
+    pub(crate) fn open(
+        paths: Vec<PathBuf>,
+        min_free: u64,
+        spill: Arc<DiskManager>,
+    ) -> Result<Self, OpenError> {
         let disk = Self {
             paths,
             min_free,
             free: AtomicU64::new(0),
             reserved: Mutex::new(0),
+            spill,
+            spill_cap_warned: AtomicBool::new(false),
             #[cfg(test)]
             fake_free: Mutex::new(None),
         };
@@ -51,19 +66,45 @@ impl Disk {
             .measure()
             .map_err(|(path, error)| open_io("measuring free disk", path, error))?;
         disk.free.store(free, Ordering::Release);
+        disk.apply_spill_cap(free);
         Ok(disk)
     }
 
-    /// Measures again and stores the result. Blocking: callers use `spawn_blocking`.
+    /// Measures again and stores the result, and the spill cap with it. Blocking: callers use
+    /// `spawn_blocking`.
     pub(crate) fn refresh(&self) -> io::Result<u64> {
         let free = self.measure().map_err(|(_, error)| error)?;
         self.free.store(free, Ordering::Release);
+        self.apply_spill_cap(free);
         Ok(free)
+    }
+
+    /// Sets the spill limit to the bytes spilled now plus the free disk above `min_free`. Spill
+    /// writes after a measurement move `spilled_now` and `free` by the same amount, so the cap
+    /// stays right until the next measurement (spec 03 §6). The cap can be too high by at
+    /// most the bytes spilled during one measurement interval: spill written between the
+    /// `statvfs` and the read of the spilled total is in the total but not in `free`.
+    fn apply_spill_cap(&self, free: u64) {
+        let cap = self
+            .spill
+            .used_disk_space()
+            .saturating_add(free.saturating_sub(self.min_free));
+        if let Err(error) = self.spill.set_max_temp_directory_size(cap)
+            && !self.spill_cap_warned.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(%error, "setting the query spill limit failed");
+        }
     }
 
     /// The last measured free bytes.
     pub(crate) fn free(&self) -> u64 {
         self.free.load(Ordering::Acquire)
+    }
+
+    /// Bytes held by running compaction jobs.
+    #[cfg(test)]
+    pub(crate) fn reserved(&self) -> u64 {
+        *self.reserved.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether ingestion must be refused: `free() < min_free`.
@@ -103,6 +144,16 @@ impl Disk {
         Ok(least)
     }
 
+    /// Sets the free bytes the next `measure` reports, without refreshing the stored
+    /// value: the stored value stays stale until something measures again.
+    #[cfg(test)]
+    pub(crate) fn set_next_measurement_for_test(&self, free: Option<u64>) {
+        *self
+            .fake_free
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = free;
+    }
+
     /// Sets the free bytes `measure` reports (`None` measures the disk again),
     /// and refreshes the stored value at once.
     #[cfg(test)]
@@ -135,8 +186,7 @@ impl Drop for DiskReservation {
 
 /// Free bytes of the file system holding `path`: `f_bavail * f_frsize`.
 fn free_bytes(path: &Path) -> io::Result<u64> {
-    let stat = rustix::fs::statvfs(path)?;
-    Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    Ok(fs::space(path)?.free)
 }
 
 /// Size of the file system holding `path`: `f_blocks * f_frsize`. Sizes the
@@ -146,8 +196,7 @@ pub(crate) fn total_bytes(path: &Path) -> Result<u64, OpenError> {
 }
 
 fn total_bytes_io(path: &Path) -> io::Result<u64> {
-    let stat = rustix::fs::statvfs(path)?;
-    Ok(stat.f_blocks.saturating_mul(stat.f_frsize))
+    Ok(fs::space(path)?.total)
 }
 
 /// A running monitor task. Drop cancels it.
@@ -238,14 +287,41 @@ pub(crate) fn spawn(disk: Arc<Disk>, cache: Option<Arc<ReadCache>>) -> DiskHandl
     }
 }
 
+/// A disk manager that spills under `dir`, as the query runtime's does.
+#[cfg(test)]
+pub(crate) fn test_spill(dir: &Path) -> Arc<DiskManager> {
+    use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+    Arc::new(
+        DiskManagerBuilder::default()
+            .with_mode(DiskManagerMode::Directories(vec![dir.to_path_buf()]))
+            .build()
+            .expect("test disk manager"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn the_spill_cap_is_the_free_disk_above_min_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let spill = test_spill(dir.path());
+        let disk = Disk::open(vec![dir.path().to_path_buf()], 100, Arc::clone(&spill)).unwrap();
+        disk.set_free_for_test(Some(1_000));
+        assert_eq!(spill.max_temp_directory_size(), 900);
+        disk.set_free_for_test(Some(50));
+        assert_eq!(spill.max_temp_directory_size(), 0);
+        disk.set_free_for_test(Some(100));
+        assert_eq!(spill.max_temp_directory_size(), 0);
+    }
+
+    #[test]
     fn try_reserve_grants_up_to_free_and_gives_back_on_drop() {
         let dir = tempfile::tempdir().unwrap();
-        let disk = Arc::new(Disk::open(vec![dir.path().to_path_buf()], 0).unwrap());
+        let disk = Arc::new(
+            Disk::open(vec![dir.path().to_path_buf()], 0, test_spill(dir.path())).unwrap(),
+        );
         disk.set_free_for_test(Some(100));
 
         let first = disk.try_reserve(60).expect("60 of 100 fits");

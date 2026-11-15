@@ -75,6 +75,7 @@ async fn export_body(
         .await
         .map_err(IngestError::Body)?;
     let now_ns = state.clock.now_ns();
+    let retention_cap = crate::entitlements::of(state, project.org_id).retention_cap_days();
     let Accepted {
         normalized,
         request_bytes,
@@ -83,7 +84,15 @@ async fn export_body(
         reservation,
     } = state
         .ingest
-        .accept(raw, reservation, format, encoding, project, now_ns)
+        .accept(
+            raw,
+            reservation,
+            format,
+            encoding,
+            project,
+            retention_cap,
+            now_ns,
+        )
         .await?;
     check_rate(state, project.org_id, normalized.spans.len(), now_ns)?;
     let rejections = normalized.rejections.clone();
@@ -186,12 +195,12 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
     use bytesize::ByteSize;
     use datafusion::prelude::SessionContext;
     use llmobs_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
-    use llmobs_storage::QueryOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
     use prost::Message;
     use serde_json::Value;
@@ -279,12 +288,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -298,12 +302,7 @@ mod tests {
 
     /// All stored span rows, formatted. Used to look at columns the tests need.
     async fn stored_rows(app: &TestApp, project: ProjectId) -> String {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -398,6 +397,35 @@ mod tests {
         let request = decode_json(&body).expect("fixture decodes");
         let expected = normalize(&request, &ctx, &prices).rejections.message();
         assert_eq!(partial["errorMessage"].as_str(), expected.as_deref());
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
+    }
+
+    /// D-P-22: under a 30-day window the age bound is 60 days (D85). A span 61 days old is
+    /// rejected; one 59 days old is stored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_plan_bounds_span_age() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let now = app.state.clock.now_ns();
+        let span = |id: usize, start: i64| {
+            format!(
+                "{{\"traceId\":\"{id:032x}\",\"spanId\":\"{id:016x}\",\"name\":\"span-{id}\",\"startTimeUnixNano\":\"{start}\",\"endTimeUnixNano\":\"{}\"}}",
+                start + 1_000_000_000
+            )
+        };
+        let body = export_json("", &[span(1, now - 61 * DAY), span(2, now - 59 * DAY)]);
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(json_body(&response)["partialSuccess"]["rejectedSpans"], "1");
         assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
     }
 
@@ -679,6 +707,7 @@ mod tests {
                 BodyFormat::Json,
                 BodyEncoding::Identity,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await

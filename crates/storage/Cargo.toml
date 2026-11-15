@@ -44,5 +44,8 @@ arbitrary.workspace = true
 [dev-dependencies]
 arbitrary.workspace = true
 proptest.workspace = true
+# Descriptor limits for the resource tests (track R M5, R5.7); the pin is the workspace's.
+rustix = { workspace = true, features = ["process"] }
+reqwest = { workspace = true }
 tempfile.workspace = true
 toml.workspace = true

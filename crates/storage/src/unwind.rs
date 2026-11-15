@@ -437,6 +437,7 @@ mod tests {
     /// Every span of the seed file, with the default exclusions off.
     fn all_spans() -> SpanListRequest<'static> {
         SpanListRequest {
+            strict_exclusions: false,
             filter: None,
             search: None,
             scope: ListScope {

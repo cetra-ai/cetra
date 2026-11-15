@@ -6,7 +6,7 @@
     "02 § Normalization rules",
     "02 § Media extraction"
   ],
-  "notes": "hand-written from the ai package telemetry (getTracer(\"ai\")); re-check against a B2 capture",
+  "notes": "hand-written from the ai package telemetry. No captured Vercel case has an image part, so no capture covers it.",
   "settings": {
     "media_min_bytes": 8
   }

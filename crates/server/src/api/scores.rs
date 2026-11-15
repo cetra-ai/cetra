@@ -121,6 +121,12 @@ pub struct ScoreListParams {
     /// Who wrote the score.
     #[serde(default)]
     pub source: Option<ScoreSource>,
+    /// Scores written by this evaluator.
+    #[serde(default)]
+    pub evaluator_id: Option<Uuid>,
+    /// Scores written by this online rule.
+    #[serde(default)]
+    pub rule_id: Option<Uuid>,
     /// Inclusive `created_at` start. RFC 3339 or epoch milliseconds.
     #[serde(default)]
     pub from: Option<TimeParam>,

@@ -6,5 +6,5 @@
     "02 § Normalization rules",
     "02 § Mapping tables / Span kind"
   ],
-  "notes": "hand-written from the ai package telemetry (getTracer(\"ai\")); re-check against a B2 capture"
+  "notes": "hand-written from the ai package telemetry. Confirmed by vercel/v5-generate-object: ai.prompt and ai.response.object are JSON on the ai.generateObject span."
 }
