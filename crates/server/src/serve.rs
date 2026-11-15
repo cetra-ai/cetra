@@ -3,10 +3,12 @@
 //! Startup creates `data_dir`, then `Storage::open` (which takes `LOCK`), then
 //! `meta.db`. A second process fails on the lock before `meta.db`.
 //!
-//! Shutdown stops accepting, drains in-flight HTTP for at most [`DRAIN`],
-//! aborts background tasks, gives storage [`STORAGE_SHUTDOWN`] (spec 12's
-//! 30 s flush budget; `Storage::shutdown` also caps each flush at 30 s), then
-//! closes `meta.db`.
+//! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
+//! most [`DRAIN`], aborts background tasks, waits at most [`COMMIT_WAIT`] for
+//! detached commits (D-G-38), flushes `last_used` and usage, gives storage
+//! [`STORAGE_SHUTDOWN`] (spec 12's 30 s flush budget; `Storage::shutdown` also
+//! caps each flush at 30 s), then closes `meta.db`. The worst case is 55 s,
+//! inside the 60 s grace period the packaging sets.
 
 use std::future::Future;
 use std::io;
@@ -34,6 +36,9 @@ use tonic::transport::server::TcpIncoming;
 
 /// How long in-flight HTTP may finish after stop-accepting (spec 12).
 const DRAIN: Duration = Duration::from_secs(20);
+
+/// How long shutdown waits for detached commits (D-G-38, spec 12).
+const COMMIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Best-effort cap on `Storage::shutdown` (spec 12).
 const STORAGE_SHUTDOWN: Duration = Duration::from_secs(30);
@@ -638,7 +643,7 @@ impl Running {
         if let Some(state) = self.state.take() {
             // Commits whose request was dropped still run (D-G-38): they append and count
             // before the final flushes.
-            if tokio::time::timeout(STORAGE_SHUTDOWN, state.ingest.wait_for_commits())
+            if tokio::time::timeout(COMMIT_WAIT, state.ingest.wait_for_commits())
                 .await
                 .is_err()
             {

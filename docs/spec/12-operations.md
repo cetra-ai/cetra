@@ -80,7 +80,7 @@ A file lock (`flock` on `<data_dir>/LOCK`) prevents two processes from opening t
 ## Process lifecycle
 
 - **Startup:** load config → lock data dir and open storage (`catalog.db`, replay WAL) → open `meta.db` + migrations → (log the setup URL if no user exists) → start background tasks (among them the deletion worker, every 2 s and on each request, and the hourly retention task, D-M-3, D-M-10) → bind ports → `/readyz` = 200 (D137). After `meta.db`: finish an interrupted key rotation, load or generate the encryption key, and verify its check value (D-I-1, D-I-3).
-- **Shutdown (SIGTERM/SIGINT):** stop accepting connections, drain in-flight requests (≤ 20 s), flush memtables (best effort ≤ 30 s), stop workers (leases expire and are re-queued), close SQLite.
+- **Shutdown (SIGTERM/SIGINT):** close live streams, stop accepting connections, drain in-flight requests (≤ 20 s), stop workers (leases expire and are re-queued), wait for detached OTLP commits (≤ 5 s, D-G-38), flush `last_used` and usage counters, flush memtables (best effort ≤ 30 s), close SQLite. The worst case is 55 s, inside the 60 s grace period of the container and chart.
 - `/healthz`: process alive. `/readyz`: WAL writable, SQLite reachable, object store reachable (cached 10 s), free disk above threshold.
 
 ## Licence keys, plans and entitlements (track P)
