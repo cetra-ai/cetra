@@ -103,4 +103,4 @@ The decisions are also recorded in `docs/mvp-decisions.md` § Track S.
 
 ## Closeout (S4)
 
-S4 sets this README's status line to `Status: S1–S4 done on <date>`, and `docs/roadmap.md`'s S row to **Done** with the PR numbers.
+S4 sets this README's status line to `Status: S1–S4 done on <date>`, and `docs/roadmap.md`'s S row to **Done**.
