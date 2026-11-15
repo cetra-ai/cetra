@@ -94,7 +94,7 @@ fn encode_within(
             reason: "payload exceeds 256MiB",
         });
     }
-    if !ipc_lengths_fit(&payload, max_decoded) {
+    if !ipc_lengths_fit(&payload, max_decoded, Check::Write) {
         return Err(WalError::InvalidPayload {
             reason: "decoded size exceeds 1 GiB",
         });
@@ -178,7 +178,7 @@ pub(crate) fn decode_next(buf: &[u8], offset: usize) -> Decoded {
 /// from its 8-byte prefix. A payload that fails any check is an
 /// `invalid ipc stream`.
 pub(crate) fn read_batch(payload: &[u8], table: Table) -> Result<RecordBatch, WalError> {
-    if !ipc_lengths_fit(payload, MAX_DECODED_BYTES) {
+    if !ipc_lengths_fit(payload, MAX_DECODED_BYTES, Check::Read) {
         return Err(WalError::InvalidPayload {
             reason: "invalid ipc stream",
         });
@@ -224,10 +224,22 @@ fn ipc_decoder_panicked() -> WalError {
     }
 }
 
+/// What [`ipc_lengths_fit`] checks about each LZ4 frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    /// The writer, through [`encode_within`]. It has just compressed these frames
+    /// itself, so the decoded size from each prefix is enough. Decoding every frame
+    /// again would add a decompression to each WAL append, the hot ingest path.
+    Write,
+    /// Replay, through [`read_batch`]. A record read from disk is not trusted, so each
+    /// frame must decode to exactly its prefix's size.
+    Read,
+}
+
 /// Whether every declared length in the payload fits its bytes, and its LZ4 buffers
 /// decode within `max_decoded` in total. Arrow allocates from these lengths, so
-/// this runs before it.
-fn ipc_lengths_fit(payload: &[u8], max_decoded: u64) -> bool {
+/// this runs before it. `check` decides whether the frames are decoded (see [`Check`]).
+fn ipc_lengths_fit(payload: &[u8], max_decoded: u64, check: Check) -> bool {
     let mut decoded = 0;
     let mut offset = 0;
     while offset < payload.len() {
@@ -270,6 +282,7 @@ fn ipc_lengths_fit(payload: &[u8], max_decoded: u64) -> bool {
             &payload[offset..offset + body_len],
             &mut decoded,
             max_decoded,
+            check,
         ) {
             return false;
         }
@@ -282,7 +295,13 @@ fn ipc_lengths_fit(payload: &[u8], max_decoded: u64) -> bool {
 /// must be a record batch or a dictionary batch, compressed with LZ4 frames
 /// per buffer, or uncompressed. `decoded` sums the decompressed sizes over the
 /// whole payload, and it must stay within `max_decoded`.
-fn buffers_fit(message: &Message<'_>, body: &[u8], decoded: &mut u64, max_decoded: u64) -> bool {
+fn buffers_fit(
+    message: &Message<'_>,
+    body: &[u8],
+    decoded: &mut u64,
+    max_decoded: u64,
+    check: Check,
+) -> bool {
     let batch = if let Some(batch) = message.header_as_record_batch() {
         batch
     } else if let Some(dictionary) = message.header_as_dictionary_batch() {
@@ -320,7 +339,7 @@ fn buffers_fit(message: &Message<'_>, body: &[u8], decoded: &mut u64, max_decode
         let Some(data) = body.get(offset..end) else {
             return false;
         };
-        if compressed && length > 0 && !lz4_buffer_fits(data, decoded, max_decoded) {
+        if compressed && length > 0 && !lz4_buffer_fits(data, decoded, max_decoded, check) {
             return false;
         }
     }
@@ -330,8 +349,8 @@ fn buffers_fit(message: &Message<'_>, body: &[u8], decoded: &mut u64, max_decode
 /// Checks one LZ4 buffer. Its 8-byte prefix is the decompressed size: 0 means
 /// empty, which Arrow allocates nothing for. -1 means stored raw, so its bytes
 /// count toward the total as they are. Any other size must fit the compressed
-/// bytes, and its LZ4 frame must decode to exactly that size.
-fn lz4_buffer_fits(data: &[u8], decoded: &mut u64, max_decoded: u64) -> bool {
+/// bytes. On read, its LZ4 frame must also decode to exactly that size.
+fn lz4_buffer_fits(data: &[u8], decoded: &mut u64, max_decoded: u64, check: Check) -> bool {
     let Some(prefix) = data.first_chunk::<8>() else {
         return false;
     };
@@ -364,7 +383,7 @@ fn lz4_buffer_fits(data: &[u8], decoded: &mut u64, max_decoded: u64) -> bool {
         Some(total) if total <= max_decoded => *decoded = total,
         _ => return false,
     }
-    raw || lz4_frame_decodes_to(frame, declared)
+    raw || check == Check::Write || lz4_frame_decodes_to(frame, declared)
 }
 
 /// Whether `frame` is an LZ4 frame that decodes to exactly `size` bytes. It decodes
@@ -872,7 +891,7 @@ mod tests {
             let mut bad = good.clone();
             // 1 TiB: the allocation Arrow would make from this prefix.
             set_first_lz4_prefix(&mut bad, 1 << 40);
-            assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES));
+            assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
             assert!(is_invalid_payload(&read_batch(&bad, table)));
         }
     }
@@ -889,7 +908,7 @@ mod tests {
         // the bound is corrupt by the ratio alone.
         let mut past = good;
         past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
-        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES));
+        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Read));
     }
 
     #[test]
@@ -909,7 +928,7 @@ mod tests {
         let mut empty = payload_of(&spans_batch(), 1);
         let (_, at) = first_lz4_buffer(&empty);
         empty[at..at + 8].copy_from_slice(&0_i64.to_le_bytes());
-        assert!(ipc_lengths_fit(&empty, MAX_DECODED_BYTES));
+        assert!(ipc_lengths_fit(&empty, MAX_DECODED_BYTES, Check::Read));
     }
 
     /// The decoded bytes the cap counts for a payload: each LZ4 buffer's declared
@@ -939,8 +958,8 @@ mod tests {
             let payload = payload_of(&batch, 1);
             let total = decoded_total(&payload);
             assert!(total > 0);
-            assert!(ipc_lengths_fit(&payload, total));
-            assert!(!ipc_lengths_fit(&payload, total - 1));
+            assert!(ipc_lengths_fit(&payload, total, Check::Read));
+            assert!(!ipc_lengths_fit(&payload, total - 1, Check::Read));
         }
     }
 
@@ -971,20 +990,44 @@ mod tests {
         let (_, at) = first_lz4_buffer(&good);
         let claimed = i64::from_le_bytes(good[at..at + 8].try_into().unwrap());
         assert!(claimed > 1);
-        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES));
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
 
         // A prefix of 1 is far inside the ratio bound, so only the frame check can
         // see that the frame decodes to more.
         let mut short = good.clone();
         short[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
-        assert!(!ipc_lengths_fit(&short, MAX_DECODED_BYTES));
+        assert!(!ipc_lengths_fit(&short, MAX_DECODED_BYTES, Check::Read));
         assert!(is_invalid_payload(&read_batch(&short, Table::Spans)));
 
         // A frame that decodes to less than its prefix claims is corrupt too.
         let mut long = good;
         long[at..at + 8].copy_from_slice(&(claimed + 1).to_le_bytes());
-        assert!(!ipc_lengths_fit(&long, MAX_DECODED_BYTES));
+        assert!(!ipc_lengths_fit(&long, MAX_DECODED_BYTES, Check::Read));
         assert!(is_invalid_payload(&read_batch(&long, Table::Spans)));
+    }
+
+    #[test]
+    fn the_write_check_skips_the_frame_decode_and_the_read_check_does_not() {
+        let good = payload_of(&spans_batch(), 1);
+        let (index, at) = first_lz4_buffer(&good);
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Write));
+        assert!(ipc_lengths_fit(&good, MAX_DECODED_BYTES, Check::Read));
+
+        // A prefix of 1 disagrees with the frame the writer left. The write check
+        // only sums prefixes, so it accepts; the read check decodes and rejects.
+        let mut lying = good.clone();
+        lying[at..at + 8].copy_from_slice(&1_i64.to_le_bytes());
+        assert!(ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Write));
+        assert!(!ipc_lengths_fit(&lying, MAX_DECODED_BYTES, Check::Read));
+        assert!(is_invalid_payload(&read_batch(&lying, Table::Spans)));
+
+        // The write check still rejects what needs no decode: a prefix past the
+        // ratio bound.
+        let length = usize::try_from(batch_layout(&good).buffers[index].1).unwrap();
+        let bound = u64::try_from(length - 8).unwrap() * LZ4_MAX_RATIO + LZ4_SLACK;
+        let mut past = good;
+        past[at..at + 8].copy_from_slice(&i64::try_from(bound + 1).unwrap().to_le_bytes());
+        assert!(!ipc_lengths_fit(&past, MAX_DECODED_BYTES, Check::Write));
     }
 
     #[test]
@@ -999,7 +1042,7 @@ mod tests {
 
         let mut bad = good;
         set_buffer_length(&mut bad, index, 1 << 40);
-        assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES));
+        assert!(!ipc_lengths_fit(&bad, MAX_DECODED_BYTES, Check::Read));
         assert!(is_invalid_payload(&read_batch(&bad, Table::Spans)));
     }
 
@@ -1015,7 +1058,7 @@ mod tests {
                 .unwrap();
         writer.write(&batch).unwrap();
         writer.finish().unwrap();
-        assert!(!ipc_lengths_fit(&zstd, MAX_DECODED_BYTES));
+        assert!(!ipc_lengths_fit(&zstd, MAX_DECODED_BYTES, Check::Read));
         assert!(is_invalid_payload(&read_batch(&zstd, Table::Spans)));
     }
 
