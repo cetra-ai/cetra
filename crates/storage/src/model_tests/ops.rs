@@ -15,7 +15,9 @@ use super::check::check_settled_files;
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, SpanCopy};
 use super::observe::{observe_eval_trace_ids, observe_user_scope};
-use super::shape::{HOUR_NS, P, ScoreKey, Target, day, hex, midnight, score, span, trace_id};
+use super::shape::{
+    HOUR_NS, P, ScoreKey, Target, day, hex, midnight, score, score_created_at, span, trace_id,
+};
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::AppendError;
 use crate::test_support::span_rows;
@@ -720,6 +722,33 @@ fn keep_newest_copies(state: &mut ProjectModel) {
     }
 }
 
+/// Mirrors the day close of scores (spec 03 § 5). Per key, the live winner is the visible version
+/// with the greatest `(created_at + version, ingest)`, as `expected_scores` orders them. When it is
+/// a tombstone, the day close dropped every version of the key, so the model drops them too. A
+/// later `StaleScore` then finds no key to pick, and a later `Score` starts at version 1 again.
+/// That is the known limit spec 03 § 5 documents: a stale version after the day close reads as live.
+fn drop_day_closed_scores(state: &mut ProjectModel) {
+    let closed: Vec<ScoreKey> = state
+        .scores
+        .iter()
+        .filter_map(|(key, versions)| {
+            let winner = versions
+                .iter()
+                .filter(|version| !state.covers_score(key, version.ingest))
+                .max_by_key(|version| {
+                    (
+                        score_created_at(key) + i64::from(version.version),
+                        version.ingest,
+                    )
+                })?;
+            winner.deleted.then_some(*key)
+        })
+        .collect();
+    for key in closed {
+        state.scores.remove(&key);
+    }
+}
+
 /// Quiesces storage, then makes the model match it (plan § R1.3, steps 1–6).
 /// The physical checks of the settled files come in R1.7.
 pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) {
@@ -771,9 +800,11 @@ pub(super) fn settle(harness: &mut Harness, model: &mut Model, clock: &mut i64) 
         .block_on(harness.storage().collect_staged(Duration::ZERO))
         .expect("collect_staged while settling");
 
-    // 6. Compaction collapsed every key to one copy.
+    // 6. Compaction collapsed every key to one copy, and day-closed the scores whose tombstone won.
     keep_newest_copies(&mut model.a);
     keep_newest_copies(&mut model.b);
+    drop_day_closed_scores(&mut model.a);
+    drop_day_closed_scores(&mut model.b);
 
     check_settled_files(harness, model);
 }

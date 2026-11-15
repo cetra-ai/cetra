@@ -389,3 +389,27 @@ fn regression_compaction_restart_resend() {
         },
     ]);
 }
+
+/// The shrunk case of finding M1-2: a score's tombstone is dropped by the day close, and a stale
+/// version of the score sent after it reads as live (spec 03 § 5, known limit). The model drops the
+/// key at settle, so the stale version is not written for it.
+#[test]
+fn stale_score_after_day_close_of_tombstone() {
+    run_case(&[
+        Op::Score {
+            project: P::A,
+            target: 0,
+            name: 0,
+        },
+        Op::DeleteScore {
+            project: P::A,
+            pick: 2,
+        },
+        Op::Settle,
+        Op::StaleScore {
+            project: P::A,
+            pick: 106,
+            back: 127,
+        },
+    ]);
+}
