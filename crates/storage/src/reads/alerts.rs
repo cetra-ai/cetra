@@ -42,7 +42,7 @@ pub enum AlertMeasure {
     Cost,
     /// Trace `duration_ns` p95, in milliseconds.
     TraceLatencyP95,
-    /// `duration_ns` p95 of `llm` spans, in milliseconds.
+    /// `duration_ns` p95 of `llm` spans that ended in the window, in milliseconds.
     LlmLatencyP95,
     /// `avg(value_num)` of the live trace and span scores named `name` whose
     /// `value_num` is not null: numeric, boolean (1/0), and categorical with a value.
@@ -60,7 +60,8 @@ pub enum AlertMeasure {
 /// One alert evaluation.
 #[derive(Debug, Clone)]
 pub struct AlertValueRequest<'a> {
-    /// `start_time ∈ [from, to)` for traces and spans, `created_at` for scores.
+    /// `start_time ∈ [from, to)` for traces, `end_time ∈ [from, to)` for `llm` spans,
+    /// `created_at ∈ [from, to)` for scores.
     pub window: TimeWindow,
     /// Filter text over `traces`. `None`, empty or all-whitespace means no filter.
     pub filter: Option<&'a str>,
@@ -195,7 +196,7 @@ async fn compute(
                 .map_err(classify)?
                 .filter(
                     window
-                        .predicate(spans::START_TIME)
+                        .predicate(spans::END_TIME)
                         .and(col(spans::SPAN_KIND).eq(lit(SpanKind::Llm.as_str())))
                         .and(in_subquery(col(spans::TRACE_ID), Arc::new(ids))),
                 )
@@ -821,6 +822,23 @@ mod tests {
                 value: None
             }
         );
+    }
+
+    #[tokio::test]
+    async fn llm_span_that_ended_in_the_window_counts_though_it_started_before() {
+        // A 90 s llm span ending at T0+5m30s: it started before the 1m window
+        // [T0+5m, T0+6m) but ended inside it.
+        let mut parent = root(0, T0 + 3 * MIN);
+        parent.end_time = T0 + 6 * MIN;
+        let mut child = llm_child(&parent, 0, T0 + 4 * MIN, 90_000_000_000);
+        child.end_time = T0 + 5 * MIN + 30_000_000_000;
+        let ctx = context(&[parent, child], &[]);
+        let window = TimeWindow::new(T0 + 5 * MIN, T0 + 6 * MIN).expect("window");
+        let value = measure_over(&ctx, window, AlertMeasure::LlmLatencyP95)
+            .await
+            .expect("value");
+        assert_eq!(value.count, 1);
+        assert_close(value.value, 90_000.0, 1.0);
     }
 
     #[tokio::test]

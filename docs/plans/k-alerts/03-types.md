@@ -330,7 +330,7 @@ Take the argument as `mut condition`, change its fields in place and return `Ok(
 2. **threshold**: not finite (`!threshold.is_finite()`) → error `threshold`, `"must be a finite number"`, and skip the per-metric check. Otherwise, per metric:
    - `error_rate`: outside `[0, 1]` → `"must be between 0 and 1"`;
    - `cost`: below 0 → `"must be at least 0"`;
-   - `latency_p95`: `<= 0` → `"must be greater than 0"`;
+   - `latency_p95`: `<= 0` → `"must be greater than 0"`; target `trace` (or `None`) and `threshold >= window length in ms` → `"must be less than the window"` (D-K-18);
    - `score` with aggregation `pass_rate` (after the default below): outside `[0, 1]` → `"must be between 0 and 1"`; with `avg`: no range.
 3. **min_count**:
    - `cost`: `Some(_)` → error `min_count`, `"does not apply to cost"`; stays `None`.

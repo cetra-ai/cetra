@@ -1791,7 +1791,8 @@ export interface components {
             target?: components["schemas"]["LatencyTarget"];
             /**
              * Format: double
-             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`.
+             * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
+             *     (below the window length for a `trace` target).
              */
             threshold: number;
             /** @description Sliding window. */

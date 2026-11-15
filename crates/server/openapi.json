@@ -11274,7 +11274,7 @@
           "threshold": {
             "type": "number",
             "format": "double",
-            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`."
+            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target)."
           },
           "window": {
             "$ref": "#/components/schemas/AlertWindow",
