@@ -37,7 +37,7 @@ There are three sub-phases. Each is done by one Haiku agent in one go, in order,
 
 **Goal:** every segment read goes through one function. That function fetches a set of segments as **one wave**: one batch of concurrent requests, after merging nearby ranges according to the scan kind. It counts requests, bytes and waves. Every place that today issues concurrent reads issues exactly one wave.
 
-**Edit:** `strata/src/{io.rs (new),file.rs,reader.rs,payload/read.rs,payload/search.rs,lib.rs}`.
+**Edit:** `strata/src/{io.rs (new),file.rs,reader.rs,payload/frames.rs,payload/read.rs,payload/search.rs,lib.rs}`.
 
 ### Types (`io.rs`)
 
