@@ -89,9 +89,22 @@ impl TestServer {
         server
     }
 
-    pub(crate) async fn stop(self) {
-        let TestServer { running, .. } = self;
+    /// The data directory: `<dir>/data`, with `objects/` under it in local mode.
+    pub(crate) fn data_dir(&self) -> PathBuf {
+        self.dir.path().join("data")
+    }
+
+    /// The config file that starts this server (`llmobs.toml` in the temp dir).
+    pub(crate) fn config_path(&self) -> PathBuf {
+        self.dir.path().join("llmobs.toml")
+    }
+
+    /// Stops the server and returns its temp dir, which holds the data directory and the
+    /// config file: keep it alive while the test still reads or runs commands on them.
+    pub(crate) async fn stop(self) -> tempfile::TempDir {
+        let TestServer { running, dir, .. } = self;
         running.shutdown().await.unwrap();
+        dir
     }
 
     /// A credentials file in the temp dir holding `url → token`.

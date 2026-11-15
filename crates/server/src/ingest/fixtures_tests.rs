@@ -21,10 +21,12 @@ use llmobs_core::ids::ProjectId;
 use llmobs_core::span::Span;
 use llmobs_core::time_serde::parse_rfc3339;
 use llmobs_otel::{IngestContext, PriceRow, PriceTable, decode_json, normalize};
+use llmobs_storage::Storage;
 use llmobs_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{QueryOptions, Storage};
+
+use crate::test_support::raw_query;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
 use prost::Message;
 use serde_json::Value;
@@ -201,10 +203,7 @@ fn span_key(
 
 /// Every stored span of `project`, in the order of the expected batch.
 async fn stored_batch(storage: &Storage, project: ProjectId) -> RecordBatch {
-    let query = storage
-        .query(project, QueryOptions::default())
-        .await
-        .expect("query opens");
+    let query = raw_query(storage, project).await;
     // The query's runtime carries the object store that the Parquet files are read from.
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
     ctx.register_table("raw_spans", query.spans)
@@ -320,7 +319,7 @@ async fn check_case(app: &TestApp, seeded: &Seeded, case: &Case, prices: &PriceT
         let read = app
             .state
             .storage
-            .get_media(project.id, &sha, None)
+            .get_media(project.id, &sha, None, None)
             .await
             .unwrap_or_else(|error| panic!("{label}: media {hash} is not stored: {error}"));
         assert_eq!(
@@ -499,10 +498,7 @@ async fn post_over_tcp(addr: SocketAddr, body: &str) -> Option<u16> {
 
 /// Span ids stored for `project`, read from the raw `spans` provider.
 async fn stored_span_ids(storage: &Storage, project: ProjectId) -> HashSet<u64> {
-    let query = storage
-        .query(project, QueryOptions::default())
-        .await
-        .expect("query opens");
+    let query = raw_query(storage, project).await;
     // The query's runtime carries the object store that the Parquet files are read from.
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), query.runtime);
     ctx.register_table("raw_spans", query.spans)

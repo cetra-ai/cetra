@@ -57,14 +57,16 @@ pub enum DeletionActorKind {
     User,
     /// A project API key.
     ApiKey,
+    /// The cloud control plane. `id` is its request token's id.
+    ControlPlane,
 }
 
 /// The requester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DeletionActor {
-    /// `user` or `api_key`.
+    /// `user`, `api_key` or `control_plane`.
     pub kind: DeletionActorKind,
-    /// The user id or the API key id.
+    /// The user, API key or control-plane token id.
     pub id: Uuid,
 }
 

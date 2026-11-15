@@ -20,7 +20,7 @@ use crate::http::AppState;
 use crate::http::access::user_project;
 use crate::http::error::ApiError;
 use crate::meta::saved_views::{self, Viewer};
-use crate::routes::read::{READ_TIMEOUT, attach_trace_scores, open_query};
+use crate::routes::read::{Deadline, READ_TIMEOUT, attach_trace_scores, open_query};
 
 pub(crate) const SEARCH_TRACES: &str = "search_traces";
 pub(crate) const GET_TRACE: &str = "get_trace";
@@ -165,12 +165,14 @@ pub(crate) async fn search_traces(
 
     // The window goes into `ListScope`, which filters the list; the context itself is opened
     // without a window, as for every read endpoint (D101).
-    let ctx = open_query(state, access.project.id, None).await?;
+    let deadline = Deadline::start();
+    let ctx = open_query(state, access.project.org_id, access.project.id, None).await?;
     let page = storage::trace_list(
         &ctx,
         storage::TraceListRequest {
             filter: filter.as_deref(),
             search: search.as_deref(),
+            strict_exclusions: false,
             scope: storage::ListScope {
                 window: Some(window),
                 include_eval,
@@ -180,12 +182,12 @@ pub(crate) async fn search_traces(
             order: storage::SortOrder::Desc,
             limit,
             cursor: None,
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
     let mut traces = convert::trace_summaries(&page.batches)?;
-    attach_trace_scores(&ctx, &mut traces).await?;
+    attach_trace_scores(&ctx, &mut traces, deadline).await?;
 
     let more = page.next_cursor.is_some();
     let mut cut = false;
@@ -318,14 +320,21 @@ pub(crate) async fn get_trace(
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
 
-    let ctx = open_query(state, access.project.id, args.around.map(TimeParam::ns)).await?;
-    let data = storage::trace_detail(&ctx, &args.trace_id, READ_TIMEOUT)
+    let deadline = Deadline::start();
+    let ctx = open_query(
+        state,
+        access.project.org_id,
+        access.project.id,
+        args.around.map(TimeParam::ns),
+    )
+    .await?;
+    let data = storage::trace_detail(&ctx, &args.trace_id, deadline.remaining()?)
         .await?
         .ok_or(ApiError::NotFound)?;
     let mut trace = convert::trace_summaries(std::slice::from_ref(&data.trace))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace)).await?;
+    attach_trace_scores(&ctx, std::slice::from_mut(&mut trace), deadline).await?;
     let spans = build_tree(convert::span_summaries(&data.spans)?);
 
     let (trace, mut cut) = compact_summary(to_json(&trace)?, args.include_payloads);
@@ -404,7 +413,13 @@ pub(crate) async fn get_span(
 
     // The HTTP span endpoint opens its context with `None`; the tool takes `around` (D154).
     // It only speeds up the lookup.
-    let ctx = open_query(state, access.project.id, args.around.map(TimeParam::ns)).await?;
+    let ctx = open_query(
+        state,
+        access.project.org_id,
+        access.project.id,
+        args.around.map(TimeParam::ns),
+    )
+    .await?;
     let batch = storage::span_detail(&ctx, &args.trace_id, &args.span_id, READ_TIMEOUT)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -517,7 +532,7 @@ mod tests {
     use crate::mcp::test_helpers::*;
     use crate::meta::members::set_project_override;
     use crate::meta::saved_views::NewSavedView;
-    use crate::test_support::{TestApp, dataset_span};
+    use crate::test_support::{TestApp, dataset_span, set_limits};
 
     const T1: &str = "a1000000000000000000000000000001";
     const T2: &str = "a1000000000000000000000000000002";
@@ -1741,5 +1756,35 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    /// D-P-21: `search_traces` does not return a trace before the org's data window. The window
+    /// is one day, so the request range (at most 30 days) reaches the hidden trace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_traces_reads_through_the_window() {
+        let (app, seeded, tok) = app_with_token().await;
+        let project = seeded.project.id.to_string();
+        let old = TraceId::from_str("a6000000000000000000000000000001").unwrap();
+        let new = TraceId::from_str("a6000000000000000000000000000002").unwrap();
+        // 2026-01-01T00:00:00Z less two days, and less two hours.
+        app.commit_trace_at(&seeded.project, old, 1, 1_767_052_800_000_000_000)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, 1_767_218_400_000_000_000)
+            .await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 1}),
+        );
+
+        let args = json!({
+            "project": project,
+            "from": "2025-12-29T00:00:00Z",
+            "to": "2026-01-02T00:00:00Z",
+        });
+        let (is_error, body) = call(&app, &tok, SEARCH_TRACES, &args).await;
+        assert!(!is_error, "{body}");
+        assert_eq!(ids(&body), ["a6000000000000000000000000000002"]);
     }
 }

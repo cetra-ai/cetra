@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { authorizeHref, isPublicPath, safeRedirect } from "./redirect";
+import { authorizeHref, isPublicPath, safeRedirect, ssoAuthorizeHref } from "./redirect";
 
 it("keeps relative paths", () => {
   expect(safeRedirect("/acme/support-bot/traces?range=1h")).toBe(
@@ -46,5 +46,12 @@ it("builds authorize links", () => {
   );
   expect(authorizeHref("github", { redirect: "/setup/workspace", setupToken: "t1" })).toBe(
     "/api/auth/authorize/github?redirect=%2Fsetup%2Fworkspace&setup_token=t1",
+  );
+});
+
+it("builds the org SSO authorize link", () => {
+  expect(ssoAuthorizeHref("acme.com")).toBe("/api/auth/sso/authorize?domain=acme.com");
+  expect(ssoAuthorizeHref("acme.com", "/acme/x?y=1")).toBe(
+    "/api/auth/sso/authorize?domain=acme.com&redirect=%2Facme%2Fx%3Fy%3D1",
   );
 });

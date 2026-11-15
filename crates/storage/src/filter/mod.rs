@@ -8,7 +8,7 @@ mod scope;
 mod scores;
 mod validate;
 
-pub(crate) use scope::{exclusions, search, time_window};
+pub(crate) use scope::{exclusions, search, strict_exclusions, time_window};
 
 use datafusion::arrow::datatypes::DataType;
 use datafusion::error::DataFusionError;
@@ -786,6 +786,7 @@ mod tests {
                 target_partitions: NonZeroUsize::new(2).expect("two partitions"),
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )
@@ -976,6 +977,7 @@ mod tests {
                 target_partitions: NonZeroUsize::new(2).expect("two partitions"),
                 optimizer_rules: Vec::new(),
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )

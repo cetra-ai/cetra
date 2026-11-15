@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use arrow::array::{
     Array, ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
@@ -27,7 +28,19 @@ use llmobs_core::schema::traces_schema;
 use llmobs_core::score::Score;
 use llmobs_core::span::Span;
 
+use crate::Storage;
+use crate::config::StorageConfig;
 use crate::views::{ProjectQuery, QueryContext};
+
+/// Turns core dumps off for this process. A crash child calls it before it can abort, so an
+/// abort writes no `core.*` file to the working directory of the run.
+pub(crate) fn no_core_dumps() {
+    use rustix::process::{Resource, getrlimit, setrlimit};
+    let mut limit = getrlimit(Resource::Core);
+    limit.current = Some(0);
+    // Best effort: a failure leaves the default, and the child still aborts as it would.
+    let _ = setrlimit(Resource::Core, limit);
+}
 
 fn dataset_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/api/dataset")
@@ -52,11 +65,15 @@ fn read_text(name: &str) -> String {
 }
 
 /// The rows stored in one catalogued file's Parquet object, under `objects/`.
-pub(crate) fn object_rows(dir: &std::path::Path, file: &crate::catalog::FileMeta) -> RecordBatch {
+pub(crate) fn object_rows(dir: &Path, file: &crate::catalog::FileMeta) -> RecordBatch {
     let bytes = fs::read(dir.join("objects").join(&file.path)).unwrap();
+    parquet_rows(Bytes::from(bytes))
+}
+
+/// The rows of one Parquet object, given its bytes (R4.4: the model reads objects of a store too).
+pub(crate) fn parquet_rows(bytes: Bytes) -> RecordBatch {
     let builder =
-        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
-            .unwrap();
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
     let schema = Arc::clone(builder.schema());
     let batches: Vec<RecordBatch> = builder
         .build()
@@ -206,6 +223,27 @@ pub(crate) fn span_rows(spans: &[Span]) -> RecordBatch {
     spans_to_record_batch(spans).unwrap_or_else(|error| panic!("spans batch: {error}"))
 }
 
+/// One span of `trace` whose `input` is `len` bytes of incompressible printable
+/// ASCII: SplitMix64 output, each byte mapped to `b'!' + b % 94`. Its WAL record
+/// is about `len` bytes, whatever the compression.
+pub(crate) fn big_span_batch(trace: u16, len: usize) -> RecordBatch {
+    let mut state = 0x5eed_u64;
+    let input: String = (0..len)
+        .map(|_| {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            let offset = u8::try_from(z % 94).expect("a remainder of 94 fits in a byte");
+            char::from(b'!' + offset)
+        })
+        .collect();
+    let mut span = span_row(trace, 0, 1_000, 1_000);
+    span.input = Some(input);
+    span_rows(&[span])
+}
+
 /// One score of the fixed test project on the given trace, the score twin of
 /// [`span_row`]: `trace_id` is the 2 big-endian bytes of `trace + 1`, repeated.
 /// A test that needs `session_id`, `user_id` or another target sets it on the
@@ -261,6 +299,7 @@ pub(crate) fn example_query() -> ProjectQuery {
         target_partitions: NonZeroUsize::new(2).expect("two partitions"),
         optimizer_rules: Vec::new(),
         suspects: crate::verify::Suspects::detached(),
+        visible_from: None,
     }
 }
 
@@ -657,222 +696,192 @@ fn sum_f64(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     total
 }
 
-mod fault_store {
-    use std::collections::VecDeque;
-    use std::fmt;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex, PoisonError};
-    use std::time::Duration;
+/// One storage life on a runtime of its own, ended like a crash (D-R-4): the
+/// storage is dropped without `shutdown`, then the runtime is shut down, so no
+/// task of this life can touch the directory afterwards.
+pub(crate) fn crashed_life<T>(config: &StorageConfig, body: impl AsyncFnOnce(&Storage) -> T) -> T {
+    let runtime = life_runtime();
+    let storage = runtime
+        .block_on(Storage::open(config.clone()))
+        .expect("open storage for a life");
+    let output = runtime.block_on(body(&storage));
+    drop(storage);
+    runtime.shutdown_timeout(Duration::from_secs(10));
+    output
+}
 
-    use async_trait::async_trait;
-    use futures::stream::BoxStream;
-    use object_store::path::Path;
-    use object_store::{
-        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, UploadPart,
+/// The same life, ended with `shutdown`.
+pub(crate) fn clean_life<T>(config: &StorageConfig, body: impl AsyncFnOnce(&Storage) -> T) -> T {
+    let runtime = life_runtime();
+    let storage = runtime
+        .block_on(Storage::open(config.clone()))
+        .expect("open storage for a life");
+    let output = runtime.block_on(body(&storage));
+    runtime
+        .block_on(storage.shutdown())
+        .expect("clean shutdown");
+    drop(storage);
+    runtime.shutdown_timeout(Duration::from_secs(10));
+    output
+}
+
+/// The runtime `Objects` and `Storage` run on in a life (as M1's `open_life`).
+fn life_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime for a life")
+}
+
+/// Object keys under `objects/tables` and `objects/media` (temp names
+/// excluded) that no `data_files`, `staged_objects` or `media` row names.
+pub(crate) async fn orphan_objects(data_dir: &Path) -> Vec<String> {
+    let known = known_names(data_dir).await;
+    let objects = data_dir.join("objects");
+    let mut keys = Vec::new();
+    for table_dir in ["tables", "media"] {
+        collect_object_keys(&objects.join(table_dir), &objects, &mut keys);
+    }
+    keys.sort();
+    keys.retain(|key| !known.contains(key));
+    keys
+}
+
+/// Opens `catalog.db` read-only, on a connection of its own.
+async fn open_catalog(data_dir: &Path) -> sqlx::SqliteConnection {
+    use sqlx::ConnectOptions;
+    sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(data_dir.join("catalog.db"))
+        .read_only(true)
+        .connect()
+        .await
+        .expect("open catalog.db read-only")
+}
+
+/// Every object name the catalog knows, in any state: `data_files` paths, `staged_objects` paths
+/// and every media key (N's B5 "known").
+async fn known_names(data_dir: &Path) -> BTreeSet<String> {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, String>(
+        "SELECT path FROM data_files
+         UNION SELECT path FROM staged_objects
+         UNION SELECT 'media/' || project_id || '/' || sha256 FROM media",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("read the object names of the catalog")
+    .into_iter()
+    .collect()
+}
+
+/// The names the catalog needs in the store: active data files, and the media of projects that
+/// are not dropping or dropped (N's B5 "needed").
+async fn needed_names(data_dir: &Path) -> BTreeSet<String> {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, String>(
+        "SELECT path FROM data_files WHERE state = 'active'
+         UNION SELECT 'media/' || m.project_id || '/' || m.sha256 FROM media m
+         WHERE NOT EXISTS (
+             SELECT 1 FROM projects p
+             WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("read the needed object names of the catalog")
+    .into_iter()
+    .collect()
+}
+
+/// What [`collect_orphans_dry_run`] counts: the fields of N's B5 `OrphanReport` with the same
+/// names.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct OrphanCounts {
+    pub(crate) orphans: u64,
+    pub(crate) missing: u64,
+    pub(crate) missing_media: u64,
+}
+
+/// Stand-in for N's B5 `Storage::collect_orphans(ZERO, dry_run = true)` until B5 merges (R4.4).
+/// It lists `tables/` and `media/` on `store`, and compares the keys with the catalog in
+/// `data_dir`. Every unknown object is an orphan: there is no minimum age yet. B5's
+/// `collect_orphans` brings the age filter, and the model test then counts the unknown objects
+/// younger than it. Like B5, it reads the needed names before listing and the known names after.
+pub(crate) async fn collect_orphans_dry_run(
+    data_dir: &Path,
+    store: &dyn object_store::ObjectStore,
+) -> OrphanCounts {
+    use futures::TryStreamExt;
+    let mut missing = needed_names(data_dir).await;
+    let mut listed = Vec::new();
+    for prefix in ["tables", "media"] {
+        let objects: Vec<object_store::ObjectMeta> = store
+            .list(Some(&object_store::path::Path::from(prefix)))
+            .try_collect()
+            .await
+            .expect("list the object store");
+        listed.extend(objects.into_iter().map(|meta| meta.location.to_string()));
+    }
+    let known = known_names(data_dir).await;
+    let mut counts = OrphanCounts::default();
+    for key in listed {
+        if is_temp_key(&key) {
+            continue;
+        }
+        missing.remove(&key);
+        if !known.contains(&key) {
+            counts.orphans += 1;
+        }
+    }
+    for key in missing {
+        if key.starts_with("tables/") {
+            counts.missing += 1;
+        } else {
+            counts.missing_media += 1;
+        }
+    }
+    counts
+}
+
+/// Rows of `data_files` in state `obsolete`. A settled store has none: GC deletes each such file
+/// and its row together.
+pub(crate) async fn obsolete_rows(data_dir: &Path) -> i64 {
+    let mut connection = open_catalog(data_dir).await;
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'")
+        .fetch_one(&mut connection)
+        .await
+        .expect("count the obsolete rows of the catalog")
+}
+
+/// A temp name, as `Objects` writes them: a dot-name with `.tmp-` in it.
+fn is_temp_key(key: &str) -> bool {
+    let name = key.rsplit('/').next().unwrap_or(key);
+    name.starts_with('.') && name.contains(".tmp-")
+}
+
+/// Adds the key of every non-temp file under `dir`, relative to `objects`.
+fn collect_object_keys(dir: &Path, objects: &Path, keys: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
-
-    /// One injected failure for the next `put` or multipart upload.
-    #[derive(Debug, Clone)]
-    pub(crate) enum FaultKind {
-        /// Return an error and write nothing.
-        FailBefore,
-        /// Write, then return an error. The object may exist.
-        FailAfter,
-        /// Wait, then forward the call.
-        Delay(Duration),
-    }
-
-    /// [`ObjectStore`] that can fail or delay its next upload.
-    ///
-    /// This is a second implementation of the external trait so the remote
-    /// `put_durable` path runs in CI without AWS (D119).
-    #[derive(Debug, Clone)]
-    pub(crate) struct FaultStore {
-        inner: Arc<dyn ObjectStore>,
-        fault: Arc<Mutex<VecDeque<FaultKind>>>,
-        /// When set, every upload fails before writing and the queue is left alone.
-        hold: Arc<AtomicBool>,
-        /// When set, every read (`get_opts`, and so `head` and range reads) fails.
-        fail_reads: Arc<AtomicBool>,
-        /// Calls to `get_opts`, shared by the clones.
-        gets: Arc<AtomicU64>,
-    }
-
-    impl FaultStore {
-        pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
-            Self {
-                inner,
-                fault: Arc::new(Mutex::new(VecDeque::new())),
-                hold: Arc::new(AtomicBool::new(false)),
-                fail_reads: Arc::new(AtomicBool::new(false)),
-                gets: Arc::new(AtomicU64::new(0)),
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            collect_object_keys(&path, objects, keys);
+        } else if kind.is_file() {
+            let Ok(key) = path.strip_prefix(objects) else {
+                continue;
+            };
+            let key = key.to_string_lossy().into_owned();
+            if !is_temp_key(&key) {
+                keys.push(key);
             }
-        }
-
-        /// How many reads (`get_opts`, and so `head`, range and whole reads) were made.
-        pub(crate) fn gets(&self) -> u64 {
-            self.gets.load(Ordering::SeqCst)
-        }
-
-        /// Makes every read fail while `on` is set.
-        pub(crate) fn fail_reads(&self, on: bool) {
-            self.fail_reads.store(on, Ordering::SeqCst);
-        }
-
-        /// Replaces the queue with one fault. A later upload consumes it.
-        pub(crate) fn arm(&self, kind: FaultKind) {
-            let mut queue = self.fault.lock().unwrap_or_else(PoisonError::into_inner);
-            queue.clear();
-            queue.push_back(kind);
-        }
-
-        /// Appends a fault. Uploads consume the queue from the front.
-        pub(crate) fn enqueue(&self, kind: FaultKind) {
-            self.fault
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push_back(kind);
-        }
-
-        /// Fail every upload before it writes, until [`Self::release`].
-        pub(crate) fn hold_failures(&self) {
-            self.hold.store(true, Ordering::SeqCst);
-        }
-
-        /// Lets uploads reach the inner store again.
-        pub(crate) fn release(&self) {
-            self.hold.store(false, Ordering::SeqCst);
-        }
-
-        fn take(&self) -> Option<FaultKind> {
-            if self.hold.load(Ordering::SeqCst) {
-                return Some(FaultKind::FailBefore);
-            }
-            self.fault
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .pop_front()
-        }
-    }
-
-    impl fmt::Display for FaultStore {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(formatter, "FaultStore({})", self.inner.as_ref())
-        }
-    }
-
-    fn injected() -> object_store::Error {
-        object_store::Error::Generic {
-            store: "fault",
-            source: Box::new(std::io::Error::other("injected fault")),
-        }
-    }
-
-    struct FaultMultipart {
-        inner: Box<dyn MultipartUpload>,
-        fail_after: bool,
-    }
-
-    impl fmt::Debug for FaultMultipart {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter
-                .debug_struct("FaultMultipart")
-                .field("fail_after", &self.fail_after)
-                .finish_non_exhaustive()
-        }
-    }
-
-    #[async_trait]
-    impl MultipartUpload for FaultMultipart {
-        fn put_part(&mut self, data: PutPayload) -> UploadPart {
-            self.inner.put_part(data)
-        }
-
-        async fn complete(&mut self) -> Result<PutResult> {
-            let result = self.inner.complete().await?;
-            if self.fail_after {
-                return Err(injected());
-            }
-            Ok(result)
-        }
-
-        async fn abort(&mut self) -> Result<()> {
-            self.inner.abort().await
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for FaultStore {
-        async fn put_opts(
-            &self,
-            location: &Path,
-            payload: PutPayload,
-            opts: PutOptions,
-        ) -> Result<PutResult> {
-            match self.take() {
-                Some(FaultKind::FailBefore) => Err(injected()),
-                Some(FaultKind::FailAfter) => {
-                    self.inner.put_opts(location, payload, opts).await?;
-                    Err(injected())
-                }
-                Some(FaultKind::Delay(duration)) => {
-                    tokio::time::sleep(duration).await;
-                    self.inner.put_opts(location, payload, opts).await
-                }
-                None => self.inner.put_opts(location, payload, opts).await,
-            }
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &Path,
-            opts: PutMultipartOptions,
-        ) -> Result<Box<dyn MultipartUpload>> {
-            match self.take() {
-                Some(FaultKind::FailBefore) => Err(injected()),
-                Some(FaultKind::FailAfter) => {
-                    let inner = self.inner.put_multipart_opts(location, opts).await?;
-                    Ok(Box::new(FaultMultipart {
-                        inner,
-                        fail_after: true,
-                    }))
-                }
-                Some(FaultKind::Delay(duration)) => {
-                    tokio::time::sleep(duration).await;
-                    self.inner.put_multipart_opts(location, opts).await
-                }
-                None => self.inner.put_multipart_opts(location, opts).await,
-            }
-        }
-
-        async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
-            self.gets.fetch_add(1, Ordering::SeqCst);
-            if self.fail_reads.load(Ordering::SeqCst) {
-                return Err(injected());
-            }
-            self.inner.get_opts(location, options).await
-        }
-
-        fn delete_stream(
-            &self,
-            locations: BoxStream<'static, Result<Path>>,
-        ) -> BoxStream<'static, Result<Path>> {
-            self.inner.delete_stream(locations)
-        }
-
-        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, Result<ObjectMeta>> {
-            self.inner.list(prefix)
-        }
-
-        async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
-            self.inner.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> Result<()> {
-            self.inner.copy_opts(from, to, options).await
         }
     }
 }
 
-pub(crate) use fault_store::{FaultKind, FaultStore};
+mod chaos;
+pub(crate) use chaos::{Call, ChaosStore, Fault, Rates, Status, UploadState};

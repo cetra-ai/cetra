@@ -177,6 +177,11 @@ impl Compactor {
         self: &Arc<Self>,
         now: i64,
     ) -> Result<CompactionReport, CompactionError> {
+        // A stopped store (D-R-6) would only stage rows that cannot commit.
+        if self.objects.sync_failed() || self.committer.stopped() {
+            tracing::debug!("compaction pass skipped: the store stopped after an I/O error");
+            return Ok(CompactionReport::default());
+        }
         let catalog = self.committer.catalog().await;
         let mut spawned: Vec<(Job, ClaimGuard)> = Vec::new();
         {
@@ -438,12 +443,18 @@ impl Compactor {
             }
 
             let (target, file) = self.objects.create_output(&path).await?;
-            let writer = FileWriter::new(
+            let writer = match FileWriter::new(
                 job.table,
                 level,
                 file,
                 u64::try_from(*expected_rows).unwrap_or(u64::MAX),
-            )?;
+            ) {
+                Ok(writer) => writer,
+                Err(error) => {
+                    let _ = self.objects.discard_output(target).await;
+                    return Err(error.into());
+                }
+            };
             let merged = merge_slice(
                 &self.merge,
                 job.table,
@@ -491,8 +502,16 @@ impl Compactor {
                 Ok::<_, CompactionError>((file, summary, footer_size))
             })
             .await
-            .map_err(|_| CompactionError::Task)??;
-            let (file, summary, footer_size) = finished;
+            .map_err(|_| CompactionError::Task)
+            .and_then(|finished| finished);
+            let (file, summary, footer_size) = match finished {
+                Ok(finished) => finished,
+                Err(error) => {
+                    // The output is not published: remove its temp file now (R5.5).
+                    let _ = self.objects.discard_output(target).await;
+                    return Err(error);
+                }
+            };
 
             let size = self.objects.publish_output(target, file).await?;
             output_bytes = output_bytes.saturating_add(size);
@@ -643,6 +662,7 @@ fn kind_label(kind: JobKind) -> &'static str {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
     use std::sync::Arc;
@@ -760,7 +780,10 @@ pub(crate) mod tests {
     }
 
     async fn view_rows(storage: &Storage, sql: &str) -> Vec<Vec<String>> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();
         text_rows(&rows(&ctx, sql).await)
     }
@@ -791,7 +814,10 @@ pub(crate) mod tests {
 
     /// Rows of the raw provider behind the `traces` view, read with SQL.
     async fn raw_traces(storage: &Storage, columns: &str) -> Vec<RecordBatch> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx =
             SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
         ctx.register_table("traces", Arc::clone(&query.traces))
@@ -1366,10 +1392,16 @@ pub(crate) mod tests {
             )
             .await;
         }
-        let pinned = storage.query(project(), Default::default()).await.unwrap();
+        let pinned = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let before = {
             let ctx = QueryContext::new(
-                storage.query(project(), Default::default()).await.unwrap(),
+                storage
+                    .query(project(), QueryOptions::new(None, None))
+                    .await
+                    .unwrap(),
                 None,
             )
             .unwrap();

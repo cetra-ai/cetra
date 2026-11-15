@@ -1,0 +1,34 @@
+{
+  "callback_url": "http://localhost:8080/api/auth/callback/sso",
+  "provider": {
+    "display_name": "Acme Okta",
+    "issuer": "https://acme.okta.com",
+    "client_id": "0oa1b2c3d4",
+    "enabled": true,
+    "enforced": false,
+    "jit_role": "viewer",
+    "last_login_at": "2026-01-01T00:00:00.000000000Z",
+    "created_at": "2026-01-01T00:00:00.000000000Z",
+    "updated_at": "2026-01-01T00:00:00.000000000Z"
+  },
+  "domains": [
+    {
+      "id": "01900000-0000-7000-8000-000000000701",
+      "domain": "acme.com",
+      "status": "verified",
+      "txt_name": "_llmobs-verify.acme.com",
+      "txt_value": "llmobs-verify=0123456789abcdef0123456789abcdef",
+      "verified_at": "2026-01-01T00:00:00.000000000Z",
+      "last_checked_at": "2026-01-01T00:00:00.000000000Z",
+      "created_at": "2026-01-01T00:00:00.000000000Z"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000000702",
+      "domain": "acme.io",
+      "status": "pending",
+      "txt_name": "_llmobs-verify.acme.io",
+      "txt_value": "llmobs-verify=fedcba9876543210fedcba9876543210",
+      "created_at": "2026-01-01T00:00:00.000000000Z"
+    }
+  ]
+}

@@ -4,5 +4,5 @@
   "spec_refs": [
     "02 § Input and output"
   ],
-  "notes": "shape as emitted by Strands/Logfire bridges; re-check against a B2 capture"
+  "notes": "shape as emitted by Strands/Logfire bridges. No captured case has legacy GenAI message events, so no capture covers this shape."
 }

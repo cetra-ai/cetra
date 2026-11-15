@@ -55,7 +55,7 @@ What is left is server work: resolving which traces a request covers, a status l
 **Out:**
 - Deleting instance user accounts (people who log in). That is account management, not end-user data. D149 lets instance admins disable accounts.
 - Personal data typed by project members into saved views, saved SQL queries, rule filters or alert names. Those are texts written by the customer's own staff, not ingested data (D-M-14).
-- Datasets and experiment items copied from traces (D24). Track J creates those tables and adds its own cascade to `deletion::cascade` (§ Coordination).
+- Datasets and experiment items copied from traces (D24). Track J creates those tables and adds its own statement to the scope transaction in `deletion/resolve.rs` (§ Coordination).
 - Alert history: `alert_events` hold aggregates only and are kept (spec 03 § Cascades). Track K's tables cascade with the project row (§ Coordination).
 - Plan lookup, the data-access window that hides old data from reads, and the upsell copy beyond one message: track P (D175, D177, D179). The control-plane side of org and project deletion: track Q (D170).
 - `Idempotency-Key` on the new POSTs. Spec 09 lists it for every create, but no route implements it yet; it stays a cross-track gap (§ API contract gaps).
@@ -115,7 +115,9 @@ A judge trace (track I) is a trace in the same project, with environment `llmobs
   - the user ids of `user` deletions, from creation;
   - the trace ids of every deletion, from the moment they are known.
 
-  I's executor asks `guard.blocks(project, target_trace_id, users, newest_ingest, now)` before the judge call and again before it commits a judge trace or a score; `users` are the trace's span user ids and `newest_ingest` its newest span's `ingest_time`. A user entry only blocks a trace whose data was ingested at or before the deletion's cut-off: a user who keeps using the product after an erasure is still evaluated. When blocked, the job ends `skipped` (`deleted`) and commits nothing (M8). The guard is loaded from `meta.db` at startup. 24 h is longer than a job can live (D-I-28 expires queued rule jobs after 24 h, and a running job has a timeout of minutes).
+  `create_deletion` fills the guard before it reads the cut-off (and again with it), after a filter's read and before it stores the row; a `filter` row guards the ids it matched at the `POST`. Two accepted gaps: a trace that starts matching a filter between its read and its cut-off is guarded only from resolution, and after a restart a `resolving` filter row guards nothing until it resolves. Each entry carries its deletion's id.
+
+  I's executor asks `guard.blocking(project, target_trace_id, users, now)` at the job's start, after loading the target, before each commit and **after** each commit; `users` pairs each user id of the trace's spans with that user's oldest `ingest_time`. A user entry blocks a trace that holds that user's data ingested at or before the deletion's cut-off: a trace with only newer data of the user (they kept using the product after the erasure) is still evaluated. Blocked before a commit, the job ends `skipped` (`deleted`) and commits nothing. Blocked after a commit, the judge trace or score is already stored with an `ingest_time` after the cut-off, which the deletion does not cover in storage; the executor then stores a **follow-up** `trace_ids` deletion of the judge trace and the target, same actor, cut-off now (M8). Because the guard knew the deletion before its cut-off, every copy stamped after a cut-off is followed by a check that sees it (except in the two filter gaps above). The guard is loaded from `meta.db` at startup. 24 h is longer than a job can live (D-I-28 expires queued rule jobs after 24 h, and a running job has a timeout of minutes).
 
 ### Cascades in `meta.db` (D-M-7, D-M-11)
 
@@ -125,7 +127,7 @@ A judge trace (track I) is a trace in the same project, with environment `llmobs
 | `pending_traces` (I) | kept; the sweeper reads through storage, which hides the traces | cascade | cascade |
 | `saved_views` (H), evaluators, rules, score definitions, API keys, members, alert tables (K) | kept | cascade | cascade |
 | `llm_connections`, `invites`, `org_members` | kept | kept | cascade from `orgs` |
-| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7; until P's M4 lands, the drop still deletes them after one `Usage::flush`) |
+| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7) |
 | `deletions` and its scope tables | kept forever (audit, D-M-8) | kept | kept |
 | live streams (SSE) | `resync` event on the project's streams when registered | `resync` | `resync` per project |
 | `GET /metrics` cache | entries of the project dropped | dropped | dropped |
@@ -231,7 +233,6 @@ crates/server/src/meta/deletions.rs       rows, inserts, updates, queries       
 crates/server/src/deletion/mod.rs         Deletions (wake + guard + attempts), run_once, on_dropped (M3)
 crates/server/src/deletion/resolve.rs     scope resolution over the M2 reads              (M3)
 crates/server/src/deletion/guard.rs       DeletionGuard                                    (M3)
-crates/server/src/deletion/cascade.rs     meta.db cascades of a stored scope              (M8)
 crates/server/src/retention.rs            retention_once, keep_from                        (M6)
 crates/server/src/api/deletions.rs        request and response types                       (M4, M5)
 crates/server/src/routes/deletions.rs     project deletion routes                          (M4)
@@ -308,7 +309,7 @@ These go to the coordinating session, which forwards them. They are also in the 
   - D-I-28 already deletes jobs of projects that are not `active`.
 - **K (alerts)**: every K table that holds a `project_id` must declare `REFERENCES projects(id) ON DELETE CASCADE`, or reach a table that does, so a project drop removes it. Rows must not copy span payloads (spec 03 § Cascades keeps `alert_events` because they are aggregates). A notification body that quotes a trace id is acceptable; one that quotes span content is not.
 - **H (console)**: `saved_views` already cascades from `projects`; H's MCP `list_projects` already skips inactive orgs and projects. Nothing to do.
-- **J (datasets)**: dataset items copied from a deleted trace (`source_trace_id` in the scope) must be hard-deleted, all versions (D24). J adds that statement to `deletion::cascade::traces_deleted` (M8), which runs in the scope transaction.
+- **J (datasets)**: dataset items copied from a deleted trace (`source_trace_id` in the scope) must be hard-deleted, all versions (D24). J adds that statement to the scope transaction in `deletion/resolve.rs`, next to M8's `eval_jobs` delete, or calls its own module from there once it has tables (plan review M-3: no cascade module ahead of J).
 - **P (plans and entitlements)**:
   - replace `None` in `retention::retention_once` with the org's retention cap (D175, D-M-15). `retention::apply_now` (the `PATCH` path) stays as is: the hourly run applies the cap. Once a cap exists, projects without their own `retention_days` are capped too: `retention_once` already lists every active project, not only those with retention;
   - replace the body of `routes/projects.rs::may_manage_retention` with the entitlement check, and the matching UI state: the settings page already shows `plan_required` (D177, D-M-16);

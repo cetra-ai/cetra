@@ -41,6 +41,7 @@ fn blob_of(bytes: &[u8], mime_type: &str) -> MediaBlob {
         sha256: sha256_of(&bytes),
         mime_type: mime_type.to_owned(),
         bytes,
+        newest_span_start: 0,
     }
 }
 
@@ -71,7 +72,10 @@ async fn connect(dir: &Path) -> sqlx::SqliteConnection {
 
 /// The first `i64` of the first row of `sql`, over `which`'s providers.
 async fn scalar(storage: &Storage, which: ProjectId, sql: &str) -> i64 {
-    let query = storage.query(which, QueryOptions::default()).await.unwrap();
+    let query = storage
+        .query(which, QueryOptions::new(None, None))
+        .await
+        .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();
     let batches = rows(&ctx, sql).await;
     let column = batches[0]
@@ -293,13 +297,13 @@ async fn a_drop_hides_the_project_and_deletes_its_data() {
     );
     assert!(
         matches!(
-            storage.get_media(project(), &p_sha, None).await,
+            storage.get_media(project(), &p_sha, None, None).await,
             Err(MediaError::NotFound)
         ),
         "a dropped project's blob was found"
     );
     let read = storage
-        .get_media(kept_project(), &q_sha, None)
+        .get_media(kept_project(), &q_sha, None, None)
         .await
         .unwrap();
     assert_eq!(read.bytes, Bytes::from_static(b"media-of-q"));

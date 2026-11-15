@@ -235,6 +235,7 @@ impl TableProvider for RawScores {
 
 #[cfg(test)]
 mod tests {
+    use crate::QueryOptions;
     use bytesize::ByteSize;
     use std::path::Path;
 
@@ -318,7 +319,10 @@ mod tests {
     }
 
     async fn names(storage: &crate::Storage) -> Vec<String> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = SessionContext::new();
         ctx.register_table("scores_t", query.scores).unwrap();
         let batches = ctx
@@ -379,7 +383,10 @@ mod tests {
             .append_scores(project(), batch_of(&rows))
             .await
             .unwrap();
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let ctx = SessionContext::new();
         ctx.register_table("scores_t", query.scores).unwrap();
         let count = ctx
@@ -421,7 +428,10 @@ mod tests {
     }
 
     async fn query_off(storage: &crate::Storage, sql: &str) -> Vec<RecordBatch> {
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let runtime = std::sync::Arc::clone(&query.runtime);
         let provider = std::sync::Arc::clone(&query.scores);
         let sql = sql.to_owned();
@@ -453,7 +463,10 @@ mod tests {
     async fn wait_flushed(storage: &crate::Storage, files: usize) {
         let started = std::time::Instant::now();
         loop {
-            let query = storage.query(project(), Default::default()).await.unwrap();
+            let query = storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap();
             let provider = scores_of(&query);
             if provider.candidate_files(&[]).len() == files && provider.candidate_batches(&[]) == 0
             {
@@ -518,7 +531,10 @@ mod tests {
             .await
             .unwrap();
 
-        let query = storage.query(project(), Default::default()).await.unwrap();
+        let query = storage
+            .query(project(), QueryOptions::new(None, None))
+            .await
+            .unwrap();
         let provider = scores_of(&query);
         assert_eq!(provider.candidate_files(&[]).len(), 2);
         assert!(provider.candidate_batches(&[]) >= 1);
@@ -617,12 +633,7 @@ mod tests {
         ));
         let around = 3 * 86_400_000_000_000;
         let query = storage
-            .query(
-                project(),
-                crate::QueryOptions {
-                    around: Some(around),
-                },
-            )
+            .query(project(), QueryOptions::new(Some(around), None))
             .await
             .unwrap();
         assert_eq!(scores_of(&query).candidate_files(&[filter]).len(), 1);

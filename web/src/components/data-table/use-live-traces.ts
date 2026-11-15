@@ -53,6 +53,7 @@ export function useLiveTraces({
   const [overflowed, setOverflowed] = useState(false);
   const [highlighted, setHighlighted] = useState<ReadonlySet<string>>(() => new Set());
   const timers = useRef<number[]>([]);
+  const refetchQueued = useRef(false);
   const pinTop = useRef(false);
   const scrollAdjust = useRef(0);
 
@@ -93,14 +94,53 @@ export function useLiveTraces({
     setPending(next.length);
   }
 
-  /** Drops every page after the first and refetches page 1 from the server, with a correct cursor. */
-  function refetchFirstPage() {
+  /**
+   * Refetches page 1 from the server, with a correct cursor. By default it first drops every
+   * page after the first. With `keepPages`, the loaded pages stay in the cache and it only
+   * invalidates: an infinite query then refetches every loaded page with fresh cursors, so a
+   * reader who scrolled down keeps their place. At most one refetch runs at a time: a call
+   * during one only queues a single trailing refetch, so the traces that arrived meanwhile
+   * are still fetched.
+   */
+  function refetchFirstPage({ keepPages }: { keepPages: boolean } = { keepPages: false }) {
     const key = queryKeyRef.current;
-    queryClient.setQueryData<TracePages>(key, (current) =>
-      current ? firstPageOnly(current) : current,
-    );
-    void queryClient.invalidateQueries({ queryKey: key, exact: true });
+    if (!keepPages) {
+      queryClient.setQueryData<TracePages>(key, (current) =>
+        current ? firstPageOnly(current) : current,
+      );
+    }
+    if (queryClient.isFetching({ queryKey: key, exact: true }) > 0) {
+      refetchQueued.current = true;
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: key, exact: true }, { cancelRefetch: false });
   }
+
+  const refetchFirstPageRef = useRef(refetchFirstPage);
+  refetchFirstPageRef.current = refetchFirstPage;
+
+  // A queued refetch belongs to the list it was queued for. A new query key or stream url
+  // starts clean, so the flag cannot refetch the new list.
+  const listId = JSON.stringify(queryKey);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the effect must rerun when the list (key or stream url) changes, though its body reads neither
+  useEffect(() => {
+    refetchQueued.current = false;
+  }, [listId, url]);
+
+  // When the running refetch settles, run the queued one. Watching the query cache also
+  // covers a page-1 fetch this hook did not start (for example a next-page load).
+  useEffect(() => {
+    return queryClient.getQueryCache().subscribe(() => {
+      if (
+        refetchQueued.current &&
+        queryClient.isFetching({ queryKey: queryKeyRef.current, exact: true }) === 0
+      ) {
+        refetchQueued.current = false;
+        // A list scrolled down keeps the pages it loaded, so the reader's place survives.
+        refetchFirstPageRef.current({ keepPages: (tracesScroller()?.scrollTop ?? 0) > 0 });
+      }
+    });
+  }, [queryClient]);
 
   function insertBuffered(rows: readonly Schema<"TraceSummary">[]) {
     const current = queryClient.getQueryData<TracePages>(queryKeyRef.current);
@@ -196,6 +236,12 @@ export function useLiveTraces({
     if (firstPageWouldExceed(current, 1, limits.page)) {
       refetchFirstPage();
       mark([trace.trace_id]);
+      return;
+    }
+    // A first-page fetch in flight would overwrite this insert with its own result, so the
+    // trailing refetch brings the trace instead.
+    if (queryClient.isFetching({ queryKey: key, exact: true }) > 0) {
+      refetchQueued.current = true;
       return;
     }
     const result = insertLiveTraces(current, [trace]);

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { reportUnauthorized } from "@/api/session";
 import type { Schema } from "@/api/types";
 
 const BACKOFF_START_MS = 1_000;
@@ -43,6 +44,14 @@ export function traceStreamUrl(
   return search ? `${path}?${search}` : path;
 }
 
+/**
+ * A status that ends the stream for good: 4xx other than 408 and 429. 401 is also
+ * handled by the caller, which routes it to the session handler first.
+ */
+function stopsStream(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
 export function openStream(
   url: string,
   onEvent: (event: StreamEvent) => void,
@@ -50,10 +59,11 @@ export function openStream(
 ): () => void {
   let attempt = 0;
   let everOpened = false;
-  let userClosed = false;
+  let closed = false;
   let socket: EventSource | undefined;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let pingTimer: ReturnType<typeof setTimeout> | undefined;
+  let probe: AbortController | undefined;
   const dropped = { count: 0 };
 
   const clearPing = () => {
@@ -70,33 +80,95 @@ export function openStream(
     }, PING_GAP_MS);
   };
 
-  const fail = () => {
-    if (userClosed || socket === undefined) {
-      return;
+  /** Ends this call for good: no retry, no probe, the EventSource closed. */
+  const finish = () => {
+    closed = true;
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
     }
+    clearPing();
+    probe?.abort();
+    probe = undefined;
     const current = socket;
     socket = undefined;
-    current.close();
-    clearPing();
+    current?.close();
+    onStatus("closed");
+  };
+
+  const scheduleRetry = () => {
     onStatus("retrying");
     const delay = Math.min(BACKOFF_START_MS * 2 ** attempt, BACKOFF_CAP_MS);
     attempt += 1;
     retryTimer = setTimeout(connect, delay);
   };
 
+  /** A drop after the stream opened: close it and retry with backoff. */
+  const fail = () => {
+    if (closed || socket === undefined) {
+      return;
+    }
+    const current = socket;
+    socket = undefined;
+    current.close();
+    clearPing();
+    scheduleRetry();
+  };
+
+  /**
+   * The stream failed before it opened, so the status is unknown. One plain request
+   * tells whether to retry: 401 goes to the session handler and stops, other 4xx stop,
+   * anything else retries.
+   */
+  const checkBeforeOpen = (controller: AbortController) => {
+    const apiPath = new URL(url, location.origin).pathname;
+    fetch(url, {
+      headers: { Accept: "text/event-stream" },
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: controller.signal,
+    }).then(
+      (response) => {
+        if (probe !== controller) {
+          return;
+        }
+        probe = undefined;
+        // A 200 answers with an endless event stream. Its headers are all we need.
+        controller.abort();
+        if (response.status === 401) {
+          reportUnauthorized(apiPath);
+          finish();
+        } else if (stopsStream(response.status)) {
+          finish();
+        } else {
+          scheduleRetry();
+        }
+      },
+      () => {
+        if (probe !== controller) {
+          return;
+        }
+        probe = undefined;
+        scheduleRetry();
+      },
+    );
+  };
+
   const connect = () => {
-    if (userClosed) {
+    if (closed) {
       return;
     }
     retryTimer = undefined;
     onStatus("connecting");
     const source = new EventSource(url, { withCredentials: false });
     socket = source;
+    let opened = false;
 
     source.addEventListener("open", () => {
       if (socket !== source) {
         return;
       }
+      opened = true;
       onStatus("open");
       if (everOpened) {
         onEvent({ type: "resync" });
@@ -107,10 +179,19 @@ export function openStream(
     });
 
     source.addEventListener("error", () => {
-      if (socket !== source) {
+      if (closed || socket !== source) {
         return;
       }
-      fail();
+      if (opened) {
+        fail();
+        return;
+      }
+      socket = undefined;
+      source.close();
+      clearPing();
+      const controller = new AbortController();
+      probe = controller;
+      checkBeforeOpen(controller);
     });
 
     source.addEventListener("ping", () => {
@@ -150,18 +231,7 @@ export function openStream(
 
   connect();
 
-  return () => {
-    userClosed = true;
-    if (retryTimer !== undefined) {
-      clearTimeout(retryTimer);
-      retryTimer = undefined;
-    }
-    clearPing();
-    const current = socket;
-    socket = undefined;
-    current?.close();
-    onStatus("closed");
-  };
+  return finish;
 }
 
 export function useStream(

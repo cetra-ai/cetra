@@ -9,9 +9,9 @@ Per-project alert rules over four metrics, evaluated in the background over slid
 | `metric` | Fields | Computed over the window |
 |---|---|---|
 | `error_rate` | `filter?`, `window`, `comparator`, `threshold` (fraction 0–1), `min_count` (default 20) | traces with `error_count > 0` / traces |
-| `cost` | `filter?`, `window`, `comparator`, `threshold` (USD ≥ 0) | `sum(cost_total)` on traces (0 when none) |
-| `latency_p95` | `filter?`, `window`, `target` (`trace` default, or `llm_span`), `comparator`, `threshold` (ms > 0), `min_count` (default 20) | `approx_percentile_cont(duration_ns, 0.95)` in ms, of traces or of `llm` spans |
-| `score` | `filter?`, `window`, `score_name`, `aggregation` (`avg` default, or `pass_rate`), `comparator`, `threshold` (`pass_rate`: 0–1), `min_count` (default 10) | `avg(value_num)` of live trace/span scores of that name; `pass_rate` keeps boolean scores only |
+| `cost` | `filter?`, `window`, `comparator`, `threshold` (USD ≥ 0) | `sum(cost_total)` on traces as `Decimal128(38, 18)` (0 when none; a non-finite cost fails the query, D-A2-4) |
+| `latency_p95` | `filter?`, `window`, `target` (`trace` default, or `llm_span`), `comparator`, `threshold` (ms > 0; for `trace`, below the window length), `min_count` (default 20) | `approx_percentile_cont(duration_ns, 0.95)` in ms, of traces (by start time) or of `llm` spans (by end time, D-K-18) |
+| `score` | `filter?`, `window`, `score_name`, `aggregation` (`avg` default, or `pass_rate`), `comparator`, `threshold` (`pass_rate`: 0–1), `min_count` (default 10) | `avg(value_num)` of live trace/span scores of that name created in the window, whose trace started at most 7 days before it (any end time, D-K-17); `pass_rate` keeps boolean scores only |
 
 - `window` ∈ {`1m`, `5m`, `15m`, `1h`, `6h`, `24h`}; `comparator` ∈ {`gt`, `gte`, `lt`, `lte`}; `min_count` 1–1 000 000.
 - `filter` is a **`traces`** filter-DSL expression for every metric; span and score measures keep rows whose trace passes it (as dashboard metrics, 05). Experiment traces are always excluded; evaluation traces (`environment = 'llmobs-eval'`) are excluded unless the filter names `environment` (05 § Default exclusions).
@@ -44,7 +44,7 @@ ok / no_data ──(breaching)──► firing ──(2 clear or insufficient in
 |---|---|---|
 | `slack` | `{url}` (an `https` Slack incoming webhook) | Block Kit message: title, project, metric, value, threshold, window, samples, buttons to the rule and to the trace list |
 | `webhook` | `{url, secret (16–256), headers?}` (≤ 10 headers) | `POST` JSON (below), `X-Llmobs-Signature: t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>` (as the webhook evaluator), `X-Llmobs-Delivery: <delivery id>` |
-| `email` | `{recipients}` (1–20) | the `alert` email template (08 § Email), one message per recipient; creating one needs SMTP, and existing ones show "SMTP not configured" without it |
+| `email` | `{recipients}` (1–20) | the `alert` email template (08 § Email), one message per recipient; creating one needs SMTP, and existing ones show "SMTP not configured" without it. Under `auth.signup = open` each recipient must be a verified member of the org (D-K-19): create and update refuse others with `400` on `recipients`, and a send skips them and fails the delivery. Each org may send 1,000 recipient messages per UTC day, test sends included (D-K-19) |
 
 Webhook payload (`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or `alert.test`; `value` and `count` are `null` when absent):
 
@@ -57,7 +57,7 @@ Webhook payload (`type` is `alert.fired`, `alert.resolved`, `alert.reminder` or 
  "rule_url": "https://…/<org>/<project>/alerts/<rule id>"}
 ```
 
-Deliveries go through `notification_deliveries`: a loop every 10 s sends due ones (at most 4 at once, 10 s timeout). Retryable failures (timeouts, connection errors, 408, 429, 5xx, SMTP connection, TLS and authentication errors) wait `min(30 s · 2^(attempts−1), 1 h)`, up to 8 attempts; other failures fail at once. Delivery is at least once. Channels are never disabled automatically: the UI shows each channel's last finished delivery, and "Send test" sends one sample message synchronously (D-K-7).
+Deliveries go through `notification_deliveries`: a loop every 10 s sends due ones (at most 4 at once, 10 s timeout). Retryable failures (timeouts, connection errors, 408, 429, 5xx, SMTP connection, TLS and authentication errors) wait `min(30 s · 2^(attempts−1), 1 h)`, up to 8 attempts; other failures fail at once. Delivery is at least once. Channels are never disabled automatically: the UI shows each channel's last finished delivery, and "Send test" sends one sample message synchronously (D-K-7). A test send is limited to 5 per minute per user and 5 per minute per channel (`429 rate_limited`, D-K-19). An email over the org's daily cap fails with `daily alert email limit reached`; the cap and the member rule are D-K-19. Each message reserves one unit of the cap just before it is sent, so a failed send counts only the messages it attempted; the member rule skips disabled users.
 
 History: events are kept 90 days and finished deliveries 30 days, pruned hourly (D-K-10).
 

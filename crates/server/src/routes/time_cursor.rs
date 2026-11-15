@@ -1,4 +1,4 @@
-//! Opaque `(created_at, id)` list cursors for `meta.db` lists, newest first.
+//! Opaque `(time, id)` list cursors for `meta.db` lists.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

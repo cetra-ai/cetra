@@ -55,6 +55,8 @@ pub(crate) enum Principal {
         user: AuthUser,
         /// SHA-256 hex of the cookie. Not the cookie value.
         session_hash: String,
+        /// The org whose provider started this session, D-P-59.
+        sso_org: Option<llmobs_core::ids::OrgId>,
     },
     /// A project API key. `Debug` omits the hash.
     ApiKey {
@@ -174,6 +176,10 @@ pub(crate) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // A hidden control-plane route answers 404 in `enforce`, so no credential is read here.
+    if crate::http::access::hidden_without_control_plane(&state, request.uri().path()) {
+        return next.run(request).await;
+    }
     if request
         .headers()
         .contains_key(axum::http::header::AUTHORIZATION)
@@ -199,6 +205,7 @@ pub(crate) async fn authenticate(
                     email: row.user.email,
                 },
                 session_hash: row.hash,
+                sso_org: row.sso_org_id,
             }),
             refresh,
         ),
@@ -261,6 +268,9 @@ pub(crate) async fn bearer_principal(
 /// live at most 5 minutes and be valid within 60 s of skew. It is not single-use: a captured
 /// one works until it expires, which the idempotent internal endpoints accept (D-P-28).
 fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
+    if !state.config.entitlements.control_plane {
+        return Err(ApiError::Unauthorized);
+    }
     let Ok(verified) = llmobs_token::verify(token) else {
         return Err(ApiError::Unauthorized);
     };
@@ -330,6 +340,11 @@ async fn pat_principal(
         return Err(ApiError::Unauthorized);
     };
     if row.disabled_at.is_some() {
+        return Err(ApiError::Unauthorized);
+    }
+    // D-P-58: under enforcement a personal access token is always refused, so a token made
+    // while the revocation committed does not work.
+    if !row.is_instance_admin && crate::ee::org_sso::enforces(state, &row.email) {
         return Err(ApiError::Unauthorized);
     }
     state.token_last_used.record(cached.id, now);
@@ -404,13 +419,20 @@ mod tests {
                 email: "ada@example.com".to_owned(),
             },
             session_hash: "not-a-cookie".to_owned(),
+            sso_org: None,
         };
         let text = format!("{principal:?}");
-        let Principal::Session { user, session_hash } = &principal else {
+        let Principal::Session {
+            user,
+            session_hash,
+            sso_org,
+        } = &principal
+        else {
             panic!("expected a session");
         };
         assert_eq!(user.email, "ada@example.com");
         assert_eq!(session_hash, "not-a-cookie");
+        assert_eq!(*sso_org, None);
         assert!(!text.contains(&user.email), "{text}");
         assert!(!text.contains(session_hash), "{text}");
     }
@@ -459,6 +481,17 @@ mod tests {
             panic!("expected a control-plane principal");
         };
         assert_eq!(scope, "orgs");
+    }
+
+    #[tokio::test]
+    async fn control_plane_tokens_are_refused_when_off() {
+        let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
+        let token = control_plane_token("orgs");
+        let refused = bearer_principal(&app.state, &bearer_headers(&token)).await;
+        assert!(
+            matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
+            "a control-plane token is refused when entitlements.control_plane is off"
+        );
     }
 
     #[tokio::test]

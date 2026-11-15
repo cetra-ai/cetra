@@ -52,15 +52,19 @@ use super::entitlements::{
     Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
     PutOrgTokenRequest, UsageNotice,
 };
+use super::eval_jobs::{
+    EvalJob, EvalJobKind, EvalJobListParams, EvalJobStatus, RunEvaluatorRequest,
+};
 use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
 };
 use super::internal::{
-    CreateInternalOrgRequest, InternalMember, InternalMembers, InternalMembersQuery, InternalOrg,
-    InternalOwner, InternalUsageQuery, InternalUsageRow, InternalUserDeleted, InternalUserRef,
-    MembershipLookup, MembershipLookupRequest, MembershipOrg,
+    CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
+    InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
+    InternalUsageRow, InternalUserDeleted, InternalUserRef, MembershipLookup,
+    MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::keys::{
@@ -69,6 +73,15 @@ use super::keys::{
 };
 use super::members::{OrgMember, ProjectMember, SetProjectOverrideRequest, UpdateOrgMemberRequest};
 use super::metrics::{MetricsBucket, MetricsGroupBy, MetricsParams, MetricsResponse};
+use super::online_rules::{
+    BudgetPeriod, CreateOnlineRuleRequest, JobCounts, OnlineRule, OnlineRulePage,
+    OnlineRulePreview, OnlineRulePreviewRequest, PauseReason, RuleSpend, RuleTarget,
+    UpdateOnlineRuleRequest,
+};
+use super::org_sso::{
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
+    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -165,6 +178,16 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<JitRole>();
+    set.insert::<OrgSsoProvider>();
+    set.insert::<DomainStatus>();
+    set.insert::<OrgSsoDomain>();
+    set.insert::<OrgSso>();
+    set.insert::<PutOrgSsoProvider>();
+    set.insert::<AddOrgSsoDomain>();
+    set.insert::<PatchOrgSso>();
+    set.insert::<SsoDiscoverRequest>();
+    set.insert::<SsoDiscovery>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -181,6 +204,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<InternalMember>();
     set.insert::<InternalMembers>();
     set.insert_page::<InternalUsageRow>("InternalUsagePage");
+    set.insert::<InternalDropKind>();
+    set.insert_page::<InternalDrop>("InternalDropPage");
     set.insert::<Feature>();
     set.insert::<OrgMembership>();
     set.insert::<CreateOrgRequest>();
@@ -286,6 +311,22 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AlertEvent>();
     set.insert_page::<AlertRule>("AlertRulePage");
     set.insert_page::<AlertEvent>("AlertEventPage");
+    set.insert::<BudgetPeriod>();
+    set.insert::<RuleTarget>();
+    set.insert::<PauseReason>();
+    set.insert::<RuleSpend>();
+    set.insert::<JobCounts>();
+    set.insert::<OnlineRule>();
+    set.insert::<OnlineRulePage>();
+    set.insert::<CreateOnlineRuleRequest>();
+    set.insert::<UpdateOnlineRuleRequest>();
+    set.insert::<OnlineRulePreviewRequest>();
+    set.insert::<OnlineRulePreview>();
+    set.insert::<EvalJobKind>();
+    set.insert::<EvalJobStatus>();
+    set.insert::<EvalJob>();
+    set.insert_page::<EvalJob>("EvalJobPage");
+    set.insert::<RunEvaluatorRequest>();
     set
 }
 
@@ -405,7 +446,8 @@ pub fn openapi() -> OpenApi {
 ///
 /// utoipa marks every `Option<T>` nullable. This removes `null` from every property
 /// that is not `required` and from every optional query parameter. The D65 message and
-/// part components are skipped: their optional fields can really be `null`.
+/// part components are skipped: their optional fields can really be `null`. So are the
+/// `NULL_IS_A_VALUE` properties.
 fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
     let skip = d65_component_names();
     if let Some(components) = openapi.components.as_mut() {
@@ -413,7 +455,11 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
             if skip.contains(name.as_str()) {
                 continue;
             }
+            let kept = take_null_is_a_value(name, schema);
             strip_nested(schema);
+            if let RefOr::T(Schema::Object(object)) = schema {
+                object.properties.extend(kept);
+            }
         }
     }
     for path_item in openapi.paths.paths.values_mut() {
@@ -428,6 +474,27 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
         strip_operation(path_item.trace.as_mut());
         strip_operation(path_item.query.as_mut());
     }
+}
+
+/// Properties where `null` is a value of their own, so the contract keeps it: `null`
+/// on a request means "keep data forever", while an absent field leaves the default
+/// (spec 09). The server takes both (`api/account.rs`).
+const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("CreateProjectRequest", "retention_days"),
+    ("UpdateProjectRequest", "retention_days"),
+];
+
+/// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
+/// [`strip_nested`] leaves them alone. The caller puts them back.
+fn take_null_is_a_value(name: &str, schema: &mut RefOr<Schema>) -> BTreeMap<String, RefOr<Schema>> {
+    let RefOr::T(Schema::Object(object)) = schema else {
+        return BTreeMap::new();
+    };
+    NULL_IS_A_VALUE
+        .iter()
+        .filter(|(component, _)| *component == name)
+        .filter_map(|(_, field)| object.properties.remove_entry(*field))
+        .collect()
 }
 
 fn d65_component_names() -> BTreeSet<String> {
@@ -656,6 +723,7 @@ fn paths() -> Paths {
     let paths = auth_paths(paths);
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
+    let paths = org_sso_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -665,6 +733,8 @@ fn paths() -> Paths {
     let paths = session_paths(paths);
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
+    let paths = online_rule_paths(paths);
+    let paths = eval_job_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
@@ -820,7 +890,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`.",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -1005,7 +1075,54 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             &[401, 403, 404, 429],
         ))
         .build();
+    let sso_authorize = operation(
+        "get_sso_authorize",
+        "auth",
+        "Start an org's single sign-on login",
+    )
+    .description(Some(
+        "Starts a login through the identity provider of the org that owns the email domain (D-P-60). A domain that is not verified, a disabled provider (except for an owner's Test sign-in, D-P-57) and an unknown domain all redirect to `/login?error=sso_unavailable` with no cookie. Discovery and authorize share 300 requests a minute per client IP; a burst over that is 429. `redirect` is kept as for the instance providers.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![
+        query_string("domain", "The email domain, e.g. `acme.com`.", false),
+        query_string(
+            "redirect",
+            "Relative path to open after a successful login.",
+            false,
+        ),
+    ]))
+    .responses(responses(
+        "302",
+        redirect_to("Redirect to the identity provider, or to `/login?error=sso_unavailable`."),
+        &[429],
+    ))
+    .build();
+    let sso_discover = operation(
+        "post_sso_discover",
+        "auth",
+        "Ask whether an email's domain signs in through an org",
+    )
+    .description(Some(
+        "Answers whether the email's domain has an org provider that is enabled (D-P-60). The answer depends only on the domain, so no account is needed and nothing is logged. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+    ))
+    .securities(Some(Vec::new()))
+    .request_body(Some(json_body("SsoDiscoverRequest")))
+    .responses(responses(
+        "200",
+        json_of::<SsoDiscovery>("Whether the domain signs in through an org."),
+        &[400, 429],
+    ))
+    .build();
     paths
+        .path(
+            "/api/auth/sso/discover",
+            PathItem::new(HttpMethod::Post, sso_discover),
+        )
+        .path(
+            "/api/auth/sso/authorize",
+            PathItem::new(HttpMethod::Get, sso_authorize),
+        )
         .path(
             "/api/auth/authorize/{provider}",
             PathItem::new(HttpMethod::Get, authorize),
@@ -1051,6 +1168,158 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let org_param = path_string("org", "Org UUID or slug.");
+    let get = operation(
+        "get_org_sso",
+        "orgs",
+        "Read the org's identity provider and domains",
+    )
+    .description(Some(
+        "The provider without its client secret, the email domains with their TXT records, and the callback URL. Owners only, session only (D-P-51). Needs no feature, so the settings stay readable after a lapse (D-P-61).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The org's SSO settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put = operation(
+        "put_org_sso_provider",
+        "orgs",
+        "Save the org's identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one OIDC provider (D-P-52). The issuer's discovery document is loaded before anything is stored. The client secret is write-only: it is needed when creating, and when the issuer or client id changes. A new issuer deletes the org's identities. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_org_sso_provider",
+        "orgs",
+        "Remove the org's identity provider",
+    )
+    .description(Some(
+        "Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![org_param]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The provider is removed.")
+            .build(),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let mut provider = PathItem::new(HttpMethod::Put, put);
+    provider.delete = Some(delete);
+    let patch_settings = operation(
+        "patch_org_sso",
+        "orgs",
+        "Turn the org's identity provider on, off or enforced",
+    )
+    .description(Some(
+        "Sets `enabled` and `enforced`, each optional (D-P-57, D-P-58, D-P-61). Turning enforcement on needs a verified domain, a sign-in through the provider, and this session's own sign-in through it when the caller's domain is covered. It revokes the password sessions and personal access tokens of the covered users, except instance admins (D-P-58). A provider cannot be disabled while enforced. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("PatchOrgSso")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let add_domain = operation(
+        "post_org_sso_domain",
+        "orgs",
+        "Add an email domain to the org's SSO",
+    )
+    .description(Some(
+        "Adds a pending domain (D-P-54). The domain is trimmed, lowercased and checked as a DNS name; a domain the server configuration owns is refused. Prove it with the TXT record of the response, then call the verify route. Up to 20 domains per org. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("AddOrgSsoDomain")))
+    .responses(responses(
+        "201",
+        json_of::<OrgSso>("The SSO settings, with the new domain pending."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let verify = operation(
+        "post_org_sso_domain_verify",
+        "orgs",
+        "Verify an email domain with its DNS TXT record",
+    )
+    .description(Some(
+        "Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The SSO settings, with the domain verified."),
+        &[401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let remove_domain = operation(
+        "delete_org_sso_domain",
+        "orgs",
+        "Remove an email domain from the org's SSO",
+    )
+    .description(Some(
+        "Removes the domain, verified or not. The org stops routing its users through the provider. Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Domain id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The domain is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch_settings);
+    paths
+        .path("/api/v1/orgs/{org}/sso", settings)
+        .path("/api/v1/orgs/{org}/sso/provider", provider)
+        .path(
+            "/api/v1/orgs/{org}/sso/domains",
+            PathItem::new(HttpMethod::Post, add_domain),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}/verify",
+            PathItem::new(HttpMethod::Post, verify),
+        )
+        .path(
+            "/api/v1/orgs/{org}/sso/domains/{id}",
+            PathItem::new(HttpMethod::Delete, remove_domain),
+        )
+}
+
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let org_param = path_string("org", "Org UUID or slug.");
@@ -1066,7 +1335,10 @@ fn invite_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_org_invite", "orgs", "Invite a member by email")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param.clone()]))
         .request_body(Some(json_body("CreateInviteRequest")))
         .responses(responses(
@@ -1231,7 +1503,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let post_internal_org = operation("post_internal_org", "internal", "Create an org")
         .description(Some(
-            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         ))
         .securities(Some(vec![SecurityRequirement::new(
             "bearer",
@@ -1246,7 +1518,27 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
                     json_of::<InternalOrg>("The org with this id already exists."),
                 ),
             ],
-            &[400, 401, 403, 422, 429],
+            &[400, 401, 403, 409, 422, 429],
+        ))
+        .build();
+    let delete_internal_org = operation("delete_internal_org", "internal", "Drop an org")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+        .responses(responses_with(
+            [
+                (
+                    "202",
+                    json_of::<Deletion>("The org drop, in status pending or resolving."),
+                ),
+                ("200", json_of::<Deletion>("The org drop is applied.")),
+            ],
+            &[401, 403, 404, 429],
         ))
         .build();
     let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
@@ -1264,6 +1556,25 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 429],
         ))
         .build();
+    let list_internal_deletions = operation(
+        "list_internal_deletions",
+        "internal",
+        "List applied org and project drops",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `deletions` scope. Applied project and org drops, oldest first, keyset-paged, for the control plane's billing and records. Rows are kept forever. `kind` narrows to `project` or `org`.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(with_query::<InternalDropsQuery>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("InternalDropPage", "One page of applied drops, oldest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
     let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
     let post_internal_user_revoke = operation(
         "post_internal_user_revoke",
@@ -1395,8 +1706,16 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, post_internal_org),
         )
         .path(
+            "/api/internal/v1/orgs/{org_id}",
+            PathItem::new(HttpMethod::Delete, delete_internal_org),
+        )
+        .path(
             "/api/internal/v1/usage",
             PathItem::new(HttpMethod::Get, list_internal_usage),
+        )
+        .path(
+            "/api/internal/v1/deletions",
+            PathItem::new(HttpMethod::Get, list_internal_deletions),
         )
         .path(
             "/api/internal/v1/users/revoke",
@@ -1435,7 +1754,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let patch_org = operation("patch_org_member", "orgs", "Change an organization role")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![org_param, user_param.clone()]))
         .request_body(Some(json_body("UpdateOrgMemberRequest")))
         .responses(responses(
@@ -1445,7 +1767,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete_org = operation("delete_org_member", "orgs", "Remove an organization member")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![
             path_string("org", "Org UUID or slug."),
             user_param.clone(),
@@ -1474,7 +1799,10 @@ fn member_paths(paths: PathsBuilder) -> PathsBuilder {
         "projects",
         "Set a project role override",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(vec![project_param(), user_param.clone()]))
     .request_body(Some(json_body("SetProjectOverrideRequest")))
     .responses(responses(
@@ -1628,7 +1956,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
 fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let list = operation("list_api_keys", "projects", "List API keys")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<PageParams>(vec![project_param()])))
         .responses(responses(
             "200",
@@ -1640,7 +1971,10 @@ fn api_key_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let create = operation("post_api_key", "projects", "Create an API key")
-        .securities(Some(session_only.clone()))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateApiKeyRequest")))
         .responses(responses(
@@ -1677,7 +2011,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "List personal access tokens",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<PageParams>(Vec::new())))
     .responses(responses(
         "200",
@@ -1693,7 +2030,10 @@ fn token_paths(paths: PathsBuilder) -> PathsBuilder {
         "auth",
         "Create a personal access token",
     )
-    .securities(Some(session_only.clone()))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .request_body(Some(json_body("CreatePersonalTokenRequest")))
     .responses(responses(
         "201",
@@ -2092,12 +2432,14 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let delete = operation("delete_evaluator", "evaluation", "Delete an evaluator")
-        .description(Some("Project members and above. API keys cannot call it."))
+        .description(Some(
+            "Project members and above. API keys cannot call it. Refused with 409 while online rules use the evaluator; `errors` lists them.",
+        ))
         .parameters(Some(vec![project_param(), id]))
         .responses(responses(
             "204",
             ResponseBuilder::new().description("Deleted.").build(),
-            &[400, 401, 403, 404, 429],
+            &[400, 401, 403, 404, 409, 429],
         ))
         .build();
     let templates = operation(
@@ -2157,6 +2499,179 @@ fn evaluator_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/evaluators/test"),
             PathItem::new(HttpMethod::Post, test),
+        )
+}
+
+fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Online rule id.");
+    let list = operation("list_online_rules", "evaluation", "List online rules")
+        .description(Some(
+            "Any project member can read. `org_enabled_rules` counts the enabled rules of the whole org (D-I-32).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("OnlineRulePage", "One page of online rules."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_online_rule", "evaluation", "Create an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateOnlineRuleRequest")))
+        .responses(responses(
+            "201",
+            json_of::<OnlineRule>("The created rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_online_rule", "evaluation", "Get an online rule")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The rule."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_online_rule", "evaluation", "Update an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateOnlineRuleRequest")))
+        .responses(responses(
+            "200",
+            json_of::<OnlineRule>("The updated rule."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_online_rule", "evaluation", "Delete an online rule")
+        .description(Some(
+            "Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let preview = operation(
+        "post_online_rule_preview",
+        "evaluation",
+        "Count what a rule's filter matches",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Counts the traces or spans the filter matches in the window (default: the last 24 hours, at most 30 days), at most 10 000, leaving out evaluation and experiment traces whatever the filter says (D-I-9).",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("OnlineRulePreviewRequest")))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRulePreview>("What the filter matches."),
+        READ_ERRORS,
+    ))
+    .build();
+    let resume = operation(
+        "post_online_rule_resume",
+        "evaluation",
+        "Resume an online rule",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Clears the rule's pause.",
+    ))
+    .parameters(Some(vec![project_param(), id]))
+    .responses(responses(
+        "200",
+        json_of::<OnlineRule>("The rule, not paused."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/online-rules"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/preview"),
+            PathItem::new(HttpMethod::Post, preview),
+        )
+        .path(
+            format!("{PROJECT}/online-rules/{{id}}/resume"),
+            PathItem::new(HttpMethod::Post, resume),
+        )
+}
+
+fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
+    let job_id = path_uuid("id", "Eval job id.");
+    let list = operation("list_eval_jobs", "evaluation", "List eval jobs")
+        .description(Some(
+            "Any project member can read. Newest first. Jobs are kept 7 days after they finish.",
+        ))
+        .parameters(Some(with_query::<EvalJobListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("EvalJobPage", "One page of eval jobs."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let get = operation("get_eval_job", "evaluation", "Get an eval job")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), job_id]))
+        .responses(responses(
+            "200",
+            json_of::<EvalJob>("The job."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let evaluator_id = path_uuid("id", "Evaluator id.");
+    let run = operation(
+        "post_evaluator_run",
+        "evaluation",
+        "Run an evaluator on one trace",
+    )
+    .description(Some(
+        "Project members and above. API keys cannot call it. Queues one run at the highest priority and answers the job; poll `GET /eval-jobs/{id}`. Shares the 10 per minute per user limit with test runs.",
+    ))
+    .parameters(Some(vec![project_param(), evaluator_id]))
+    .request_body(Some(json_body("RunEvaluatorRequest")))
+    .responses(responses(
+        "202",
+        json_of::<EvalJob>("The queued job."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/eval-jobs"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/eval-jobs/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/evaluators/{{id}}/run"),
+            PathItem::new(HttpMethod::Post, run),
         )
 }
 
@@ -2265,6 +2780,20 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 413, 415, 429],
         ))
         .build();
+    let get = operation("get_saved_view", "saved_views", "Get a saved view")
+        .description(Some(
+            "One view by id, with the same visibility as the list: the caller's own and shared views (an API key sees shared views). Any other id is 404. Use it to open a view that is not on the first pages of the list.",
+        ))
+        .parameters(Some(vec![
+            project_param(),
+            path_uuid("id", "Saved view id."),
+        ]))
+        .responses(responses(
+            "200",
+            json_of::<SavedView>("The saved view."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
     let update = operation("update_saved_view", "saved_views", "Update a saved view")
         .description(Some(
             "The owner changes name, state, shared and is_default; sharing, or editing a shared view, needs role member. A project admin may also unshare another user's shared view. Setting is_default clears the other default of the same scope: the caller's private views of that kind, or the project's shared views of that kind.",
@@ -2302,6 +2831,10 @@ fn saved_view_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/saved-views"),
             PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/saved-views/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
         )
         .path(
             format!("{PROJECT}/saved-views/{{id}}"),
@@ -2395,7 +2928,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let create = operation("create_channel", "alerts", "Create a notification channel")
         .description(Some(
-            "Needs role member. Email channels need SMTP. At most 20 channels per project (409).",
+            "Needs role member. Email channels need SMTP. At most 20 channels per project (409). \
+             Under open signup every email recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateChannelRequest")))
@@ -2406,6 +2940,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         ))
         .build();
     let update = operation("update_channel", "alerts", "Update a notification channel")
+        .description(Some(
+            "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+        ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .request_body(Some(json_body("UpdateChannelRequest")))
         .responses(responses(
@@ -2426,7 +2963,9 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let test = operation("test_channel", "alerts", "Send a test notification")
         .description(Some(
-            "Sends one sample message now and reports the result. Nothing is stored. Needs role member.",
+            "Sends one sample message now and reports the result. Nothing is stored. Needs role member. \
+             At most 5 sends per minute per user and 5 per minute per channel (429, Retry-After). \
+             Email sends count against the org's daily limit of 1000 messages; over it the result is ok false.",
         ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .responses(responses(
@@ -2789,7 +3328,7 @@ fn problem(code: u16) -> Response {
         416 => "The Range header does not overlap the blob.",
         415 => "The request body is not JSON.",
         422 => {
-            "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
+            "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed)."
         }
         429 => "Too many requests.",
         503 => "The server is busy or a dependency is unavailable. Retry later.",

@@ -26,6 +26,48 @@ test:
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
     cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_survives_a_lossy_crash
+    cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_retention_hook_aborts_safely
+    cargo test --workspace --all-features -- --ignored --exact crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows
+
+# The storage model test with more cases (D-R-14), in release mode.
+model cases="500":
+    LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
+
+# Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
+# Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
+# Ubuntu 24.04 and later restrict them with AppArmor: run
+# `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` first (until the next reboot).
+resources:
+    cargo test --workspace --all-features -- --ignored --test-threads=1 model_tests::resources::small_fs:: model_tests::resources::disk_full:: model_tests::resources::descriptors::
+
+# Memory-limit runs (track R M5, D-R-9), release mode, under a systemd user scope.
+resources-memory:
+    cargo test --release --workspace --all-features -- --ignored --test-threads=1 --exact model_tests::resources::memory::defaults_at_the_documented_minimum model_tests::resources::memory::small_profile_at_its_minimum model_tests::resources::memory::child_sees_the_scope_limit
+
+# The smallest memory limit a profile survives (defaults or small). Takes tens of minutes.
+resources-memory-min profile="defaults":
+    LLMOBS_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
+
+# The storage model test on a remote store with injected S3 faults, in release mode (R4.5).
+model-s3 cases="200":
+    LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
+
+# S3 chaos through toxiproxy in front of an S3 endpoint (R M4). Needs
+# LLMOBS_TEST_S3_ENDPOINT, LLMOBS_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY and LLMOBS_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
+s3-chaos:
+    cargo test --release --workspace --all-features --test s3_chaos -- --ignored --test-threads 1 --nocapture
+
+# Cross-check the storage crash tests on LazyFS, which drops unsynced data at each crash (R2.12).
+# Needs FUSE 3 and `user_allow_other`: tools/lazyfs/README.md. Manual, not in `just test`.
+lazyfs:
+    tools/lazyfs/lazyfs.sh build && tools/lazyfs/lazyfs.sh run
 
 # Download the pinned text corpus of the storage benchmarks and soak (OpenAssistant oasst2, Apache-2.0; track R M7)
 fetch-corpus:
@@ -116,7 +158,10 @@ ts-smoke tarball:
     trap 'rm -rf "$dir"' EXIT
     cd "$dir"
     npm init -y >/dev/null
-    npm install --no-audit --no-fund --ignore-scripts "$tarball" >/dev/null
+    # The SDK's dependencies come from npm, with no lockfile. Hold them to the 7-day age gate that
+    # pnpm's minimumReleaseAge applies to the repo (D74); npm 10, shipped with Node 22.12, supports --before.
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
     EXPECTED="$expected" node --input-type=module -e 'import { VERSION } from "llmobs"; if (VERSION !== process.env.EXPECTED) { console.error(`ESM: VERSION ${VERSION}`); process.exit(1); }'
     EXPECTED="$expected" node -e 'const { VERSION } = require("llmobs"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
     echo "llmobs ${expected} loads from ESM and CommonJS on Node $(node --version)"

@@ -13,7 +13,7 @@ Everything compiles to DataFusion plans over the project-scoped providers of 03 
 | `experiment_items` | experiment results | SQLite rows for the project, exposed via a `MemTable` built per query (bounded to 1M rows). The server owns the schema, the rows and the column catalog, and registers the table through `QueryContext::register_sqlite_view` (D93) |
 | `dataset_items` | current version items | same approach |
 
-Cost totals of `sessions` and of the user list are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
+Cost totals of `sessions`, of the user list, and of the dashboard and alert queries (§ Dashboard metrics; spec 07) are summed as `Decimal128(38, 18)`, so they do not depend on the partitioning (D-A2-4).
 
 Each view exposes the stored columns of its table in spec 01 order, without `project_id`. `traces` also drops `last_ingest_time` and `partial_count`. Binary IDs (`trace_id`, `span_id`, `parent_span_id`, `root_span_id`) are lowercase hex `Utf8`. `duration_ms` follows `duration_ns`: on `spans`, `duration_ns` is stored; on `traces` and `sessions`, `duration_ns = end_time − start_time` in nanoseconds, placed after `end_time`, and `duration_ms = duration_ns / 1e6`. `events` and `links` keep their native list-of-struct types. They are listed as `json` in the schema endpoint because clients receive them as JSON.
 
@@ -28,6 +28,10 @@ Column reference for each view is generated from the Arrow schemas and served at
 Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM 'llmobs-eval'` and exclude experiment traces (`metadata['llmobs.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `llmobs-eval` exclusion is not added; the experiment exclusion still is.
 
 The exclusions apply to the view the request reads: `traces` and `spans` directly; session and user lists through the traces they aggregate; span-based and score-based metrics through a semi-join on the excluded traces.
+
+**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'llmobs-eval' OR metadata['llmobs.experiment_id'] IS NOT NULL)`.
+
+**Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show "10 000 or more" without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window. On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded. With strict exclusions, `trace_refresh` returns only `trace_id` and `start_time`, the two columns the trigger needs.
 
 The SQL console applies **no** implicit exclusion (users see raw data; the schema docs explain the reserved environments).
 
@@ -98,8 +102,8 @@ Later (post-MVP): Tantivy index per partition built at compaction.
 4. Functions: DataFusion's built-in scalar, nested, aggregate and window functions, except those whose result can be far larger than their arguments or that read storage internals: `range`, `generate_series`, `repeat`, `lpad`, `rpad`, `replace`, `regexp_replace`, `array_repeat`, `array_resize`, `array_replace`, `array_replace_n`, `array_replace_all` (and their `list_*` aliases), `levenshtein` (quadratic CPU), `input_file_name` and `file_row_index`. Using one is a 400 naming it. Every other scalar function call except `get_field` first reserves the bytes it reads in the query memory pool (for `concat_ws` and `array_to_string`, the separator once per place it is written); when the pool is full the query fails with `query_too_large`. Each query's pool is capped at `query.max_memory` (A1 M6.1) (D-A2-2). Functions the planner inserts itself (`array_concat` for `||` on lists, `array_element` for subscripts, …) and string concatenation with `||` go through the same reservation. No table or higher-order functions. Score functions are DSL-only (D97).
 5. The planned statement is checked again with DataFusion's `SQLOptions` (no DDL, DML or statements).
 6. Session config: per-query runtime from storage (memory cap), `batch_size = 8192`, `target_partitions` from storage. Timeout: `tokio::time::timeout` around planning and execution; dropping the stream cancels it.
-7. Time window (D101): an optional `[from, to)` written into the `spans` and `traces` views (on `start_time`) and the `scores` view (on `created_at`); `sessions` follows from `traces`; the SQLite views are not windowed. Every scan of a view carries it, in joins, subqueries and CTEs too. Without a window the query reads all history. Independently of it, an org's plan data-access window (D175) hides older rows from every provider through `QueryOptions::visible_from`, set by the server for every query (track P's M4, D-P-21).
-8. Results (D98): `{columns: [{name, type}], rows: [{column: value}], truncated}`. Output column names must be unique. Timestamps are RFC 3339 with 9 fractional digits, `Z` for UTC (D64). Binary is lowercase hex, maps are objects, NaN and ±inf are null. `type` is the Arrow type as DataFusion prints it. At most 10,000 rows (`limit` 1–10,000, default 10,000), with `truncated: true` when more exist. CSV, NDJSON and Parquet exports stream up to 10M rows and stop there; a failure after the first byte aborts the response body (D-H-8).
+7. Time window (D101): an optional `[from, to)` written into the `spans` and `traces` views (on `start_time`) and the `scores` view (on `created_at`); `sessions` follows from `traces`; the SQLite views are not windowed. Every scan of a view carries it, in joins, subqueries and CTEs too. Without a window the query reads all history. Independently of it, an org's plan data-access window (D175) hides older rows from every base view through `QueryOptions::visible_from`, which the server sets for every read (D-P-21, D-P-47).
+8. Results (D98): `{columns: [{name, type}], rows: [{column: value}], truncated}`. Output column names must be unique. Timestamps are RFC 3339 with 9 fractional digits, `Z` for UTC (D64). Binary is lowercase hex, maps are objects, NaN and ±inf are null. `type` is the Arrow type as DataFusion prints it. At most 10,000 rows (`limit` 1–10,000, default 10,000). `truncated: true` means more rows matched than `rows` holds, because of `limit` or the byte cap. The encoded JSON answer is at most 32 MiB (`SQL_MAX_RESULT_BYTES`): rows are pulled while their estimate, plus the answer's brackets and a comma per row, fits, and the answer stops at the last row that fits. Only a first row that alone passes the cap is `TooLarge`. Each row is sized as the JSON text its values encode to: a string's bytes, a binary's hex length (two characters a byte), a view's length from the view itself, a list or map's children in the rows it reaches (a slice does not count the rest of its child), a dictionary value by its key, a run-end value by its run, 40 bytes per number, bool or temporal value, a decimal by its precision and scale (`max(precision, scale) + 3` for a positive scale, `precision + |scale| + 1` otherwise), a day-time or month-day-nano interval by its display bound (64 and 96 bytes), `null` as 4 bytes, a null dictionary slot as `null` whatever its key, and each cell's column name and punctuation (name length + 4). Each alias is a cell, so it counts its values again. The estimate does not count JSON escapes, so it can read low for control characters and quotes; the encoder refuses output past the cap or past the query memory pool, and either is `TooLarge`, answered `422 query_too_large`. A row whose estimate would pass the cap stops the answer instead (`truncated`); the encoder's own refusal is only reached by escapes the estimate does not count. The parsed rows are reserved from the pool at three times their encoded bytes until the answer is built. CSV, NDJSON and Parquet exports stream up to 10M rows and stop there. Each export batch is sliced into pieces of at most 8 MiB estimated size (at least one row), and each encoded chunk is at most 64 MiB (`EXPORT_MAX_CHUNK_BYTES`); a single row over that ends the stream as `TooLarge`. A failure after the first byte aborts the response body (D-H-8). The caps bound what the console encodes and returns. They do not bound the memory a DataFusion operator uses to build one batch: literal broadcast and join row duplication (a cross join's `take`) are outside the memory pool, and their remaining bound is one output batch of 8,192 rows times the payload size (D-A2-2). In CSV exports, a string cell or header name whose first character is `=`, `+`, `-`, `@`, tab or CR gets a leading `'`; numbers, bools, nulls and JSON arrays and objects are unchanged, and NDJSON and Parquet are exact (D-A2-5).
 
 ### Parameters
 
@@ -129,11 +133,13 @@ Returns time series:
 | latency p50/p95/p99 (traces) | `approx_percentile_cont(duration_ns, q)` on `traces` |
 | LLM latency p50/p95 by model | on `spans WHERE span_kind='llm'` |
 | tokens (input/output/cache) | sums on `spans WHERE span_kind IN ('llm','embedding')` |
-| cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model |
-| top models by cost | `llm` spans with a non-null model, at most 10, by `cost_total` descending (nulls last), then model ascending |
+| cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model, as `Decimal128(38, 18)` |
+| top models by cost | `llm` spans with a non-null model, at most 10, by their `Decimal128(38, 18)` cost sum descending (nulls last), then model ascending |
 | scores | `avg(value_num)` per score name per bucket on `scores` |
-| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'llmobs-eval'` |
+| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'llmobs-eval'`, as `Decimal128(38, 18)` |
 | TTFT p50/p95 | spans `ttft_ns` |
+
+Every cost series and KPI above (total, by model, top models, evaluation) and the alert cost value (`cost`, spec 07) are summed as `Decimal128(38, 18)` (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
 
 The filter is a `traces`-view DSL expression. Span series keep spans whose trace passes it, and score series keep scores whose trace passes it, through a semi-join on `trace_id` over traces with `start_time ∈ [from − 1 day, to)` and `end_time ≥ from`. Session-target scores are not in the score series.
 
@@ -141,7 +147,7 @@ The filter is a `traces`-view DSL expression. Span series keep spans whose trace
 
 KPIs cover `[from, to)` and the previous range of the same length; every KPI value is absent when its range has no traces.
 
-All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`.
+All series honor the filter DSL and the default exclusions (applied as above). Results are cached for 10 s per `(project, params)`, counted from the moment the query finishes. Concurrent requests for the same key share one query, and a failed query's error goes to every request waiting on it; nothing is cached for it.
 
 ## Trace and span APIs
 
@@ -168,5 +174,5 @@ Filter, SQL and execution errors (D94) go back to the caller, capped at 2 KiB, a
 | `invalid_filter` | 400 | Filter and SQL text, with `position` when one is known |
 | `query_failed` | 400 | Execution errors (bad cast, regex too big, division by zero), with DataFusion's message capped at 2 KiB |
 | `query_timeout` | 422 | The query exceeded its time limit |
-| `query_too_large` | 422 | The query needed more memory than the cap |
+| `query_too_large` | 422 | The query needed more memory or temporary disk space than the cap |
 | `busy` | 503 | Admission control refused the query |

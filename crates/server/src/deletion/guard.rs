@@ -1,11 +1,11 @@
 //! Trace ids and end users of recent deletions, so a judge run that started before a
 //! deletion does not write a copy of deleted data after its cut-off (D-M-6).
-#![cfg_attr(not(test), allow(dead_code))] // `blocks` is called by I's executor from M8 on
 
 use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use llmobs_core::ids::{ProjectId, TraceId};
+use uuid::Uuid;
 
 use crate::meta::{MetaDb, MetaError};
 
@@ -17,10 +17,26 @@ pub(crate) struct DeletionGuard {
     inner: Mutex<GuardState>,
 }
 
+/// The deletion an entry comes from. When two deletions name the same trace or user, the
+/// later one is kept.
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    deletion: Uuid,
+    created_at: i64,
+}
+
+impl Entry {
+    fn keep_later(&mut self, other: Self) {
+        if other.created_at > self.created_at {
+            *self = other;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct GuardState {
-    traces: HashMap<ProjectId, HashMap<TraceId, i64>>,
-    users: HashMap<ProjectId, HashMap<String, i64>>,
+    traces: HashMap<ProjectId, HashMap<TraceId, Entry>>,
+    users: HashMap<ProjectId, HashMap<String, Entry>>,
 }
 
 impl DeletionGuard {
@@ -28,57 +44,77 @@ impl DeletionGuard {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records `traces` of `project` from a deletion created at `created_at`. An existing entry
-    /// keeps the later `created_at`.
-    pub(crate) fn add_traces(&self, project: ProjectId, traces: &[TraceId], created_at: i64) {
+    /// Records `traces` of `project` from `deletion`, created at `created_at`.
+    pub(crate) fn add_traces(
+        &self,
+        project: ProjectId,
+        traces: &[TraceId],
+        deletion: Uuid,
+        created_at: i64,
+    ) {
+        let entry = Entry {
+            deletion,
+            created_at,
+        };
         let mut state = self.lock();
         let map = state.traces.entry(project).or_default();
         for trace in traces {
-            let slot = map.entry(*trace).or_insert(created_at);
-            *slot = (*slot).max(created_at);
+            map.entry(*trace).or_insert(entry).keep_later(entry);
         }
     }
 
-    /// Records an end user of `project`.
-    pub(crate) fn add_user(&self, project: ProjectId, user_id: &str, created_at: i64) {
+    /// Records an end user of `project` from `deletion`, created at `created_at`.
+    pub(crate) fn add_user(
+        &self,
+        project: ProjectId,
+        user_id: &str,
+        deletion: Uuid,
+        created_at: i64,
+    ) {
+        let entry = Entry {
+            deletion,
+            created_at,
+        };
         let mut state = self.lock();
         let map = state.users.entry(project).or_default();
-        let slot = map.entry(user_id.to_owned()).or_insert(created_at);
-        *slot = (*slot).max(created_at);
+        map.entry(user_id.to_owned())
+            .or_insert(entry)
+            .keep_later(entry);
     }
 
-    /// Whether a judge run about `trace` must not go on (D-M-6). Only entries with
-    /// `created_at > now - GUARD_NS` count:
+    /// The deletion that forbids a judge run about `trace` to go on, if any (D-M-6). Only
+    /// entries with `created_at > now - GUARD_NS` count:
     /// - a trace-id entry for `trace` blocks;
-    /// - a user entry for one of `users` blocks only when `newest_ingest_ns <= entry.created_at`
-    ///   (the trace's data predates that user's deletion; newer data is not covered, spec S5).
+    /// - a user entry blocks when `users` holds that user with an oldest ingest time at or
+    ///   before the entry's `created_at`: the trace holds data of that user from before the
+    ///   deletion. A trace with only newer data of the user is not covered (spec S5).
     ///
-    /// `users` are the distinct user ids of the trace's loaded spans; `newest_ingest_ns` their
-    /// largest `ingest_time`. Callers that know neither pass `&[]` and `0`.
-    pub(crate) fn blocks(
+    /// `users` are the distinct user ids of the trace's loaded spans, each with the smallest
+    /// `ingest_time` of its spans. Callers that have not loaded the trace pass `&[]`.
+    /// The returned id lets a run that already committed a copy ask for its follow-up
+    /// deletion (D-M-6).
+    pub(crate) fn blocking(
         &self,
         project: ProjectId,
         trace: TraceId,
-        users: &[&str],
-        newest_ingest_ns: i64,
+        users: &[(&str, i64)],
         now: i64,
-    ) -> bool {
+    ) -> Option<Uuid> {
         let floor = now.saturating_sub(GUARD_NS);
         let state = self.lock();
-        let trace_hit = state
+        if let Some(entry) = state
             .traces
             .get(&project)
             .and_then(|map| map.get(&trace))
-            .is_some_and(|created| *created > floor);
-        if trace_hit {
-            return true;
+            .filter(|entry| entry.created_at > floor)
+        {
+            return Some(entry.deletion);
         }
-        let Some(map) = state.users.get(&project) else {
-            return false;
-        };
-        users.iter().any(|user| {
+        let map = state.users.get(&project)?;
+        users.iter().find_map(|(user, oldest_ingest)| {
             map.get(*user)
-                .is_some_and(|created| *created > floor && newest_ingest_ns <= *created)
+                .filter(|entry| entry.created_at > floor && *oldest_ingest <= entry.created_at)
+                .map(|entry| entry.deletion)
         })
     }
 
@@ -87,11 +123,11 @@ impl DeletionGuard {
         let floor = now.saturating_sub(GUARD_NS);
         let mut state = self.lock();
         for map in state.traces.values_mut() {
-            map.retain(|_, created| *created > floor);
+            map.retain(|_, entry| entry.created_at > floor);
         }
         state.traces.retain(|_, map| !map.is_empty());
         for map in state.users.values_mut() {
-            map.retain(|_, created| *created > floor);
+            map.retain(|_, entry| entry.created_at > floor);
         }
         state.users.retain(|_, map| !map.is_empty());
     }
@@ -105,11 +141,11 @@ impl DeletionGuard {
         let entries =
             crate::meta::deletions::guard_entries(meta.reader(), now.saturating_sub(GUARD_NS))
                 .await?;
-        for (project, trace, created_at) in entries.traces {
-            self.add_traces(project, &[trace], created_at);
+        for (project, trace, deletion, created_at) in entries.traces {
+            self.add_traces(project, &[trace], deletion, created_at);
         }
-        for (project, user, created_at) in entries.users {
-            self.add_user(project, &user, created_at);
+        for (project, user, deletion, created_at) in entries.users {
+            self.add_user(project, &user, deletion, created_at);
         }
         Ok(())
     }
@@ -144,31 +180,51 @@ mod tests {
         let guard = DeletionGuard::default();
         let p = ProjectId::new_v7();
         let p2 = ProjectId::new_v7();
-        guard.add_traces(p, &[trace(1)], 100);
-        guard.add_user(p, "u", 100);
+        let (d1, d2) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        guard.add_traces(p, &[trace(1)], d1, 100);
+        guard.add_user(p, "u", d2, 100);
         let (t, t2) = (trace(1), trace(2));
 
-        assert!(guard.blocks(p, t, &[], 0, 101));
-        // Data ingested at the cut-off is covered; newer data is not.
-        assert!(guard.blocks(p, t2, &["u"], 100, 101));
-        assert!(!guard.blocks(p, t2, &["u"], 101, 102));
-        assert!(!guard.blocks(p2, t, &[], 0, 101));
-        assert!(!guard.blocks(p, t2, &[], 0, 101));
+        assert_eq!(guard.blocking(p, t, &[], 101), Some(d1));
+        // The user's data ingested at or before the cut-off is covered, even when the
+        // trace also holds newer data; a trace with only newer data of the user is not.
+        assert_eq!(guard.blocking(p, t2, &[("u", 100)], 101), Some(d2));
+        assert_eq!(
+            guard.blocking(p, t2, &[("v", 50), ("u", 99)], 101),
+            Some(d2)
+        );
+        assert_eq!(guard.blocking(p, t2, &[("u", 101)], 102), None);
+        assert_eq!(guard.blocking(p2, t, &[], 101), None);
+        assert_eq!(guard.blocking(p, t2, &[], 101), None);
         // Expired after a day.
-        assert!(!guard.blocks(p, t, &[], 0, 100 + GUARD_NS));
+        assert_eq!(guard.blocking(p, t, &[], 100 + GUARD_NS), None);
+    }
+
+    #[test]
+    fn the_later_deletion_wins() {
+        let guard = DeletionGuard::default();
+        let p = ProjectId::new_v7();
+        let (d1, d2) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        guard.add_traces(p, &[trace(1)], d2, 200);
+        guard.add_traces(p, &[trace(1)], d1, 100);
+        assert_eq!(guard.blocking(p, trace(1), &[], 201), Some(d2));
     }
 
     #[test]
     fn prune_drops_expired_entries() {
         let guard = DeletionGuard::default();
         let p = ProjectId::new_v7();
-        guard.add_traces(p, &[trace(1), trace(2)], 100);
-        guard.add_user(p, "u", 100);
+        let d = Uuid::from_u128(1);
+        guard.add_traces(p, &[trace(1), trace(2)], d, 100);
+        guard.add_user(p, "u", d, 100);
         assert_eq!(guard.len(), 3);
 
         guard.prune(100 + GUARD_NS);
         assert_eq!(guard.len(), 0);
-        assert!(!guard.blocks(p, trace(1), &["u"], 0, 100 + GUARD_NS));
+        assert_eq!(
+            guard.blocking(p, trace(1), &[("u", 0)], 100 + GUARD_NS),
+            None
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -179,8 +235,9 @@ mod tests {
         let org: OrgId = OrgId::new_v7();
         let (t, t2, x) = (trace(1), trace(2), trace(3));
 
+        let user_id = Uuid::now_v7();
         let user_row = NewDeletion {
-            id: Uuid::now_v7(),
+            id: user_id,
             org_id: org,
             project_id: Some(p),
             kind: DeletionKind::User,
@@ -214,8 +271,11 @@ mod tests {
 
         let guard = DeletionGuard::default();
         guard.load(&app.state.meta, now).await.unwrap();
-        assert!(guard.blocks(p, t, &[], 0, now));
-        assert!(guard.blocks(p, x, &["user-1"], now - 1, now));
-        assert!(!guard.blocks(p, t2, &[], 0, now));
+        assert_eq!(guard.blocking(p, t, &[], now), Some(user_id));
+        assert_eq!(
+            guard.blocking(p, x, &[("user-1", now - 1)], now),
+            Some(user_id)
+        );
+        assert_eq!(guard.blocking(p, t2, &[], now), None);
     }
 }

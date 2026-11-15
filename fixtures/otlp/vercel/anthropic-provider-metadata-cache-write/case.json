@@ -7,5 +7,5 @@
     "02 § Token semantics",
     "02 § Cost computation"
   ],
-  "notes": "pinned by hand from Langfuse's providerMetadata reading; re-check against a B2 capture (D113)"
+  "notes": "pinned by hand from Langfuse's providerMetadata reading. Confirmed by vercel/v5-anthropic-cache: ai.usage carries the exclusive input 100 and no cache counts, and the cache write 200 is only in ai.response.providerMetadata (D113)."
 }

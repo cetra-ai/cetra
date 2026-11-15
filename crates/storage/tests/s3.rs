@@ -23,9 +23,14 @@
 //! ```text
 //! LLMOBS_TEST_S3_ENDPOINT=http://127.0.0.1:7070 LLMOBS_TEST_S3_BUCKET=llmobs-test AWS_ACCESS_KEY_ID=llmobs AWS_SECRET_ACCESS_KEY=llmobs-secret cargo test -p llmobs-storage --test s3 -- --nocapture
 //! ```
+//!
+//! A remote provider needs its region and addressing style: `LLMOBS_TEST_S3_REGION` (default
+//! `us-east-1`) and `LLMOBS_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, see
+//! `docs/self-hosting/s3.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use llmobs_storage::QueryOptions;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -52,7 +57,25 @@ fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
 }
 
-fn config(dir: &std::path::Path, bucket: &str, prefix: &str, endpoint: &str) -> StorageConfig {
+/// The region and addressing style of the server under test (`LLMOBS_TEST_S3_REGION`, default
+/// `us-east-1`; `LLMOBS_TEST_S3_PATH_STYLE`, default `true`).
+fn region_and_path_style() -> (String, bool) {
+    let region = std::env::var("LLMOBS_TEST_S3_REGION").unwrap_or_else(|_| "us-east-1".to_owned());
+    let path_style = !matches!(
+        std::env::var("LLMOBS_TEST_S3_PATH_STYLE").as_deref(),
+        Ok("false")
+    );
+    (region, path_style)
+}
+
+fn config(
+    dir: &std::path::Path,
+    bucket: &str,
+    prefix: &str,
+    endpoint: &str,
+    region: &str,
+    path_style: bool,
+) -> StorageConfig {
     StorageConfig {
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
@@ -61,9 +84,9 @@ fn config(dir: &std::path::Path, bucket: &str, prefix: &str, endpoint: &str) -> 
             prefix: prefix.to_owned(),
         }),
         s3: S3Config {
-            region: Some("us-east-1".to_owned()),
+            region: Some(region.to_owned()),
             endpoint: Some(endpoint.to_owned()),
-            force_path_style: true,
+            force_path_style: path_style,
             allow_http: endpoint.starts_with("http://"),
         },
         wal: WalConfig::default(),
@@ -215,13 +238,19 @@ async fn largest_object(dir: &std::path::Path) -> Result<i64, String> {
     size.ok_or_else(|| "catalog has no files".to_owned())
 }
 
-async fn delete_prefix(endpoint: &str, bucket: &str, prefix: &str) -> Result<(), String> {
+async fn delete_prefix(
+    endpoint: &str,
+    bucket: &str,
+    prefix: &str,
+    region: &str,
+    path_style: bool,
+) -> Result<(), String> {
     let http = endpoint.starts_with("http://");
     let store = AmazonS3Builder::from_env()
         .with_bucket_name(bucket)
         .with_endpoint(endpoint)
-        .with_region("us-east-1")
-        .with_virtual_hosted_style_request(false)
+        .with_region(region)
+        .with_virtual_hosted_style_request(!path_style)
         .with_allow_http(http)
         .build()
         .map_err(|error| error.to_string())?;
@@ -248,11 +277,12 @@ async fn s3_flush_round_trip() {
         return;
     };
     let bucket = std::env::var("LLMOBS_TEST_S3_BUCKET").expect("LLMOBS_TEST_S3_BUCKET");
+    let (region, path_style) = region_and_path_style();
     let prefix = format!("m29-{}", now_ms());
     let dir = tempfile::tempdir().unwrap();
-    let config = config(dir.path(), &bucket, &prefix, &endpoint);
+    let config = config(dir.path(), &bucket, &prefix, &endpoint, &region, path_style);
     let outcome = round_trip(&config).await;
-    let deleted = delete_prefix(&endpoint, &bucket, &prefix).await;
+    let deleted = delete_prefix(&endpoint, &bucket, &prefix, &region, path_style).await;
     outcome.unwrap();
     deleted.unwrap();
 }
@@ -271,7 +301,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )
@@ -286,7 +316,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )
@@ -305,7 +335,7 @@ async fn round_trip(config: &StorageConfig) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let count = span_count(
         &storage
-            .query(project(), Default::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .map_err(|error| error.to_string())?,
     )

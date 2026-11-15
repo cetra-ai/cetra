@@ -2573,6 +2573,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )

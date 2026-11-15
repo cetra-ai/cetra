@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::{OrgId, ProjectId};
+use llmobs_core::ids::{OrgId, ProjectId, TraceId};
 use llmobs_storage::error::{DeletionError, QueryError};
 use llmobs_storage::{
     Deletion, DeletionScope, DeletionStatus, MAX_FILTER_DELETION_TRACES, RunError,
@@ -20,11 +20,12 @@ use uuid::Uuid;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::deletions::{
-    DeletionKind, DeletionRow, DeletionState, FailReason, clear_handover, log_undecodable,
-    mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions, scope_projects,
-    scope_sessions, scope_traces,
+    ActorKind, DeletionKind, DeletionRow, DeletionState, FailReason, NewDeletion, RequestDetails,
+    clear_handover, deletion_by_id, insert_deletion, insert_follow_up, insert_projects,
+    log_undecodable, mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions,
+    scope_projects, scope_sessions, scope_traces,
 };
-use crate::meta::orgs::{delete_org, org_by_id};
+use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id};
 use crate::meta::projects::{delete_project, project_by_id, project_ids_of_org};
 
 /// Time between two runs when nothing wakes the worker.
@@ -202,6 +203,75 @@ pub(crate) fn on_dropped(dropped: &Dropped) {
     }
 }
 
+/// Asks for the deletion of copies committed after `parent`'s cut-off (D-M-6): a judge trace
+/// and the target it scored. Stores the follow-up row, wakes the worker and writes the audit
+/// event `deletion requested` with `follow_up_of = parent`.
+///
+/// The guard learns a deletion before `create_deletion` stores its row, so a `parent` that is not
+/// stored yet is waited for: the row is read up to [`PARENT_READS`] times, [`PARENT_WAIT`] apart.
+/// If it is still missing, the entry comes from a request that failed after it filled the guard;
+/// no deletion happened, so there is nothing to erase: `warn!` with the id and return `Ok(())`.
+/// A `parent` without a project is a bug: `warn!` and return `Ok(())`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the parent cannot be read or the row cannot be stored.
+pub(crate) async fn follow_up(
+    state: &AppState,
+    parent: Uuid,
+    traces: &[TraceId],
+) -> Result<(), MetaError> {
+    let Some(row) = parent_row(state, parent).await? else {
+        tracing::warn!(deletion_id = %parent, "follow-up of an unknown deletion; no deletion was stored");
+        return Ok(());
+    };
+    let Some(project) = row.project_id else {
+        tracing::warn!(deletion_id = %parent, "follow-up of a deletion without a project");
+        return Ok(());
+    };
+    let id = Uuid::now_v7();
+    let now = state.clock.now_ns();
+    let (org, actor_kind, actor_id) = (row.org_id, row.actor_kind, row.actor_id);
+    let traces = traces.to_vec();
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { insert_follow_up(conn, &row, id, &traces, now).await })
+        })
+        .await?;
+    state.deletions.wake.notify_one();
+    tracing::info!(
+        target: "audit",
+        deletion_id = %id,
+        follow_up_of = %parent,
+        kind = DeletionKind::TraceIds.as_str(),
+        org_id = %org,
+        project_id = %project,
+        actor_kind = actor_kind.as_str(),
+        actor_id = %actor_id,
+        "deletion requested"
+    );
+    Ok(())
+}
+
+/// Reads per wait for a `parent` row that is not stored yet (see [`follow_up`]).
+const PARENT_READS: u32 = 20;
+/// Time between two reads of a missing `parent` row (about one second in all).
+const PARENT_WAIT: Duration = Duration::from_millis(50);
+
+/// The row of `parent`, read up to [`PARENT_READS`] times, [`PARENT_WAIT`] apart.
+async fn parent_row(state: &AppState, parent: Uuid) -> Result<Option<DeletionRow>, MetaError> {
+    for read in 1..=PARENT_READS {
+        if let Some(row) = deletion_by_id(state.meta.reader(), parent).await? {
+            return Ok(Some(row));
+        }
+        if read < PARENT_READS {
+            tokio::time::sleep(PARENT_WAIT).await;
+        }
+    }
+    Ok(None)
+}
+
 /// Processes every open deletion once: drops first, then cheap rows (see [`priority`]), oldest
 /// first within each group. A row that does not decode is logged and skipped; errors on one
 /// row are logged and counted and do not stop the others. Returns `Err` only when the open
@@ -358,7 +428,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
                 state
                     .deletions
                     .guard
-                    .add_user(project, user, row.created_at);
+                    .add_user(project, user, row.id, row.created_at);
             }
         }
         DeletionKind::TraceIds if row.trace_count.is_none() => {
@@ -368,7 +438,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
             state
                 .deletions
                 .guard
-                .add_traces(project, &requested, row.created_at);
+                .add_traces(project, &requested, row.id, row.created_at);
         }
         _ => {}
     }
@@ -420,7 +490,7 @@ async fn register(
     state
         .deletions
         .guard
-        .add_traces(project, &traces, row.created_at);
+        .add_traces(project, &traces, row.id, row.created_at);
     let scope = match row.kind {
         DeletionKind::User => DeletionScope::User {
             user_id: row
@@ -541,8 +611,70 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     Ok(())
 }
 
-/// Drops every project of the org (including any created after the request), its usage
-/// and the org row.
+/// Starts the drop of `org` (D-M-7): marks it `deleting`, records the deletion and its
+/// projects in one write, wakes the worker and logs the audit event. `Ok(None)` when the
+/// org is no longer active (another drop started first).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the write fails.
+pub(crate) async fn request_org_drop(
+    state: &AppState,
+    org: &OrgRow,
+    actor: (ActorKind, Uuid),
+) -> Result<Option<DeletionRow>, MetaError> {
+    let (actor_kind, actor_id) = actor;
+    let id = Uuid::now_v7();
+    let now = state.clock.now_ns();
+    let org_id = org.id;
+    let new = NewDeletion {
+        id,
+        org_id,
+        project_id: None,
+        kind: DeletionKind::Org,
+        user_id: None,
+        request: RequestDetails {
+            name: Some(org.name.clone()),
+            slug: Some(org.slug.clone()),
+            ..RequestDetails::default()
+        },
+        actor_kind,
+        actor_id,
+        state: DeletionState::Pending,
+        created_at: now,
+    };
+    let row = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if !mark_org_deleting(conn, org_id, now).await? {
+                    return Ok(None);
+                }
+                let projects = project_ids_of_org(&mut *conn, org_id).await?;
+                let row = insert_deletion(conn, &new).await?;
+                insert_projects(conn, id, &projects).await?;
+                Ok(Some(row))
+            })
+        })
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    state.deletions.wake.notify_one();
+    tracing::info!(
+        target: "audit",
+        deletion_id = %id,
+        kind = DeletionKind::Org.as_str(),
+        org_id = %org_id,
+        actor_kind = actor_kind.as_str(),
+        actor_id = %actor_id,
+        "deletion requested"
+    );
+    Ok(Some(row))
+}
+
+/// Drops every project of the org (including any created after the request) and the org row.
+/// The org's `usage_daily` rows stay for the control plane's billing (D-P-46).
 async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), Step> {
     let reader = state.meta.reader();
     let mut projects = scope_projects(reader, row.id)
@@ -575,7 +707,6 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                crate::usage::delete_org_usage(conn, org).await?;
                 delete_org(conn, org).await?;
                 mark_dropped(conn, id, now).await
             })
@@ -616,6 +747,8 @@ mod tests {
         insert_projects, insert_traces, mark_handed_over, scope_sessions, scope_traces,
         store_counts,
     };
+    use crate::meta::eval_jobs::{KIND_MANUAL, NewJob, insert_job};
+    use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::orgs::{insert_org, org_by_id};
     use crate::meta::projects::{ProjectRow, insert_project, project_by_id};
     use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
@@ -1247,7 +1380,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn org_drop_removes_the_org_and_its_usage() {
+    async fn org_drop_keeps_the_usage() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
@@ -1313,14 +1446,14 @@ mod tests {
                     .is_none()
             );
         }
-        assert_eq!(
+        assert!(
             count_rows(
                 &app,
                 "SELECT COUNT(*) FROM usage_daily WHERE org_id = ?",
                 globex.to_string()
             )
-            .await,
-            0
+            .await
+                > 0
         );
         assert!(
             count_rows(
@@ -1568,5 +1701,150 @@ mod tests {
             ),
             Step::Fail(FailReason::ResolutionFailed)
         ));
+    }
+
+    /// A queued manual job of `project` for `trace`, with a check evaluator of its own.
+    async fn queued_job(app: &TestApp, project: &ProjectRow, trace: TraceId) -> Uuid {
+        let evaluator = Uuid::now_v7();
+        let job = Uuid::now_v7();
+        let project_id = project.id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_evaluator(
+                        conn,
+                        evaluator,
+                        project_id,
+                        "check",
+                        EvaluatorFields {
+                            name: "Same".to_owned(),
+                            config: r#"{"check":"exact_match"}"#.to_owned(),
+                            output_score: r#"{"name":"same","data_type":"boolean"}"#.to_owned(),
+                            connection_id: None,
+                            secret_enc: None,
+                            version: 1,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    insert_job(
+                        conn,
+                        NewJob {
+                            id: job,
+                            project_id,
+                            kind: KIND_MANUAL,
+                            rule_id: None,
+                            evaluator_id: evaluator,
+                            variable_mapping: Some(r#"{"input":"trace.input"}"#.to_owned()),
+                            trace_id: trace,
+                            span_id: None,
+                            trace_start_ns: now,
+                        },
+                        now,
+                    )
+                    .await
+                    .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        job
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolution_cascades_to_eval_jobs() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        let a = trace_id(1);
+        commit(&app, project, &a, &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        let job = queued_job(&app, project, trace(1)).await;
+
+        let id = insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM eval_jobs WHERE id = ?")
+            .bind(job.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(gone, 0, "the queued job of the deleted trace is deleted");
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Pending);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn follow_up_of_a_missing_parent_does_nothing() {
+        let app = TestApp::new().await;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        follow_up(&app.state, Uuid::now_v7(), &[trace(1)])
+            .await
+            .unwrap();
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deletions")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn follow_up_waits_for_a_parent_being_stored() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let parent = Uuid::now_v7();
+        let state = app.state.clone();
+        let copy = trace(1);
+        let task = tokio::spawn(async move { follow_up(&state, parent, &[copy]).await });
+
+        // The guard knows the deletion; its row is stored about 100 ms later.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let parent_row = NewDeletion {
+            id: parent,
+            org_id: seeded.org_id,
+            project_id: Some(project),
+            kind: DeletionKind::TraceIds,
+            user_id: None,
+            request: RequestDetails::default(),
+            actor_kind: ActorKind::User,
+            actor_id: seeded.user_id,
+            state: DeletionState::Resolving,
+            created_at: now,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { insert_deletion(conn, &parent_row).await.map(|_| ()) })
+            })
+            .await
+            .unwrap();
+        task.await.unwrap().unwrap();
+
+        let follow_up: String =
+            sqlx::query_scalar("SELECT id FROM deletions WHERE project_id = ? AND id <> ?")
+                .bind(project.to_string())
+                .bind(parent.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        let follow_up = Uuid::parse_str(&follow_up).unwrap();
+        let row = deletion_row(&app, follow_up).await;
+        assert_eq!(row.actor_kind, ActorKind::User);
+        assert_eq!(row.actor_id, seeded.user_id, "the parent's actor");
+        assert_eq!(row.kind, DeletionKind::TraceIds);
+        assert_eq!(row.state, DeletionState::Resolving);
+        assert_eq!(row.request.requested, Some(1));
     }
 }

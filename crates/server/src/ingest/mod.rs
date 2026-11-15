@@ -8,6 +8,7 @@ mod fixtures_tests;
 pub(crate) mod grpc;
 pub(crate) mod otlp;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
@@ -27,6 +28,7 @@ use llmobs_storage::{MediaBlob, Storage};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{IngestConfig, MediaConfig};
+use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::live::LiveBus;
@@ -180,12 +182,19 @@ impl Ingest {
         self.max_request_bytes
     }
 
-    /// The normalizer's context for an in-process commit into `project` (D-I-21).
-    pub(crate) fn context(&self, project: &ProjectRow, now_ns: i64) -> IngestContext {
+    /// The normalizer's context for an in-process commit into `project` (D-I-21). The D85 age
+    /// bound is the project's retention, or `retention_cap` (the org's window plus 30 days, D-P-22)
+    /// when that is shorter.
+    pub(crate) fn context(
+        &self,
+        project: &ProjectRow,
+        retention_cap: Option<u32>,
+        now_ns: i64,
+    ) -> IngestContext {
         IngestContext {
             project_id: project.id,
             ingest_time: now_ns,
-            retention_days: project.retention_days,
+            retention_days: crate::retention::effective_days(project.retention_days, retention_cap),
             limits: self.limits,
         }
     }
@@ -214,27 +223,18 @@ impl Ingest {
             .map_err(|_| IngestError::Busy)
     }
 
-    /// Decompresses, decodes, counts, normalizes and rewrites one OTLP request (D-G-2, D-G-7).
-    ///
-    /// `reservation` covers the raw body; decompressed chunks are reserved as they are
-    /// produced. The result keeps the reservation until it is dropped.
-    pub(crate) async fn accept(
+    /// Sets `reservation` to exactly `bytes` of budget (D-G-5): a larger one gives back the
+    /// rest, a smaller one takes what is missing. Never waits; `Busy` when the budget is full.
+    pub(crate) fn fit(
         &self,
-        raw: Bytes,
-        mut reservation: Reservation,
-        format: BodyFormat,
-        encoding: BodyEncoding,
-        project: &ProjectRow,
-        now_ns: i64,
-    ) -> Result<Accepted, IngestError> {
-        let request_bytes = raw.len();
-        // Give back the part of a chunked reservation that the body does not use, and cover
-        // any part of the body the reservation does not.
+        reservation: &mut Reservation,
+        bytes: usize,
+    ) -> Result<(), IngestError> {
         let held = reservation.0.num_permits();
-        if held > request_bytes {
-            drop(reservation.0.split(held - request_bytes));
-        } else if held < request_bytes {
-            let missing = u32::try_from(request_bytes - held).map_err(|_| IngestError::Busy)?;
+        if held > bytes {
+            drop(reservation.0.split(held - bytes));
+        } else if held < bytes {
+            let missing = u32::try_from(bytes - held).map_err(|_| IngestError::Busy)?;
             let extra = self
                 .budget
                 .clone()
@@ -242,6 +242,26 @@ impl Ingest {
                 .map_err(|_| IngestError::Busy)?;
             reservation.0.merge(extra);
         }
+        Ok(())
+    }
+
+    /// Decompresses, decodes, counts, normalizes and rewrites one OTLP request (D-G-2, D-G-7).
+    ///
+    /// `reservation` covers the raw body; decompressed chunks are reserved as they are
+    /// produced. The result keeps the reservation until it is dropped.
+    #[allow(clippy::too_many_arguments)] // the body, its reservation and format, and the project and clock
+    pub(crate) async fn accept(
+        &self,
+        raw: Bytes,
+        mut reservation: Reservation,
+        format: BodyFormat,
+        encoding: BodyEncoding,
+        project: &ProjectRow,
+        retention_cap: Option<u32>,
+        now_ns: i64,
+    ) -> Result<Accepted, IngestError> {
+        let request_bytes = raw.len();
+        self.fit(&mut reservation, request_bytes)?;
         let max_bytes = self.max_request_bytes;
         let semaphore = Arc::clone(&self.budget);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
@@ -281,6 +301,7 @@ impl Ingest {
             u64::try_from(request_bytes).unwrap_or(u64::MAX),
             u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
             project,
+            retention_cap,
             now_ns,
         )
         .await
@@ -288,6 +309,7 @@ impl Ingest {
 
     /// Counts, normalizes and rewrites a decoded request (D-G-2, D-G-7). Used by OTLP/HTTP after
     /// decoding and by gRPC, whose request tonic decodes.
+    #[allow(clippy::too_many_arguments)] // the request, its reservation and sizes, and the project and clock
     pub(crate) async fn accept_request(
         &self,
         request: ExportTraceServiceRequest,
@@ -295,6 +317,7 @@ impl Ingest {
         request_bytes: u64,
         decompressed_bytes: u64,
         project: &ProjectRow,
+        retention_cap: Option<u32>,
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let prices: Arc<PriceTable> = self
@@ -302,7 +325,7 @@ impl Ingest {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-        let ctx = self.context(project, now_ns);
+        let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
@@ -335,19 +358,25 @@ impl Ingest {
     /// Stores the media, then appends the spans (D-G-8, D-G-9), then counts the billable spans
     /// (every span outside the reserved evaluation environment, D-I-31) and the request bytes
     /// (D-G-30). Nothing is appended when a blob fails, and nothing is counted then. The
-    /// caller's reservation covers the spans until this returns.
+    /// caller's reservation covers the spans until this returns. Then records the trace in the
+    /// trigger's pending map when its project has an online rule (D-I-8; memory only).
     pub(crate) async fn commit(
         &self,
         storage: &Storage,
         usage: &Usage,
         live: &LiveBus,
+        pending: &PendingTraces,
         target: CommitTarget,
         normalized: Normalized,
     ) -> Result<CommitReceipt, IngestError> {
         let Normalized { spans, media, .. } = normalized;
+        let starts = newest_span_starts(&spans);
         let blobs = media
             .into_iter()
-            .map(store_blob)
+            .map(|blob| {
+                let newest = starts.get(&blob.sha256).copied().unwrap_or(i64::MIN);
+                store_blob(blob, newest)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let mut stored = 0_usize;
         let mut puts = stream::iter(blobs)
@@ -374,6 +403,7 @@ impl Ingest {
                 .await
                 .map_err(IngestError::Append)?;
             live.publish(target.project_id, &spans);
+            pending.observe(target.project_id, &spans, target.now_ns);
         }
         usage.add(
             target.org_id,
@@ -415,6 +445,7 @@ pub(crate) async fn commit_in_task(
                 &state.storage,
                 &state.usage,
                 &state.live,
+                &state.pending,
                 target,
                 normalized,
             )
@@ -425,14 +456,31 @@ pub(crate) async fn commit_in_task(
     task.await.map_err(IngestError::Join)?
 }
 
+/// The newest `start_time` of the spans that reference each blob, keyed by the blob's hash
+/// (the spans' `media_refs`, hex). A blob no span references has no entry (D-P-21).
+pub(crate) fn newest_span_starts(spans: &[llmobs_core::span::Span]) -> HashMap<String, i64> {
+    let mut newest: HashMap<String, i64> = HashMap::new();
+    for span in spans {
+        for sha in &span.media_refs {
+            newest
+                .entry(sha.clone())
+                .and_modify(|start| *start = (*start).max(span.start_time))
+                .or_insert(span.start_time);
+        }
+    }
+    newest
+}
+
 /// Converts a normalized blob to the storage type, checking that its hash is 32 bytes.
-fn store_blob(blob: CoreBlob) -> Result<MediaBlob, IngestError> {
+/// `newest_span_start` is the newest `start_time` of the spans that reference it.
+fn store_blob(blob: CoreBlob, newest_span_start: i64) -> Result<MediaBlob, IngestError> {
     let digest = hex::decode(&blob.sha256).map_err(|_| IngestError::MediaHash)?;
     let sha256 = <[u8; 32]>::try_from(digest.as_slice()).map_err(|_| IngestError::MediaHash)?;
     Ok(MediaBlob {
         sha256,
         mime_type: blob.mime_type,
         bytes: Bytes::from(blob.bytes),
+        newest_span_start,
     })
 }
 
@@ -528,20 +576,20 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use bytesize::ByteSize;
     use llmobs_core::ids::ProjectId;
     use llmobs_core::media::MediaBlob as CoreBlob;
     use llmobs_otel::{ExportTraceServiceRequest, Rejections, builtin_price_rows, decode_json};
-    use llmobs_storage::QueryOptions;
     use llmobs_storage::error::ObjectError;
     use prost::Message;
     use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::meta::projects::ProjectRow;
-    use crate::test_support::{Seeded, TestApp};
+    use crate::test_support::{Seeded, TestApp, dataset_span};
 
     fn fixture(relative: &str) -> Vec<u8> {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -626,6 +674,7 @@ mod tests {
                 format,
                 encoding,
                 project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -642,12 +691,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -774,6 +818,7 @@ mod tests {
                 BodyFormat::Json,
                 BodyEncoding::Identity,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -854,6 +899,7 @@ mod tests {
                 len,
                 len,
                 &seeded.project,
+                None,
                 app.state.clock.now_ns(),
             )
             .await
@@ -904,6 +950,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -921,19 +968,14 @@ mod tests {
         let read = app
             .state
             .storage
-            .get_media(seeded.project.id, &sha, None)
+            .get_media(seeded.project.id, &sha, None, None)
             .await
             .expect("the blob is stored");
         assert_eq!(read.bytes.as_ref(), blob.bytes.as_slice());
         assert_eq!(read.mime_type, blob.mime_type);
         assert_eq!(stored_spans(&app, seeded.project.id).await, span_total);
         // The span row carries the media reference.
-        let query = app
-            .state
-            .storage
-            .query(seeded.project.id, QueryOptions::default())
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, seeded.project.id).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("register");
@@ -968,6 +1010,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -1012,6 +1055,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -1035,6 +1079,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 CommitTarget {
                     request_bytes: 7,
                     ..target(&app, &seeded.project)
@@ -1102,6 +1147,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 Normalized {
                     spans,
@@ -1126,6 +1172,57 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn commit_records_tracked_projects_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let normalized = accepted_fixture(
+            &app,
+            &seeded.project,
+            "genai/openai-v2-chat-tool/input.json",
+        )
+        .await;
+        let base = normalized
+            .spans
+            .first()
+            .cloned()
+            .expect("the fixture has a span");
+        let other_trace = llmobs_core::ids::TraceId::from_bytes([9; 16]).expect("not all zero");
+        let production = llmobs_core::span::Span {
+            environment: Some("production".to_owned()),
+            ..base.clone()
+        };
+        let judge = llmobs_core::span::Span {
+            environment: Some(EVAL_ENVIRONMENT.to_owned()),
+            trace_id: other_trace,
+            ..base.clone()
+        };
+        let pending = &app.state.pending;
+        pending.set_tracked(std::collections::HashSet::from([seeded.project.id]));
+        let commit = |spans: Vec<llmobs_core::span::Span>| {
+            app.state.ingest.commit(
+                &app.state.storage,
+                &app.state.usage,
+                &app.state.live,
+                pending,
+                target(&app, &seeded.project),
+                Normalized {
+                    spans,
+                    media: Vec::new(),
+                    rejections: Rejections::default(),
+                },
+            )
+        };
+        commit(vec![production.clone()]).await.expect("committed");
+        assert_eq!(pending.len(), 1);
+        commit(vec![judge]).await.expect("committed");
+        assert_eq!(pending.len(), 1, "an evaluation span is not tracked");
+        pending.set_tracked(std::collections::HashSet::new());
+        assert_eq!(pending.len(), 0);
+        commit(vec![production]).await.expect("committed");
+        assert_eq!(pending.len(), 0, "an untracked project is not tracked");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn commit_after_the_project_is_dropped_is_refused() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -1147,6 +1244,7 @@ mod tests {
                 &app.state.storage,
                 &app.state.usage,
                 &app.state.live,
+                &app.state.pending,
                 target(&app, &seeded.project),
                 normalized,
             )
@@ -1456,5 +1554,23 @@ mod tests {
         let handle = tokio::spawn(std::future::pending::<()>());
         handle.abort();
         handle.await.expect_err("an aborted task does not finish")
+    }
+
+    /// D-P-21: a blob's newest span start is the latest `start_time` of the spans that reference it.
+    #[test]
+    fn newest_span_starts_takes_the_latest_start_per_hash() {
+        const A: &str = "aa00000000000000000000000000000000000000000000000000000000000000";
+        const B: &str = "bb00000000000000000000000000000000000000000000000000000000000000";
+        let span = |start: i64, refs: &[&str]| {
+            let mut span = dataset_span(0);
+            span.start_time = start;
+            span.media_refs = refs.iter().map(|sha| (*sha).to_owned()).collect();
+            span
+        };
+        let spans = [span(5, &[A]), span(9, &[A]), span(3, &[B])];
+        let starts = newest_span_starts(&spans);
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[A], 9);
+        assert_eq!(starts[B], 3);
     }
 }

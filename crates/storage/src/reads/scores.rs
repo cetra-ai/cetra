@@ -52,6 +52,10 @@ pub struct ScoreListRequest<'a> {
     pub name: Option<&'a str>,
     /// `source` column. Compared with [`ScoreSource::as_str`].
     pub source: Option<ScoreSource>,
+    /// `evaluator_id` column, compared with the hyphenated lowercase UUID text.
+    pub evaluator_id: Option<&'a str>,
+    /// `rule_id` column, compared with the hyphenated lowercase UUID text.
+    pub rule_id: Option<&'a str>,
     /// `created_at ∈ [from, to)`.
     pub window: Option<TimeWindow>,
     /// Rows to return, from 1 to [`MAX_PAGE`].
@@ -259,6 +263,12 @@ fn filters(request: &ScoreListRequest<'_>) -> Result<Option<Expr>, RunError> {
     if let Some(source) = request.source {
         conjuncts.push(col(scores::SOURCE).eq(lit(source.as_str())));
     }
+    if let Some(evaluator_id) = request.evaluator_id {
+        conjuncts.push(col(scores::EVALUATOR_ID).eq(lit(evaluator_id)));
+    }
+    if let Some(rule_id) = request.rule_id {
+        conjuncts.push(col(scores::RULE_ID).eq(lit(rule_id)));
+    }
     if let Some(window) = request.window {
         conjuncts.push(window.predicate(scores::CREATED_AT));
     }
@@ -362,7 +372,8 @@ mod tests {
     use crate::query_error::RunError;
     use crate::reads::Page;
     use crate::test_support::{
-        dataset_scores, dataset_spans, example_query, live_scores_table, spans_table, traces_table,
+        dataset_scores, dataset_spans, example_query, live_scores_table, score_row, spans_table,
+        traces_table,
     };
     use crate::views::{ProjectQuery, QueryContext, TimeWindow};
 
@@ -380,6 +391,8 @@ mod tests {
             session_id: None,
             name: None,
             source: None,
+            evaluator_id: None,
+            rule_id: None,
             window: None,
             limit: 50,
             cursor: None,
@@ -829,6 +842,7 @@ mod tests {
                 optimizer_rules: Vec::new(),
 
                 suspects: crate::verify::Suspects::detached(),
+                visible_from: None,
             },
             None,
         )
@@ -865,5 +879,38 @@ mod tests {
             }
             other => panic!("expected an invalid trace id, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn score_list_filters_by_evaluator_and_rule() {
+        const EVALUATOR: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000003";
+        const RULE: &str = "018f6b4e-7c1a-7c1a-8c1a-000000000004";
+        let mut by_rule = score_row(1, 0, 100, 100, 100, false, "relevance");
+        by_rule.evaluator_id = Some(EVALUATOR.parse().expect("evaluator"));
+        by_rule.rule_id = Some(RULE.parse().expect("rule"));
+        let mut by_evaluator = score_row(2, 1, 200, 200, 200, false, "tone");
+        by_evaluator.evaluator_id = Some(EVALUATOR.parse().expect("evaluator"));
+        let unlinked = score_row(3, 2, 300, 300, 300, false, "length");
+        let query = ProjectQuery {
+            scores: live_scores_table(&[by_rule, by_evaluator, unlinked]),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, None).expect("context");
+
+        let mut evaluator = request();
+        evaluator.evaluator_id = Some(EVALUATOR);
+        let page = score_list(&ctx, evaluator).await.expect("evaluator");
+        assert_eq!(
+            ids(&rows(&page)),
+            [
+                "00000000-0000-0000-0000-000000000002",
+                "00000000-0000-0000-0000-000000000001",
+            ]
+        );
+
+        let mut rule = request();
+        rule.rule_id = Some(RULE);
+        let page = score_list(&ctx, rule).await.expect("rule");
+        assert_eq!(ids(&rows(&page)), ["00000000-0000-0000-0000-000000000001"]);
     }
 }

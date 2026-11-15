@@ -32,11 +32,17 @@ export function isSessionApiPath(pathname: string): boolean {
   return pathname.startsWith("/api/v1/") || pathname === "/api/auth/me";
 }
 
+/** Hands a 401 for `apiPath` to the registered handler when the path is a session API. */
+export function reportUnauthorized(apiPath: string): void {
+  if (isSessionApiPath(apiPath)) {
+    handler?.(apiPath);
+  }
+}
+
 export const unauthorizedMiddleware: Middleware = {
   onResponse({ request, response }) {
-    const pathname = new URL(request.url).pathname;
-    if (response.status === 401 && isSessionApiPath(pathname)) {
-      handler?.(pathname);
+    if (response.status === 401) {
+      reportUnauthorized(new URL(request.url).pathname);
     }
     return undefined;
   },

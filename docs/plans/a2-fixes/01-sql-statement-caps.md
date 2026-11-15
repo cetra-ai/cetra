@@ -224,6 +224,9 @@ All tests are new unless stated otherwise. Positions are 1-based `(line, column)
        Plan,
        /// `plan_sql` must return an error (and not abort).
        Reject,
+       /// `plan_sql` succeeds and `create_physical_plan` must return an error
+       /// (and not abort).
+       RejectPhysical,
    }
 
    fn on_two_megabytes(sql: String, mode: OnStack) {
@@ -247,7 +250,12 @@ All tests are new unless stated otherwise. Positions are 1-based `(line, column)
                        .execute_logical_plan(plan)
                        .await
                        .expect("execute");
-                   frame.create_physical_plan().await.expect("physical");
+                   let physical = frame.create_physical_plan().await;
+                   if matches!(mode, OnStack::RejectPhysical) {
+                       physical.expect_err("rejected by create_physical_plan");
+                       return;
+                   }
+                   physical.expect("physical");
                    if matches!(mode, OnStack::Run) {
                        frame.collect().await.expect("run");
                    }
@@ -272,11 +280,12 @@ All tests are new unless stated otherwise. Positions are 1-based `(line, column)
    | `full_size_set_operations_run_on_a_two_megabyte_stack` | `"SELECT 1 AS a"` + 512 × `" UNION ALL SELECT 1"` | `Run` |
    | `full_size_intersections_run_on_a_two_megabyte_stack` | `"SELECT 1 AS a"` + 512 × `" INTERSECT SELECT 1"` | `Run` |
    | `full_size_time_zone_chains_run_on_a_two_megabyte_stack` | `"SELECT now()"` + 512 × `" AT TIME ZONE 'UTC'"` + `" AS t"` | `Run` |
-   | `full_size_like_chains_run_on_a_two_megabyte_stack` | `"SELECT 'a' AS a WHERE 'a'"` + 512 × `" ~~ 'a'"` | `Run` |
+   | `full_size_like_chains_are_rejected_on_a_two_megabyte_stack` | `"SELECT 'a' AS a WHERE 'a'"` + 512 × `" {op} 'a'"`, for `op` in `~~`, `~~*`, `!~~`, `!~~*` | `RejectPhysical` |
+   | `full_size_like_predicates_run_on_a_two_megabyte_stack` | `"SELECT 'a' AS a WHERE 'a' ~~ 'a'"` + 511 × `" = true"` | `Run` |
    | `full_size_subscripts_are_rejected_on_a_two_megabyte_stack` | `"SELECT metadata"` + 512 × `"['k']"` + `" AS x FROM spans"` | `Reject` |
    | `full_size_joins_plan_on_a_two_megabyte_stack` | `"SELECT 1 AS a FROM scores s0"` + `" CROSS JOIN scores s{i}"` for `i` in `1..32`, then `" WHERE true"` + 479 × `" OR true"` | `Plan` |
 
-   - **The `~~` row.** `SELECT 'a' AS a WHERE 'a' ~~ 'a' ~~ 'a'` plans on today's code (checked), so the full chain is planned and run.
+   - **The `~~` rows.** A second `~~` has a Boolean left operand, so no type-correct chain of 512 `~~` exists. The rejection row makes the type coercion analyzer reject the chain (`Cannot infer common argument type for regex operation`) after it recurses through all 512 levels; the optimizer and the physical planner do not run on it. The run row keeps the optimizer and the physical planner on a 512-level chain: one `~~`, then Boolean comparisons.
    - **The subscript row.** Indexing a string with `['k']` is a type error after the first level, so `plan_sql` returns an error. The test checks that it is an error and not an abort.
    - **The joins row.** It does not run its plan: a 32-way cross join of `scores` has too many rows.
    - If any of these tests overflows the stack (the process aborts with `has overflowed its stack`), **stop and report**. Do not lower a cap or raise the stack size.

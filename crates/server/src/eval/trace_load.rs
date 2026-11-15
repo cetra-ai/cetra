@@ -3,16 +3,18 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use llmobs_core::names::environment::EVAL;
 use llmobs_core::span::Span;
 use llmobs_storage::error::QueryError;
-use llmobs_storage::{QueryContext, QueryOptions, RunError, TraceSpansRequest, trace_spans};
+use llmobs_storage::{QueryContext, RunError, TraceSpansRequest, trace_spans};
 use serde::Serialize;
 
 use crate::api::convert::{self, ConvertError};
+use crate::entitlements::{Visibility, query_options};
 use crate::http::AppState;
 use crate::routes::read::READ_TIMEOUT;
 
@@ -27,25 +29,31 @@ pub(crate) const MAX_LOADS: u32 = 4;
 
 /// Permits for trace loads, shared by test runs (M2) and jobs (M3).
 #[derive(Debug)]
-pub(crate) struct TraceLoads(tokio::sync::Semaphore);
+pub(crate) struct TraceLoads {
+    permits: tokio::sync::Semaphore,
+    /// How long a load waits for a permit before it answers `Saturated`. [`READ_TIMEOUT`] in
+    /// production; tests shorten it.
+    pub(crate) permit_wait: Duration,
+}
 
 impl TraceLoads {
-    /// `MAX_LOADS` permits.
-    pub(crate) fn new() -> Self {
-        Self(tokio::sync::Semaphore::new(
-            usize::try_from(MAX_LOADS).unwrap_or(4),
-        ))
+    /// `MAX_LOADS` permits, and a load waits `permit_wait` for one.
+    pub(crate) fn new(permit_wait: Duration) -> Self {
+        Self {
+            permits: tokio::sync::Semaphore::new(usize::try_from(MAX_LOADS).unwrap_or(4)),
+            permit_wait,
+        }
     }
 
     /// The permits, for `load_trace` and for tests that hold them.
     pub(crate) fn semaphore(&self) -> &tokio::sync::Semaphore {
-        &self.0
+        &self.permits
     }
 }
 
 impl Default for TraceLoads {
     fn default() -> Self {
-        Self::new()
+        Self::new(READ_TIMEOUT)
     }
 }
 
@@ -79,6 +87,8 @@ pub(crate) enum LoadError {
     EvaluationTrace,
     #[error("storage is busy")]
     Busy,
+    #[error("storage is busy")]
+    Saturated,
     #[error("storage read failed")]
     Failed(#[source] RunError),
     #[error("could not read the spans")]
@@ -89,30 +99,47 @@ pub(crate) enum LoadError {
 pub(crate) async fn load_trace(
     state: &AppState,
     project: ProjectId,
+    visibility: Visibility,
     trace_id: TraceId,
     target_span: Option<SpanId>,
     around: Option<i64>,
 ) -> Result<LoadedTrace, LoadError> {
-    load_trace_capped(state, project, trace_id, target_span, around, MAX_SPANS).await
+    load_trace_capped(
+        state,
+        project,
+        visibility,
+        trace_id,
+        target_span,
+        around,
+        MAX_SPANS,
+        state.trace_loads.permit_wait,
+    )
+    .await
 }
 
-/// [`load_trace`] with the span cap as a parameter, so a test can reach `truncated` with a few
-/// spans. `load_trace` passes [`MAX_SPANS`].
+/// [`load_trace`] with the span cap and the permit wait as parameters, so a test can reach
+/// `truncated` with a few spans and `Saturated` without waiting 30 s. `load_trace` passes
+/// [`MAX_SPANS`] and `state.trace_loads.permit_wait`.
+#[allow(clippy::too_many_arguments)] // load_trace's arguments plus the two test seams
 async fn load_trace_capped(
     state: &AppState,
     project: ProjectId,
+    visibility: Visibility,
     trace_id: TraceId,
     target_span: Option<SpanId>,
     around: Option<i64>,
     max_spans: usize,
+    permit_wait: Duration,
 ) -> Result<LoadedTrace, LoadError> {
-    let _permit = tokio::time::timeout(READ_TIMEOUT, state.trace_loads.semaphore().acquire())
-        .await
-        .map_err(|_| LoadError::Busy)?
-        .map_err(|_| LoadError::Busy)?;
+    // No permit within the wait: this trace did not fail, the other loads are busy (D-I-23).
+    let _permit =
+        match tokio::time::timeout(permit_wait, state.trace_loads.semaphore().acquire()).await {
+            Ok(permit) => permit.map_err(|_| LoadError::Busy)?,
+            Err(_) => return Err(LoadError::Saturated),
+        };
     let source = state
         .storage
-        .query(project, QueryOptions { around })
+        .query(project, query_options(visibility, around))
         .await
         .map_err(|error| match error {
             QueryError::Busy => LoadError::Busy,
@@ -270,7 +297,7 @@ mod tests {
 
     use super::*;
     use crate::routes::read::open_query;
-    use crate::test_support::{TestApp, dataset_span};
+    use crate::test_support::{TestApp, dataset_span, set_limits};
 
     const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
     const ROOT: &str = "1000000000000001";
@@ -328,9 +355,16 @@ mod tests {
         )
         .await;
 
-        let loaded = load_trace(&app.state, seeded.project.id, trace_id(), None, None)
-            .await
-            .expect("loaded");
+        let loaded = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(
             ids(&loaded.spans),
             ids(&[root, early, late]),
@@ -350,15 +384,33 @@ mod tests {
         app.commit_spans(&seeded.project, vec![root, early, late])
             .await;
 
-        let loaded = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 2)
-            .await
-            .expect("loaded");
+        let loaded = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+            2,
+            READ_TIMEOUT,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(loaded.spans.len(), 2);
         assert!(loaded.truncated);
 
-        let whole = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 3)
-            .await
-            .expect("loaded");
+        let whole = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+            3,
+            READ_TIMEOUT,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(whole.spans.len(), 3);
         assert!(!whole.truncated);
     }
@@ -380,7 +432,7 @@ mod tests {
         )
         .await;
 
-        let ctx = open_query(&app.state, seeded.project.id, None)
+        let ctx = open_query(&app.state, seeded.org_id, seeded.project.id, None)
             .await
             .expect("query");
         let data = trace_spans(
@@ -417,9 +469,16 @@ mod tests {
         app.commit_spans(&seeded.project, vec![old]).await;
         app.commit_spans(&seeded.project, vec![new]).await;
 
-        let loaded = load_trace(&app.state, seeded.project.id, trace_id(), None, None)
-            .await
-            .expect("loaded");
+        let loaded = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(loaded.spans.len(), 1);
         assert_eq!(loaded.spans[0].name, "new");
     }
@@ -428,7 +487,15 @@ mod tests {
     async fn unknown_trace_is_not_found() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let result = load_trace(&app.state, seeded.project.id, trace_id(), None, None).await;
+        let result = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(LoadError::NotFound)));
     }
 
@@ -443,6 +510,7 @@ mod tests {
         let result = load_trace(
             &app.state,
             seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
             trace_id(),
             Some(span_id(TARGET)),
             None,
@@ -460,8 +528,40 @@ mod tests {
         judge.environment = Some(EVAL.to_owned());
         app.commit_spans(&seeded.project, vec![judge]).await;
 
-        let result = load_trace(&app.state, seeded.project.id, trace_id(), None, None).await;
+        let result = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(LoadError::EvaluationTrace)));
+    }
+
+    #[tokio::test]
+    async fn no_permit_within_the_wait_is_saturated() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let _held = app
+            .state
+            .trace_loads
+            .semaphore()
+            .try_acquire_many(MAX_LOADS)
+            .expect("permits");
+        let result = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+            MAX_SPANS,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(matches!(result, Err(LoadError::Saturated)));
     }
 
     #[tokio::test]
@@ -533,5 +633,51 @@ mod tests {
         target.input = Some("x".repeat(1000));
         let result = cap(vec![target], Some(span_id(TARGET)), 100);
         assert!(matches!(result, Err(LoadError::TooLarge)));
+    }
+
+    /// D-P-21: an evaluator loads a trace through the org's data window. An old trace is not
+    /// found; once the org's window covers it, it is.
+    #[tokio::test]
+    async fn a_trace_before_the_window_is_not_found() {
+        const DAY: i64 = 86_400_000_000_000;
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 1}),
+        );
+        let now = app.state.clock.now_ns();
+        let old = bare(TRACE, ROOT, None, now - 2 * DAY);
+        app.commit_spans(&seeded.project, vec![old]).await;
+
+        let windowed = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(windowed, Err(LoadError::NotFound)));
+
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-02T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let widened = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
+        assert!(widened.is_ok(), "the same trace loads under a wider window");
     }
 }

@@ -59,6 +59,13 @@ persistence:
 
 resources: {}
 
+# More volumes for the pod and mounts for the llmobs container, e.g. a backup volume for
+# `llmobs admin backup` (docs/self-hosting/backup.md):
+#   extraVolumes: [{name: backups, persistentVolumeClaim: {claimName: llmobs-backups}}]
+#   extraVolumeMounts: [{name: backups, mountPath: /backups}]
+extraVolumes: []
+extraVolumeMounts: []
+
 service:
   type: ClusterIP
   annotations: {}
