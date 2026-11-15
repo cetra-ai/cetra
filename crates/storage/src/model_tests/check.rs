@@ -48,7 +48,7 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
 /// Every registered deletion of both projects reads `Pending` or `Applied`. Once one reads
 /// `Applied` it never reads `Pending` again (spec 03 §7). Dropped projects' deletions are
 /// checked too: a drop marks them applied.
-fn check_deletions(h: &Harness, model: &mut Model, index: usize) {
+pub(super) fn check_deletions(h: &Harness, model: &mut Model, index: usize) {
     for project in [P::A, P::B] {
         for deletion in &mut model.project_mut(project).deletions {
             let status = h
@@ -63,6 +63,21 @@ fn check_deletions(h: &Harness, model: &mut Model, index: usize) {
                 ),
             }
         }
+    }
+}
+
+/// Right after `DropB`: every deletion of the dropped project reads `Applied` at once (spec 03 §7,
+/// the drop's second step).
+pub(super) fn check_dropped(h: &Harness, model: &Model, index: usize) {
+    for deletion in &model.b.deletions {
+        let status = h
+            .block_on(h.storage().deletion_status(deletion.id))
+            .expect("deletion_status of a deletion of B");
+        assert!(
+            matches!(status, DeletionStatus::Applied { .. }),
+            "op {index}, project B: deletion {} of the dropped project reads {status:?}, expected Applied",
+            deletion.id
+        );
     }
 }
 

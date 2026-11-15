@@ -11,13 +11,15 @@ mod shape;
 
 use proptest::prelude::*;
 
-use check::{check_full, check_quick};
+use check::{check_deletions, check_dropped, check_full, check_quick};
 use harness::Harness;
 use model::Model;
-use observe::{ALL_ROWS, observe_spans, observe_traces};
+use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, settle};
-use shape::{HOUR_NS, P, day, midnight};
+use shape::{HOUR_NS, P, day, midnight, trace_id};
+use uuid::Uuid;
 
+use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::reads::MAX_PAGE;
 
 /// Cases per run: `LLMOBS_MODEL_CASES`, else 8 (D-R-14).
@@ -46,12 +48,22 @@ fn run_case(ops: &[Op]) {
         apply(op, &mut harness, &mut model, &mut clock);
         match op {
             Op::Restart | Op::Crash | Op::Settle => check_full(&harness, &mut model, index),
+            // The projects share trace ids, so these may hide rows of the other project too.
+            Op::DeleteTraces { .. } | Op::DeleteUser { .. } | Op::Retention { .. } => {
+                check_both(&harness, &model, index);
+            }
+            Op::ApplyDeletions { .. } => {
+                check_deletions(&harness, &mut model, index);
+                check_both(&harness, &model, index);
+            }
+            Op::DropB => {
+                check_deletions(&harness, &mut model, index);
+                check_dropped(&harness, &model, index);
+                check_both(&harness, &model, index);
+            }
             _ => match op.project() {
                 Some(project) => check_quick(&harness, &model, project, index),
-                None => {
-                    check_quick(&harness, &model, P::A, index);
-                    check_quick(&harness, &model, P::B, index);
-                }
+                None => check_both(&harness, &model, index),
             },
         }
     }
@@ -59,7 +71,15 @@ fn run_case(ops: &[Op]) {
     check_full(&harness, &mut model, ops.len());
 }
 
-/// Dropping B leaves A's reads as the model has them, and B's reads empty (spec 03 §7).
+/// `check_quick` on both projects.
+fn check_both(harness: &Harness, model: &Model, index: usize) {
+    check_quick(harness, model, P::A, index);
+    check_quick(harness, model, P::B, index);
+}
+
+/// Dropping B leaves A's reads as the model has them, and B's reads empty (spec 03 §7). B has a
+/// deletion of trace 6 registered before the drop, which covers its evaluation trace 5 (trace 5
+/// targets 6). The drop marks that deletion applied. Writes to B after the drop are refused.
 #[test]
 fn drop_keeps_project_a() {
     let ops = [
@@ -87,7 +107,53 @@ fn drop_keeps_project_a() {
             count: 2,
             split: false,
         },
+        Op::Append {
+            project: P::B,
+            trace: 5,
+            count: 2,
+            split: false,
+        },
+        Op::Append {
+            project: P::B,
+            trace: 6,
+            count: 2,
+            split: false,
+        },
+        Op::Score {
+            project: P::A,
+            target: 0,
+            name: 0,
+        },
+        Op::Score {
+            project: P::B,
+            target: 1,
+            name: 0,
+        },
+        Op::DeleteTraces {
+            project: P::B,
+            picks: vec![6],
+        },
+        Op::Score {
+            project: P::A,
+            target: 0,
+            name: 0,
+        },
         Op::DropB,
+        Op::Append {
+            project: P::B,
+            trace: 0,
+            count: 2,
+            split: false,
+        },
+        Op::Score {
+            project: P::B,
+            target: 0,
+            name: 0,
+        },
+        Op::DeleteScore {
+            project: P::B,
+            pick: 0,
+        },
         Op::Settle,
     ];
     let mut harness = Harness::new();
@@ -97,9 +163,18 @@ fn drop_keeps_project_a() {
         apply(op, &mut harness, &mut model, &mut clock);
     }
     check_full(&harness, &mut model, ops.len());
+    check_dropped(&harness, &model, ops.len());
     assert!(
         !model.a.expected_traces().is_empty(),
         "project A has traces to check"
+    );
+    assert!(
+        !model.a.expected_scores().is_empty(),
+        "project A has live scores to check"
+    );
+    assert!(
+        !model.b.deletions.is_empty(),
+        "project B has a deletion to check after the drop"
     );
     assert!(
         observe_spans(&harness, P::B, MAX_PAGE).is_empty(),
@@ -108,6 +183,48 @@ fn drop_keeps_project_a() {
     assert!(
         observe_traces(&harness, P::B, ALL_ROWS, MAX_PAGE).is_empty(),
         "dropped project B still lists traces"
+    );
+    assert!(
+        observe_scores(&harness, P::B, MAX_PAGE).is_empty(),
+        "dropped project B still lists scores"
+    );
+}
+
+/// Spec 03 §7, Handoff: a request for a dropped project is stored as already applied. A deletion
+/// registered on B after the drop reads `Applied` at once.
+#[test]
+fn deletion_of_dropped_project_is_applied() {
+    let mut harness = Harness::new();
+    let mut model = Model::new();
+    let mut clock = midnight(day(0)) + 12 * HOUR_NS;
+    for op in [
+        Op::Append {
+            project: P::B,
+            trace: 0,
+            count: 3,
+            split: false,
+        },
+        Op::DropB,
+    ] {
+        apply(&op, &mut harness, &mut model, &mut clock);
+    }
+    let id = Uuid::now_v7();
+    harness
+        .block_on(harness.storage().register_deletion(Deletion {
+            id,
+            project: P::B.id(),
+            cutoff: clock,
+            scope: DeletionScope::Traces {
+                trace_ids: vec![trace_id(0)],
+            },
+        }))
+        .expect("register_deletion on a dropped project");
+    let status = harness
+        .block_on(harness.storage().deletion_status(id))
+        .expect("deletion_status of the deletion just registered");
+    assert!(
+        matches!(status, DeletionStatus::Applied { .. }),
+        "a deletion registered on a dropped project reads {status:?}, expected Applied"
     );
 }
 

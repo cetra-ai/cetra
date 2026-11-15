@@ -80,7 +80,8 @@ pub(super) enum Op {
         name: u8,
     },
     /// Writes version `last + 1` with `deleted = true` of one score the model has
-    /// written (`pick % len`, in key order). A no-op when the project has none.
+    /// written (`pick % len`, in key order). A no-op when the project has none. A dropped project
+    /// keeps no scores, so its deletion picks one key of its score space and is refused.
     DeleteScore {
         project: P,
         pick: u8,
@@ -329,6 +330,15 @@ fn append(
     split: bool,
     clock: i64,
 ) {
+    if model.project(project).dropped {
+        // Storage refuses every batch of a dropped project, so one is always sent, even when the
+        // trace has no span left to append. Its span numbers do not matter: nothing is stored.
+        let batch: Vec<Span> = (0..count.clamp(1, SPANS))
+            .map(|span_no| span(project, trace, span_no, clock))
+            .collect();
+        send_refused(harness, project, &batch);
+        return;
+    }
     let first = model
         .project(project)
         .next_span
@@ -342,10 +352,6 @@ fn append(
     let spans: Vec<Span> = (first..end)
         .map(|span_no| span(project, trace, span_no, clock))
         .collect();
-    if model.project(project).dropped {
-        send_refused(harness, project, &spans);
-        return;
-    }
     if split && spans.len() >= 2 {
         let (head, tail) = spans.split_at(spans.len() / 2);
         send(harness, project, head);
@@ -449,7 +455,23 @@ fn last_version(model: &Model, key: ScoreKey) -> u32 {
 }
 
 /// Writes `last + 1` of a score the model has written, as a deletion. `pick % len` in key order.
+/// On a dropped project it writes version 1 of one key of the project's score space, refused.
 fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
+    if model.project(project).dropped {
+        let keys: Vec<ScoreKey> = score_key_space()
+            .into_iter()
+            .filter(|key| key.project == project)
+            .collect();
+        send_score(
+            harness,
+            model,
+            keys[usize::from(pick) % keys.len()],
+            1,
+            true,
+            clock,
+        );
+        return;
+    }
     let Some(key) = picked_score(model, project, pick) else {
         return;
     };
@@ -529,29 +551,30 @@ fn picked_traces(picks: &[u8]) -> BTreeSet<u8> {
     picks.iter().map(|pick| pick % TRACES).collect()
 }
 
-/// The trace number of a trace id the model knows.
-fn number_of(id: &TraceId) -> u8 {
-    (0..TRACES)
-        .find(|&trace| hex(trace_id(trace).as_bytes()) == hex(id.as_bytes()))
-        .expect("a trace id the model knows")
-}
-
 /// The trace ids of `traces`, in trace-number order (which is byte order, see `trace_id`).
 fn ids_of(traces: &BTreeSet<u8>) -> Vec<TraceId> {
     traces.iter().map(|&trace| trace_id(trace)).collect()
 }
 
+/// The hex form of each id, in order. Ids are compared as hex, so an id the model does not know
+/// is printed by an `assert_eq!` rather than panicking on the lookup.
+fn hex_of(ids: &[TraceId]) -> Vec<String> {
+    ids.iter().map(|id| hex(id.as_bytes())).collect()
+}
+
+/// The hex ids of the trace numbers in `traces`, in order.
+fn hex_numbers(traces: &BTreeSet<u8>) -> Vec<String> {
+    hex_of(&ids_of(traces))
+}
+
 /// Checks `eval_trace_ids` of `targets` against the model, and returns the evaluation traces
 /// the model expects.
 fn resolve_evals(harness: &Harness, state: &ProjectModel, targets: &BTreeSet<u8>) -> BTreeSet<u8> {
-    let observed: Vec<u8> = observe_eval_trace_ids(harness, state.project, &ids_of(targets))
-        .iter()
-        .map(number_of)
-        .collect();
+    let observed = observe_eval_trace_ids(harness, state.project, &ids_of(targets));
     let expected = state.eval_traces_for(targets);
     assert_eq!(
-        observed,
-        expected.iter().copied().collect::<Vec<u8>>(),
+        hex_of(&observed),
+        hex_numbers(&expected),
         "eval_trace_ids of targets {targets:?} in project {:?} differ from the model",
         state.project
     );
@@ -605,10 +628,9 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
     let name = format!("u{}", user % 2);
     let (expected_traces, expected_sessions) = model.project(project).user_scope(&name);
     let observed = observe_user_scope(harness, project, &name, clock);
-    let observed_traces: Vec<u8> = observed.trace_ids.iter().map(number_of).collect();
     assert_eq!(
-        observed_traces,
-        expected_traces.iter().copied().collect::<Vec<u8>>(),
+        hex_of(&observed.trace_ids),
+        hex_numbers(&expected_traces),
         "user_deletion_scope of {name} in project {project:?}: traces differ from the model"
     );
     assert_eq!(
