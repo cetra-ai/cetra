@@ -121,8 +121,19 @@ impl Drop for Scratch {
     }
 }
 
+/// Silences the panic hook that libFuzzer installs. That hook aborts on every
+/// panic, including the ones our `catch_unwind` guards catch (spec 03 §10), so
+/// a caught decoder panic would look like a crash. An uncaught panic still
+/// aborts: the entries are called from libFuzzer's `extern "C"` wrapper, which
+/// cannot unwind.
+fn quiet_caught_panics() {
+    static HOOK: OnceLock<()> = OnceLock::new();
+    HOOK.get_or_init(|| std::panic::set_hook(Box::new(|_| {})));
+}
+
 /// Frames arbitrary bytes as WAL records and decodes them; the IPC payload is read as a batch.
 pub fn wal_record(data: &[u8]) {
+    quiet_caught_panics();
     let mut offset = 0;
     while let Decoded::Record { next, .. } = decode_next(data, offset) {
         assert!(next > offset, "framing must advance");
@@ -209,9 +220,12 @@ fn stage(data: &[u8], scratch: &Scratch) -> Staged {
 /// The entry frames most segments itself with the real checksum; see the layout in
 /// `03-m3-fuzzing.md` § R3.1.
 pub fn wal_replay(data: &[u8]) {
+    quiet_caught_panics();
     let scratch = Scratch::new();
     let staged = stage(data, &scratch);
     let segment_bytes = WalConfig::default().segment_bytes.0;
+    // `Hooks` is a unit struct outside tests, where `default()` is the same value.
+    #[allow(clippy::default_constructed_unit_structs)]
     let hooks = Hooks::default();
     let replay = |staged: &Staged| {
         recover_table(
@@ -367,6 +381,7 @@ fn scope(window: Option<TimeWindow>) -> ListScope {
 /// read path (track R M3). Layout: byte 0 selects the table, bytes 1..5 the footer
 /// hint, bytes 5..13 the time bound, the rest is the file.
 pub fn parquet_file(data: &[u8]) {
+    quiet_caught_panics();
     let mut input = Cursor::new(data);
     let table = match input.u8() % 3 {
         0 => FileTable::Spans,
@@ -513,6 +528,7 @@ fn view_table(view: FilterView) -> &'static str {
 /// Parses arbitrary text as a filter over one view and runs it (track R M3). Layout:
 /// byte 0 selects the view, the rest must be UTF-8.
 pub fn filter_dsl(data: &[u8]) {
+    quiet_caught_panics();
     let Some((&view, text)) = data.split_first() else {
         return;
     };
@@ -733,6 +749,7 @@ fn check_cache(input: &CacheInput) {
 
 /// Decodes arbitrary bytes as a read cache over one object, and reads it (track R M3).
 pub fn read_cache_block(data: &[u8]) {
+    quiet_caught_panics();
     let Ok(input) = CacheInput::arbitrary_take_rest(Unstructured::new(data)) else {
         return;
     };
@@ -959,6 +976,7 @@ fn open_catalog(input: &CatalogInput) -> Option<Catalog> {
 /// Decodes arbitrary bytes as catalog rows, loads them, and plans compaction over the result
 /// (track R M3).
 pub fn catalog_rows(data: &[u8]) {
+    quiet_caught_panics();
     let Ok(input) = CatalogInput::arbitrary_take_rest(Unstructured::new(data)) else {
         return;
     };
