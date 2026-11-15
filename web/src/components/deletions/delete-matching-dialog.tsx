@@ -94,7 +94,7 @@ function DeleteMatchingBody({
   } else if (matched === 0) {
     description = "No trace matches. Nothing to delete.";
   } else if (showCount) {
-    description = `${count} ${matched === 1 ? "trace matches" : "traces match"} the current filter, search and time range. Their spans, scores and evaluation traces are hidden within seconds and erased within 24 hours. This cannot be undone.`;
+    description = `${count} ${matched === 1 ? "trace matches" : "traces match"} the current filter, search and time range. Their spans, scores and evaluation traces are hidden within seconds and removed within 24 hours; stored copies are purged after the storage grace period. This cannot be undone.`;
   }
 
   const previewError = preview.isError
