@@ -1,16 +1,22 @@
 //! DataFusion over Strata files against DataFusion over Parquet: every bench query returns the
 //! same rows, and the plans show the pushdown and lookup modes that M5.1 promises.
 //!
-//! Always ignored. Run with:
+//! `datafusion_equivalence` is always ignored. Run with:
 //! `cargo test --release -- --ignored datafusion_equivalence --nocapture`
+//!
+//! `pushdown_edge_cases` runs in a plain `cargo test`: it compares the rows of filters that the
+//! simplifier rewrites and that involve floats, against DataFusion over the same rows in memory.
 
 #[path = "common/dataset.rs"]
 mod dataset;
 
 use std::sync::Arc;
 
-use arrow::array::{AsArray, RecordBatch};
-use arrow::datatypes::Int64Type;
+use arrow::array::{
+    AsArray, FixedSizeBinaryArray, Float64Array, Int64Array, RecordBatch, TimestampNanosecondArray,
+};
+use arrow::datatypes::{DataType, Field, Int64Type, Schema, TimeUnit};
+use datafusion::datasource::MemTable;
 use datafusion::physical_plan::displayable;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use dataset::rows;
@@ -259,4 +265,139 @@ async fn datafusion_equivalence() {
     assert!(files_in(&plan) < 3, "lookup plan reads every file:\n{plan}");
 
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The rows of `sql`, sorted, so that two plans compare equal when they return the same rows.
+async fn sorted_rows(ctx: &SessionContext, sql: &str) -> Vec<String> {
+    let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+    let mut out = rows(&batches);
+    out.sort();
+    out
+}
+
+/// `count` integer literals starting at `from`, comma separated.
+fn literals(from: i64, count: i64) -> String {
+    (from..from + count)
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pushdown_edge_cases() {
+    // 1,000 rows. `i` has nulls, `f` holds -0.0, 0.0, 1.5, NaN and null, and `ts` is in UTC.
+    let n: usize = 1_000;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+        Field::new("i", DataType::Int64, true),
+        Field::new("f", DataType::Float64, true),
+        Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            false,
+        ),
+    ]));
+    let ids: Vec<[u8; 16]> = (0..n)
+        .map(|i| {
+            let mut id = [0u8; 16];
+            id[8..].copy_from_slice(&((i / 2) as u64).to_be_bytes());
+            id
+        })
+        .collect();
+    let ints = Int64Array::from_iter((0..n).map(|i| {
+        if i % 5 == 0 {
+            None
+        } else {
+            Some((i as i64 * 37) % 1_000)
+        }
+    }));
+    let floats = Float64Array::from_iter((0..n).map(|i| match i % 6 {
+        0 => None,
+        1 => Some(f64::NAN),
+        2 => Some(-0.0),
+        3 => Some(0.0),
+        4 => Some(1.5),
+        _ => Some(-2.0),
+    }));
+    let times = TimestampNanosecondArray::from_iter_values((0..n).map(|i| i as i64 * 1_000))
+        .with_timezone("UTC");
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(FixedSizeBinaryArray::try_from_iter(ids.iter()).unwrap()),
+            Arc::new(ints),
+            Arc::new(floats),
+            Arc::new(times),
+        ],
+    )
+    .unwrap();
+
+    // One Strata file, sorted by trace_id, with small chunks so that pruning runs.
+    let mut writer = StrataWriter::new(
+        schema.clone(),
+        &["trace_id"],
+        Config {
+            chunk_max_rows: 128,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    writer.write(&batch).unwrap();
+    let (bytes, _) = writer.finish().unwrap();
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = Path::from("edge.strata");
+    store.put(&path, PutPayload::from(bytes)).await.unwrap();
+    let table = StrataTable::open(store, vec![path], &Config::default())
+        .await
+        .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table)).unwrap();
+    let memory = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+    ctx.register_table("m", Arc::new(memory)).unwrap();
+
+    let mut queries: Vec<String> = [
+        "i IN (1, NULL)",
+        "i NOT IN (1, NULL)",
+        "NOT (i IN (1, NULL))",
+        "i IN (1, 2, NULL) OR i IS NULL",
+        "i IN (NULL)",
+        "i NOT IN (NULL)",
+        "f = 0",
+        "f <> 0",
+        "f IN (0.0)",
+        "f < 0",
+        "f >= 0",
+        "f BETWEEN 0 AND 0",
+        "f > -0.0",
+        "f = 'NaN'::double",
+        "ts >= TIMESTAMP '1970-01-01T00:00:00.0005Z'",
+        "i > 5 AND NOT (i < 900 OR i IS NULL)",
+    ]
+    .iter()
+    .map(|predicate| predicate.to_string())
+    .collect();
+    // Two lists of 2,100 literals: the filters must not fail, whatever the size limit does.
+    queries.push(format!(
+        "i IN ({}) AND i IN ({})",
+        literals(0, 2_100),
+        literals(2_100, 2_100)
+    ));
+
+    for predicate in &queries {
+        let strata = sorted_rows(&ctx, &format!("SELECT * FROM t WHERE {predicate}")).await;
+        let memtable = sorted_rows(&ctx, &format!("SELECT * FROM m WHERE {predicate}")).await;
+        println!(
+            "pushdown_edge_cases [{}]: strata {} rows, memtable {} rows",
+            if predicate.len() > 60 {
+                "IN list".to_string()
+            } else {
+                predicate.clone()
+            },
+            strata.len(),
+            memtable.len()
+        );
+        assert_eq!(strata.len(), memtable.len(), "row count of `{predicate}`");
+        assert_eq!(strata, memtable, "rows of `{predicate}`");
+    }
 }

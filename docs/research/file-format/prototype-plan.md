@@ -526,7 +526,10 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 | any `Cast` or `TRY_CAST` on the column, a non-literal operand, `ILIKE`, anything else | `Unsupported` (no unwrapping of casts) |
 
 - Literal types must match the column's file type exactly; a mismatched literal is `Unsupported`.
-- `scan()` translates the pushed filters to `Predicate` and leaves `Unsupported` filters to DataFusion. For `trace_id` equality it calls `may_contain` on each file and drops the files whose filter says no. It uses `lookup_scan` only when that filter is the only kept filter and there is no `limit`.
+- Float columns (Float32, Float64) are never pushed: a comparison, `IN` or `BETWEEN` on them is `Unsupported`. DataFusion compares floats with `-0.0 == 0.0`, while Arrow's kernels, which Strata uses, order them by the IEEE total order, so the two would disagree.
+- A boolean literal `TRUE`, `FALSE` or `NULL` is `Exact` and becomes the `Const` predicate, a constant TRUE, FALSE or NULL for every row. DataFusion's simplifier produces these when it rewrites a filter, for example `i IN (1, NULL)` becomes `i = 1 OR NULL`. A top-level FALSE or NULL conjunct makes `scan` prune every chunk.
+- `supports_filters_pushdown` accepts a filter only while the predicates it has accepted before still fit the predicate size limit together; a filter that would not fit is `Unsupported`.
+- `scan()` translates the pushed filters to `Predicate` and leaves `Unsupported` filters to DataFusion. DataFusion passes it only the filters that were accepted, so a filter that does not translate there, or a set of filters that no longer fits the size limit together (the same running check as above), is a `DataFusionError::Plan` and never a dropped filter; a dropped filter would return wrong rows. For `trace_id` equality it calls `may_contain` on each file and drops the files whose filter says no. It uses `lookup_scan` only when that filter is the only kept filter and there is no `limit`.
 - `scan()` needs the hot tails, so it opens the files (cached in `StrataTable`). Planning a lookup can therefore cost the open wave.
 
 **`StrataExec`.**
@@ -561,6 +564,7 @@ Both return batches in the `StrataTable` schema (`table_schema` of the file sche
 2. Scan the kept chunks one at a time, in that order, with the window and the predicate, and the projection of each chunk. Keep a top-k heap of the rows seen.
 3. Stop when the heap holds `k` rows and the next chunk's `max` is strictly below the heap's minimum `start_time`. Equal times still continue, because of the tie-break.
 4. Build the output columns from the kept chunks with `interleave`, in heap order.
+5. **Compaction.** After each chunk, when the kept batches hold more than `2k + 8,192` rows, they are replaced by one batch of the heap's rows, and each heap entry points at its row of that batch. The rows keep their (batch, row) order, so ties resolve as before. Memory then stays proportional to `k`, not to the window. An empty projection gives a batch with the row count and no columns.
 
 Each visited chunk costs at least one wave. The early stop only helps when `start_time` zones are narrow, that is, when the file is sorted by time. Zone pruning on `start_time` works only if chunks cover narrow time ranges. Files sorted by `trace_id` within a time slice give wide `start_time` zones, so the report states which dataset layout the gain depends on.
 

@@ -29,7 +29,7 @@ use crate::payload::{
 };
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, evaluate, layout_of,
-    map_key_mask, matching_codes, pruned_columns,
+    map_key_mask, matching_codes, never_true, pruned_columns,
 };
 use crate::segment::{Kind, SegmentRef, Segments};
 use crate::shred::unshred;
@@ -558,6 +558,12 @@ impl StrataFile {
                 std::iter::once(0..end).collect()
             }
         };
+        // A top-level FALSE or NULL conjunct selects no row: every chunk is pruned.
+        if let Some(b) = &bound
+            && never_true(b)
+        {
+            return Ok(Vec::new());
+        }
         if let Some(b) = &bound {
             for column in pruned_columns(b) {
                 let info = info_of(&infos, column)?;
@@ -1183,6 +1189,7 @@ mod tests {
             }
             Predicate::IsNull(c) => leaf(Bound::IsNull(*c))?,
             Predicate::IsNotNull(c) => leaf(Bound::IsNotNull(*c))?,
+            Predicate::Const(v) => leaf(Bound::Const(*v))?,
             Predicate::MapKeyEq(c, key, lit) => {
                 let value = literal(*c, &DataType::Utf8, lit)?;
                 map_key_mask(column(*c)?.as_ref(), key, value.as_ref())?
@@ -1689,6 +1696,7 @@ mod tests {
                 .prop_map(|(c, lits)| Predicate::In(c, lits)),
             (0usize..16).prop_map(Predicate::IsNull),
             (0usize..16).prop_map(Predicate::IsNotNull),
+            prop_oneof![Just(Some(true)), Just(Some(false)), Just(None)].prop_map(Predicate::Const),
         ];
         leaf.prop_recursive(3, 16, 4, |inner| {
             prop_oneof![

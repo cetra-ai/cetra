@@ -9,7 +9,10 @@ use std::collections::BinaryHeap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, FixedSizeBinaryArray, RecordBatch, TimestampNanosecondArray};
+use arrow::array::{
+    Array, ArrayRef, FixedSizeBinaryArray, RecordBatch, RecordBatchOptions,
+    TimestampNanosecondArray,
+};
 use arrow::compute::{concat_batches, interleave};
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use futures::future::try_join_all;
@@ -144,6 +147,12 @@ pub async fn trace_list(
             }
             kept.push(batch);
         }
+        // The kept batches hold every row of the window seen so far. Compact them once they hold
+        // much more than the heap needs, so the memory stays proportional to `k`.
+        let held: usize = kept.iter().map(RecordBatch::num_rows).sum();
+        if held > k.saturating_mul(2).saturating_add(8_192) {
+            compact(&mut kept, &mut heap)?;
+        }
     }
 
     let mut rows: Vec<ListKey> = heap.into_iter().map(|Reverse(key)| key).collect();
@@ -169,8 +178,59 @@ pub async fn trace_list(
             .collect::<Result<_>>()?;
         columns.push(interleave(&arrays, &indices)?);
     }
-    let batch = RecordBatch::try_new(file_schema, columns)?;
+    // With no column requested, the row count alone sizes the batch.
+    let batch = RecordBatch::try_new_with_options(
+        file_schema,
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(indices.len())),
+    )?;
     to_table_batch(&batch, &out)
+}
+
+/// Replaces `kept` with one batch holding the rows that `heap` points at, all columns of the
+/// kept batches, and points each heap entry at its row of that batch. The rows keep their
+/// (batch, row) order, so ties on the sort key resolve as they would without compaction.
+fn compact(kept: &mut Vec<RecordBatch>, heap: &mut BinaryHeap<Reverse<ListKey>>) -> Result<()> {
+    let Some(first) = kept.first() else {
+        return Ok(());
+    };
+    let schema = first.schema();
+    let mut entries: Vec<ListKey> = std::mem::take(heap)
+        .into_iter()
+        .map(|Reverse(key)| key)
+        .collect();
+    entries.sort_unstable_by_key(|key| (key.3, key.4));
+    let indices: Vec<(usize, usize)> = entries.iter().map(|key| (key.3, key.4)).collect();
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    for position in 0..schema.fields().len() {
+        let arrays: Vec<&dyn Array> = kept
+            .iter()
+            .map(|batch| {
+                batch
+                    .columns()
+                    .get(position)
+                    .map(|column| column.as_ref())
+                    .ok_or(StrataError::Corrupt {
+                        what: "trace_list compaction",
+                        offset: 0,
+                    })
+            })
+            .collect::<Result<_>>()?;
+        columns.push(interleave(&arrays, &indices)?);
+    }
+    let batch = RecordBatch::try_new_with_options(
+        schema,
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(entries.len())),
+    )?;
+    *kept = vec![batch];
+    heap.extend(
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(row, key)| Reverse((key.0, key.1, key.2, 0, row))),
+    );
+    Ok(())
 }
 
 /// The sort key of a `trace_list` row, then its (batch, row) in `kept`.
