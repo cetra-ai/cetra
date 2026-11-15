@@ -476,3 +476,37 @@ fn assert_hidden(err: &JudgeError) {
     assert!(!debug.contains(PROMPT), "{debug}");
     assert!(!debug.contains("SECRET-PAYLOAD"), "{debug}");
 }
+
+#[tokio::test]
+async fn extra_headers_cannot_override_the_content_type_or_the_auth_header() {
+    let mock = Mock::start().await;
+    let conn = connection(
+        mock.url(),
+        vec![
+            ("Content-Type", "text/plain"),
+            ("Authorization", "forged"),
+            ("X-Trace", "kept"),
+        ],
+    );
+    let http = client();
+    let output = numeric();
+    mock.enqueue(MockReply {
+        status: 500,
+        body: json!({"error": {"message": "overloaded"}}),
+        delay: Duration::ZERO,
+    });
+    call(
+        &http,
+        &conn,
+        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+    )
+    .await
+    .expect_err("status");
+    let request = &mock.requests()[0];
+    assert_eq!(request.header("content-type"), Some("application/json"));
+    assert_eq!(
+        request.header("authorization"),
+        Some(format!("Bearer {KEY}").as_str())
+    );
+    assert_eq!(request.header("x-trace"), Some("kept"));
+}
