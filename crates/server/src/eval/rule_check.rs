@@ -60,8 +60,9 @@ impl Subject {
 pub(crate) struct RuleShape<'a> {
     /// The rule's target.
     pub(crate) target: RuleTarget,
-    /// The parsed mapping.
-    pub(crate) mapping: &'a VariableMapping,
+    /// The parsed mapping, or `None` when it does not parse (its errors are the caller's). Only
+    /// the checks that need a parsed mapping are skipped then.
+    pub(crate) mapping: Option<&'a VariableMapping>,
     /// The mapping's variable names.
     pub(crate) variables: &'a BTreeSet<String>,
     /// Whether the rule has a budget.
@@ -79,7 +80,10 @@ pub(crate) fn check_rule(
     now: i64,
 ) -> Vec<FieldError> {
     let mut errors = Vec::new();
-    if shape.target == RuleTarget::Trace && shape.mapping.needs_target_span() {
+    if let Some(mapping) = shape.mapping
+        && shape.target == RuleTarget::Trace
+        && mapping.needs_target_span()
+    {
         errors.push(field_error(
             "variable_mapping",
             "span.* needs a span rule; use a selector such as span[name=…]",
@@ -209,7 +213,7 @@ mod tests {
         let variables = names(pairs);
         let shape = RuleShape {
             target,
-            mapping: &mapping,
+            mapping: Some(&mapping),
             variables: &variables,
             budgeted,
         };
@@ -287,6 +291,34 @@ mod tests {
         assert_eq!(
             errors[0].message,
             "variable context is used by the prompt but not mapped"
+        );
+    }
+
+    #[test]
+    fn the_key_checks_run_without_a_parsed_mapping() {
+        // The mapping did not parse, so only the checks on its keys run: a `span.*` check is skipped.
+        let judge = judge("{{ input }} {{ output }}", "m");
+        let variables = names(&[("input", "")]);
+        let shape = RuleShape {
+            target: RuleTarget::Trace,
+            mapping: None,
+            variables: &variables,
+            budgeted: false,
+        };
+        let prices = PriceTable::new(Vec::new()).expect("an empty table");
+        let errors = check_rule(
+            &shape,
+            &Subject::Judge(judge),
+            Some(Adapter::OpenAi),
+            &prices,
+            0,
+        );
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| error.field.as_str())
+                .collect::<Vec<_>>(),
+            ["variable_mapping.output"]
         );
     }
 

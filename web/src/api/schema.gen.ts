@@ -1372,14 +1372,14 @@ export interface paths {
         post?: never;
         /**
          * Delete an online rule
-         * @description Project members and above. Queued jobs of the rule are deleted with it.
+         * @description Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.
          */
         delete: operations["delete_online_rule"];
         options?: never;
         head?: never;
         /**
          * Update an online rule
-         * @description Project members and above. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.
+         * @description Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.
          */
         patch: operations["patch_online_rule"];
         trace?: never;
@@ -1395,7 +1395,7 @@ export interface paths {
         put?: never;
         /**
          * Resume an online rule
-         * @description Project members and above. Clears the rule's pause.
+         * @description Project members and above. API keys cannot call it. Clears the rule's pause.
          */
         post: operations["post_online_rule_resume"];
         delete?: never;

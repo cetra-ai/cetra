@@ -4,6 +4,7 @@
 
 use axum::extract::{Extension, State};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
@@ -323,7 +324,11 @@ async fn update_evaluator(
         expected.version
     };
     // The rules of this evaluator are checked against the new config in the write (D-I-19).
-    let subject = Subject::from_config(&prepared.evaluator.config);
+    let checks = RuleChecks {
+        subject: Subject::from_config(&prepared.evaluator.config),
+        prices: state.ingest.prices(),
+        now: state.clock.now_ns(),
+    };
     let fields = EvaluatorFields {
         name: prepared.evaluator.name.clone(),
         config: prepared.config_json,
@@ -333,16 +338,11 @@ async fn update_evaluator(
         version,
     };
     let user_id = user.id;
-    let now = state.clock.now_ns();
-    let prices = state.ingest.prices();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                write_update(
-                    conn, org, project, id, expected, fields, &subject, &prices, now,
-                )
-                .await
+                write_update(conn, org, project, id, expected, fields, &checks).await
             })
         })
         .await?;
@@ -435,10 +435,18 @@ async fn list_evaluator_templates() -> error::Json<EvaluatorTemplateList> {
     error::Json(builtin_template_list())
 }
 
+/// What the rules of an evaluator are checked with in a PATCH's write: the new configuration,
+/// the prices and the time.
+struct RuleChecks {
+    subject: Subject,
+    prices: Arc<PriceTable>,
+    now: i64,
+}
+
 /// Step 7 of the update: refuses a row that changed since `expected` was read, then
 /// writes `fields`. A judge's connection is read in the same transaction, and so are the
-/// rules of the evaluator: a change that breaks one of them is refused (D-I-19).
-#[allow(clippy::too_many_arguments)] // The write needs every value it checks against.
+/// rules of the evaluator: a change of the config or the connection that breaks one of them is
+/// refused (D-I-19). Other changes (a rename, the webhook values) leave the rules alone.
 async fn write_update(
     conn: &mut SqliteConnection,
     org: OrgId,
@@ -446,9 +454,7 @@ async fn write_update(
     id: Uuid,
     expected: EvaluatorRow,
     fields: EvaluatorFields,
-    subject: &Subject,
-    prices: &PriceTable,
-    now: i64,
+    checks: &RuleChecks,
 ) -> Result<Outcome, MetaError> {
     let Some(current) = store::get_evaluator_tx(conn, project, id).await? else {
         return Ok(Outcome::Gone);
@@ -463,12 +469,24 @@ async fn write_update(
         },
         None => None,
     };
-    let broken = broken_rules(conn, id, subject, connection.as_ref(), prices, now).await?;
-    if !broken.is_empty() {
-        return Ok(Outcome::BreaksRules(broken));
+    let rules_affected =
+        fields.config != expected.config || fields.connection_id != expected.connection_id;
+    if rules_affected {
+        let broken = broken_rules(
+            conn,
+            id,
+            &checks.subject,
+            connection.as_ref(),
+            &checks.prices,
+            checks.now,
+        )
+        .await?;
+        if !broken.is_empty() {
+            return Ok(Outcome::BreaksRules(broken));
+        }
     }
     Ok(
-        match store::update_evaluator(conn, project, id, fields, now).await? {
+        match store::update_evaluator(conn, project, id, fields, checks.now).await? {
             Some(row) => Outcome::Updated(Box::new(row)),
             None => Outcome::Gone,
         },
@@ -515,7 +533,7 @@ async fn broken_rules(
         })?;
         let shape = RuleShape {
             target,
-            mapping: &mapping,
+            mapping: Some(&mapping),
             variables: &variables,
             budgeted: rule.budget_usd.is_some(),
         };
@@ -1420,17 +1438,17 @@ mod tests {
             secret_enc: None,
             version: 2,
         };
-        let subject = Subject::from_row(&expected).unwrap();
-        let prices = app.state.ingest.prices();
+        let checks = RuleChecks {
+            subject: Subject::from_row(&expected).unwrap(),
+            prices: app.state.ingest.prices(),
+            now,
+        };
         let stale = app
             .state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(
-                        conn, org, project, id, expected, fields, &subject, &prices, now,
-                    )
-                    .await
+                    write_update(conn, org, project, id, expected, fields, &checks).await
                 })
             })
             .await;
@@ -1452,17 +1470,17 @@ mod tests {
             secret_enc: None,
             version: current.version,
         };
-        let subject = Subject::from_row(&current).unwrap();
-        let prices = app.state.ingest.prices();
+        let checks = RuleChecks {
+            subject: Subject::from_row(&current).unwrap(),
+            prices: app.state.ingest.prices(),
+            now,
+        };
         let outcome = app
             .state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(
-                        conn, org, project, id, current, fields, &subject, &prices, now,
-                    )
-                    .await
+                    write_update(conn, org, project, id, current, fields, &checks).await
                 })
             })
             .await
@@ -1640,7 +1658,6 @@ mod tests {
         rule_on(&app, &seeded, id, "Saved late", None).await;
         let config = judge_config_with_prompt("Q: {{ input }} A: {{ output }} C: {{ context }}");
         let parsed = EvaluatorConfig::from_parts("llm_judge", &config).unwrap();
-        let subject = Subject::from_config(&parsed);
         let fields = EvaluatorFields {
             name: current.name.clone(),
             config: config.to_string(),
@@ -1649,16 +1666,17 @@ mod tests {
             secret_enc: None,
             version: current.version + 1,
         };
-        let prices = app.state.ingest.prices();
+        let checks = RuleChecks {
+            subject: Subject::from_config(&parsed),
+            prices: app.state.ingest.prices(),
+            now,
+        };
         let outcome = app
             .state
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    write_update(
-                        conn, org, project, id, current, fields, &subject, &prices, now,
-                    )
-                    .await
+                    write_update(conn, org, project, id, current, fields, &checks).await
                 })
             })
             .await
@@ -1668,6 +1686,22 @@ mod tests {
         };
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.starts_with("Saved late: "), "{errors:?}");
+    }
+
+    #[tokio::test]
+    async fn a_rename_does_not_check_the_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        fixture_connection(&app, &seeded).await;
+        // The judge's prompt uses `context`, which the rule does not map: the rule is broken already.
+        let mut body = judge_body();
+        body["config"]["prompt"] = json!("Q: {{ input }} A: {{ output }} C: {{ context }}");
+        let created = create_ok(&app, &seeded, &body).await;
+        let id = Uuid::from_str(&id_of(&created)).unwrap();
+        rule_on(&app, &seeded, id, "Already broken", None).await;
+        let renamed = patch(&app, &seeded, &id.to_string(), &json!({"name": "Renamed"})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        assert_eq!(renamed.json::<Value>()["name"], "Renamed");
     }
 
     #[tokio::test]

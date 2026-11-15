@@ -498,8 +498,10 @@ async fn test_connection(
     // Best effort: the provider was called, so a failed status write must not
     // lose the test result.
     let status_write = if result.ok {
-        // One write sets `ok` and resumes the `'connection'` pauses (D-I-5, D-I-14).
-        match recover_connection(&state, id, row.status != "ok", now).await {
+        // One write sets `ok` and, on the default model, resumes the `'connection'` pauses
+        // (D-I-5, D-I-14).
+        let resume = explicit.is_none();
+        match recover_connection(&state, id, row.status != "ok", resume, now).await {
             Ok(resumed) => {
                 after_connection_write(&state, id, &resumed, &resumed, "connection test");
                 Ok(())
@@ -540,7 +542,8 @@ async fn test_connection(
 }
 
 /// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
-/// write. Returns the resumed rules.
+/// write. Returns the resumed rules. `resume` is false for a test on a typed model: it proves
+/// the key works, but the pauses wait for a test on the default model (D-I-5).
 ///
 /// # Errors
 ///
@@ -549,6 +552,7 @@ async fn recover_connection(
     state: &AppState,
     id: Uuid,
     set_ok: bool,
+    resume: bool,
     now: i64,
 ) -> Result<Vec<Uuid>, MetaError> {
     state
@@ -558,7 +562,11 @@ async fn recover_connection(
                 if set_ok {
                     connections::set_connection_status(conn, id, "ok", None, now).await?;
                 }
-                rules::resume_connection_pauses(conn, id, now).await
+                if resume {
+                    rules::resume_connection_pauses(conn, id, now).await
+                } else {
+                    Ok(Vec::new())
+                }
             })
         })
         .await
@@ -1182,6 +1190,30 @@ mod tests {
         assert_eq!(response.status, 200, "{}", text(&response));
         assert!(response.json::<LlmConnectionTestResult>().ok);
         assert_eq!(paused_reason_of(&app, by_connection).await, None);
+        assert_eq!(
+            paused_reason_of(&app, by_errors).await.as_deref(),
+            Some(PAUSE_ERRORS)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_test_on_a_typed_model_keeps_connection_pauses() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &mock).await;
+        let (by_connection, by_errors) = paused_rules(&app, &seeded, id).await;
+
+        let response = test(&app, &seeded.cookie, id, &json!({"model": "gpt-other"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(
+            paused_reason_of(&app, by_connection).await.as_deref(),
+            Some(PAUSE_CONNECTION)
+        );
         assert_eq!(
             paused_reason_of(&app, by_errors).await.as_deref(),
             Some(PAUSE_ERRORS)

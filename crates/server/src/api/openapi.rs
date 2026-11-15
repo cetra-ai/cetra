@@ -2221,7 +2221,7 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let patch = operation("patch_online_rule", "evaluation", "Update an online rule")
         .description(Some(
-            "Project members and above. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
+            "Project members and above. API keys cannot call it. `target` and `evaluator_id` cannot change. Enabling a rule checks the active-rule limit.",
         ))
         .parameters(Some(vec![project_param(), id.clone()]))
         .request_body(Some(json_body("UpdateOnlineRuleRequest")))
@@ -2233,7 +2233,7 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let delete = operation("delete_online_rule", "evaluation", "Delete an online rule")
         .description(Some(
-            "Project members and above. Queued jobs of the rule are deleted with it.",
+            "Project members and above. API keys cannot call it. Queued jobs of the rule are deleted with it.",
         ))
         .parameters(Some(vec![project_param(), id.clone()]))
         .responses(responses(
@@ -2247,7 +2247,9 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         "evaluation",
         "Resume an online rule",
     )
-    .description(Some("Project members and above. Clears the rule's pause."))
+    .description(Some(
+        "Project members and above. API keys cannot call it. Clears the rule's pause.",
+    ))
     .parameters(Some(vec![project_param(), id]))
     .responses(responses(
         "200",
