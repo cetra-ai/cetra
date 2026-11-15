@@ -38,8 +38,12 @@ fuzz_toolchain := "nightly-2026-11-03"
 fuzz_targets := "wal_record wal_replay parquet_file read_cache_block catalog_rows filter_dsl otlp_http_protobuf otlp_http_json otlp_grpc"
 
 # Install the fuzzing toolchain and cargo-fuzz (track R M3)
-fuzz-tools:
+# Install the fuzzing toolchain (track R M3); CI installs cargo-fuzz with taiki-e instead
+fuzz-toolchain:
     rustup toolchain install {{fuzz_toolchain}} --profile minimal
+
+# Install the fuzzing toolchain and cargo-fuzz (track R M3)
+fuzz-tools: fuzz-toolchain
     cargo install cargo-fuzz --version 0.13.2 --locked
 
 # Write fuzz/Cargo.lock: the root lock's versions, plus the exact libfuzzer-sys pin
