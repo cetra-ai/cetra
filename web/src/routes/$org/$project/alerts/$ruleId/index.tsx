@@ -15,6 +15,8 @@ import { StateBadge } from "@/components/alerts/state-badge";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { Badge } from "@/components/ui/badge";
@@ -59,6 +61,7 @@ function AlertRulePage() {
   const canEdit = canManageAlerts(data.role);
   const { data: rule } = useSuspenseQuery(alertRuleQuery(org, project, ruleId));
   const channels = useQuery(channelsQuery(org, project));
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
   const events = $api.useInfiniteQuery(
     "get",
     "/api/v1/projects/{project}/alert-rules/{id}/events",
@@ -172,6 +175,7 @@ function AlertRulePage() {
               {planLimited ? (
                 <p className="text-xs">Upgrade your plan or disable another rule.</p>
               ) : null}
+              {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
             </>
           ) : null}
         </div>

@@ -129,8 +129,9 @@ impl Evaluator {
                 expect_type(expected, self.output.data_type)
             }
             EvaluatorConfig::Webhook(_) => match self.output.data_type {
-                ScoreDataType::Numeric | ScoreDataType::Boolean | ScoreDataType::Categorical => {
-                    Ok(())
+                ScoreDataType::Numeric | ScoreDataType::Boolean => Ok(()),
+                ScoreDataType::Categorical => {
+                    validate_webhook_categories(self.output.categories.as_deref())
                 }
                 ScoreDataType::Text => Err(ConfigError::Invalid {
                     field: "data_type",
@@ -381,29 +382,7 @@ fn validate_labels(
             reason: "must have between 2 and 20 labels",
         });
     }
-    let mut seen = BTreeMap::<String, ()>::new();
-    for label in labels {
-        let chars = label.chars().count();
-        if !(1..=LABEL_CHARS_MAX).contains(&chars) {
-            return Err(ConfigError::Invalid {
-                field: "labels",
-                reason: "must be 1 to 64 characters",
-            });
-        }
-        let folded = crate::judge::normalize_label(label);
-        if folded.is_empty() {
-            return Err(ConfigError::Invalid {
-                field: "labels",
-                reason: "must not be blank",
-            });
-        }
-        if seen.insert(folded, ()).is_some() {
-            return Err(ConfigError::Invalid {
-                field: "labels",
-                reason: "must be unique",
-            });
-        }
-    }
+    validate_label_items(labels, "labels")?;
     for (key, value) in label_values {
         if !value.is_finite() {
             return Err(ConfigError::Invalid {
@@ -415,6 +394,46 @@ fn validate_labels(
             return Err(ConfigError::Invalid {
                 field: "label_values",
                 reason: "key is not a label",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A categorical webhook needs at least one category, each checked like a judge label.
+fn validate_webhook_categories(categories: Option<&[String]>) -> Result<(), ConfigError> {
+    match categories {
+        Some(list) if !list.is_empty() => validate_label_items(list, "categories"),
+        _ => Err(ConfigError::Invalid {
+            field: "categories",
+            reason: "must list at least one category for a categorical webhook",
+        }),
+    }
+}
+
+/// Each label is 1 to 64 characters, not blank after normalization, and unique after it.
+/// `field` names the input in the error.
+fn validate_label_items(labels: &[String], field: &'static str) -> Result<(), ConfigError> {
+    let mut seen = BTreeMap::<String, ()>::new();
+    for label in labels {
+        let chars = label.chars().count();
+        if !(1..=LABEL_CHARS_MAX).contains(&chars) {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: "must be 1 to 64 characters",
+            });
+        }
+        let folded = crate::judge::normalize_label(label);
+        if folded.is_empty() {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: "must not be blank",
+            });
+        }
+        if seen.insert(folded, ()).is_some() {
+            return Err(ConfigError::Invalid {
+                field,
+                reason: "must be unique",
             });
         }
     }
@@ -1554,9 +1573,36 @@ mod tests {
         evaluator(boolean, score(ScoreDataType::Boolean, None))
             .validate()
             .expect("boolean judge");
-        evaluator(webhook.clone(), score(ScoreDataType::Categorical, None))
+        evaluator(
+            webhook.clone(),
+            score(ScoreDataType::Categorical, Some(vec!["yes", "no"])),
+        )
+        .validate()
+        .expect("webhook categorical");
+        let refused = [
+            None,
+            Some(vec![]),
+            Some(vec!["yes", " YES. "]),
+            Some(vec!["  ", "no"]),
+        ];
+        for categories in refused {
+            let err = evaluator(
+                webhook.clone(),
+                score(ScoreDataType::Categorical, categories),
+            )
             .validate()
-            .expect("webhook categorical");
+            .expect_err("webhook categories");
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Invalid {
+                        field: "categories",
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
         let err = evaluator(webhook, score(ScoreDataType::Text, None))
             .validate()
             .expect_err("webhook text");

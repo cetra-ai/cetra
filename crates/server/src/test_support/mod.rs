@@ -23,14 +23,14 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode
 use bytesize::ByteSize;
 use http_body_util::BodyExt;
 use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::ids::{OrgId, ProjectId};
+use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use llmobs_core::names::PRODUCT;
 use llmobs_core::score::Score;
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{MediaBlob, Storage};
+use llmobs_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::SqliteConnection;
@@ -55,6 +55,7 @@ use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
 
@@ -190,19 +191,19 @@ pub(crate) struct TestApp {
 impl TestApp {
     /// Defaults, `data_dir` in a temp directory, `public_url` `http://localhost:8080`.
     pub(crate) async fn new() -> Self {
-        Self::open(|_| {}, None, None, false, None, None).await
+        Self::open(|_| {}, None, None, false, None, None, None).await
     }
 
     /// `tweak` runs before storage and `meta.db` open.
     ///
     /// `storage.data_dir` is then copied from the top-level `data_dir`.
     pub(crate) async fn with_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, None).await
+        Self::open(tweak, None, None, false, None, None, None).await
     }
 
     /// Same as [`Self::new`] with extra routes inside the shared layers.
     pub(crate) async fn with_routes(routes: Router<AppState>) -> Self {
-        Self::open(|_| {}, Some(routes), None, false, None, None).await
+        Self::open(|_| {}, Some(routes), None, false, None, None, None).await
     }
 
     /// [`Self::with_config`] and [`Self::with_routes`] together.
@@ -210,7 +211,7 @@ impl TestApp {
         tweak: impl FnOnce(&mut ServerConfig),
         routes: Router<AppState>,
     ) -> Self {
-        Self::open(tweak, Some(routes), None, false, None, None).await
+        Self::open(tweak, Some(routes), None, false, None, None, None).await
     }
 
     /// Serves this app's router on `127.0.0.1` at an ephemeral port, in a background task that
@@ -234,17 +235,23 @@ impl TestApp {
 
     /// The given route table instead of the server's, with the same layers.
     pub(crate) async fn with_route_table(routes: Vec<RouteDef>) -> Self {
-        Self::open(|_| {}, None, Some(routes), false, None, None).await
+        Self::open(|_| {}, None, Some(routes), false, None, None, None).await
+    }
+
+    /// [`Self::new`] with a trace load waiting `permit_wait` for a permit (a job's `Saturated`
+    /// requeue, § I3.6), so a test does not wait 30 s.
+    pub(crate) async fn with_permit_wait(permit_wait: Duration) -> Self {
+        Self::open(|_| {}, None, None, false, None, None, Some(permit_wait)).await
     }
 
     /// The stub mailer. [`Self::sent`] reads what it accepted.
     pub(crate) async fn with_mailer() -> Self {
-        Self::open(|_| {}, None, None, true, None, None).await
+        Self::open(|_| {}, None, None, true, None, None, None).await
     }
 
     /// [`Self::with_config`] with the stub mailer.
     pub(crate) async fn with_mailer_config(tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, true, None, None).await
+        Self::open(tweak, None, None, true, None, None, None).await
     }
 
     /// An app whose licence lists `features`.
@@ -258,12 +265,12 @@ impl TestApp {
 
     /// [`Self::with_config`] with GitHub's endpoints pointed at `base`.
     pub(crate) async fn with_github(base: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, Some(base), None).await
+        Self::open(tweak, None, None, false, Some(base), None, None).await
     }
 
     /// [`Self::with_config`] with Google's issuer pointed at `issuer`.
     pub(crate) async fn with_google(issuer: &str, tweak: impl FnOnce(&mut ServerConfig)) -> Self {
-        Self::open(tweak, None, None, false, None, Some(issuer)).await
+        Self::open(tweak, None, None, false, None, Some(issuer), None).await
     }
 
     /// Messages the stub mailer accepted. Empty when the stub is not installed.
@@ -282,6 +289,7 @@ impl TestApp {
         stub_mailer: bool,
         github_base: Option<&str>,
         google_issuer: Option<&str>,
+        permit_wait: Option<Duration>,
     ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let mut config = default_config(dir.path());
@@ -336,9 +344,11 @@ impl TestApp {
             license,
             defaults,
             config.public_url.origin(),
+            config.entitlements.control_plane,
         )
         .await
         .expect("stored org tokens load");
+        let eval = crate::eval::EvalQueue::new(config.eval.workers);
         let org_sso = crate::ee::org_sso::OrgSso::new(
             llmobs_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
@@ -365,15 +375,21 @@ impl TestApp {
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             metrics_cache: crate::routes::metrics::MetricsCache::default(),
             usage: crate::usage::Usage::default(),
+            alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
             secrets,
             eval_runner,
             connections: crate::eval::connection::ConnectionCache::default(),
             entitlements,
             ingest_rate: crate::entitlements::rate::IngestRate::default(),
-            trace_loads: crate::eval::trace_load::TraceLoads::default(),
+            trace_loads: crate::eval::trace_load::TraceLoads::new(
+                permit_wait.unwrap_or(crate::routes::read::READ_TIMEOUT),
+            ),
             definitions: crate::eval::definitions::DefinitionCache::default(),
             org_sso,
+            backup_slot: tokio::sync::Mutex::new(()),
+            eval,
+            pending: crate::eval::pending::PendingTraces::default(),
         });
         state
             .org_sso
@@ -544,6 +560,18 @@ pub(crate) struct Member {
 }
 
 impl TestApp {
+    /// Marks `user_id`'s email address verified.
+    pub(crate) async fn verify_email(&self, user_id: Uuid) {
+        let now = self.state.clock.now_ns();
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { set_email_verified(conn, user_id, now).await })
+            })
+            .await
+            .unwrap();
+    }
+
     /// A new user `email` with org role `role` in `seeded`'s org (no project override), and a
     /// session cookie for them.
     pub(crate) async fn add_member(&self, seeded: &Seeded, email: &str, role: OrgRole) -> Member {
@@ -649,7 +677,60 @@ pub(crate) fn dataset_span(index: usize) -> Span {
         .expect("the dataset has that many spans")
 }
 
+/// Every row of `project`, no window: for tests that read storage directly.
+pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQuery {
+    storage
+        .query(
+            project,
+            crate::entitlements::query_options(crate::entitlements::Visibility::unlimited(), None),
+        )
+        .await
+        .expect("query opens")
+}
+
+/// Spans of `project` in storage, no window: `SELECT count(*) FROM spans` over
+/// `QueryContext::new(raw_query(storage, project).await, None)`.
+pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64 {
+    let ctx = QueryContext::new(raw_query(storage, project).await, None).expect("context");
+    let batches = ctx
+        .session()
+        .sql("SELECT count(*) AS n FROM spans")
+        .await
+        .expect("count plans")
+        .collect()
+        .await
+        .expect("count runs");
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    u64::try_from(count).unwrap_or(0)
+}
+
 impl TestApp {
+    /// Commits one span of `trace` that starts at `start_time`, through [`Self::commit_spans`].
+    /// `span_index` makes the span id distinct within the trace.
+    pub(crate) async fn commit_trace_at(
+        &self,
+        project: &ProjectRow,
+        trace: TraceId,
+        span_index: u8,
+        start_time: i64,
+    ) {
+        let mut span: Span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = format!("c4{span_index:014x}")
+            .parse::<SpanId>()
+            .expect("span id hex");
+        span.parent_span_id = None;
+        span.start_time = start_time;
+        span.end_time = start_time + 1_000_000_000;
+        span.ingest_time = self.state.clock.now_ns();
+        self.commit_spans(project, vec![span]).await;
+    }
+
     /// Commits `spans` to `project` through the ingest path: the live bus sees them and the
     /// usage counters count them. The spans' `project_id` is set to `project`.
     pub(crate) async fn commit_spans(&self, project: &ProjectRow, mut spans: Vec<Span>) {
@@ -662,6 +743,7 @@ impl TestApp {
                 &self.state.storage,
                 &self.state.usage,
                 &self.state.live,
+                &self.state.pending,
                 crate::ingest::CommitTarget {
                     org_id: project.org_id,
                     project_id: project.id,
@@ -707,6 +789,7 @@ impl TestApp {
             .await
             .unwrap();
 
+        let starts = crate::ingest::newest_span_starts(&spans);
         let media_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/media");
         for entry in std::fs::read_dir(media_dir).unwrap() {
             let path = entry.unwrap().path();
@@ -716,10 +799,12 @@ impl TestApp {
             let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
             let sha256: [u8; 32] = hex::decode(stem).unwrap().try_into().unwrap();
             let bytes = std::fs::read(&path).unwrap();
+            let newest_span_start = starts.get(stem).copied().unwrap_or(i64::MIN);
             let blob = MediaBlob {
                 sha256,
                 mime_type: "image/png".to_owned(),
                 bytes: Bytes::from(bytes),
+                newest_span_start,
             };
             self.state.storage.put_media(project, blob).await.unwrap();
         }
@@ -800,7 +885,11 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
-        entitlements: EntitlementsConfig::default(),
+        // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
+        entitlements: EntitlementsConfig {
+            control_plane: true,
+            ..EntitlementsConfig::default()
+        },
         orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,
@@ -1287,4 +1376,59 @@ pub(crate) async fn org_sso_app_with(
         .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
         .await;
     (app, seeded, owner)
+}
+
+/// The OTLP key the tests send with, also the project key of [`with_init`].
+pub(crate) const OTLP_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// A server config with `init` set, so `bind` seeds an admin, an org, a project and [`OTLP_KEY`].
+pub(crate) fn with_init(mut config: ServerConfig) -> ServerConfig {
+    config.init = serde_json::from_value(serde_json::json!({
+        "admin_email": "ada@example.com",
+        "admin_password": "llmobs-ok1",
+        "org": "Acme",
+        "project": "Support bot",
+        "secret_key": OTLP_KEY,
+    }))
+    .unwrap();
+    config
+}
+
+/// A config for a server on `data_dir`, on ephemeral loopback ports, with the defaults.
+pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
+    ServerConfig {
+        data_dir: data_dir.to_path_buf(),
+        public_url: PublicUrl::default(),
+        http_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        trusted_proxies: Vec::new(),
+        otlp_http_addr: None,
+        grpc_addr: None,
+        storage: StorageConfig {
+            data_dir: data_dir.to_path_buf(),
+            min_free_bytes: ByteSize::b(0),
+            object_store: None,
+            s3: S3Config::default(),
+            wal: WalConfig::default(),
+            flush: FlushConfig::default(),
+            memtable: MemtableConfig::default(),
+            query: QueryConfig::default(),
+            anchor: AnchorConfig::default(),
+            gc: Default::default(),
+            compaction: Default::default(),
+            deletion: Default::default(),
+        },
+        ingest: IngestConfig::default(),
+        media: MediaConfig::default(),
+        eval: EvalConfig::default(),
+        security: SecurityConfig::default(),
+        entitlements: EntitlementsConfig::default(),
+        orgs: OrgsConfig::default(),
+        encryption_key: None,
+        license_key: None,
+        auth: AuthSettings::default(),
+        smtp_url: None,
+        email_from: None,
+        init: InitConfig::default(),
+        log: LogConfig::default(),
+    }
 }

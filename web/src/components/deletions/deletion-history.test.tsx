@@ -14,6 +14,44 @@ afterEach(() => {
   setDeletionPollMs(DELETION_POLL_MS);
 });
 
+it("labels a control plane request", async () => {
+  const [first, ...rest] = deletionsFixture.data;
+  if (!first) {
+    throw new Error("the fixture has no deletions");
+  }
+  server.use(
+    http.get("/api/v1/projects/:project/deletions", () =>
+      HttpResponse.json({
+        ...deletionsFixture,
+        data: [
+          { ...first, requested_by: { kind: "control_plane", id: first.requested_by.id } },
+          ...rest,
+        ],
+      }),
+    ),
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={queryClient}>
+      <ProjectProvider
+        value={{
+          org: "acme",
+          project: "support-bot",
+          ref: "acme/support-bot",
+          data: projectFixture as Schema<"Project">,
+        }}
+      >
+        <DeletionHistory />
+      </ProjectProvider>
+    </QueryClientProvider>,
+  );
+
+  const table = await screen.findByRole("table", { name: "Deletions" });
+  expect(within(table).getByText("Control plane")).toBeInTheDocument();
+});
+
 it("keeps the rows visible when a refetch fails", async () => {
   // The first answer has an open deletion, so the history polls.
   let gets = 0;

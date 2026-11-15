@@ -40,7 +40,7 @@ fn other_project() -> ProjectId {
 /// The first `i64` of the first row of `sql`, over `project`'s providers.
 async fn scalar(storage: &Storage, project: ProjectId, sql: &str) -> i64 {
     let query = storage
-        .query(project, QueryOptions::default())
+        .query(project, QueryOptions::new(None, None))
         .await
         .unwrap();
     let ctx = QueryContext::new(query, None).unwrap();

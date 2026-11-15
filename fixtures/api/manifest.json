@@ -70,6 +70,16 @@
     "file": "static/deletion.json"
   },
   {
+    "operation_id": "get_eval_job",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000800"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/eval-job.json"
+  },
+  {
     "operation_id": "get_evaluator",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000500"
@@ -127,6 +137,16 @@
     "file": "responses/metrics.json"
   },
   {
+    "operation_id": "get_online_rule",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000700"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule.json"
+  },
+  {
     "operation_id": "get_org",
     "path_params": {
       "org": "acme"
@@ -173,6 +193,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/project.json"
+  },
+  {
+    "operation_id": "get_saved_view",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000211"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/saved-view.json"
   },
   {
     "operation_id": "get_schema",
@@ -511,6 +541,14 @@
     "file": "static/deletions.json"
   },
   {
+    "operation_id": "list_eval_jobs",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/eval-jobs.json"
+  },
+  {
     "operation_id": "list_evaluator_templates",
     "path_params": {},
     "query": {},
@@ -535,6 +573,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/llm-connections.json"
+  },
+  {
+    "operation_id": "list_online_rules",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rules.json"
   },
   {
     "operation_id": "list_org_deletions",
@@ -711,6 +757,16 @@
     "file": "static/evaluator.json"
   },
   {
+    "operation_id": "post_evaluator_run",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000500"
+    },
+    "query": {},
+    "status": 202,
+    "content_type": "application/json",
+    "file": "static/eval-job-queued.json"
+  },
+  {
     "operation_id": "post_evaluator_test",
     "path_params": {},
     "query": {},
@@ -746,6 +802,32 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/me.json"
+  },
+  {
+    "operation_id": "post_online_rule",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/online-rule.json"
+  },
+  {
+    "operation_id": "post_online_rule_preview",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-preview.json"
+  },
+  {
+    "operation_id": "post_online_rule_resume",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000701"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/online-rule-resumed.json"
   },
   {
     "operation_id": "post_org_invite",

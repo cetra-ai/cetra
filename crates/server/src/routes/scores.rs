@@ -80,8 +80,10 @@ async fn list_scores(
 ) -> Result<error::Json<Page<Score>>, ApiError> {
     let trace_id = params.trace_id.map(|id| id.to_string());
     let span_id = params.span_id.map(|id| id.to_string());
+    let evaluator_id = params.evaluator_id.map(|id| id.to_string());
+    let rule_id = params.rule_id.map(|id| id.to_string());
     let created = window(params.from, params.to)?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::score_list(
         &ctx,
         storage::ScoreListRequest {
@@ -91,6 +93,8 @@ async fn list_scores(
             session_id: params.session_id.as_deref(),
             name: params.name.as_deref(),
             source: params.source,
+            evaluator_id: evaluator_id.as_deref(),
+            rule_id: rule_id.as_deref(),
             window: created,
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
@@ -275,6 +279,28 @@ mod tests {
         let (_, body) = get_json(&app, &seeded, "/scores?target=session").await;
         let page: Page<Score> = serde_json::from_value(body).unwrap();
         assert_eq!(ids(&page), [score_id(305)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn scores_filter_by_evaluator_id_and_rule_id() {
+        let (app, seeded) = loaded().await;
+        let evaluator = "01900000-0000-7000-8000-000000000201";
+        let rule = "01900000-0000-7000-8000-000000000202";
+
+        let (status, body) =
+            get_json(&app, &seeded, &format!("/scores?evaluator_id={evaluator}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<Score> = serde_json::from_value(body).unwrap();
+        assert_eq!(ids(&page), [score_id(302)]);
+
+        let (status, body) = get_json(&app, &seeded, &format!("/scores?rule_id={rule}")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let page: Page<Score> = serde_json::from_value(body).unwrap();
+        assert_eq!(ids(&page), [score_id(302)]);
+
+        let (status, body) = get_json(&app, &seeded, "/scores?evaluator_id=not-a-uuid").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["code"], "bad_request");
     }
 
     #[tokio::test(flavor = "multi_thread")]

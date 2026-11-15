@@ -6,8 +6,15 @@ import { problemMessage } from "@/api/problem";
 import { AuthLayout } from "@/components/auth/auth-layout";
 import { FormError } from "@/components/form/form-error";
 import { Button } from "@/components/ui/button";
-import { cliAuthSearchFrom, cliCallbackUrl, cliTokenName, parseCliRequest } from "@/lib/cli-auth";
-import { navigateExternal } from "@/lib/external-navigation";
+import {
+  cliAuthSearchFrom,
+  cliCallbackForm,
+  cliCancelUrl,
+  cliTokenExpiry,
+  cliTokenName,
+  parseCliRequest,
+} from "@/lib/cli-auth";
+import { navigateExternal, submitExternalForm } from "@/lib/external-navigation";
 import { PRODUCT_NAME } from "@/product";
 
 export const Route = createFileRoute("/cli-auth")({
@@ -59,13 +66,19 @@ function CliAuthPage() {
 
   const authorize = () => {
     create.mutate(
-      { body: { name: cliTokenName(request), scopes: ["read", "write"] } },
+      {
+        body: {
+          name: cliTokenName(request),
+          scopes: ["read", "write"],
+          expires_at: cliTokenExpiry(new Date()),
+        },
+      },
       {
         onSuccess: (data) => {
-          const url = cliCallbackUrl(request, { token: data.secret });
+          const callback = cliCallbackForm(request, data.secret);
           create.reset();
           setOutcome("authorized");
-          navigateExternal(url);
+          submitExternalForm(callback.action, callback.fields);
         },
       },
     );
@@ -73,7 +86,7 @@ function CliAuthPage() {
 
   const cancel = () => {
     setOutcome("cancelled");
-    navigateExternal(cliCallbackUrl(request, { error: "access_denied" }));
+    navigateExternal(cliCancelUrl(request));
   };
 
   return (
@@ -85,10 +98,16 @@ function CliAuthPage() {
         </>
       }
     >
+      <p role="note" className="rounded-md border p-3 text-sm font-medium">
+        Only continue if you just ran <code>{`${PRODUCT_NAME} login`}</code> on this computer.
+        Someone who sent you this link could otherwise get access to your account.
+      </p>
       <p className="text-sm">
-        The CLI on <strong>{request.host ?? "this computer"}</strong> will get a personal access
-        token named <strong>{cliTokenName(request)}</strong> with read and write access. You can
-        revoke it on your account page.
+        Computer name reported by the CLI: <code>{request.host ?? "not reported"}</code>
+      </p>
+      <p className="text-sm">
+        The CLI will get a personal access token named <strong>{cliTokenName(request)}</strong> with
+        read and write access. It expires in 90 days. You can revoke it on your account page.
       </p>
       <FormError
         message={

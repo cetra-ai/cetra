@@ -176,6 +176,10 @@ pub(crate) async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // A hidden control-plane route answers 404 in `enforce`, so no credential is read here.
+    if crate::http::access::hidden_without_control_plane(&state, request.uri().path()) {
+        return next.run(request).await;
+    }
     if request
         .headers()
         .contains_key(axum::http::header::AUTHORIZATION)
@@ -264,6 +268,9 @@ pub(crate) async fn bearer_principal(
 /// live at most 5 minutes and be valid within 60 s of skew. It is not single-use: a captured
 /// one works until it expires, which the idempotent internal endpoints accept (D-P-28).
 fn control_plane_principal(state: &AppState, token: &str, now: i64) -> Result<Principal, ApiError> {
+    if !state.config.entitlements.control_plane {
+        return Err(ApiError::Unauthorized);
+    }
     let Ok(verified) = llmobs_token::verify(token) else {
         return Err(ApiError::Unauthorized);
     };
@@ -474,6 +481,17 @@ mod tests {
             panic!("expected a control-plane principal");
         };
         assert_eq!(scope, "orgs");
+    }
+
+    #[tokio::test]
+    async fn control_plane_tokens_are_refused_when_off() {
+        let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
+        let token = control_plane_token("orgs");
+        let refused = bearer_principal(&app.state, &bearer_headers(&token)).await;
+        assert!(
+            matches!(refused, Err(crate::http::error::ApiError::Unauthorized)),
+            "a control-plane token is refused when entitlements.control_plane is off"
+        );
     }
 
     #[tokio::test]

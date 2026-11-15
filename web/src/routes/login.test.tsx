@@ -373,7 +373,14 @@ it("sends an SSO email to its org's identity provider", async () => {
   withConfig({ sso_discovery: true });
   const bodies = discoverAnswers(() => HttpResponse.json({ sso: true }));
   const navigated: string[] = [];
-  setExternalNavigator((url) => navigated.push(url));
+  setExternalNavigator({
+    navigate: (url) => {
+      navigated.push(url);
+    },
+    submit: () => {
+      throw new Error("the SSO login never posts a form");
+    },
+  });
   const { user } = await renderApp("/login?redirect=%2Facme");
   await user.type(await screen.findByLabelText("Email"), "ada@acme.com");
   await user.click(screen.getByRole("button", { name: "Continue" }));

@@ -607,7 +607,7 @@ mod tests {
     /// The first `i64` of the first row of `sql`.
     async fn scalar(storage: &Storage, sql: &str) -> i64 {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();
@@ -632,7 +632,7 @@ mod tests {
     /// Every string cell of `sql`'s result, one per line (EXPLAIN plans).
     async fn text(storage: &Storage, sql: &str) -> String {
         let query = storage
-            .query(project(), QueryOptions::default())
+            .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
         let ctx = QueryContext::new(query, None).unwrap();

@@ -18,6 +18,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { formatRetention } from "@/lib/format";
 import { atLeast, roleLabel } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/")({
@@ -141,7 +142,7 @@ function ProjectTable({ org, rows }: { org: string; rows: Schema<"Project">[] })
             <TableCell>
               <Badge variant="secondary">{project.role ? roleLabel(project.role) : ""}</Badge>
             </TableCell>
-            <TableCell>{retentionLabel(project.retention_days)}</TableCell>
+            <TableCell>{formatRetention(project.retention_days)}</TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -158,11 +159,4 @@ function ProjectsPending() {
       <Skeleton className="h-10 w-full" />
     </main>
   );
-}
-
-function retentionLabel(days: number | null | undefined): string {
-  if (days == null) {
-    return "Default";
-  }
-  return days === 1 ? "1 day" : `${days} days`;
 }

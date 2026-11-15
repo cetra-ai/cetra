@@ -3,6 +3,7 @@ import {
   Database,
   Gauge,
   LayoutDashboard,
+  ListChecks,
   MessagesSquare,
   Rows3,
   Users,
@@ -19,4 +20,5 @@ export const projectNav = [
   { to: "/$org/$project/alerts", label: "Alerts", icon: BellRing },
   { to: "/$org/$project/sql", label: "SQL", icon: Database },
   { to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
+  { to: "/$org/$project/online-rules", label: "Online rules", icon: ListChecks },
 ] as const;

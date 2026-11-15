@@ -3537,6 +3537,7 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "hmac 0.13.0",
+ "http-body",
  "http-body-util",
  "insta",
  "ipnet",

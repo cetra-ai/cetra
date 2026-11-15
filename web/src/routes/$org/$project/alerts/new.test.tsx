@@ -8,6 +8,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import ruleFixture from "../../../../../../fixtures/api/static/alert-rule.json";
 import channelsFixture from "../../../../../../fixtures/api/static/channels.json";
+import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const PAGE = "/acme/support-bot/alerts/new";
@@ -135,6 +136,10 @@ it("shows the plan limit with the upgrade line", async () => {
   expect(
     screen.getByText("Upgrade your plan, disable another rule, or save this one disabled."),
   ).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
 });
 
 it("clears the plan limit hint once a later submit fails client validation", async () => {

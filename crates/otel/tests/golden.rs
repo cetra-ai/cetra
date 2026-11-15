@@ -8,10 +8,15 @@ mod support;
 
 use std::fs;
 
+use llmobs_core::enums::{CostSource, SpanKind};
 use llmobs_core::media::MediaBlob;
-use llmobs_otel::{IngestContext, IngestLimits, Normalized, PriceTable, decode_json, normalize};
+use llmobs_otel::{
+    IngestContext, IngestLimits, Normalized, PriceTable, builtin_price_rows, decode_json, normalize,
+};
 use serde_json::{Map, Value};
-use support::{Case, ExpectedMedia, canonical_json, load_all_cases, load_prices, sort_spans};
+use support::{
+    Case, ExpectedMedia, Origin, canonical_json, load_all_cases, load_prices, sort_spans,
+};
 
 /// Cases whose expected output needs a later sub-phase.
 const PENDING: &[&str] = &[];
@@ -287,4 +292,73 @@ fn costs_match(path: &str, actual: &Value, expected: &Value) -> bool {
         (Some(actual), Some(expected)) => (actual - expected).abs() <= COST_EPSILON,
         _ => false,
     }
+}
+
+/// Every captured `llm` or `embedding` span with a model and token counts is priced by
+/// the embedded snapshot, the table the server uses. The golden suite prices with
+/// `prices.json`, which has one row per test model, so it cannot see a provider that
+/// no snapshot row carries (D-B1-11). Hand-written cases use invented models and are
+/// not checked here.
+#[test]
+fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
+    let loaded = load_all_cases();
+    assert!(
+        loaded.failures.is_empty(),
+        "fixtures failed to load:\n{}",
+        loaded.failures.join("\n")
+    );
+    let prices = PriceTable::new(builtin_price_rows()).unwrap_or_else(|err| panic!("{err}"));
+    let mut failures = Vec::new();
+    let mut checked = 0_usize;
+    for case in loaded
+        .cases
+        .iter()
+        .filter(|case| case.meta.origin == Origin::Captured)
+    {
+        let label = format!("{}/{}", case.group, case.name);
+        let bytes = match fs::read(case.dir.join("input.json")) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                failures.push(format!("{label}: {err}"));
+                continue;
+            }
+        };
+        let request = match decode_json(&bytes) {
+            Ok(request) => request,
+            Err(err) => {
+                failures.push(format!("{label}: input.json: {err}"));
+                continue;
+            }
+        };
+        let context = match context_of(case) {
+            Ok(context) => context,
+            Err(err) => {
+                failures.push(err);
+                continue;
+            }
+        };
+        for span in normalize(&request, &context, &prices).spans {
+            let llm = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
+            let modelled = span.request_model.is_some() || span.response_model.is_some();
+            let counted = span.input_tokens.is_some() || span.output_tokens.is_some();
+            if !(llm && modelled && counted) {
+                continue;
+            }
+            checked += 1;
+            let priced = span.cost_total.is_some()
+                && matches!(
+                    span.cost_source,
+                    Some(CostSource::Computed | CostSource::Reported)
+                );
+            if !priced {
+                failures.push(format!(
+                    "{label}: model {:?} provider {:?} has no price",
+                    span.response_model.as_ref().or(span.request_model.as_ref()),
+                    span.provider
+                ));
+            }
+        }
+    }
+    assert!(checked > 0, "no captured llm span with tokens was checked");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

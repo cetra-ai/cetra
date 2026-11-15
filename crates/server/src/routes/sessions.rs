@@ -16,7 +16,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::routes::read::{
-    READ_TIMEOUT, attach_session_scores, attach_trace_scores, list_scope, open_query, page_limit,
+    Deadline, attach_session_scores, attach_trace_scores, list_scope, open_query, page_limit,
     sort_order,
 };
 
@@ -62,7 +62,8 @@ async fn list_sessions(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::session_list(
         &ctx,
         storage::SessionListRequest {
@@ -72,12 +73,12 @@ async fn list_sessions(
             order: sort_order(params.order),
             limit: page_limit(params.limit),
             cursor: params.cursor.as_deref(),
-            timeout: READ_TIMEOUT,
+            timeout: deadline.remaining()?,
         },
     )
     .await?;
     let mut data = convert::session_summaries(&page.batches)?;
-    attach_session_scores(&ctx, &mut data).await?;
+    attach_session_scores(&ctx, &mut data, deadline).await?;
     Ok(error::Json(Page {
         data,
         next_cursor: page.next_cursor,
@@ -90,22 +91,23 @@ async fn get_session(
     error::Path(path): error::Path<SessionPath>,
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<SessionDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let deadline = Deadline::start();
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::session_detail(
         &ctx,
         &path.session_id,
         params.include_eval,
         params.include_experiments,
-        READ_TIMEOUT,
+        deadline.remaining()?,
     )
     .await?
     .ok_or(ApiError::NotFound)?;
     let mut session = convert::session_summaries(std::slice::from_ref(&data.session))?
         .pop()
         .ok_or(ApiError::NotFound)?;
-    attach_session_scores(&ctx, std::slice::from_mut(&mut session)).await?;
+    attach_session_scores(&ctx, std::slice::from_mut(&mut session), deadline).await?;
     let mut traces = convert::trace_summaries(&data.turns)?;
-    attach_trace_scores(&ctx, &mut traces).await?;
+    attach_trace_scores(&ctx, &mut traces, deadline).await?;
     let mut roots = convert::root_payloads(&data.roots)?;
     let turns = traces
         .into_iter()

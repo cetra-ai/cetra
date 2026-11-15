@@ -1,5 +1,12 @@
 import { expect, it } from "vitest";
-import { cliAuthSearchFrom, cliCallbackUrl, cliTokenName, parseCliRequest } from "@/lib/cli-auth";
+import {
+  cliAuthSearchFrom,
+  cliCallbackForm,
+  cliCancelUrl,
+  cliTokenExpiry,
+  cliTokenName,
+  parseCliRequest,
+} from "@/lib/cli-auth";
 
 it("reads the raw query string", () => {
   expect(cliAuthSearchFrom("?port=54321&state=s_12345678901234567890&host=laptop&other=x")).toEqual(
@@ -55,14 +62,19 @@ it("names the token after the host", () => {
   expect(cliTokenName({ port: 5000, state: "s", host: "laptop" })).toBe("CLI on laptop");
 });
 
-it("builds the callback with the token", () => {
-  expect(cliCallbackUrl({ port: 54321, state: "xyz" }, { token: "pat-llmobs-A+B" })).toBe(
-    "http://127.0.0.1:54321/callback?token=pat-llmobs-A%2BB&state=xyz",
+it("builds the cancel callback without a secret", () => {
+  expect(cliCancelUrl({ port: 54321, state: "xyz" })).toBe(
+    "http://127.0.0.1:54321/callback?error=access_denied&state=xyz",
   );
 });
 
-it("builds the callback with the error", () => {
-  expect(cliCallbackUrl({ port: 54321, state: "xyz" }, { error: "access_denied" })).toBe(
-    "http://127.0.0.1:54321/callback?error=access_denied&state=xyz",
-  );
+it("builds the authorize callback as a form post with the token in the body", () => {
+  expect(cliCallbackForm({ port: 54321, state: "xyz" }, "pat-llmobs-A+B")).toEqual({
+    action: "http://127.0.0.1:54321/callback",
+    fields: { token: "pat-llmobs-A+B", state: "xyz" },
+  });
+});
+
+it("expires the token 90 days after now, as RFC 3339", () => {
+  expect(cliTokenExpiry(new Date("2026-11-15T10:30:00.000Z"))).toBe("2027-02-13T10:30:00.000Z");
 });

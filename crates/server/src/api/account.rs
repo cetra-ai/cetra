@@ -85,6 +85,10 @@ pub struct User {
     pub name: Option<String>,
     /// Instance administrator, allowed to manage instance settings.
     pub is_instance_admin: bool,
+    /// The address has been verified.
+    pub email_verified: bool,
+    /// A password is set. SSO-only accounts are false.
+    pub has_password: bool,
 }
 
 /// One org membership of the signed-in user.
@@ -135,6 +139,9 @@ pub struct Project {
     /// Days to keep data. Omitted when data is kept forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+    /// Seconds without a new span after which a trace counts as complete for online rules (D-I-7).
+    /// 10 to 3600; 60 unless set.
+    pub trace_completion_timeout_s: u32,
     /// The caller's effective role. Omitted when the caller is an API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<OrgRole>,
@@ -288,11 +295,12 @@ pub struct UpdateOrgRequest {
 pub struct CreateProjectRequest {
     /// Display name. Trimmed to 1–100 characters.
     pub name: String,
-    /// URL slug. Absent derives one from the name. Project slugs are not reserved words.
+    /// URL slug. Absent derives one from the name. `settings` is reserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
-    /// Days to keep data, from 1 to 36500. Absent keeps data forever.
+    /// Days to keep data, from 1 to 36500. Null or absent keeps data forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1, maximum = 36500)]
     pub retention_days: Option<u32>,
 }
 
@@ -307,8 +315,12 @@ pub struct UpdateProjectRequest {
     pub name: Option<String>,
     /// Days to keep data, from 1 to 36500. Null keeps data forever. Absent leaves retention unchanged.
     #[serde(default, deserialize_with = "optional_retention")]
-    #[schema(value_type = Option<u32>)]
+    #[schema(value_type = Option<u32>, minimum = 1, maximum = 36500)]
     pub retention_days: Option<Option<u32>>,
+    /// Seconds without a new span after which a trace counts as complete for online rules, 10 to 3600.
+    /// Absent leaves it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_completion_timeout_s: Option<u32>,
 }
 
 /// Present JSON is `Some(value)`, including null. An absent field stays the default `None`.
@@ -350,6 +362,8 @@ mod tests {
             email: "ada@example.com".to_owned(),
             name: Some("Ada Example".to_owned()),
             is_instance_admin: true,
+            email_verified: true,
+            has_password: true,
         }
     }
 
@@ -418,6 +432,7 @@ mod tests {
             slug: "support-bot".to_owned(),
             name: "Support bot".to_owned(),
             retention_days: Some(30),
+            trace_completion_timeout_s: 60,
             role: Some(OrgRole::Owner),
             created_at: CREATED_AT,
         };

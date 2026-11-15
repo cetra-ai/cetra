@@ -127,7 +127,7 @@ A judge trace (track I) is a trace in the same project, with environment `llmobs
 | `pending_traces` (I) | kept; the sweeper reads through storage, which hides the traces | cascade | cascade |
 | `saved_views` (H), evaluators, rules, score definitions, API keys, members, alert tables (K) | kept | cascade | cascade |
 | `llm_connections`, `invites`, `org_members` | kept | kept | cascade from `orgs` |
-| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7; until P's M4 lands, the drop still deletes them after one `Usage::flush`) |
+| `usage_daily` | kept | kept: aggregates, needed for the org's billing (N) | kept 40 days after the drop is applied, then pruned (D-P-46, amending D-M-7) |
 | `deletions` and its scope tables | kept forever (audit, D-M-8) | kept | kept |
 | live streams (SSE) | `resync` event on the project's streams when registered | `resync` | `resync` per project |
 | `GET /metrics` cache | entries of the project dropped | dropped | dropped |

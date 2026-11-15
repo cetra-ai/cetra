@@ -2,14 +2,12 @@
 //! and the judge usage, and no score. The body rules and the answer are § Test run contract.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Instant;
 
-use llmobs_core::enums::SpanKind;
 use llmobs_core::ids::{SpanId, TraceId};
 use llmobs_eval::{
-    Check, ErrorClass, EvalOrigin, EvalRun, EvalTarget, EvaluatorConfig, OutputScore,
-    PromptTemplate, RunInput, Secret, TraceData, VariableMapping, Variables,
+    ErrorClass, EvalOrigin, EvalRun, EvalTarget, EvaluatorConfig, OutputScore, PromptTemplate,
+    Secret, TraceData, VariableMapping, Variables,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -20,11 +18,12 @@ use crate::api::evaluators::{
     EvaluatorKind, EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult,
     EvaluatorTestUsage, OutputScoreBody, TestEvaluatorBody,
 };
+use crate::entitlements::Visibility;
 use crate::eval::evaluator::{self, EvaluatorError, Prepared};
+use crate::eval::execute::{self, RunArgs, render};
 use crate::eval::trace_load::{self, LoadError};
 use crate::http::AppState;
 use crate::http::error::ApiError;
-use crate::ingest::{CommitTarget, commit_in_task};
 use crate::meta::connections;
 use crate::meta::evaluators::{self as store, EvaluatorRow};
 use crate::meta::projects::ProjectRow;
@@ -35,8 +34,6 @@ const ANSWER_CHARS: usize = 2_000;
 const MAX_VARIABLES: usize = 32;
 /// Most bytes the literal variables may take in all.
 const MAX_VARIABLE_BYTES: usize = 256 * 1024;
-/// Longest `output` and `expected` of a levenshtein check, in bytes (the distance is quadratic).
-const MAX_LEVENSHTEIN_BYTES: usize = 64 * 1024;
 
 /// Where a run's variables come from, as the body asks. Built only when the body is valid.
 enum Source {
@@ -138,30 +135,38 @@ pub(crate) async fn run(
             around,
             mapping,
         } => {
-            let loaded =
-                match trace_load::load_trace(state, project.id, trace_id, span_id, around).await {
-                    Ok(loaded) => loaded,
-                    Err(LoadError::TooLarge) => {
-                        return Ok(refused(TestErrorClass::Permanent, "trace too large", true));
-                    }
-                    Err(LoadError::NotFound | LoadError::NoTargetSpan) => {
-                        return Err(ApiError::NotFound);
-                    }
-                    Err(LoadError::EvaluationTrace) => {
-                        return Err(ApiError::BadRequest {
-                            detail: Some("target is an evaluation trace".to_owned()),
-                            errors: Vec::new(),
-                        });
-                    }
-                    Err(LoadError::Busy) => {
-                        return Err(ApiError::Unavailable {
-                            detail: "storage is busy",
-                        });
-                    }
-                    Err(error @ (LoadError::Failed(_) | LoadError::Convert(_))) => {
-                        return Err(internal(error));
-                    }
-                };
+            let loaded = match trace_load::load_trace(
+                state,
+                project.id,
+                Visibility::window(state, project.org_id),
+                trace_id,
+                span_id,
+                around,
+            )
+            .await
+            {
+                Ok(loaded) => loaded,
+                Err(LoadError::TooLarge) => {
+                    return Ok(refused(TestErrorClass::Permanent, "trace too large", true));
+                }
+                Err(LoadError::NotFound | LoadError::NoTargetSpan) => {
+                    return Err(ApiError::NotFound);
+                }
+                Err(LoadError::EvaluationTrace) => {
+                    return Err(ApiError::BadRequest {
+                        detail: Some("target is an evaluation trace".to_owned()),
+                        errors: Vec::new(),
+                    });
+                }
+                Err(LoadError::Busy | LoadError::Saturated) => {
+                    return Err(ApiError::Unavailable {
+                        detail: "storage is busy",
+                    });
+                }
+                Err(error @ (LoadError::Failed(_) | LoadError::Convert(_))) => {
+                    return Err(internal(error));
+                }
+            };
             let data = TraceData::new(&loaded.spans, span_id);
             match llmobs_eval::resolve(&mapping, Some(&data), None) {
                 Ok(variables) => (
@@ -183,15 +188,7 @@ pub(crate) async fn run(
             }
         }
     };
-    let is_levenshtein = matches!(
-        prepared.evaluator.config,
-        EvaluatorConfig::Check(Check::Levenshtein { .. })
-    );
-    if is_levenshtein
-        && variables.iter().any(|(name, value)| {
-            matches!(name, "output" | "expected") && render(value).len() > MAX_LEVENSHTEIN_BYTES
-        })
-    {
+    if execute::levenshtein_too_large(&prepared.evaluator, &variables) {
         return Err(bad_request(vec![field_error(
             "variables",
             "levenshtein inputs must be at most 64 KiB each",
@@ -207,99 +204,40 @@ pub(crate) async fn run(
 
     let judge_trace_id = judge_trace_id()?;
     let now = state.clock.now_ns();
-    let ingest = state.ingest.context(project, now);
-    let prices = state.ingest.prices();
     let signing_secret = prepared
         .secrets
         .as_ref()
         .map(|values| Secret::new(values.signing_secret.clone()));
     let evaluator_id = prepared.evaluator.id;
     let started = Instant::now();
-    let run = if matches!(prepared.evaluator.config, EvaluatorConfig::Check(_)) {
-        // Checks are CPU work: they run off the async workers (D-I-23).
-        let runner = Arc::clone(&state.eval_runner);
-        let handle = tokio::runtime::Handle::current();
-        let evaluator = prepared.evaluator;
-        tokio::task::spawn_blocking(move || {
-            handle.block_on(async move {
-                runner
-                    .run(RunInput {
-                        evaluator: &evaluator,
-                        variables: &variables,
-                        connection: None,
-                        webhook_secret: None,
-                        target,
-                        origin: EvalOrigin::Test,
-                        judge_trace_id,
-                        ingest: &ingest,
-                        prices: &prices,
-                    })
-                    .await
-            })
-        })
-        .await
-        .map_err(internal)?
-    } else {
-        state
-            .eval_runner
-            .run(RunInput {
-                evaluator: &prepared.evaluator,
-                variables: &variables,
-                connection: connection.as_deref(),
-                webhook_secret: signing_secret.as_ref(),
-                target,
-                origin: EvalOrigin::Test,
-                judge_trace_id,
-                ingest: &ingest,
-                prices: &prices,
-            })
-            .await
-    };
+    let run = execute::run_evaluator(
+        state,
+        RunArgs {
+            project,
+            evaluator: prepared.evaluator,
+            connection,
+            webhook_secret: signing_secret,
+            variables,
+            target,
+            origin: EvalOrigin::Test,
+            judge_trace_id,
+            now,
+        },
+    )
+    .await
+    .map_err(internal)?;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
+    let usage = execute::judge_usage(&run);
+    if let Some(usage) = usage {
+        execute::count_judge_usage(state, project, now, usage);
+    }
     let EvalRun {
         outcome,
         judge_trace,
     } = run;
-    let llm = judge_trace
-        .spans
-        .iter()
-        .find(|span| span.span_kind == SpanKind::Llm);
-    let usage = llm.map(|span| {
-        let input_tokens = span.input_tokens.unwrap_or(0);
-        let output_tokens = span.output_tokens.unwrap_or(0);
-        state.usage.add_judge(
-            project.org_id,
-            project.id,
-            now,
-            u64::try_from(input_tokens).unwrap_or(0),
-            u64::try_from(output_tokens).unwrap_or(0),
-            span.cost_total.unwrap_or(0.0),
-        );
-        EvaluatorTestUsage {
-            input_tokens: span
-                .input_tokens
-                .and_then(|count| u64::try_from(count).ok()),
-            output_tokens: span
-                .output_tokens
-                .and_then(|count| u64::try_from(count).ok()),
-            cost_usd: span.cost_total,
-        }
-    });
     // The judge trace is committed on its own (D-I-16); its spans are not billable (D-I-31).
-    let reservation = state.ingest.reserve_exact(0)?;
-    commit_in_task(
-        state,
-        CommitTarget {
-            org_id: project.org_id,
-            project_id: project.id,
-            request_bytes: 0,
-            now_ns: now,
-        },
-        judge_trace,
-        reservation,
-    )
-    .await?;
+    execute::commit_judge_trace(state, project, now, judge_trace).await?;
 
     let mut result = EvaluatorTestResult {
         ok: false,
@@ -308,7 +246,11 @@ pub(crate) async fn run(
         error: None,
         prompt,
         variables: rendered,
-        usage,
+        usage: usage.map(|usage| EvaluatorTestUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost_usd: usage.cost_usd,
+        }),
         latency_ms,
         trace_truncated: truncated,
         judge_trace_id: Some(judge_trace_id),
@@ -593,14 +535,6 @@ fn valid_name(name: &str) -> bool {
             .next()
             .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && chars.all(|next| next.is_ascii_alphanumeric() || next == '_')
-}
-
-/// A variable as the answer shows it: a string as itself, anything else as compact JSON.
-fn render(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
 }
 
 /// Every variable rendered and cut to [`ANSWER_CHARS`] characters, with a final `…` when cut.

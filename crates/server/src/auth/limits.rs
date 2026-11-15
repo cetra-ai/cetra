@@ -248,6 +248,10 @@ pub(crate) struct Limits {
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,
+    /// 5 alert test sends per minute per user, across channels (D-K-19).
+    pub(crate) alert_tests_by_user: KeyedLimiter<Uuid>,
+    /// 5 alert test sends per minute per channel, whoever sends them (D-K-19).
+    pub(crate) alert_tests_by_channel: KeyedLimiter<Uuid>,
     /// 60 requests per minute and 4 at once per personal access token on `POST /mcp` (D-H-10).
     pub(crate) mcp: McpLimits,
     /// 20 failures lock password login for 15 minutes.
@@ -301,9 +305,23 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            alert_tests_by_user: KeyedLimiter::new(
+                Bucket {
+                    capacity: 5,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             sso_discover: KeyedLimiter::new(
                 Bucket {
                     capacity: 300,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            alert_tests_by_channel: KeyedLimiter::new(
+                Bucket {
+                    capacity: 5,
                     per: Duration::from_secs(60),
                 },
                 MAX_KEYS,
@@ -322,6 +340,8 @@ impl Limits {
         self.connection_tests.prune(now);
         self.sso_dns_checks.prune(now);
         self.sso_discover.prune(now);
+        self.alert_tests_by_user.prune(now);
+        self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
         self.lockout.prune(now);
     }

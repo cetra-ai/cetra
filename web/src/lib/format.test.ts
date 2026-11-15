@@ -4,6 +4,7 @@ import {
   formatCost,
   formatDuration,
   formatRelative,
+  formatRetention,
   formatTimestamp,
   formatTokens,
   instantNs,
@@ -130,5 +131,17 @@ describe("ids and nanosecond differences", () => {
     const later = instantNs("2026-01-01T00:00:00.000001000Z");
     expect(later - earlier).toBeGreaterThanOrEqual(500);
     expect(later - earlier).toBeLessThanOrEqual(1_500);
+  });
+});
+
+describe("formatRetention", () => {
+  it("labels a missing retention as forever, not as a default", () => {
+    expect(formatRetention(null)).toBe("Forever");
+    expect(formatRetention(undefined)).toBe("Forever");
+  });
+
+  it("counts days", () => {
+    expect(formatRetention(1)).toBe("1 day");
+    expect(formatRetention(30)).toBe("30 days");
   });
 });

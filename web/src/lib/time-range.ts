@@ -94,6 +94,22 @@ export function parseTypedRange(text: string): Preset | { durationMs: number } |
   return { durationMs };
 }
 
+/** Whether `state` reaches before the org's data window (`windowDays`, undefined = none). */
+export function beyondWindow(
+  state: RangeState,
+  windowDays: number | undefined,
+  nowMs: number,
+): boolean {
+  if (windowDays === undefined) {
+    return false;
+  }
+  const windowMs = windowDays * DAY_MS;
+  if (state.kind === "preset") {
+    return PRESET_MS[state.preset] > windowMs;
+  }
+  return Date.parse(state.from) < nowMs - windowMs;
+}
+
 export function rangeLabel(state: RangeState, zone: TimeZoneSetting): string {
   if (state.kind === "preset") {
     return PRESET_LABEL[state.preset];

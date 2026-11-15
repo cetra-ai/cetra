@@ -70,9 +70,9 @@ just check
 | P11 | `Show the month's units in admin entitlements` | `EntitlementsReport::month_units`, CLI line (D-P-32) | P10 |
 | P12 | `Lock time ranges beyond the data window` | `beyondWindow`, the picker lock (D-P-48) | P1 |
 | P13 | `Show the data window on the retention settings` | retention lock line, window note, Upgrade on 403 | P1 |
-| P14 | `Limit active online rules by the plan` | **after I's M3**: `eval::rule_limit::limit` body | P11 and I's M3 |
-| P15 | `Show the online-rule limit upgrade state` | **after I's M3**: Upgrade button on the rule form's `403 plan_limit` | P14 |
-| P16 | `Close out M4` | dead-code attributes, specs check, roadmap row | all |
+| P14 | `Limit active online rules by the plan` (**done** by track I's M3) | **after I's M3**: `eval::rule_limit::limit` body | P11 and I's M3 |
+| P15 | `Show the online-rule limit upgrade state` (**done**) | **after I's M3**: Upgrade button on the rule form's `403 plan_limit` | P14 |
+| P16 | `Close out M4` (**done**) | dead-code attributes, specs check, roadmap row | all |
 
 P1–P11 run in order, one at a time (they edit the same server files and the generated contract). P12 and P13 touch only `web/` files that no server phase regenerates, plus spec 11 in two different bullets (P12 the Traces Header bullet, P13 the Settings Project bullet), so they do not conflict (`time-range-picker.tsx`, `lib/time-range.ts`, `settings/general.tsx`); each can run in parallel with P2–P11 in its own worktree, after P1. P14 and P15 start only once I's M3 is merged into `main`. P16 runs last.
 
@@ -302,8 +302,8 @@ Change each call; the org is the one the handler already holds (`access.project.
 | `routes/streams.rs` `check_filter(state, project, params)` | `open_query(state, project, None)` | `check_filter(state, org, project, params)`; the caller passes `access.project.org_id` |
 | `routes/streams.rs` `refresh` | `open_query_on(storage, project, None, None)` | the code change of P4 § Streams, made here (`TraceStream` gains `visibility`; `refresh` takes it) |
 | `alerts/evaluate.rs` `measure_rule` | `open_query_on(&state.storage, project, None, None)` | the code change of P4 § Alerts, made here (`due_rules` returns the org) |
-| `routes/deletions.rs` `matching` (create and preview) | `read::open_query(state, project, None)` | `read::open_query_on(&state.storage, project, Visibility::Exempt, None, None)` |
-| `deletion/resolve.rs` `resolve` | `state.storage.query(project, QueryOptions::new(None, None))` | `state.storage.query(project, query_options(Visibility::Exempt, None))` |
+| `routes/deletions.rs` `matching` (create and preview) | `read::open_query(state, project, None)` | `read::open_query_on(&state.storage, project, Visibility::exempt(), None, None)` |
+| `deletion/resolve.rs` `resolve` | `state.storage.query(project, QueryOptions::new(None, None))` | `state.storage.query(project, query_options(Visibility::exempt(), None))` |
 | `eval/trace_load.rs` `load_trace_capped` | `QueryOptions::new(around, None)` | the code change of P4 § Evaluators, made here (`load_trace` takes a `Visibility`) |
 | tests: `api/convert.rs`, `routes/read.rs`, `eval/trace_load.rs`, `scores.rs`, `mcp/sql.rs`, … | `open_query(&app.state, seeded.project.id, x)` | add `seeded.org_id` (or the project's `org_id`) |
 
@@ -337,7 +337,7 @@ After this phase `QueryOptions` appears in `crates/server/src` only in `entitlem
 
 Scan the sources with `std::fs` from `concat!(env!("CARGO_MANIFEST_DIR"), "/src")`, recursively, every `.rs` file; paths compared relative to `src/` with `/` separators.
 1. `only_query_options_builds_query_options`: no file other than `entitlements/window.rs` contains `QueryOptions::new(` or `QueryOptions {` (also checked with whitespace removed: `QueryOptions{`). Name the offending files in the failure message.
-2. `exempt_reads_are_deletion_reads`: the files containing `Visibility::Exempt` are exactly a subset of `{"entitlements/window.rs", "deletion/resolve.rs", "deletion/mod.rs", "routes/deletions.rs"}`, and both `deletion/resolve.rs` and `routes/deletions.rs` are in the set (so a refactor that drops the exemption fails too).
+2. `exempt_reads_are_deletion_reads`: the files containing `Visibility::exempt()` are exactly a subset of `{"entitlements/window.rs", "deletion/resolve.rs", "deletion/mod.rs", "routes/deletions.rs"}`, and both `deletion/resolve.rs` and `routes/deletions.rs` are in the set (so a refactor that drops the exemption fails too).
 3. `no_unwindowed_visibility`: the files containing `Visibility::Window(` are a subset of `{"entitlements/window.rs", "test_support/mod.rs"}`. Server code gets its window only from `Visibility::window(state, org)`; tests that need no window use `test_support::raw_query`, or `Visibility::window` on an org without a limit. The scan cannot skip `#[cfg(test)]` modules, so no test module elsewhere may write `Visibility::Window(` either.
 4. `direct_storage_reads_are_listed`: remove all whitespace from each file's text, then look for the needle built as `concat!("storage", ".query(")` (so the test's own source in `entitlements/window.rs` does not match it; test 1's and 3's needles are built the same way, `concat!("QueryOptions", "::new(")`, `concat!("Visibility", "::Window(")`, or the scan skips `entitlements/window.rs` for them, since that file is allowed anyway) (this also matches the multi-line `state\n    .storage\n    .query(` form). The files containing it are a subset of `{"routes/read.rs", "deletion/resolve.rs", "eval/trace_load.rs", "test_support/mod.rs"}`. A new direct read (track I's sweeper and backfill, M's M8) adds its file to this list in the same change, and builds its options with `query_options`.
 5. `visible_from_saturates`: `visible_from(NOW, 30) == NOW − 30 × DAY_NS`; `visible_from(NOW, u64::MAX) == NOW.saturating_sub(i64::MAX)` (the span saturates at `i64::MAX`, then the subtraction); `visible_from(i64::MIN, 1) == i64::MIN`.
@@ -760,12 +760,16 @@ Also check that P3/P4 reached I's code: `grep -rn "load_trace(\|open_query(" cra
 
 ## P14 — Active online-rule limit (D-P-23, D-I-32)
 
+**Done by track I's M3.** `rule_limit::limit` reads `max_active_online_rules`, and `routes::online_rules` tests the 403 with `set_limits`. Once I's M3 and M4 merged, the sweeper's read (`eval/trigger.rs`, now on the allow-list) and the preview and filter check in `routes/online_rules.rs` read through the org's window.
+
 - `eval/rule_limit.rs` `limit`: body `crate::entitlements::of(state, org).limits.max_active_online_rules`; parameters lose the `_`; doc: "The org's active-rule limit (D-I-32, D-P-23); `None` means no limit." Remove any dead-code attribute I left on it.
 - Test (`routes::online_rules::tests`): replace the M3 test that had to call the write helper with `Some(1)` (`the_active_rule_limit_refuses_create_and_enable`) by a route test: `set_limits({"max_active_online_rules": 1})`; create an enabled rule → 201; a second enabled → 403 `plan_limit`, detail "Your plan allows 1 active online rule."; created disabled → 201; enabling it → 403. Keep the unit tests of `check`.
 
 `just check`.
 
 ## P15 — Online-rule upgrade state (D-P-15)
+
+**Done.**
 
 In the rule form's `403 plan_limit` branch, render `<UpgradeButton url={useOrgEntitlements(org).upgradeUrl} />` after the existing alert text. Its existing `plan_limit` test also expects the "Upgrade" link to the fixture's `upgrade_url`.
 
@@ -789,7 +793,7 @@ In the rule form's `403 plan_limit` branch, render `<UpgradeButton url={useOrgEn
 ## Coordination
 
 - **Track I.** If I's M3 merges after P3/P4, its executor's `load_trace` call takes the `Visibility` (`Visibility::window(state, project.org_id)`) and its routes' `open_query` calls take the org. I's later milestones (the sweeper and live enqueue in I's M4, backfill in I's M6) read with `crate::entitlements::query_options(Visibility::window(state, org), around)` (D-I-34, with D-P-44's signature) or through `open_query`. A new file with a direct `storage.query(` must be added to the allow-list of `direct_storage_reads_are_listed` (P3) in the same change, and must never write `Visibility::Window(` (`no_unwindowed_visibility`).
-- **Track M.** M's M8 (eval cascade, not merged) adds deletion reads: they live in `deletion/` and may use `Visibility::Exempt`; a new file there must be added to the allow-lists of `exempt_reads_are_deletion_reads` and, for a direct read, `direct_storage_reads_are_listed`.
+- **Track M.** M's M8 (eval cascade, not merged) adds deletion reads: they live in `deletion/` and may use `Visibility::exempt()`; a new file there must be added to the allow-lists of `exempt_reads_are_deletion_reads` and, for a direct read, `direct_storage_reads_are_listed`.
 - **Track Q.** Cells set `entitlements.control_plane = true` (D-P-50). New endpoints: `DELETE /api/internal/v1/orgs/{org_id}` (scope `orgs`) and `GET /api/internal/v1/deletions` (scope `deletions`); `POST /api/internal/v1/orgs` answers 409 for a dropping or dropped id (D-P-49).
 
 ## Report

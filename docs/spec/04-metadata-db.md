@@ -59,7 +59,7 @@ CREATE TABLE projects (
   org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   name TEXT NOT NULL, slug TEXT NOT NULL,
   retention_days INTEGER,             -- NULL = forever
-  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s, media settings, …
+  settings TEXT NOT NULL DEFAULT '{}',-- JSON: trace_completion_timeout_s (integer seconds, 10–3600; absent means 60, D-I-7), media settings, …
   state TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   UNIQUE(org_id, slug)
@@ -342,50 +342,84 @@ CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection
 CREATE TABLE online_rules (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
   name TEXT NOT NULL,
-  target TEXT NOT NULL,               -- 'trace' | 'span'
-  filter TEXT,                        -- filter DSL expression (05)
-  variable_mapping TEXT NOT NULL,     -- JSON {var: path} (06)
+  target TEXT NOT NULL,
+  filter TEXT,
+  variable_mapping TEXT NOT NULL,
   sample_rate REAL NOT NULL DEFAULT 1.0,
-  budget_usd REAL, budget_period TEXT,-- 'day' | 'month'
+  budget_usd REAL,
+  budget_period TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
-  paused_reason TEXT,                 -- 'budget' | 'errors' | NULL
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  paused_reason TEXT,
+  paused_at INTEGER,
+  paused_detail TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
 );
+CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id);
 
-CREATE TABLE eval_jobs (              -- durable work queue
+CREATE TABLE eval_jobs (
   id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL,
-  rule_id TEXT, experiment_id TEXT, evaluator_id TEXT NOT NULL,
-  trace_id BLOB, span_id BLOB, dataset_item_id TEXT,
-  status TEXT NOT NULL,               -- 'queued' | 'running' | 'done' | 'failed'
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  rule_id TEXT REFERENCES online_rules(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  variable_mapping TEXT,
+  trace_id BLOB NOT NULL,
+  span_id BLOB,
+  trace_start_ns INTEGER NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
-  not_before INTEGER NOT NULL,        -- scheduling / backoff
-  lease_until INTEGER,
+  claims INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,
+  error_class TEXT,
   error TEXT,
+  judge_trace_id BLOB,
+  score_id TEXT,
+  evaluator_version INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
   cost_usd REAL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
 );
-CREATE INDEX eval_jobs_ready ON eval_jobs(status, not_before);
+CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before);
+CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at);
+CREATE INDEX eval_jobs_project ON eval_jobs(project_id, created_at);
+CREATE INDEX eval_jobs_finished ON eval_jobs(finished_at) WHERE finished_at IS NOT NULL;
 
 CREATE TABLE rule_spend (
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
-  period_start INTEGER NOT NULL,
+  day INTEGER NOT NULL,
   spent_usd REAL NOT NULL DEFAULT 0,
-  PRIMARY KEY (rule_id, period_start)
+  PRIMARY KEY (rule_id, day)
 );
 
-CREATE TABLE pending_traces (         -- trace-completion detector state (06)
-  project_id TEXT NOT NULL, trace_id BLOB NOT NULL,
-  last_ingest_at INTEGER NOT NULL, root_ended INTEGER NOT NULL DEFAULT 0,
+CREATE TABLE pending_traces (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id BLOB NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  min_start INTEGER NOT NULL,
+  root_ended INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, trace_id)
 );
 ```
 
+`pending_traces` is the persisted copy of the trigger's in-memory map (spec 06 § Online rules › Triggering, D-I-8): the flusher writes the changed entries every 5 s and at shutdown, and startup loads them. `first_seen` and `last_seen` are ingest times; `min_start` is the earliest span `start_time` seen.
+
 `connection_id` is derived from a judge's config; `secret_enc` holds a webhook's sealed `{signing_secret, url, headers}`, and `config` then keeps `{url_host, timeout_ms, header_names}` (D-I-19).
 
-Done/failed `eval_jobs` are pruned after 7 days.
+`eval_jobs` is the durable queue (spec 06 § Online rules › Execution; D-I-11, D-I-12): `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and there is no lease. Every hour, finished jobs older than 7 days are deleted, queued jobs older than 24 h (7 days for backfill) are skipped as `expired`, and jobs of inactive projects or orgs are deleted (D-I-28). `rule_spend` holds one row per rule and UTC day; a month is the sum of its days; rows older than 62 days are deleted.
 
 ## Alerts
 
@@ -511,7 +545,7 @@ CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 `instance_settings` is created by track I (migration `0004`, D156).
 
-Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add).
+Usage counters are accumulated in memory and flushed to `usage_daily` every 10 s (upsert-add). A dropped org's rows stay 40 days after its org deletion is applied, then a daily task deletes them (D-P-46).
 
 `spans` counts billable spans: spans in the reserved `llmobs-eval` environment (judge traces) are stored but not counted (D-I-31). Judge calls add their tokens and cost to `judge_input_tokens`, `judge_output_tokens` and `judge_cost_usd`.
 
