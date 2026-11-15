@@ -170,3 +170,14 @@ def _dataset_body(name: str) -> bytes:
         "updated_at": 0,
     }
     return json.dumps(body).encode()
+
+
+def test_a_2xx_body_that_is_not_json_is_an_api_error(
+    api: tuple[Client, list[float]], http_recorder: Recorder
+) -> None:
+    client, _ = api
+    http_recorder.queue_response(200, {"Content-Type": "text/html"}, b"<html>ok</html>")
+    with pytest.raises(ApiError) as excinfo:
+        client.datasets.get("faq")
+    error = excinfo.value
+    assert (error.status, error.code, error.detail) == (200, None, "response is not JSON")

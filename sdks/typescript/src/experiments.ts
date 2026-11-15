@@ -218,17 +218,45 @@ export async function evaluate(options: EvaluateOptions): Promise<ExperimentResu
     checked.repetitions,
     await defaultNameSource(client, options),
   );
-  const items = await readItems(client, created);
-  return execute({
-    runtime,
-    client,
-    experiment: created.experiment,
-    items,
-    repetitions: checked.repetitions,
-    concurrency: checked.concurrency,
-    task: options.task,
-    scorers: checked.scorers,
-  });
+  const experiment = created.experiment;
+  // Set once the finish is sent (or the upload failure has been finished): no second finish.
+  let finishing = false;
+  try {
+    const items = await readItems(client, created);
+    const executed = await execute({
+      runtime,
+      client,
+      experiment,
+      items,
+      repetitions: checked.repetitions,
+      concurrency: checked.concurrency,
+      task: options.task,
+      scorers: checked.scorers,
+    });
+    finishing = true;
+    if (executed.uploadFailure !== undefined) {
+      await finishWithError(client, experiment, UPLOAD_FAILED);
+      throw executed.uploadFailure;
+    }
+    await client.request("POST", "/experiments/{experiment}/finish", finishPath(experiment), {
+      body: {},
+      retry: true,
+    });
+    return new ExperimentResult({
+      experimentId: experiment.id,
+      experimentName: experiment.name,
+      datasetId: experiment.dataset_id,
+      datasetVersion: experiment.dataset_version,
+      runs: executed.runs.filter((run): run is Run => run !== undefined),
+      scorerErrors: Object.fromEntries(executed.scorerErrors),
+      scorerNames: checked.scorers.map((scorer) => scorer.name),
+    });
+  } catch (error) {
+    if (!finishing) {
+      await finishWithError(client, experiment, errorName(error));
+    }
+    throw error;
+  }
 }
 
 /** A scorer with its name and position, as `evaluate` calls it. */
@@ -339,8 +367,11 @@ async function createExperiment(
     dataset: datasetRef,
     repetitions,
   };
-  const version =
-    options.datasetVersion ?? (typeof dataset === "string" ? undefined : dataset.version);
+  // A dataset at version 0 has no items: no version is sent and the server uses its current one.
+  let version = options.datasetVersion;
+  if (version === undefined && typeof dataset !== "string" && dataset.version !== 0) {
+    version = dataset.version;
+  }
   if (version !== undefined) {
     body.dataset_version = version;
   }
@@ -395,8 +426,19 @@ interface ResultRow {
   error?: string;
 }
 
-/** Runs the (item, repetition) pairs, at most `concurrency` at once, then finishes. */
-async function execute(plan: Plan): Promise<ExperimentResult> {
+/** What `execute` leaves for `evaluate` to finish with. */
+interface Executed {
+  readonly runs: (Run | undefined)[];
+  readonly scorerErrors: Map<string, number>;
+  readonly uploadFailure: ApiError | undefined;
+}
+
+/**
+ * Runs the (item, repetition) pairs, at most `concurrency` at once, and drains
+ * the uploads. A worker that throws stops new runs; the rest in flight are
+ * awaited, then the error is raised.
+ */
+async function execute(plan: Plan): Promise<Executed> {
   const { runtime, client, experiment, items, repetitions } = plan;
   const total = items.length * repetitions;
   const runs = new Array<Run | undefined>(total);
@@ -404,48 +446,54 @@ async function execute(plan: Plan): Promise<ExperimentResult> {
   const scorerErrors = new Map<string, number>();
   const warned = new Set<number>();
   let next = 0;
+  let stopped = false;
   const worker = async (): Promise<void> => {
-    // An upload failure stops new runs (§ evaluate flow, step 6).
-    while (uploader.failure === undefined && next < total) {
+    // An upload failure or an unexpected error stops new runs (§ evaluate flow, step 6).
+    while (!stopped && uploader.failure === undefined && next < total) {
       const index = next;
       next += 1;
       const item = items[Math.floor(index / repetitions)];
       if (item === undefined) {
         return;
       }
-      const outcome = await runOne(plan, item, index % repetitions, scorerErrors, warned);
-      runs[index] = outcome.run;
-      await uploader.add(outcome.row, outcome.bytes);
+      try {
+        const outcome = await runOne(plan, item, index % repetitions, scorerErrors, warned);
+        runs[index] = outcome.run;
+        await uploader.add(outcome.row, outcome.bytes);
+      } catch (error) {
+        stopped = true;
+        throw error;
+      }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(plan.concurrency, total) }, () => worker()));
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(plan.concurrency, total) }, () => worker()),
+  );
   await uploader.drain();
   await runtime.flush();
-  const failure = uploader.failure;
-  if (failure !== undefined) {
-    try {
-      await client.request("POST", "/experiments/{experiment}/finish", finishPath(experiment), {
-        body: { error: UPLOAD_FAILED },
-        retry: true,
-      });
-    } catch (finishError) {
-      debug(`llmobs: finishing a failed experiment failed: ${errorName(finishError)}`);
-    }
-    throw failure;
+  const failed = settled.find((result): result is PromiseRejectedResult => {
+    return result.status === "rejected";
+  });
+  if (failed !== undefined) {
+    throw failed.reason;
   }
-  await client.request("POST", "/experiments/{experiment}/finish", finishPath(experiment), {
-    body: {},
-    retry: true,
-  });
-  return new ExperimentResult({
-    experimentId: experiment.id,
-    experimentName: experiment.name,
-    datasetId: experiment.dataset_id,
-    datasetVersion: experiment.dataset_version,
-    runs: runs.filter((run): run is Run => run !== undefined),
-    scorerErrors: Object.fromEntries(scorerErrors),
-    scorerNames: plan.scorers.map((scorer) => scorer.name),
-  });
+  return { runs, scorerErrors, uploadFailure: uploader.failure };
+}
+
+/** Finish the experiment with `error`, best effort: a failure is logged at debug level only. */
+async function finishWithError(
+  client: Client,
+  experiment: WireExperiment,
+  error: string,
+): Promise<void> {
+  try {
+    await client.request("POST", "/experiments/{experiment}/finish", finishPath(experiment), {
+      body: { error },
+      retry: true,
+    });
+  } catch (finishError) {
+    debug(`llmobs: finishing a failed experiment failed: ${errorName(finishError)}`);
+  }
 }
 
 function finishPath(experiment: WireExperiment): string {
@@ -507,7 +555,11 @@ async function runOne(
       row.output = converted.output;
       bytes = converted.bytes;
     }
-    scores = await scoreRun(plan, item, output, traceId, scorerErrors, warned);
+    // The scorers run in the task's experiment scope: their spans carry the linkage,
+    // and the caller's withContext user and session stay out of the score bodies.
+    scores = await context.with(experimentContext(experiment.id, item.id), () =>
+      scoreRun(plan, item, output, traceId, scorerErrors, warned),
+    );
   }
   const run: Run = {
     datasetItemId: item.id,
@@ -797,9 +849,14 @@ function clockNs(): number {
 
 /** `<ExceptionTypeName>: <message>`, cut to 4,096 UTF-16 code units. */
 function errorText(caught: unknown): string {
-  const text =
-    caught instanceof Error ? `${caught.name}: ${caught.message}` : `Error: ${String(caught)}`;
-  return text.slice(0, ERROR_LIMIT_CHARS);
+  try {
+    const text =
+      caught instanceof Error ? `${caught.name}: ${caught.message}` : `Error: ${String(caught)}`;
+    return text.slice(0, ERROR_LIMIT_CHARS);
+  } catch {
+    // A message that cannot be read: the type name alone.
+    return typeName(caught);
+  }
 }
 
 function typeName(value: unknown): string {
@@ -811,5 +868,9 @@ function typeName(value: unknown): string {
 }
 
 function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
+  try {
+    return error instanceof Error ? error.name : typeof error;
+  } catch {
+    return "Error";
+  }
 }

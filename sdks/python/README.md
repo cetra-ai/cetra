@@ -338,7 +338,9 @@ client.datasets.delete("faq-v1")  # the dataset and its items
   before a request is sent.
 - `add_items` sends batches of 1,000 items, and each batch makes a new
   version. Versions are integers: a new dataset is at version 0 and has no
-  items. `add_items` returns the dataset at its latest version.
+  items. `add_items` returns the dataset at its latest version. If a later
+  batch fails, the earlier batches are already stored (each made a version),
+  and the error is raised.
 - `get(name_or_id, version=...)` reads a version with all its items; without
   `version` it reads the current one.
 - `create(..., input_schema=..., expected_schema=...)` takes JSON Schemas
@@ -384,7 +386,9 @@ result.assert_min("exact", 0.8)  # raises AssertionError when the mean is below 
 ```
 
 - **Dataset.** A name, an id or a `Dataset` object. A `Dataset` runs at the
-  version it holds; `dataset_version=` pins another one.
+  version it holds; `dataset_version=` pins another one. A `Dataset` at
+  version 0 has no items, so no `dataset_version` is sent and the server uses
+  its current version.
 - **Task.** `task(input)` when it takes one positional parameter, or
   `task(input, item)` when it takes two or more (`item` is the `DatasetItem`).
   Async tasks go through `aevaluate`: `await llmobs.aevaluate(...)`.

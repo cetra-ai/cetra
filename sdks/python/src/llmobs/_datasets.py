@@ -59,6 +59,9 @@ class Dataset:
         Each mapping has ``input`` (required), ``expected_output`` and ``metadata``
         (a mapping; ``None`` counts as absent). Any other key is a ``ValueError``,
         raised before any request. Returns the dataset at its latest version.
+
+        Batches are posted in order. If a later batch fails, the earlier batches
+        are already stored (each made a version), and the error is raised.
         """
         rows = [_new_item(index, entry) for index, entry in enumerate(items)]
         if not rows:

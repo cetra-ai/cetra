@@ -181,7 +181,9 @@ await client.datasets.delete("faq-v1"); // the dataset and its items
   before a request is sent.
 - `addItems` sends batches of 1,000 items, and each batch makes a new
   version. Versions are integers: a new dataset is at version 0 and has no
-  items. `addItems` resolves to the dataset at its latest version.
+  items. `addItems` resolves to the dataset at its latest version. If a later
+  batch fails, the earlier batches are already stored (each made a version),
+  and the promise rejects.
 - `get(nameOrId, { version })` reads a version with all its items; without
   `version` it reads the current one.
 - `create(name, { inputSchema, expectedSchema })` takes JSON Schemas (Draft
@@ -222,7 +224,9 @@ result.assertMin("exact", 0.8); // throws when the mean is below 0.8
 ```
 
 - **Dataset.** A name, an id or a `Dataset` object. A `Dataset` runs at the
-  version it holds; `datasetVersion` pins another one.
+  version it holds; `datasetVersion` pins another one. A `Dataset` at
+  version 0 has no items, so no version is sent and the server uses its
+  current version.
 - **Task.** `task(input, item)` receives `item.input` and the `DatasetItem`.
   It may return a promise.
 - **Scorers.** A scorer's name is its function's name: a named function or a

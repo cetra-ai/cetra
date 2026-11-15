@@ -135,7 +135,7 @@ class Client:
                     errors=(),
                 ) from None
             if 200 <= response.status_code < 300:
-                return _decode(response)
+                return _decode(response, method, template)
             retryable = response.status_code == 429 or response.status_code >= 500
             if retrying and retryable and attempt < _MAX_RETRIES:
                 self._sleep(retry_delay(response, attempt))
@@ -149,11 +149,24 @@ def _segment(value: str) -> str:
     return urllib.parse.quote(value, safe="")
 
 
-def _decode(response: requests.Response) -> Any:  # noqa: ANN401  # the decoded JSON body
-    """The JSON body of a 2xx answer, or ``None`` when it has none (204)."""
+def _decode(response: requests.Response, method: str, template: str) -> Any:  # noqa: ANN401  # the decoded JSON body
+    """The JSON body of a 2xx answer, or ``None`` when it has none (204).
+
+    A body that is not JSON is an ``ApiError`` with ``code=None`` (the answer's status).
+    """
     if not response.content:
         return None
-    return response.json()
+    try:
+        return response.json()
+    except ValueError:
+        raise ApiError(
+            method=method,
+            path=template,
+            status=response.status_code,
+            code=None,
+            detail="response is not JSON",
+            errors=(),
+        ) from None
 
 
 def _api_error(method: str, template: str, response: requests.Response) -> ApiError:

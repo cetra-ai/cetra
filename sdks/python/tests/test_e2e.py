@@ -112,7 +112,6 @@ def test_dataset_experiment_round_trip() -> None:
         )
         assert result.error_count == 0
         result.assert_min("exact", 1.0)
-        llmobs.shutdown()
 
         _poll(
             f"{base_url}/api/v1/projects/current/experiments/{result.experiment_id}/results",
@@ -120,4 +119,5 @@ def test_dataset_experiment_round_trip() -> None:
             ready=_experiment_ready,
         )
     finally:
+        llmobs.shutdown()
         client.datasets.delete(dataset.id)

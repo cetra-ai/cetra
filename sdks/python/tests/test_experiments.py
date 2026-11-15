@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qs
@@ -15,8 +17,9 @@ from opentelemetry.trace import StatusCode
 
 import llmobs
 from llmobs import ApiError, Client, ConfigError, Dataset, Score
+from llmobs import _experiments as experiments
 from llmobs._datasets import DatasetItem
-from llmobs._experiments import ExperimentResult, Run
+from llmobs._experiments import ExperimentResult, Run, _error_text
 from llmobs._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
@@ -101,6 +104,9 @@ class FakeApi:
             }
             return _json(201, {"experiment": experiment, "items": page, "next_cursor": cursor})
         if method == "GET" and route == f"{PROJECT}/datasets/{DATASET_ID}/items":
+            status = self._status("pages", 200)
+            if status >= 300:
+                return _problem(status)
             page, cursor = self._page(int(params.get("cursor", ["0"])[0]))
             return _json(200, {"data": page, "next_cursor": cursor})
         if method == "POST" and route == f"{PROJECT}/experiments/{EXPERIMENT_ID}/items":
@@ -142,6 +148,10 @@ async def async_exact(output: object, expected: object) -> bool:
     return output == expected
 
 
+def positional_only(output: object, /) -> bool:
+    return True
+
+
 @pytest.fixture
 def fake(http_recorder: HttpRecorder) -> FakeApi:
     api = FakeApi(make_items(3))
@@ -169,6 +179,7 @@ async def _async_task(value: int) -> int:
         {"scorers": [lambda output: True]},
         {"scorers": [exact, exact]},
         {"task": _async_task},
+        {"scorers": [positional_only]},
     ],
 )
 def test_bad_arguments_raise_before_any_request(
@@ -664,3 +675,172 @@ def test_no_payload_in_logs(
         result = llmobs.evaluate(dataset="faq", task=leaky_task, scorers=[leaky_scorer])
     assert result.error_count == 1
     assert all("secret-canary" not in record.getMessage() for record in caplog.records)
+
+
+def test_version_0_dataset_omits_dataset_version(
+    memory: Memory, http_recorder: HttpRecorder, fake: FakeApi
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    client = Client(api_key=TEST_API_KEY, base_url=http_recorder.url)
+    empty = Dataset(
+        id=DATASET_ID, name="faq", description=None, version=0, items=(), _client=client
+    )
+    llmobs.evaluate(dataset=empty, task=double)
+    body = json.loads(sent(http_recorder, "POST", "/experiments")[0])
+    assert "dataset_version" not in body
+
+
+def test_sync_scorer_returning_an_awaitable_raises_type_error(
+    memory: Memory, http_recorder: HttpRecorder, fake: FakeApi
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(1)
+
+    def returns_coroutine(output: object) -> object:
+        return async_exact(output, output)
+
+    with pytest.raises(TypeError, match="use aevaluate"):
+        llmobs.evaluate(dataset="faq", task=double, scorers=[returns_coroutine])
+    finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
+    assert finishes == [{"error": "TypeError"}]
+
+
+def test_summary_shows_mixed_numeric_and_label_values() -> None:
+    def run(item_id: str, score: Score) -> Run:
+        return Run(
+            dataset_item_id=item_id,
+            repetition=0,
+            input=1,
+            expected_output=1,
+            output=1,
+            error=None,
+            trace_id=None,
+            latency_ns=1,
+            scores={"mixed": score},
+        )
+
+    result = ExperimentResult(
+        experiment_id="e1",
+        experiment_name="exp",
+        dataset_id="d1",
+        dataset_version=2,
+        runs=(
+            run("i1", Score(value=0.5, data_type="numeric")),
+            run("i2", Score(value="good", data_type="categorical")),
+        ),
+        scorer_errors={},
+        scorer_names=("mixed",),
+    )
+    assert result.summary().splitlines()[1:] == [
+        "  mixed: mean 0.500 (1 values)",
+        "  mixed: good 1",
+    ]
+
+
+def test_error_text_falls_back_to_the_type_name() -> None:
+    class UnprintableError(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("no text")
+
+    assert _error_text(UnprintableError()) == "UnprintableError"
+    assert _error_text(KeyError("x")) == "KeyError: 'x'"
+
+
+def test_failing_item_page_finishes_with_an_error_and_raises(
+    memory: Memory, http_recorder: HttpRecorder, fake: FakeApi
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(1001)
+    fake.queue("pages", 422)
+    with pytest.raises(ApiError) as raised:
+        llmobs.evaluate(dataset="faq", task=double)
+    assert raised.value.status == 422
+    finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
+    assert finishes == [{"error": "ApiError"}]
+    assert sent(http_recorder, "POST", "/items") == []
+
+
+def test_unexpected_worker_error_finishes_with_an_error_and_raises(
+    memory: Memory,
+    http_recorder: HttpRecorder,
+    fake: FakeApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(3)
+
+    def broken_add(self: object, row: object, size: int) -> None:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(experiments._Uploader, "add", broken_add)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        llmobs.evaluate(dataset="faq", task=double, concurrency=2)
+    finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
+    assert finishes == [{"error": "RuntimeError"}]
+
+
+def test_aevaluate_unexpected_worker_error_finishes_and_raises(
+    memory: Memory,
+    http_recorder: HttpRecorder,
+    fake: FakeApi,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(3)
+
+    def broken_add(self: object, row: object, size: int) -> None:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(experiments._Uploader, "add", broken_add)
+    with pytest.raises(RuntimeError, match="unexpected"):
+        asyncio.run(llmobs.aevaluate(dataset="faq", task=async_double, concurrency=2))
+    finishes = [json.loads(body) for body in sent(http_recorder, "POST", "/finish")]
+    assert finishes == [{"error": "RuntimeError"}]
+
+
+def test_at_most_concurrency_runs_are_in_flight(
+    memory: Memory, http_recorder: HttpRecorder, fake: FakeApi
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(8)
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0}
+
+    def slow(value: int) -> int:
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.02)
+        with lock:
+            state["now"] -= 1
+        return value
+
+    result = llmobs.evaluate(dataset="faq", task=slow, concurrency=2)
+    assert len(result.runs) == 8
+    assert 1 <= state["peak"] <= 2
+
+
+def test_aevaluate_at_most_concurrency_runs_are_in_flight(
+    memory: Memory, http_recorder: HttpRecorder, fake: FakeApi
+) -> None:
+    _, start = memory
+    start(base_url=http_recorder.url)
+    fake.items = make_items(8)
+    state = {"now": 0, "peak": 0}
+
+    async def slow(value: int) -> int:
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await asyncio.sleep(0.02)
+        state["now"] -= 1
+        return value
+
+    result = asyncio.run(llmobs.aevaluate(dataset="faq", task=slow, concurrency=2))
+    assert len(result.runs) == 8
+    assert 1 <= state["peak"] <= 2

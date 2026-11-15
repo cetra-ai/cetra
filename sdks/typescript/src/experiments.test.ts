@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, Client } from "./client.js";
 import { ConfigError, type LlmobsOptions } from "./config.js";
 import { withContext } from "./context.js";
+import { Dataset } from "./datasets.js";
 import {
   ExperimentResult,
   evaluate,
@@ -594,5 +595,179 @@ describe("ExperimentResult", () => {
     expect(() => result.assertMin("exact", 0.9)).toThrow("exact: mean 0.667 is below 0.9");
     expect(() => result.assertMin("unused", 0)).toThrow("unused: no numeric or boolean values");
     expect(() => result.assertMin("missing", 0)).toThrow("missing: no numeric or boolean values");
+  });
+});
+
+describe("evaluate: scopes, failures and limits", () => {
+  it("runs the scorers in the experiment scope, without the caller's user and session", async () => {
+    const calls: ScoreCall[] = [];
+    const { exporter } = startScoring({}, calls);
+    const { client } = api(1);
+    const spanScorer = function spanScorer(): boolean {
+      withSpan("scorer-span", () => undefined);
+      return true;
+    };
+    await withContext({ userId: "u-1", sessionId: "s-1" }, () =>
+      withSpan("caller", () =>
+        evaluate({
+          dataset: "faq",
+          task: () => 1,
+          scorers: [spanScorer],
+          client,
+          experimentName: "exp",
+        }),
+      ),
+    );
+    await flush();
+    const scorerSpan = (await finished(exporter)).find((span) => span.name === "scorer-span");
+    expect(scorerSpan?.attributes["llmobs.experiment.id"]).toBe("e1");
+    expect(scorerSpan?.attributes["llmobs.dataset_item.id"]).toBe("item-1");
+    expect(scorerSpan?.attributes["llmobs.session.id"]).toBeUndefined();
+    const queued = scoresOf(calls);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).not.toHaveProperty("user_id");
+    expect(queued[0]).not.toHaveProperty("session_id");
+  });
+
+  it("finishes with the error's name and rejects when an item page fails", async () => {
+    startScoring();
+    const { client, requests } = api(3, {
+      pageSize: 2,
+      override: (request, path) =>
+        request.method === "GET" && path === "/datasets/d1/items"
+          ? { status: 422, json: { code: "invalid" } }
+          : undefined,
+    });
+    await expect(
+      evaluate({ dataset: "faq", task: () => 1, client, experimentName: "exp" }),
+    ).rejects.toBeInstanceOf(ApiError);
+    expect(bodiesTo(requests(), "POST", "/finish")).toEqual([{ error: "ApiError" }]);
+    expect(bodiesTo(requests(), "POST", "/experiments/e1/items")).toEqual([]);
+  });
+
+  it("finishes with the error's name and rejects when a worker fails unexpectedly", async () => {
+    startScoring();
+    const { client, requests } = api(3);
+    // A scorer whose return value cannot be read: normalizing it throws outside the scorer's own try.
+    const hostile = function hostile(): Score {
+      return {
+        get value(): never {
+          throw new RangeError("getter");
+        },
+      };
+    };
+    await expect(
+      evaluate({
+        dataset: "faq",
+        task: () => 1,
+        scorers: [hostile],
+        client,
+        experimentName: "exp",
+        concurrency: 2,
+      }),
+    ).rejects.toThrow("getter");
+    expect(bodiesTo(requests(), "POST", "/finish")).toEqual([{ error: "RangeError" }]);
+  });
+
+  it("raises when the finish fails, and sends no second finish", async () => {
+    startScoring();
+    const { client, requests } = api(1, {
+      override: (request, path) =>
+        request.method === "POST" && path === "/experiments/e1/finish"
+          ? { status: 409, json: { code: "conflict" } }
+          : undefined,
+    });
+    await expect(
+      evaluate({ dataset: "faq", task: () => 1, client, experimentName: "exp" }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(bodiesTo(requests(), "POST", "/finish")).toHaveLength(1);
+  });
+
+  it("stops starting new runs after an upload failure", async () => {
+    startScoring();
+    const task = vi.fn(() => 1);
+    const { client, requests } = api(1200, {
+      override: (request, path) =>
+        request.method === "POST" && path === "/experiments/e1/items"
+          ? { status: 422, json: { code: "invalid" } }
+          : undefined,
+    });
+    await expect(
+      evaluate({ dataset: "faq", task, client, experimentName: "exp", concurrency: 1 }),
+    ).rejects.toBeInstanceOf(ApiError);
+    // The first batch is 500 rows: the run that filled it is the last one started.
+    expect(task).toHaveBeenCalledTimes(500);
+    expect(bodiesTo(requests(), "POST", "/finish")).toEqual([{ error: "results upload failed" }]);
+  });
+
+  it("runs at most concurrency tasks at once", async () => {
+    startScoring();
+    const { client } = api(8);
+    let running = 0;
+    let peak = 0;
+    await evaluate({
+      dataset: "faq",
+      task: async () => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        running -= 1;
+        return 1;
+      },
+      client,
+      experimentName: "exp",
+      concurrency: 2,
+    });
+    expect(peak).toBeGreaterThan(0);
+    expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  it("sends at most 32 MiB of outputs in a batch", async () => {
+    startScoring();
+    const { client, requests } = api(300);
+    await evaluate({
+      dataset: "faq",
+      task: () => "x".repeat(200_000),
+      client,
+      experimentName: "exp",
+    });
+    // Each row's output is 200,002 bytes of JSON: 167 rows fit in 32 MiB, 168 do not.
+    const counts = bodiesTo(requests(), "POST", "/experiments/e1/items").map(
+      (body) => (body as { results: unknown[] }).results.length,
+    );
+    expect(counts).toEqual([167, 133]);
+  });
+
+  it("omits the version of a dataset at version 0", async () => {
+    startScoring();
+    const { client, requests } = api(1);
+    const empty = new Dataset(
+      { id: "d1", name: "faq", description: undefined, version: 0, items: [] },
+      client,
+    );
+    await evaluate({ dataset: empty, task: () => 1, client, experimentName: "exp" });
+    const [create] = bodiesTo(requests(), "POST", "/experiments") as Record<string, unknown>[];
+    expect(create).toEqual({ name: "exp", dataset: "d1", repetitions: 1 });
+  });
+
+  it("records a thrown error whose message cannot be read by its type name", async () => {
+    startScoring();
+    const { client, requests } = api(1);
+    const unreadable = new TypeError("never read");
+    Object.defineProperty(unreadable, "message", {
+      get: (): never => {
+        throw new RangeError("getter");
+      },
+    });
+    const result = await evaluate({
+      dataset: "faq",
+      task: () => {
+        throw unreadable;
+      },
+      client,
+      experimentName: "exp",
+    });
+    expect(result.runs[0]?.error).toBe("TypeError");
+    expect(resultRows(requests())[0]).toMatchObject({ error: "TypeError" });
   });
 });

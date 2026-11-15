@@ -77,6 +77,8 @@ export class Dataset {
    * Add items; each batch of up to 1,000 makes one new version (D-J-3).
    * Rejects with `TypeError` before any request when an item is malformed.
    * Resolves to the latest version; an empty iterable resolves to `this`.
+   * Batches are sent in order: if a later batch fails, the earlier batches are
+   * already stored (each made a version), and the promise rejects.
    */
   async addItems(items: Iterable<NewDatasetItem>): Promise<Dataset> {
     const all = [...items];

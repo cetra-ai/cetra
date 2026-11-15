@@ -113,15 +113,17 @@ class ExperimentResult:
         ]
         for name in self._names():
             values = self._values(name)
+            numeric = [value for value in values if value.data_type in _NUMERIC_TYPES]
+            labels = [value for value in values if value.data_type not in _NUMERIC_TYPES]
             if not values:
                 lines.append(f"  {name}: no values")
-            elif all(value.data_type in _NUMERIC_TYPES for value in values):
-                lines.append(f"  {name}: mean {_mean(values):.3f} ({len(values)} values)")
-            else:
-                counts = Counter(str(value.value) for value in values)
+            if numeric:
+                lines.append(f"  {name}: mean {_mean(numeric):.3f} ({len(numeric)} values)")
+            if labels:
+                counts = Counter(str(value.value) for value in labels)
                 ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
-                labels = ", ".join(f"{label} {count}" for label, count in ordered)
-                lines.append(f"  {name}: {labels}")
+                text = ", ".join(f"{label} {count}" for label, count in ordered)
+                lines.append(f"  {name}: {text}")
             errors = self.scorer_errors.get(name, 0)
             if errors > 0:
                 lines.append(f"  {name}: {errors} errors")
@@ -219,6 +221,9 @@ class _Uploader:
                 self._post_locked()
 
     def _post_locked(self) -> None:
+        # The lock is held across the request's retries and their sleeps, so no other
+        # batch is queued meanwhile. Accepted for the MVP: one sender at a time keeps
+        # the upserts ordered.
         rows, self._rows, self._bytes = self._rows, [], 0
         try:
             self._client._request(
@@ -242,6 +247,11 @@ def _scorer_arguments(scorer: Callable[..., Any], index: int) -> tuple[str, ...]
         parameters = tuple(inspect.signature(scorer).parameters.values())
     except (TypeError, ValueError):
         raise ValueError(f"scorers[{index}]: the signature cannot be read") from None
+    for parameter in parameters:
+        if parameter.kind is parameter.POSITIONAL_ONLY:
+            raise ValueError(
+                f"scorers[{index}]: positional-only parameter {parameter.name!r} is not supported"
+            )
     for parameter in parameters:
         if (
             parameter.kind not in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD)
@@ -333,7 +343,10 @@ def _prepare(
     if isinstance(dataset, Dataset):
         dataset_ref = dataset.id
         dataset_name = dataset.name
-        pinned_request = dataset_version if dataset_version is not None else dataset.version
+        pinned_request = dataset_version
+        # A dataset at version 0 has no items yet: the server then uses its current version.
+        if pinned_request is None and dataset.version != 0:
+            pinned_request = dataset.version
     else:
         dataset_ref = dataset
         pinned_request = dataset_version
@@ -355,38 +368,46 @@ def _prepare(
         body["metadata"] = to_jsonable(dict(metadata))
     created = client._request("POST", "/experiments", "/experiments", body=body, retry=False)
     experiment = created["experiment"]
+    try:
+        items = _read_items(client, created)
+        if runtime.config.sample_rate < 1:
+            warn_once("evaluate-sample-rate", _SAMPLE_RATE)
+        return _Plan(
+            runtime=runtime,
+            client=client,
+            experiment_id=experiment["id"],
+            experiment_name=experiment["name"],
+            dataset_id=experiment["dataset_id"],
+            dataset_version=experiment["dataset_version"],
+            items=items,
+            repetitions=repetitions,
+            concurrency=concurrency,
+            task=task,
+            task_is_async=inspect.iscoroutinefunction(task),
+            task_takes_item=_takes_item(task),
+            scorers=built_scorers,
+        )
+    except BaseException as error:
+        _finish_failed(client, experiment["id"], error)
+        raise
+
+
+def _read_items(client: Client, created: Mapping[str, Any]) -> list[DatasetItem]:
+    """The first page of the create answer, then the rest of the pinned version (D-J-10)."""
+    experiment = created["experiment"]
     items = [_to_item(raw) for raw in created["items"]]
     cursor = created.get("next_cursor")
-    dataset_id = experiment["dataset_id"]
-    pinned = experiment["dataset_version"]
-    items_path = f"/datasets/{_segment(dataset_id)}/items"
+    items_path = f"/datasets/{_segment(experiment['dataset_id'])}/items"
     while cursor is not None:
         page = client._request(
             "GET",
             "/datasets/{dataset}/items",
             items_path,
-            params={"version": pinned, "limit": 1000, "cursor": cursor},
+            params={"version": experiment["dataset_version"], "limit": 1000, "cursor": cursor},
         )
         items.extend(_to_item(raw) for raw in page["data"])
         cursor = page.get("next_cursor")
-
-    if runtime.config.sample_rate < 1:
-        warn_once("evaluate-sample-rate", _SAMPLE_RATE)
-    return _Plan(
-        runtime=runtime,
-        client=client,
-        experiment_id=experiment["id"],
-        experiment_name=experiment["name"],
-        dataset_id=dataset_id,
-        dataset_version=pinned,
-        items=items,
-        repetitions=repetitions,
-        concurrency=concurrency,
-        task=task,
-        task_is_async=inspect.iscoroutinefunction(task),
-        task_takes_item=_takes_item(task),
-        scorers=built_scorers,
-    )
+    return items
 
 
 def _task_args(plan: _Plan, item: DatasetItem) -> tuple[object, ...]:
@@ -469,8 +490,23 @@ def _output_field(value: object) -> tuple[object, int] | None:
     return jsonable, len(text.encode("utf-8"))
 
 
+def _discard(awaitable: object) -> None:
+    """Close an awaitable nobody awaits, so Python does not log a "never awaited" warning."""
+    close = getattr(awaitable, "close", None)
+    if callable(close):
+        close()
+
+
 def _error_text(error: Exception) -> str:
-    return f"{type(error).__name__}: {error}"[:_MAX_ERROR]
+    """``<ExceptionTypeName>: <message>``, cut to 4,096 characters.
+
+    The type name alone when the message cannot be converted to text.
+    """
+    try:
+        text = f"{type(error).__name__}: {error}"
+    except Exception:  # noqa: BLE001  # a message that cannot be converted must not fail the run
+        return type(error).__name__
+    return text[:_MAX_ERROR]
 
 
 def _sampled_trace_id(handle: Span | None) -> str | None:
@@ -560,7 +596,18 @@ def _run_sync(plan: _Plan, item: DatasetItem, repetition: int) -> tuple[Run, dic
         if failure is None:
             for scorer in plan.scorers:
                 try:
-                    score = _coerce(scorer.call(**_scorer_kwargs(scorer, item, output, trace_id)))
+                    raw = scorer.call(**_scorer_kwargs(scorer, item, output, trace_id))
+                except Exception as error:  # noqa: BLE001  # a scorer error is counted, not raised
+                    plan.scorer_failed(scorer, type(error).__name__)
+                    continue
+                if inspect.isawaitable(raw):
+                    _discard(raw)
+                    raise TypeError(
+                        f"scorers[{scorer.index}] returned an awaitable: "
+                        "use aevaluate for async scorers"
+                    )
+                try:
+                    score = _coerce(raw)
                 except Exception as error:  # noqa: BLE001  # a scorer error is counted, not raised
                     plan.scorer_failed(scorer, type(error).__name__)
                     continue
@@ -663,6 +710,80 @@ def _conclude(plan: _Plan, uploader: _Uploader, slots: Sequence[Run | None]) -> 
     )
 
 
+def _finish_failed(client: Client, experiment_id: str, error: BaseException) -> None:
+    """Finish the experiment with the error's type name, best effort; the caller re-raises."""
+    try:
+        client._request(
+            "POST",
+            "/experiments/{experiment}/finish",
+            f"/experiments/{_segment(experiment_id)}/finish",
+            body={"error": type(error).__name__},
+            retry=True,
+        )
+    except Exception as finish_error:  # noqa: BLE001  # best effort: the original error is re-raised
+        logger.debug(
+            "llmobs: finish after a failed experiment failed (%s)", type(finish_error).__name__
+        )
+
+
+def _run_pool(plan: _Plan, uploader: _Uploader, slots: list[Run | None]) -> None:
+    """Every run on ``plan.concurrency`` threads. A failure stops new runs and waits."""
+    stop = threading.Event()
+
+    def work(index: int, item: DatasetItem, repetition: int) -> None:
+        if stop.is_set() or uploader.failed:
+            return
+        try:
+            run, row, size = _run_sync(plan, item, repetition)
+            slots[index] = run
+            uploader.add(row, size)
+        except BaseException:
+            stop.set()
+            raise
+
+    pool = ThreadPoolExecutor(max_workers=plan.concurrency, thread_name_prefix="llmobs-evaluate")
+    try:
+        futures = []
+        index = 0
+        for item in plan.items:
+            for repetition in range(plan.repetitions):
+                futures.append(pool.submit(work, index, item, repetition))
+                index += 1
+        for future in futures:
+            future.result()
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+
+
+async def _run_tasks(plan: _Plan, uploader: _Uploader, slots: list[Run | None]) -> None:
+    """Every run as a task, at most ``plan.concurrency`` at once. A failure cancels the rest."""
+    semaphore = asyncio.Semaphore(plan.concurrency)
+
+    async def work(index: int, item: DatasetItem, repetition: int) -> None:
+        async with semaphore:
+            if uploader.failed:
+                return
+            run, row, size = await _run_async(plan, item, repetition)
+            slots[index] = run
+            await asyncio.to_thread(uploader.add, row, size)
+
+    tasks: list[asyncio.Task[None]] = []
+    index = 0
+    for item in plan.items:
+        for repetition in range(plan.repetitions):
+            tasks.append(asyncio.ensure_future(work(index, item, repetition)))
+            index += 1
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
 def evaluate(
     *,
     dataset: str | Dataset,
@@ -681,7 +802,8 @@ def evaluate(
     Runs on this machine (D18): one trace per run, scores from ``scorers``, results
     stored on the server. Task and scorer exceptions are recorded per run. Raises
     ``ConfigError`` before ``init()``, ``ValueError``/``TypeError`` for bad
-    arguments, ``ApiError`` when the API refuses a call.
+    arguments, ``ApiError`` when the API refuses a call. Any other failure after the
+    experiment is created finishes it with the error's type name and re-raises it.
     """
     plan = _prepare(
         dataset=dataset,
@@ -698,27 +820,16 @@ def evaluate(
     )
     uploader = _Uploader(plan)
     slots: list[Run | None] = [None] * (len(plan.items) * plan.repetitions)
-
-    def work(index: int, item: DatasetItem, repetition: int) -> None:
-        if uploader.failed:
-            return
-        run, row, size = _run_sync(plan, item, repetition)
-        slots[index] = run
-        uploader.add(row, size)
-
-    with ThreadPoolExecutor(
-        max_workers=plan.concurrency, thread_name_prefix="llmobs-evaluate"
-    ) as pool:
-        futures = []
-        index = 0
-        for item in plan.items:
-            for repetition in range(plan.repetitions):
-                futures.append(pool.submit(work, index, item, repetition))
-                index += 1
-        for future in futures:
-            future.result()
-    uploader.drain()
-    return _conclude(plan, uploader, slots)
+    concluding = False
+    try:
+        _run_pool(plan, uploader, slots)
+        uploader.drain()
+        concluding = True
+        return _conclude(plan, uploader, slots)
+    except BaseException as error:
+        if not concluding:
+            _finish_failed(plan.client, plan.experiment_id, error)
+        raise
 
 
 async def aevaluate(
@@ -751,22 +862,13 @@ async def aevaluate(
     )
     uploader = _Uploader(plan)
     slots: list[Run | None] = [None] * (len(plan.items) * plan.repetitions)
-    semaphore = asyncio.Semaphore(plan.concurrency)
-
-    async def work(index: int, item: DatasetItem, repetition: int) -> None:
-        async with semaphore:
-            if uploader.failed:
-                return
-            run, row, size = await _run_async(plan, item, repetition)
-            slots[index] = run
-            await asyncio.to_thread(uploader.add, row, size)
-
-    coroutines = []
-    index = 0
-    for item in plan.items:
-        for repetition in range(plan.repetitions):
-            coroutines.append(work(index, item, repetition))
-            index += 1
-    await asyncio.gather(*coroutines)
-    await asyncio.to_thread(uploader.drain)
-    return await asyncio.to_thread(_conclude, plan, uploader, slots)
+    concluding = False
+    try:
+        await _run_tasks(plan, uploader, slots)
+        await asyncio.to_thread(uploader.drain)
+        concluding = True
+        return await asyncio.to_thread(_conclude, plan, uploader, slots)
+    except BaseException as error:
+        if not concluding:
+            await asyncio.to_thread(_finish_failed, plan.client, plan.experiment_id, error)
+        raise
