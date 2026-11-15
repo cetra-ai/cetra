@@ -158,7 +158,7 @@ bytes[stored_len]
 
 **Hot tail.** Seven sections in this order, each prefixed by a `u32` length. A section may be empty (length 0); every section exists from phase 1 on and is empty until its phase fills it.
 
-1. Arrow schema: `arrow_ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema).finished_data()`, read back with `arrow_ipc::convert::try_schema_from_flatbuffer_bytes`. These are the arrow-ipc 59.3 names; if they differ, use the equivalent pair and record it in the commit message.
+1. Arrow schema: `arrow::ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema).finished_data()`, read back with `arrow::ipc::convert::try_schema_from_flatbuffer_bytes`. These are the arrow-ipc 59.3 names; if they differ, use the equivalent pair and record it in the commit message.
 2. Column directory (S2).
 3. Sort-key block table: a copy of the block table of the first sort-key column (S3, 56 B entries).
 4. Sort-key filter: the binary fuse filter over the first sort-key column (S5).
@@ -200,10 +200,10 @@ u8 layer · u8 flags · u16 reserved
 u32 pages_offset (byte offset of this column's page list within hot-tail section 7) · u32 n_pages · u32 n_chunks
 u64 dict_offset (kind 8 segment; 0 = none) · u32 dict_len
 u64 payload_offset (kind 4 segment; 0 unless layer = 1) · u32 payload_len
-u64 null_count · u32 reserved
+u64 null_count · u64 reserved2 (zero)
 ```
 
-Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 4 = 60. Add the final `u32 reserved2`, set to 0, to reach **64**.
+Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 
 | `layer` | Meaning |
 |---|---|

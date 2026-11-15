@@ -195,7 +195,7 @@ pub const HOT_SECTIONS: usize = 7;
    - `pub struct Cursor<'a> { buf: &'a [u8], pos: usize, base: u64 }`. `base` is the absolute file offset of `buf[0]`, used in error offsets. Methods:
      - `new(buf, base)`;
      - `u8()`, `u16()`, `u32()`, `u64()`, little-endian;
-     - `bytes(n) -> Result<&'a [u8]>`;
+     - `bytes(n, what) -> Result<&'a [u8]>`;
      - `remaining() -> usize`, `position() -> u64` (= `base + pos`).
 
      Each returns `Err(StrataError::Corrupt { what, offset: self.position() })` when not enough bytes remain. `what` is a `&'static str` passed by the caller: `fn u32(&mut self, what: &'static str) -> Result<u32>`.
@@ -244,8 +244,9 @@ pub const HOT_SECTIONS: usize = 7;
        column_id u32 · parent u32 · layer u8 · flags u8 · reserved u16 ·
        pages_offset u32 · n_pages u32 · n_chunks u32 ·
        dict_offset u64 · dict_len u32 · payload_offset u64 · payload_len u32 ·
-       null_count u64 · reserved2 u32
+       null_count u64 · reserved2 u64
        ```
+     - Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = 64.
      - `encode(&self, out)` and `decode(cursor) -> Result<Self>`. Decode requires `reserved == 0` and `reserved2 == 0`.
      - `#[repr(u8)] pub enum Layer { Narrow = 0, Payload = 1, MapParent = 2, MapChild = 3, Residual = 4 }`, with `fn from_u8(u8) -> Option<Layer>`. `DirectoryRecord::decode` returns `Corrupt` for an unknown layer.
    - **`PageRef`:** `{ first_row: u32, offset: u64, len: u32 }`, 16 bytes, with `encode` and `decode`.
@@ -264,10 +265,10 @@ pub const HOT_SECTIONS: usize = 7;
      ```
 
      - `encode(&self, out) -> Result<()>` writes the 7 sections, each as a `u32` length followed by the bytes. The length is `u32::try_from(len)`, and an overflow is `Unsupported`.
-       - Section 1 is `IpcSchemaEncoder::new().schema_to_fb(&schema)`; take its `finished_data()`.
+       - Section 1 is `arrow::ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema)`; take its `finished_data()`.
        - Section 2 is the directory records back to back.
      - `decode(bytes, offset) -> Result<HotTail>`:
-       - Section 1 goes through `arrow_ipc::convert::try_schema_from_flatbuffer_bytes`; an error becomes `Corrupt { what: "hot schema" }`.
+       - Section 1 goes through `arrow::ipc::convert::try_schema_from_flatbuffer_bytes`; an error becomes `Corrupt { what: "hot schema" }`.
        - Section 2's length must be a multiple of 64.
        - Section 3's length must be a multiple of 56.
        - Section 7's length must be a multiple of 16.
@@ -288,7 +289,15 @@ pub const HOT_SECTIONS: usize = 7;
    - Accessors: `schema()`, `row_count()`, `size()`, `hot_len()`, `directory()`.
    - `pub async fn read_segment(&self, r: &SegmentRef, kind: Kind) -> Result<Vec<u8>>`: one `get_range(offset..offset + len)`, then `decode_segment`.
 
-6. **`lib.rs`.** The crate docs, which say:
+6. **`lib.rs`.** Dead code: in M1.1 the encoders (`format::Out`, `segment::encode_segment`, the `encode` methods of `hot.rs`, `write_file_header`, `HotTail::pages_of`) are used only by tests; the writer that calls them arrives in M1.2. Put exactly this attribute on each of the module declarations `mod format;`, `mod segment;` and `mod hot;`:
+
+   ```rust
+   #[allow(dead_code)] // the writer arrives in M1.2, which removes this attribute
+   ```
+
+   This is the only `allow` permitted outside test modules. M1.2 deletes the three attributes, and its clippy run proves nothing is left unused.
+
+   The crate docs, which say:
    - what Strata is;
    - that it is a research prototype outside the llmobs workspace;
    - a pointer to `../prototype-plan.md`;
@@ -480,7 +489,7 @@ pub struct BlockEntry {
 
 7. **`reader.rs`.** `pub async fn read_column(file: &StrataFile, column: usize) -> Result<ArrayRef>` fetches every chunk segment of the column concurrently, decodes them, and concatenates them. A file with zero rows returns an empty array of the field's type.
 
-8. **`lib.rs`.** Add the modules and re-export `StrataWriter`, `FileSummary`, `ColumnSummary` and `read_column`. Delete the M1.1 test-only `write_empty_file`, and switch the M1.1 tests to `StrataWriter` with zero rows. Update `ColumnSummary.encoding_counts` with `if let Some(c) = counts.get_mut(enc as usize) { *c += 1 }`.
+8. **`lib.rs`.** Remove the three `#[allow(dead_code)]` attributes added in M1.1. Add the modules and re-export `StrataWriter`, `FileSummary`, `ColumnSummary` and `read_column`. Delete the M1.1 test-only `write_empty_file`, and switch the M1.1 tests to `StrataWriter` with zero rows. Update `ColumnSummary.encoding_counts` with `if let Some(c) = counts.get_mut(enc as usize) { *c += 1 }`.
 
 9. **`testgen.rs`** (`#[cfg(test)]` module). `pub(crate) fn batch(n: usize) -> RecordBatch` with schema:
 
