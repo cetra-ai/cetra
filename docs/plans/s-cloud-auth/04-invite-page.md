@@ -95,7 +95,7 @@ Add imports `afterEach` (from `vitest`) and `setExternalNavigator` (from `@/lib/
 
 ```ts
 const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
-const START = `/api/auth/authorize/oidc%3Acloud?redirect=${encodeURIComponent(URL_PATH)}`;
+const START = authorizeHref("oidc:cloud", { redirect: URL_PATH });
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
   withConfig({ password_enabled: false, providers: [CLOUD], ...overrides });
@@ -118,7 +118,7 @@ function recordReplace() {
 }
 ```
 
-(`encodeURIComponent` and `URLSearchParams` both write `/` as `%2F`; `INVITE_TOKEN` is URL-safe. If the assertion differs only in encoding, build `START` with `authorizeHref("oidc:cloud", { redirect: URL_PATH })` from `@/lib/redirect` instead.)
+(import `authorizeHref` from `@/lib/redirect`; it builds the same URL the page does.)
 
 1. `starts the only provider for a visitor without an account`: `signedOut(); onlyCloud(); const replaced = recordReplace();` render `URL_PATH`; `await waitFor(() => expect(replaced).toEqual([START]))`; the text `Redirecting to llmobs Cloud…` and the heading `Join Acme` are shown.
 2. `starts the only provider for a visitor with an account`: as 1 with the preview overridden to `account_exists: true` (as `asks an existing user to sign in` does).

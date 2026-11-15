@@ -243,7 +243,7 @@ Replace `<dd>{data.password_enabled ? "Enabled" : "Disabled"}</dd>` with `<dd>{d
 
 ### 9. Tests in `login.test.tsx`
 
-Add at the top, after the existing helpers:
+The file already imports `setExternalNavigator` from `@/lib/external-navigation`; keep that import. Add at the top, after the existing helpers:
 
 ```ts
 const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };

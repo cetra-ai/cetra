@@ -112,7 +112,7 @@ with
     validate(&mut config)?;
 ```
 
-Keep the `continue` in `EnvSource::data` for `auth.oidc` (figment cannot merge into an array element); update its comment to:
+Keep the `continue` in `EnvSource::data` for `auth.oidc` (figment cannot merge into an array element); replace both lines of its comment (`` // `[[auth.oidc]]` is a TOML array. The split form cannot name an `` and `// element, so those variables are ignored rather than merged.`) with:
 
 ```rust
                 // `[[auth.oidc]]` is a TOML array, which the split form cannot index.

@@ -31,6 +31,8 @@ Do not edit anything under `crates/server/src/auth/` (README § Files S touches)
 
 ## Steps
 
+**Anchors.** `if state.config.auth.disable_password {` appears in five handlers of `routes/auth.rs`, and the org SSO block in both `login` and `reset_password`. Every Edit in steps 1 and 2 must include enough surrounding lines of the named function (its signature or the lines just before and after) to be unique; when an Edit reports a non-unique match, widen it, never use `replace_all`.
+
 ### 1. `login` (`routes/auth.rs`)
 
 1. Delete the first block of `login`:
