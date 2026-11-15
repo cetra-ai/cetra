@@ -323,72 +323,115 @@ fn resendable_trace() -> impl Strategy<Value = u8> {
     )
 }
 
+/// What `apply_storage` reports around each storage call that changes what a read sees.
+pub(super) enum StepEvent<'a> {
+    /// The call is about to start.
+    Begin,
+    /// The call returned; the model is already updated for it.
+    Done(&'a Model),
+}
+
 /// Runs one op against storage and the model. `clock` advances first (by one microsecond,
-/// and by the op's own hours for `Compact`).
+/// and by the op's own hours for `Compact`). Ops that need `&mut Harness` (`Restart`, `Crash`,
+/// `LossyCrash`, `FaultyRead`, `Settle`) run here; the rest run in `apply_storage`.
 pub(super) fn apply(op: &Op, harness: &mut Harness, model: &mut Model, clock: &mut i64) {
-    *clock += MICRO_NS;
     model.ops_applied += 1;
+    match *op {
+        Op::Restart => {
+            *clock += MICRO_NS;
+            harness.restart();
+            flushed(harness, model);
+        }
+        Op::Crash => {
+            *clock += MICRO_NS;
+            harness.crash();
+            crashed(harness, model);
+        }
+        Op::LossyCrash { seed } => {
+            *clock += MICRO_NS;
+            lossy_crash(harness, model, seed);
+        }
+        Op::FaultyRead { project, pick } => {
+            *clock += MICRO_NS;
+            require_s3(harness, op);
+            let index = model.ops_applied - 1;
+            faulty_read(harness, model, project, pick, index);
+        }
+        Op::Settle => {
+            *clock += MICRO_NS;
+            settle(harness, model, clock);
+        }
+        _ => apply_storage(op, harness, model, clock, &mut |_| {}),
+    }
+}
+
+/// Runs one op that needs only a shared harness, against storage and the model. It ticks the
+/// clock first. Every call that changes what a read sees reports `Begin` before it and `Done`
+/// after it, with the model already updated (the `Done` model is the state after that step).
+/// A call that is refused changes nothing and reports nothing. Ops that call nothing visible
+/// (`Compact`, `Gc`, `ApplyDeletions`, `Verify`, `EvictCache`) report nothing.
+///
+/// Never called with `Restart`, `Crash`, `LossyCrash`, `FaultyRead` or `Settle`: those need
+/// `&mut Harness`, so they run in `apply`.
+pub(super) fn apply_storage(
+    op: &Op,
+    h: &Harness,
+    model: &mut Model,
+    clock: &mut i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
+    *clock += MICRO_NS;
     match *op {
         Op::Append {
             project,
             trace,
             count,
             split,
-        } => append(harness, model, project, trace, count, split, *clock),
+        } => append(h, model, project, (trace, count, split), *clock, step),
         Op::Resend {
             project,
             trace,
             pick,
-        } => resend(harness, model, project, trace, pick, *clock),
-        Op::Restart => {
-            harness.restart();
-            flushed(harness, model);
+        } => resend(h, model, project, trace, pick, *clock, step),
+        Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::FaultyRead { .. } | Op::Settle => {
+            unreachable!("{op:?} needs &mut Harness: use apply")
         }
-        Op::Crash => {
-            harness.crash();
-            crashed(harness, model);
-        }
-        Op::LossyCrash { seed } => lossy_crash(harness, model, seed),
         Op::Verify { pick } => {
-            require_s3(harness, op);
-            verify(harness, pick);
+            require_s3(h, op);
+            verify(h, pick);
         }
         Op::EvictCache => {
-            require_s3(harness, op);
-            evict_cache(harness);
-        }
-        Op::FaultyRead { project, pick } => {
-            require_s3(harness, op);
-            let index = model.ops_applied - 1;
-            faulty_read(harness, model, project, pick, index);
+            require_s3(h, op);
+            evict_cache(h);
         }
         Op::Compact { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            compact(harness, *clock);
+            compact(h, *clock);
         }
-        Op::Gc => collect_obsolete(harness),
-        Op::Settle => settle(harness, model, clock),
+        Op::Gc => collect_obsolete(h),
         Op::Score {
             project,
             target,
             name,
-        } => put_score(harness, model, project, target, name, *clock),
-        Op::DeleteScore { project, pick } => delete_score(harness, model, project, pick, *clock),
+        } => put_score(h, model, project, target, name, *clock, step),
+        Op::DeleteScore { project, pick } => delete_score(h, model, project, pick, *clock, step),
         Op::StaleScore {
             project,
             pick,
             back,
-        } => stale_score(harness, model, project, pick, back, *clock),
+        } => stale_score(h, model, project, pick, back, *clock, step),
         Op::DeleteTraces { project, ref picks } => {
-            delete_traces(harness, model, project, picks, *clock);
+            delete_traces(h, model, project, picks, *clock, step);
         }
-        Op::DeleteUser { project, user } => delete_user(harness, model, project, user, *clock),
+        Op::DeleteUser { project, user } => {
+            delete_user(h, model, project, user, *clock, step);
+        }
         Op::ApplyDeletions { hours } => {
             *clock += i64::from(hours) * HOUR_NS;
-            apply_deletions(harness, *clock);
+            apply_deletions(h, *clock);
         }
-        Op::Retention { project, keep } => retention(harness, model, project, keep),
-        Op::DropB => drop_b(harness, model),
+        Op::Retention { project, keep } => retention(h, model, project, keep, step),
+        Op::DropB => drop_b(h, model, step),
     }
 }
 
@@ -416,14 +459,14 @@ fn send_refused(harness: &Harness, project: P, batch: &[Span]) {
     );
 }
 
+/// Appends `count` spans of `trace` as `Op::Append` describes (`(trace, count, split)`).
 fn append(
     harness: &Harness,
     model: &mut Model,
     project: P,
-    trace: u8,
-    count: u8,
-    split: bool,
+    (trace, count, split): (u8, u8, bool),
     clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     if model.project(project).dropped {
         // Storage refuses every batch of a dropped project, so one is always sent, even when the
@@ -450,15 +493,23 @@ fn append(
     if split && spans.len() >= 2 {
         let (head, tail) = spans.split_at(spans.len() / 2);
         let middle = first + u8::try_from(head.len()).expect("a batch of at most 6 spans");
+        step(StepEvent::Begin);
         send(harness, project, head);
         record_spans(harness, model, project, trace, first..middle, clock);
+        model.project_mut(project).next_span.insert(trace, middle);
+        step(StepEvent::Done(&*model));
+        step(StepEvent::Begin);
         send(harness, project, tail);
         record_spans(harness, model, project, trace, middle..end, clock);
+        model.project_mut(project).next_span.insert(trace, end);
+        step(StepEvent::Done(&*model));
     } else {
+        step(StepEvent::Begin);
         send(harness, project, &spans);
         record_spans(harness, model, project, trace, first..end, clock);
+        model.project_mut(project).next_span.insert(trace, end);
+        step(StepEvent::Done(&*model));
     }
-    model.project_mut(project).next_span.insert(trace, end);
 }
 
 /// Stores the spans `span_nos` of `trace` in the model after a successful append of them, which
@@ -487,7 +538,15 @@ fn record_spans(
         .appended(pushed, segments, always_synced(harness));
 }
 
-fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8, clock: i64) {
+fn resend(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    trace: u8,
+    pick: u8,
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     debug_assert!(trace % 4 != 2, "class-2 traces are never re-sent");
     let next = model
         .project(project)
@@ -504,8 +563,10 @@ fn resend(harness: &Harness, model: &mut Model, project: P, trace: u8, pick: u8,
         send_refused(harness, project, &batch);
         return;
     }
+    step(StepEvent::Begin);
     send(harness, project, &batch);
     record_spans(harness, model, project, trace, span_no..span_no + 1, clock);
+    step(StepEvent::Done(&*model));
 }
 
 /// The key a score target number names (see `Op::Score`).
@@ -536,7 +597,15 @@ pub(super) fn score_key_space(projects: [P; 2]) -> Vec<ScoreKey> {
 }
 
 /// Writes the next version of `(project, target, name)`: version 1 when the key has none.
-fn put_score(harness: &Harness, model: &mut Model, project: P, target: u8, name: u8, clock: i64) {
+fn put_score(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    target: u8,
+    name: u8,
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     let key = ScoreKey {
         project,
         target: target_of(target),
@@ -554,6 +623,7 @@ fn put_score(harness: &Harness, model: &mut Model, project: P, target: u8, name:
         last.map_or(1, |last| last + 1),
         false,
         clock,
+        step,
     );
 }
 
@@ -608,7 +678,14 @@ fn last_version(model: &Model, key: ScoreKey) -> u32 {
 
 /// Writes `last + 1` of a score the model has written, as a deletion. `pick % len` in key order.
 /// On a dropped project it writes version 1 of one key of the project's score space, refused.
-fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, clock: i64) {
+fn delete_score(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    pick: u8,
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     if model.project(project).dropped {
         let keys: Vec<ScoreKey> = score_key_space(model.projects())
             .into_iter()
@@ -621,6 +698,7 @@ fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, cloc
             1,
             true,
             clock,
+            step,
         );
         return;
     }
@@ -628,12 +706,20 @@ fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, cloc
         return;
     };
     let last = last_version(model, key);
-    send_score(harness, model, key, last + 1, true, clock);
+    send_score(harness, model, key, last + 1, true, clock, step);
 }
 
 /// Writes an older (or equal, see `Op::StaleScore`) version of a score the model has written.
 /// The version repeats the `deleted` flag of the stored version it names, if one exists.
-fn stale_score(harness: &Harness, model: &mut Model, project: P, pick: u8, back: u8, clock: i64) {
+fn stale_score(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    pick: u8,
+    back: u8,
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     let candidates = stale_candidates(model, project);
     if candidates.is_empty() {
         return;
@@ -650,7 +736,7 @@ fn stale_score(harness: &Harness, model: &mut Model, project: P, pick: u8, back:
         .filter(|stored| stored.version == version)
         .max_by_key(|stored| stored.ingest)
         .is_some_and(|stored| stored.deleted);
-    send_score(harness, model, key, version, deleted, clock);
+    send_score(harness, model, key, version, deleted, clock, step);
 }
 
 /// Sends one score version (a one-row batch). A dropped project refuses it, and the model
@@ -662,19 +748,23 @@ fn send_score(
     version: u32,
     deleted: bool,
     clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
 ) {
     let project = key.project;
     let batch = scores_to_record_batch(&[score(&key, version, deleted, clock)])
         .expect("a score batch of one score");
-    let result = harness.block_on(harness.storage().append_scores(project.id(), batch));
     if model.project(project).dropped {
+        let result = harness.block_on(harness.storage().append_scores(project.id(), batch));
         assert!(
             matches!(result, Err(AppendError::ProjectDropped)),
             "append_scores on a dropped project is refused as ProjectDropped"
         );
         return;
     }
-    result.expect("append_scores of one score");
+    step(StepEvent::Begin);
+    harness
+        .block_on(harness.storage().append_scores(project.id(), batch))
+        .expect("append_scores of one score");
     let stored = model
         .project_mut(project)
         .write_score(key, version, deleted, clock);
@@ -690,6 +780,7 @@ fn send_score(
     model
         .scores_wal
         .appended(pushed, segments, always_synced(harness));
+    step(StepEvent::Done(&*model));
 }
 
 /// Whether an op that touches the store may fail (R4.5): only when the chaos store injected a
@@ -897,7 +988,14 @@ fn register(harness: &Harness, deletion: Deletion) {
 }
 
 /// `register_deletion` of the picked traces and their evaluation traces, cut off at `clock`.
-fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8], clock: i64) {
+fn delete_traces(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    picks: &[u8],
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     if model.project(project).dropped {
         return;
     }
@@ -909,6 +1007,7 @@ fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8],
     };
     let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
     let id = deletion_id(clock);
+    step(StepEvent::Begin);
     register(
         harness,
         Deletion {
@@ -928,12 +1027,20 @@ fn delete_traces(harness: &Harness, model: &mut Model, project: P, picks: &[u8],
         sessions: BTreeSet::new(),
         applied_seen: false,
     });
+    step(StepEvent::Done(&*model));
 }
 
 /// A user deletion, resolved as the server does (D-M-3): `user_deletion_scope` first, then
 /// `eval_trace_ids` of its traces. Both results are checked against the model before the
 /// deletion is registered with them.
-fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock: i64) {
+fn delete_user(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    user: u8,
+    clock: i64,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     if model.project(project).dropped {
         return;
     }
@@ -960,6 +1067,7 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
     };
     let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
     let id = deletion_id(clock);
+    step(StepEvent::Begin);
     register(
         harness,
         Deletion {
@@ -981,30 +1089,41 @@ fn delete_user(harness: &Harness, model: &mut Model, project: P, user: u8, clock
         sessions: expected_sessions,
         applied_seen: false,
     });
+    step(StepEvent::Done(&*model));
 }
 
 /// `apply_retention` of one of `RETENTION_DAYS`. The model keeps the watermark rule of R1.2.
-fn retention(harness: &Harness, model: &mut Model, project: P, keep: u8) {
+fn retention(
+    harness: &Harness,
+    model: &mut Model,
+    project: P,
+    keep: u8,
+    step: &mut dyn FnMut(StepEvent<'_>),
+) {
     if model.project(project).dropped {
         return;
     }
     let keep_from = day(RETENTION_DAYS[usize::from(keep % 3)]);
+    step(StepEvent::Begin);
     harness
         .block_on(harness.storage().apply_retention(project.id(), keep_from))
         .expect("apply_retention on a live project");
     model.project_mut(project).apply_retention(keep_from);
+    step(StepEvent::Done(&*model));
 }
 
 /// Drops project B. Later drops are no-ops without a call.
-fn drop_b(harness: &Harness, model: &mut Model) {
+fn drop_b(harness: &Harness, model: &mut Model, step: &mut dyn FnMut(StepEvent<'_>)) {
     if model.b.dropped {
         return;
     }
     let project = model.b.project;
+    step(StepEvent::Begin);
     harness
         .block_on(harness.storage().drop_project(project.id()))
         .expect("drop_project of the lane's second project");
     model.project_mut(project).drop_project();
+    step(StepEvent::Done(&*model));
 }
 
 /// Whether every deletion either project registered reads `Applied`.
@@ -1200,5 +1319,86 @@ fn lossy_crash(harness: &mut Harness, model: &mut Model, seed: u64) {
     );
     for push in &lost_scores {
         model.project_mut(push.key.project).unstore_score(push);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One event `apply_storage` reported: `Done` carries the copies the model of `a` holds.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Begin,
+        Done(usize),
+    }
+
+    fn copies(state: &ProjectModel) -> usize {
+        state.spans.values().map(Vec::len).sum()
+    }
+
+    /// Runs one op through `apply_storage` and returns the events it reported.
+    fn run(op: &Op, harness: &Harness, model: &mut Model, clock: &mut i64) -> Vec<Seen> {
+        let mut seen = Vec::new();
+        apply_storage(op, harness, model, clock, &mut |event| match event {
+            StepEvent::Begin => seen.push(Seen::Begin),
+            StepEvent::Done(state) => seen.push(Seen::Done(copies(&state.a))),
+        });
+        seen
+    }
+
+    #[test]
+    fn apply_storage_reports_one_done_per_publishing_call() {
+        let harness = Harness::new();
+        let mut model = new_model(&harness, (P::A, P::B));
+        let start = midnight(day(0)) + 12 * HOUR_NS;
+        let mut clock = start;
+
+        let split = Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 4,
+            split: true,
+        };
+        assert_eq!(
+            run(&split, &harness, &mut model, &mut clock),
+            [Seen::Begin, Seen::Done(2), Seen::Begin, Seen::Done(4)],
+            "a split append reports two steps, each with the copies so far"
+        );
+
+        let whole = Op::Append {
+            project: P::A,
+            trace: 0,
+            count: 4,
+            split: false,
+        };
+        assert_eq!(
+            run(&whole, &harness, &mut model, &mut clock),
+            [Seen::Begin, Seen::Done(8)],
+            "an unsplit append reports one step"
+        );
+
+        let compact = Op::Compact { hours: 1 };
+        assert_eq!(
+            run(&compact, &harness, &mut model, &mut clock),
+            [],
+            "a compaction publishes nothing visible and reports no step"
+        );
+
+        let delete = Op::DeleteTraces {
+            project: P::A,
+            picks: vec![0],
+        };
+        assert_eq!(
+            run(&delete, &harness, &mut model, &mut clock),
+            [Seen::Begin, Seen::Done(8)],
+            "a deletion reports one step, after its resolution reads"
+        );
+
+        assert_eq!(
+            clock,
+            start + 4 * MICRO_NS + HOUR_NS,
+            "each op ticks the clock once; a compaction also advances its hours"
+        );
     }
 }
