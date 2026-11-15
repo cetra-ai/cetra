@@ -9,6 +9,15 @@ export {
   type Datasets,
   type NewDatasetItem,
 } from "./datasets.js";
+export {
+  type EvaluateOptions,
+  ExperimentResult,
+  evaluate,
+  type Run,
+  type Score,
+  type Scorer,
+  type ScorerArgs,
+} from "./experiments.js";
 export type { Instrumentation } from "./instrument.js";
 export {
   type LlmSpanHandle,

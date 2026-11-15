@@ -197,7 +197,8 @@ interface WireDataset {
   item_count: number;
 }
 
-interface WireItem {
+/** An item as the item routes and `POST /experiments` answer it. Internal. */
+export interface WireItem {
   id: string;
   input: unknown;
   expected_output?: unknown;
@@ -207,7 +208,8 @@ interface WireItem {
   source_span_id?: string;
 }
 
-interface WirePage<T> {
+/** One page of a list answer. Internal. */
+export interface WirePage<T> {
   data: T[];
   next_cursor: string | null;
 }
@@ -251,7 +253,8 @@ function infoFromWire(wire: WireDataset): DatasetInfo {
   };
 }
 
-function itemFromWire(wire: WireItem): DatasetItem {
+/** A wire item as a `DatasetItem`. Internal, shared with `evaluate`. */
+export function itemFromWire(wire: WireItem): DatasetItem {
   return {
     id: wire.id,
     input: wire.input,

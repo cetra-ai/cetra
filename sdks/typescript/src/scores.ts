@@ -14,7 +14,7 @@ import { debug, warn, warnOnce } from "./log.js";
 import { applyMask } from "./mask.js";
 import { QuotaState } from "./quota.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
-import { currentRuntime } from "./runtime.js";
+import { currentRuntime, type Runtime } from "./runtime.js";
 import { serialize } from "./serialize.js";
 import { uuid7 } from "./uuid.js";
 import { type FetchLike, getFetch, runtimeGlobals, timeoutSignal } from "./web.js";
@@ -55,6 +55,32 @@ export type ScoreTarget =
   | { type: "trace"; trace_id: string }
   | { type: "session"; session_id: string };
 
+/**
+ * Queue one experiment score (D-J-12): a `score()` item plus the experiment
+ * and dataset item ids. Returns its id, or `undefined` when nothing was queued
+ * (invalid input, with one warning, or a full buffer). Internal.
+ */
+export function queueExperimentScore(
+  runtime: Runtime,
+  options: ScoreOptions & { traceId: string; experimentId: string; datasetItemId: string },
+): string | undefined {
+  const failure = invalidReason(options);
+  if (failure !== undefined) {
+    warn(`llmobs: score not queued: ${failure}`);
+    return undefined;
+  }
+  const scoreId = mintScoreId();
+  if (scoreId === undefined) {
+    return undefined;
+  }
+  const body: ScoreBody = {
+    ...buildBody(options, scoreId),
+    experiment_id: options.experimentId,
+    dataset_item_id: options.datasetItemId,
+  };
+  return runtime.scores.put(body) ? scoreId : undefined;
+}
+
 /** One item of the `scores` array in a § Score request body. Internal. */
 export interface ScoreBody {
   score_id: string;
@@ -65,6 +91,9 @@ export interface ScoreBody {
   reason?: string;
   user_id?: string;
   metadata?: Record<string, string>;
+  /** Experiment scores only (D-J-12). */
+  experiment_id?: string;
+  dataset_item_id?: string;
 }
 
 /**
@@ -116,10 +145,18 @@ function invalidReason(options: ScoreOptions): string | undefined {
   if (options.scoreId !== undefined && !SCORE_ID.test(options.scoreId)) {
     return "invalid score_id";
   }
-  if (typeof options.value === "number" && !Number.isFinite(options.value)) {
+  return valueReason(options.value, options.dataType);
+}
+
+/** Why a value cannot be scored: a non-finite number, or a forced `dataType` that does not match. */
+export function valueReason(
+  value: boolean | number | string,
+  dataType: ScoreDataType | undefined,
+): string | undefined {
+  if (typeof value === "number" && !Number.isFinite(value)) {
     return "non-finite value";
   }
-  if (dataTypeMismatch(options.value, options.dataType)) {
+  if (dataTypeMismatch(value, dataType)) {
     return "data_type mismatch";
   }
   return undefined;
@@ -252,6 +289,11 @@ export class ScoreQueue {
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
     this.quota = options.quota ?? new QuotaState(this.now);
+  }
+
+  /** True while a 402 pause (D-P-34) drops the score batches. */
+  paused(): boolean {
+    return this.quota.paused();
   }
 
   /** Queue one score; `false` when it was dropped (buffer full, or stopped). */
