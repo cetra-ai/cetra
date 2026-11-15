@@ -12,6 +12,7 @@ from llmobs._client import ApiError, Client
 from llmobs._config import ConfigError
 from llmobs._context import context
 from llmobs._datasets import Dataset, DatasetInfo, DatasetItem
+from llmobs._experiments import ExperimentResult, Run, Score, aevaluate, evaluate
 from llmobs._llm import LlmSpan, llm_span
 from llmobs._runtime import flush, init, shutdown, span_processor, tracer_provider
 from llmobs._scores import score, uuid7
@@ -24,12 +25,17 @@ __all__ = [
     "Dataset",
     "DatasetInfo",
     "DatasetItem",
+    "ExperimentResult",
     "LlmSpan",
+    "Run",
+    "Score",
     "Span",
     "__version__",
+    "aevaluate",
     "context",
     "current_span_id",
     "current_trace_id",
+    "evaluate",
     "flush",
     "init",
     "llm_span",
