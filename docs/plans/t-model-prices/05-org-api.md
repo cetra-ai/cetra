@@ -63,6 +63,8 @@ Handlers take `Extension(access): Extension<OrgAccess>` and use `let org = acces
 - **`create_org_model_price`**: as T4's `create_model_price` with `validate_input(&body, PriceScope::Org)` and `prices::write(&state, org, None, PriceChange::Insert { id, row })`. Audit message `"org model price created"` with `price_id`, `org_id`, `user_id`.
 - **`update_org_model_price`**, **`delete_org_model_price`**: as T4's, with `project` `None`; audit `"org model price updated"` / `"org model price deleted"`.
 
+Remove the `#![cfg_attr(not(test), allow(dead_code))]` line from `meta/model_prices.rs`: `list_org_rows` now has a caller.
+
 Move T4's outcome-to-response mapping into one private function used by all seven write handlers if T4 wrote it three times:
 
 ```rust
@@ -91,12 +93,12 @@ In `model_price_paths` (T4), add:
 | `patch_org_model_price` | PATCH `/api/v1/orgs/{org}/models/{id}` | org, `path_uuid("id", "Price row id.")` | `json_body("ModelPriceInput")` | `200` | `&[400, 401, 403, 404, 409, 429]` |
 | `delete_org_model_price` | DELETE same | same | — | `204` | `&[400, 401, 403, 404, 409, 429]` |
 
-Descriptions: read "Any org member can read."; writes "Org admins. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409." Update `tests/openapi.rs` (`OPERATIONS`, `expected_errors`, `pages` for `list_org_model_prices`). Run `just openapi`.
+Descriptions: read "Any org member can read."; writes "Org admins. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409." Update `tests/openapi.rs`: the four tuples in `OPERATIONS`; `"list_org_model_prices"` in `QUERY_OR_BODY`; the three writes in the `post_score_definition` branch of `expected_errors` (with 409). The `ModelPricePage` page entries exist since T4. Run `just openapi`.
 
 ## 4. Fixtures
 
 - `static/org-model-prices.json`: a `ModelPricePage` with the org row `…0c00` (README of fixtures, T4) and `next_cursor: null`.
-- `api_examples.rs`: `example("list_org_model_prices", BTreeMap::new(), BTreeMap::new(), "static/org-model-prices.json", "application/json")` (no `org` path param, as `list_llm_connections`'s example has none; if it has one, copy it). `tests/api_examples.rs`: round-trip it as T4's page.
+- `api_examples.rs`: `example("list_org_model_prices", params(&[("org", "acme")]), BTreeMap::new(), "static/org-model-prices.json", "application/json")`, as `list_llm_connections`'s example passes `("org", "acme")`. `tests/api_examples.rs`: `roundtrip::<Page<ModelPrice>>("static/org-model-prices.json")` (use the same page type T4 used for `model-prices.json`). Produce the file text with the roundtrip loop of T4 § 6.
 - Run `just api-examples`.
 
 ## 5. Dev write mocks
@@ -154,6 +156,7 @@ just check
 
 - The four org routes work as § 2 says, with the 6 tests; `ManagePrices` is in every `OrgPerm` match.
 - The three org writes have dev mocks and a mock test.
+- No `dead_code` allowance is left in `meta/model_prices.rs` or `prices.rs`; `just lint` passes.
 - OpenAPI, the TypeScript schema and the fixtures are regenerated.
 - `just check` is green.
 

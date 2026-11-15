@@ -56,7 +56,7 @@ export function PriceResolver({ org, project }: { org: string; project: string }
 ```
 
 A small form: "Model" (`TextField`, id `resolve-model`), "Provider" (`TextField`, id `resolve-provider`, description "Optional, e.g. openai"), and a "Check" submit button. On submit with a non-blank model, set the submitted values in state and run `$api.useQuery("get", "/api/v1/projects/{project}/models/resolve", { params: { path: { project: projectRef(org, project) }, query: { model, ...(provider ? { provider } : {}) } } }, { enabled: submitted })`. Show:
-- `price: null` → "No price matches this model. Its spans get no cost, and a budgeted online rule cannot use it as a judge."
+- `price` absent → "No price matches this model. Its spans get no cost, and a budgeted online rule cannot use it as a judge."
 - a row → "Priced by the {scope label} price “{model_name}”: input {formatUnitPrice}, output {formatUnitPrice} per 1M tokens." where the scope label is "project", "organization" or "built-in".
 
 ## 4. Online-rule hint (`rule-form.tsx`)
@@ -75,7 +75,7 @@ Under the budget `TextField`, when `errors.budget_usd` contains `"no price"`, re
 
 1. "shows project and organization prices": the project fixture rows render in "Project prices" (`gpt-4o (negotiated)`, `openai`, `$2.00`) and "Organization prices" (`Llama 3.1 8B (local)`, `Any`), and the "Manage organization prices" link points at `/acme/settings/models`. The manifest mock serves one `list_models` file for any query; override `GET /api/v1/projects/:project/models` with `server.use` to answer per `scope` (`new URL(request.url).searchParams.get("scope")`) from the fixture's rows filtered by scope.
 2. "searches built-in prices": type `gpt-4o` → after the debounce the override receives `scope=builtin&q=gpt-4o` and the rows show; one character sends nothing.
-3. "resolves a model": type `gpt-4o`, provider `openai`, Check → "Priced by the project price “gpt-4o (negotiated)”: input $2.00, output $8.00 per 1M tokens."; an override answering `{price: null}` → the "No price matches" text.
+3. "resolves a model": type `gpt-4o`, provider `openai`, Check → "Priced by the project price “gpt-4o (negotiated)”: input $2.00, output $8.00 per 1M tokens."; an override answering `{}` → the "No price matches" text.
 4. "adds a project price": Add price → dialog → body posted to `/api/v1/projects/:project/models`.
 5. "viewers and members read only": with the project role `member` (override the project fetch the way `score-definitions.test.tsx` sets a role), no Edit buttons, "Add price" disabled with the reason.
 6. "a delete blocked by rules explains why" (`409`, as T6 test 7).

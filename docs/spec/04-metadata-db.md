@@ -220,7 +220,7 @@ CREATE UNIQUE INDEX model_prices_key ON model_prices(
 CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id IS NOT NULL;
 ```
 
-At most 500 org rows per org and 500 rows per project (D-T-4). The server loads every row at startup and keeps one compiled table per org and per project that has rows; each write reloads its org (D-T-9). A write that would leave a budgeted online rule without a price for its judge model is refused (D-T-8).
+At most 500 org rows per org and 500 rows per project (D-T-4). The server loads every row at startup and keeps one compiled table per org and per project that has rows; each write reloads its org (D-T-9). A write that would take away the price a budgeted online rule's judge model has is refused (D-T-8).
 
 ## Scores definitions
 

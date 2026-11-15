@@ -20,8 +20,7 @@ Adds the `model_prices` table (spec 04 § Pricing as amended by D-T-2) and its s
 |---|---|
 | `crates/server/migrations/meta/NNNN_model_prices.sql` | new (README § Migration number) |
 | `crates/server/src/meta/model_prices.rs` | new |
-| `crates/server/src/meta/mod.rs` | `pub(crate) mod model_prices;` (alphabetical in the module list); version numbers in two tests |
-| `crates/server/src/admin.rs` | version numbers in one test |
+| `crates/server/src/meta/mod.rs` | `pub(crate) mod model_prices;` (alphabetical in the module list) |
 | `crates/server/tests/snapshots/meta_schema.snap` | regenerated |
 
 ## 1. Migration
@@ -52,28 +51,26 @@ CREATE UNIQUE INDEX model_prices_key ON model_prices(
 CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id IS NOT NULL;
 ```
 
-`project_id` NULL is an org row; set, a project row of that org (the store checks the project belongs to the org; T4 passes the route's project). `tiers` is the JSON of `Vec<PriceTier>` (`[{"min_input_tokens":…, "price_input":…, …}]`) or NULL. Times are nanoseconds.
+`project_id` NULL is an org row; set, a project row of that org. The store does not check that the project belongs to the org: callers pass the route's own project (`access.project`), whose `org_id` is the org. `tiers` is the JSON of `Vec<PriceTier>` (`[{"min_input_tokens":…, "price_input":…, …}]`) or NULL. Times are nanoseconds.
 
-### Version numbers in existing tests
+### Schema version
 
-The schema version grows from `P` (the number of migration files before yours) to `N = P + 1`. Find every literal with:
-
-```bash
-grep -rn "_sqlx_migrations\|'future'\|expects schema" crates/server/src
-```
-
-With `0014_backfills.sql` the last file today (P = 14, N = 15, file `0015_model_prices.sql`):
-- `meta/mod.rs`, test `open_twice_is_idempotent`: `assert_eq!(count, 14)` → `15`.
-- `meta/mod.rs`, test `open_existing_checks_the_file_and_the_version`: `VALUES (15, 'future', …)` → `16`, `assert_eq!(found, 15)` → `16`, `assert_eq!(expected, 14)` → `15`.
-- `admin.rs`, test `schema_mismatch_names_the_versions`: `VALUES (15, 'future', …)` → `16` and `"this binary expects schema 14, found 15"` → `"… schema 15, found 16"`.
-
-If more migrations landed first, shift them the same way. If the literals you find do not match `P` and `P + 1`, STOP and report.
+The schema-version tests (`open_twice_is_idempotent`, `open_existing_checks_the_file_and_the_version` in `meta/mod.rs`, `schema_mismatch_names_the_versions` in `admin.rs`) read `crate::meta::expected_version()`, so they need no edit.
 
 Regenerate the snapshot: `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. `git diff crates/server/tests/snapshots/meta_schema.snap` must show only an added block for `model_prices`, its two explicit indexes and one `sqlite_autoindex_model_prices_1`. Anything else: STOP and report.
 
 ## 2. `meta/model_prices.rs`
 
 Module doc: `//! \`model_prices\` rows: custom prices of an org or a project (spec 04 § Pricing, D-T-2, D-T-4).`
+
+Right after the module doc, add:
+
+```rust
+// Used by tests only until T3 loads the rows and T4/T5 serve them; T5 removes this line.
+#![cfg_attr(not(test), allow(dead_code))]
+```
+
+`just lint` runs clippy on all targets with `-D warnings`, so code without a non-test caller fails without it (the same device as g-spine's first phases).
 
 Imports: `llmobs_core::ids::{OrgId, ProjectId}`, `llmobs_otel::{PriceRow, PriceScope, PriceTier}`, `sqlx::{SqliteConnection, SqlitePool}`, `uuid::Uuid`, `super::{MetaError, unique_or}`.
 
@@ -244,7 +241,7 @@ just check
 ## Done when
 
 - The migration, store and 11 tests are in; the version literals and the snapshot are updated as § 1 says.
-- Nothing reads the table yet (T3 does).
+- Nothing reads the table yet (T3 does); the file carries the `dead_code` allowance.
 - `just check` is green.
 
 **Commit:** `server: store custom model prices in meta.db`

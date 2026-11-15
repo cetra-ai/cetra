@@ -36,7 +36,7 @@ grep -rn "ingest.prices()\|replace_prices" crates/server/src
 
 ## 1. `prices.rs`
 
-Module doc:
+Module doc, then the allowance (T4 removes it: `builtin`, `reload_org` and `lock_writes` get non-test callers there):
 
 ```rust
 //! The price tables of every org and project (spec 02 § Cost computation, D-T-3, D-T-9).
@@ -45,6 +45,9 @@ Module doc:
 //! layered on the built-in one; a project with rows of its own gets a table of the org rows and
 //! its rows layered on the built-in one. The ingest path reads a map under a read lock and never
 //! touches `meta.db`.
+
+// T4 removes this line, once the write routes call `reload_org` and `lock_writes`.
+#![cfg_attr(not(test), allow(dead_code))]
 ```
 
 Imports: `std::collections::HashMap`, `std::sync::{Arc, PoisonError, RwLock}`, `llmobs_core::ids::{OrgId, ProjectId}`, `llmobs_otel::{PriceError, PriceRow, PriceTable}`, `sqlx::SqlitePool`, `tokio::sync::{Mutex, MutexGuard}`, `crate::meta::MetaError`, `crate::meta::model_prices::{self, PriceRecord}`. (`llmobs_otel` re-exports `PriceError`.)
@@ -173,7 +176,7 @@ Built-in table for these tests: `PriceTable::new(vec![row("gpt-4o", PriceScope::
 
 - Field `prices: RwLock<Arc<PriceTable>>` → `prices: crate::prices::Prices`.
 - `Ingest::new(config: &IngestConfig, media: &MediaConfig, prices: crate::prices::Prices) -> Self`; store it.
-- Delete `replace_prices` (with its `#[cfg(test)]` and doc).
+- Delete `replace_prices` with its `#[cfg(test)]` attribute and its two doc lines ("Swaps the price table (D-G-10)…" and "The track that adds custom prices removes the `cfg`."), and update the `prices` field's doc if it mentions `RwLock`.
 - `prices()` becomes:
 
 ```rust
@@ -234,8 +237,17 @@ Add one test in `routes/online_rules.rs`'s test module, next to the existing bud
 
 ## 6. `deletion/mod.rs`
 
-- `drop_project_step`: after the `meta.write` that deletes the project succeeds, next to `state.metrics_cache.clear_project(project);`, add `state.ingest.prices().forget_project(project);`.
-- The org drop step (the one that calls `delete_org`): after its `meta.write` succeeds, next to the loop that clears the metrics cache, add `state.ingest.prices().forget_org(org);`.
+- `drop_project_step`: after the `meta.write` that deletes the project succeeds, next to `state.metrics_cache.clear_project(project);`, add:
+
+```rust
+{
+    // A price reload that read the rows before the delete must not reinstall them (D-T-9).
+    let _writes = state.ingest.prices().lock_writes().await;
+    state.ingest.prices().forget_project(project);
+}
+```
+
+- The org drop step (the one that calls `delete_org`): after its `meta.write` succeeds, next to the loop that clears the metrics cache, the same block with `forget_org(org)`.
 
 No new test: the cascade is T2's test 10, and `forget_*` are case 7.
 
@@ -255,7 +267,8 @@ just check
 
 ## Done when
 
-- `grep -rn "replace_prices\|RwLock<Arc<PriceTable>>" crates/server/src` prints nothing.
+- `grep -rn "replace_prices\|RwLock<Arc<PriceTable>>" crates/server/src` prints nothing (code and doc comments).
+- `prices.rs` carries the `dead_code` allowance; `just lint` passes.
 - Every caller of README § Who prices with what uses `for_project` or `for_org`.
 - The 8 registry tests, the 3 new ingest tests and the online-rule test pass; the golden fixture test passes with `set_builtin`.
 - `just check` is green.

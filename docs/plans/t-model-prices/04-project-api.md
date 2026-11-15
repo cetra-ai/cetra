@@ -198,7 +198,9 @@ pub struct ModelPriceResolveParams {
 /// The row that would price a span now.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ModelPriceResolution {
-    /// The winning row, or null when no row prices the model.
+    /// The winning row. Absent when no row prices the model (spec 09: optional fields are
+    /// absent, never null).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<ModelPrice>,
 }
 ```
@@ -277,6 +279,8 @@ pub(crate) async fn write(
     change: PriceChange,
 ) -> Result<WriteOutcome, MetaError>;
 ```
+
+Remove the `#![cfg_attr(not(test), allow(dead_code))]` line T3 put in `prices.rs`: every function now has a non-test caller. (The one in `meta/model_prices.rs` stays until T5: `list_org_rows` is used by T5's org list only.)
 
 Body of `write`:
 
@@ -392,15 +396,15 @@ async fn delete_model_price(State(state): State<AppState>, Extension(principal):
 
 **`list_models`**:
 1. `q` trimmed and lowercased; blank → none. More than 200 chars → `field_error("q", "at most 200 characters")`.
-2. `let table = state.ingest.prices().for_project(org, project);` and `let builtin = state.ingest.prices().builtin();`.
+2. `let builtin = state.ingest.prices().builtin();` (the list needs no compiled project table).
 3. Custom rows: `model_prices::list_org_all(state.meta.reader(), org)` keeping org rows and this project's rows only (drop other projects' rows). Reading `meta.db` keeps ids and times; the table only has `PriceRow`s.
 4. Build `Vec<(String, String, ModelPrice)>`: for each kept record, `(format!("{rank}:{}", record.row.model_name.to_lowercase()), record.id.to_string(), record_json(&record))` with `rank` `0` for project rows, `1` for org rows; for each `(index, row)` of `builtin.rows()`, `(format!("2:{}", row.model_name.to_lowercase()), format!("builtin:{index:06}"), builtin_json(row))`.
 5. Filter by `params.scope` and by `q` (substring of the lowercased name).
 6. Sort by `(name, id)`, then `page_named(rows, params.cursor.as_deref(), params.limit.get())` (from `super::orgs`). Return `error::Json(page)`.
 
-`table` is unused in this handler; do not fetch it (step 2 needs only `builtin`). The `rank:` prefix keeps the D-T-7 order, and the id tie-break keeps the cursor stable.
+The `rank:` prefix keeps the D-T-7 order, and the id tie-break keeps the cursor stable.
 
-**`resolve_model_price`**: `model` trimmed; empty → `field_error("model", "is required")`; more than 500 bytes → `field_error("model", "at most 500 bytes")`. `provider` trimmed, blank → `None`. `let table = state.ingest.prices().for_project(org, project); let now = state.clock.now_ns();` `let Some(row) = table.price_for(&model, provider.as_deref(), now) else { return Ok(error::Json(ModelPriceResolution { price: None })) };`. A built-in row (`row.scope == PriceScope::Builtin`) → `builtin_json(row)`. A custom row needs its id: look it up among `model_prices::list_org_all(reader, org)` by the scope and the full `PriceRow` equality (`record.row == *row` and, for a project row, `record.project_id == Some(project)`); found → `record_json`; not found (a reload raced) → `builtin_json(row)` with the right `scope` (set `scope` from `row.scope`). Answer `{price: Some(…)}`.
+**`resolve_model_price`**: `model` trimmed; empty → `field_error("model", "is required")`; more than 500 bytes → `field_error("model", "at most 500 bytes")`. `provider` trimmed, blank → `None`. `let table = state.ingest.prices().for_project(org, project); let now = state.clock.now_ns();` `let Some(row) = table.price_for(&model, provider.as_deref(), now) else { return Ok(error::Json(ModelPriceResolution { price: None })) };` (serialized as `{}`);`. A built-in row (`row.scope == PriceScope::Builtin`) → `builtin_json(row)`. A custom row needs its id: look it up among `model_prices::list_org_all(reader, org)` by the scope and the full `PriceRow` equality (`record.row == *row` and, for a project row, `record.project_id == Some(project)`); found → `record_json`; not found (a reload raced) → `builtin_json(row)` with the right `scope` (set `scope` from `row.scope`). Answer `{price: Some(…)}`.
 
 **`create_model_price`**, in this order:
 1. `let user = principal::session_user(&principal)?;` (it accepts a session and a PAT, and refuses an API key, which `ManageSettings` already keeps out).
@@ -419,7 +423,7 @@ Use the helpers the score definition route tests use (`app.seed()`, requests as 
 1. `create_list_update_delete_round_trip`: POST `{model_name: "llama3.1:8b", price_input: 0, price_output: 0}` → `201`, `scope: "project"`, `match_pattern: "llama3\\.1:8b"`, `tiers: []`; GET `?scope=project` lists it; PATCH with `{model_name: "llama3.1:8b", price_input: 0.1, price_output: 0.2, provider: "openai"}` → `200`, provider set; PATCH again without `provider` → provider absent (replace semantics); DELETE → `204`; GET `?scope=project` → empty.
 2. `the_list_orders_project_org_builtin_and_pages`: insert an org row through `model_prices::insert_tx` + `reload_org`, and a project row through the API; GET `?limit=2` → the project row then the org row, `next_cursor` set; the next page starts with built-in rows; `?scope=builtin&q=gpt-4o&limit=1000` → only built-in rows whose name contains `gpt-4o`; `?q=` of 201 chars → `400`.
 3. `other_projects_rows_are_not_listed_or_used`: a row created in a second project of the same org is not in the seeded project's list, and `resolve` in the seeded project does not return it.
-4. `resolve_names_the_winning_row`: `?model=gpt-4o&provider=openai` → a built-in row; after a project row `gpt-4o` at 1.0 → that project row with its id; `?model=no-such-model` → `{"price": null}`; `?model=` → `400`.
+4. `resolve_names_the_winning_row`: `?model=gpt-4o&provider=openai` → a built-in row; after a project row `gpt-4o` at 1.0 → that project row with its id; `?model=no-such-model` → `{}` (no `price` key); `?model=` → `400`.
 5. `a_new_price_applies_to_spans_ingested_after_it`: ingest one OTLP span for model `llama3.1:8b` (build the request as the T3 ingest tests or `routes/otlp.rs` tests do) → `cost_source` `none`; POST the price → ingest another span → `computed`. Read the first span again: still `none` (D-T-5).
 6. `validation_errors_are_400`: an empty body name, a bad pattern, no prices → `400` with those fields.
 7. `a_duplicate_is_409` and `the_501st_project_row_is_409` (insert 500 through the store, then POST).
@@ -445,7 +449,13 @@ In `api/openapi.rs`:
 
   Descriptions: reads "Any project member can read; a `read` API key too."; writes "Project admins. API keys cannot call it. A PATCH replaces the whole row. A write that would leave a budgeted online rule without a price is 409."
 
-In `tests/openapi.rs`: add the five operations to `OPERATIONS` (same tuple shape as their neighbours), `model_prices` to `TAGS`, the error codes to the `expected_errors` chain as the score definition operations are, and `list_models` to the `pages` lists.
+In `tests/openapi.rs`:
+- `OPERATIONS`: the five `(method, path, operation id)` tuples, next to the score definition ones.
+- `TAGS`: `"model_prices"`.
+- `QUERY_OR_BODY`: add `"list_models"` and `"resolve_model_price"` (they expect 400, 401, 403, 404, 429; without this the default branch expects no 400 and the test fails).
+- The `expected_errors` chain: add `|| *id == "post_model_price" || *id == "patch_model_price" || *id == "delete_model_price"` to the branch that holds `post_score_definition` (400, 401, 403, 404, 409, 429). Not the `delete_score_definition` branch: a price delete can be `409` (D-T-8).
+- The `pages` array of `(page, item)` pairs (it holds `("ScorePage", "Score")`): add `("ModelPricePage", "ModelPrice")`.
+- The second `pages` list, in the nullability check (it holds `"TracePage"`, `"SpanPage"`, …; it must equal the set of pages with a required-nullable `next_cursor`): add `"ModelPricePage"`.
 
 Run `just openapi`.
 
@@ -457,10 +467,10 @@ Fixed ids (add to `fixtures/api/README.md` § Fixed identifiers, after the backf
 |---|---|
 | Model prices | `01900000-0000-7000-8000-000000000c00`, an org row `Llama 3.1 8B (local)` for `llama3\.1:8b`, any provider, 0 USD; `…0c01`, a project row `gpt-4o (negotiated)` for `gpt\-4o`, provider `openai`, from `2026-01-01T00:00:00.000000000Z`, input 2.0, output 8.0, cache read 1.0. `model-prices.json`, `model-price.json`, `model-price-resolution.json`, `org-model-prices.json` and `requests/model-price-create.json` use them |
 
-Files (hand-written, valid against the types; times `2026-01-02T10:00:00.000000000Z` for created/updated):
+Files (times `2026-01-02T10:00:00.000000000Z` for created/updated). `tests/api_examples.rs`'s `roundtrip` compares the file text with the canonical JSON of the parsed value (pretty, struct field order, floats as Rust prints them: `0.0`, `2.0`), so do not hand-format: write the values below, run `cargo test -p llmobs-server --test api_examples static_files_match_their_types`, and copy the expected text from each failure into the file until it passes. Content:
 - `static/model-prices.json`: a `ModelPricePage` with the project row `…0c01`, the org row `…0c00`, then two built-in rows copied from `crates/otel/prices/builtin.json` (`gpt-4o` provider `openai`, and `gpt-4o-mini` provider `openai`; copy their prices exactly, `tiers: []`, no id, no times), `next_cursor: null` (no static fixture carries a cursor; the generator checks only that the file round-trips).
 - `static/model-price.json`: the project row `…0c01` alone.
-- `static/model-price-resolution.json`: `{"price": <the project row …0c01>}`.
+- `static/model-price-resolution.json`: `{"price": <the project row …0c01>}` (the found case).
 - `requests/model-price-create.json`: `{"model_name": "gpt-4o (negotiated)", "match_pattern": "gpt\\-4o", "provider": "openai", "valid_from": "2026-01-01T00:00:00.000000000Z", "price_input": 2.0, "price_output": 8.0, "price_cache_read": 1.0}`.
 
 In `api_examples.rs`: `example("list_models", BTreeMap::new(), BTreeMap::new(), "static/model-prices.json", "application/json")`; `example("resolve_model_price", BTreeMap::new(), params(&[("model", "gpt-4o"), ("provider", "openai")]), "static/model-price-resolution.json", "application/json")` (the arguments are path params, then query); `example_created("post_model_price", BTreeMap::new(), "static/model-price.json")`. In `tests/api_examples.rs`: `roundtrip::<ModelPricePage-or-Page<ModelPrice>>("static/model-prices.json")` as the score definition page is round-tripped, `roundtrip::<ModelPrice>("static/model-price.json")`, `roundtrip::<ModelPriceResolution>(…)`, `roundtrip::<ModelPriceInput>("requests/model-price-create.json")` (it has `Deserialize` only; use the helper that other request files use), and `("post_model_price", "requests/model-price-create.json")` in the request list.

@@ -19,6 +19,7 @@ Adds the query helpers, one dialog that creates and edits a price row of either 
 |---|---|
 | `web/src/api/queries-prices.ts` | new |
 | `web/src/lib/roles.ts` | `canManageOrgPrices` |
+| `web/src/components/form/text-field.tsx` | `"date"` in the `type` union |
 | `web/src/lib/prices.ts`, `web/src/lib/prices.test.ts` | new: formatting and form conversion |
 | `web/src/components/prices/price-dialog.tsx` | new |
 | `web/src/components/prices/tiers-editor.tsx` | new |
@@ -130,7 +131,7 @@ Rules:
 - `priceBody`: `model_name: form.modelName.trim()`; `match_pattern` only when `matchKind === "regex"` (trimmed); `provider` only when non-blank (trimmed, lowercased); `valid_from` only when `validFrom` is set; each price as `Number(text)` only when non-blank; `tiers` mapped the same way with `min_input_tokens: Number(minInputTokens)`.
 - `checkPriceForm`: blank name → `model_name: "Enter a name."`; `matchKind === "regex"` and blank pattern → `match_pattern: "Enter a pattern, or choose Exact name."`; any non-blank price that is not a finite number ≥ 0 → that field: `"Enter a number of 0 or more."`; input and output both blank → `price_input: "Enter an input or an output price."`; a tier whose `minInputTokens` is not an integer ≥ 1 → `tiers[i].min_input_tokens: "Enter a whole number of 1 or more."`.
 
-Tests (`lib/prices.test.ts`): each rule above, plus a round trip: `priceBody(priceForm(fixtureRow))` equals the fixture row's input fields (use `fixtures/api/static/model-price.json`, whose pattern `gpt\-4o` opens as "exact").
+Tests (`lib/prices.test.ts`): each rule above, plus two round trips. (a) `fixtures/api/static/model-price.json`: its name `gpt-4o (negotiated)` escapes to `gpt\-4o \(negotiated\)`, not its pattern `gpt\-4o`, so `priceForm` gives `matchKind === "regex"` and `priceBody(priceForm(row))` carries `match_pattern: "gpt\\-4o"` and the row's prices. (b) A row built in the test, `{model_name: "llama3.1:8b", match_pattern: "llama3\\.1:8b", …}`: `matchKind === "exact"` and the body has no `match_pattern`.
 
 ## 4. Components
 
@@ -162,10 +163,10 @@ export function PriceDialog({
 Layout (labels exactly, the tests use them):
 - Title "Add model price" or "Edit model price"; description "Prices are USD per 1M tokens. New prices apply to spans received from now on; stored costs are not recomputed." (D-T-5).
 - "Model name" (`TextField`, id `price-model-name`).
-- "Match" radio group (`RadioGroup`, `RadioGroupItem` from `@/components/ui/radio-group`): "Exact name" and "Regular expression". With "Regular expression": "Pattern" (`TextField`, id `price-pattern`, description "Anchored and case-insensitive, e.g. llama3.*").
+- "Match" radio group (`RadioGroup`, `RadioGroupItem` from `@/components/ui/radio-group`): "Exact name" and "Regular expression". With "Regular expression": "Pattern" (`TextField`, id `price-pattern`, description "Anchored and case-insensitive, e.g. llama3.*. Without a provider, the pattern overrides the built-in price of every model it matches, for every provider.").
 - "Provider" (`TextField`, id `price-provider`, description "Leave empty to match any provider. Local models served through an OpenAI-compatible endpoint use openai.").
-- "Valid from" (`TextField`, `type="date"`, id `price-valid-from`, description "Leave empty to apply to every span.").
-- "Input", "Output", "Cache read", "Cache write", "Reasoning" (`TextField`, `type="number"`, step any, ids `price-input`, `price-output`, `price-cache-read`, `price-cache-write`, `price-reasoning`; Reasoning's description "Empty uses the output price.").
+- "Valid from" (`TextField`, `type="date"` — add `"date"` to `TextField`'s `type` union `"text" | "email" | "password" | "number"` in `components/form/text-field.tsx`; id `price-valid-from`, description "Leave empty to apply to every span.").
+- "Input", "Output", "Cache read", "Cache write", "Reasoning" (`TextField`, `type="number"`, ids `price-input`, `price-output`, `price-cache-read`, `price-cache-write`, `price-reasoning`; Reasoning's description "Empty uses the output price."). Under the five prices, a muted line: "A judge model with a budget needs both an input and an output price." (D-I-15's `model_price` needs both.)
 - "Long-context tiers" heading and `TiersEditor`.
 - Footer: Cancel, and a `SubmitButton` "Add price" or "Save".
 
