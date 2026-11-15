@@ -1,0 +1,9 @@
+{
+  "model_name": "gpt-4o (negotiated)",
+  "match_pattern": "gpt\\-4o",
+  "provider": "openai",
+  "valid_from": "2026-01-01T00:00:00.000000000Z",
+  "price_input": 2.0,
+  "price_output": 8.0,
+  "price_cache_read": 1.0
+}

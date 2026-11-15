@@ -465,7 +465,7 @@ async fn test_connection(
         retention_days: None,
         limits: state.config.ingest.limits(&state.config.media),
     };
-    let prices = state.ingest.prices();
+    let prices = state.ingest.prices().for_org(access.org.id);
     let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
     let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
     let judge_trace_id = llmobs_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only

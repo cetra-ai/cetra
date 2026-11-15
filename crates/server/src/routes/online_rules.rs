@@ -259,6 +259,9 @@ async fn create_online_rule(
         budget_period: body.budget_period,
         enabled: body.enabled,
     };
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let prices_write = state.ingest.prices().lock_writes().await;
     let evaluator_id = body.evaluator_id;
     let evaluator = evaluators::get_evaluator(state.meta.reader(), project, evaluator_id).await?;
     validate(&state, org, project, &draft, evaluator.as_ref(), now).await?;
@@ -281,7 +284,9 @@ async fn create_online_rule(
     let outcome = state
         .meta
         .write(move |conn| Box::pin(async move { insert_checked(conn, insert, limit, now).await }))
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         RuleWrite::Done { row, .. } => {
             tracing::info!(
@@ -311,6 +316,9 @@ async fn update_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    // D-T-8: the price table is read and the write made under the price write lock, so a
+    // price write cannot pass its guard between the two.
+    let prices_write = state.ingest.prices().lock_writes().await;
     let stored = store::get_rule(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -343,7 +351,9 @@ async fn update_online_rule(
         .write(move |conn| {
             Box::pin(async move { update_checked(conn, project, update, limit, now).await })
         })
-        .await?;
+        .await;
+    drop(prices_write);
+    let outcome = outcome?;
     match outcome {
         RuleWrite::Done {
             row,
@@ -623,7 +633,7 @@ async fn validate(
             let adapter = judge_adapter(state, org, &subject).await?;
             // The checks on the mapping's keys run even when an expression does not parse.
             let variables: BTreeSet<String> = draft.mapping.keys().cloned().collect();
-            let prices = state.ingest.prices();
+            let prices = state.ingest.prices().for_project(org, project);
             let shape = RuleShape {
                 target: draft.target,
                 mapping: mapping.as_ref(),
@@ -880,12 +890,14 @@ mod tests {
     use llmobs_core::enums::SpanStatus;
     use llmobs_core::ids::{SpanId, TraceId};
     use llmobs_core::span::Span;
+    use llmobs_otel::{PriceRow, PriceScope, exact_pattern};
     use serde_json::{Value, json};
 
     use super::*;
     use crate::auth::roles::OrgRole;
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+    use crate::meta::model_prices;
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
     use crate::test_support::{
@@ -1202,6 +1214,48 @@ mod tests {
         assert!(page["next_cursor"].is_null());
     }
 
+    /// D-T-8: a write waits while a price write holds the lock, so the price table it checks
+    /// against is read after that price write has committed.
+    #[tokio::test]
+    async fn a_create_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rule = rule_body(evaluator);
+        let mut pending = std::pin::pin!(create(&app, &seeded, &rule));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the create did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 201, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn a_patch_waits_for_a_price_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &rule_body(evaluator)).await;
+        let id = id_of(&created);
+        let guard = app.state.ingest.prices().lock_writes().await;
+        let rename = json!({"name": "Renamed"});
+        let mut pending = std::pin::pin!(patch(&app, &seeded, id, &rename));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), pending.as_mut())
+                .await
+                .is_err(),
+            "the patch did not wait for the price write"
+        );
+        drop(guard);
+        let response = pending.await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+    }
+
     #[tokio::test]
     async fn create_validates_every_field() {
         let app = TestApp::new().await;
@@ -1321,7 +1375,7 @@ mod tests {
         assert!(
             field_errors(&create(&app, &seeded, &body).await).contains(&(
                 "budget_usd".to_owned(),
-                "the judge model has no price, so the rule cannot have a budget".to_owned()
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices".to_owned()
             ))
         );
 
@@ -1468,6 +1522,54 @@ mod tests {
                 "give budget_usd and budget_period together".to_owned()
             )]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_budget_on_a_local_model_is_accepted_once_the_project_prices_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge_with_model(&app, &seeded, "llama3.1:8b").await;
+        let body = rule_body(evaluator);
+        assert_eq!(
+            field_errors(&create(&app, &seeded, &body).await),
+            [(
+                "budget_usd".to_owned(),
+                "the judge model has no price, so the rule cannot have a budget; add one under Settings → Model prices".to_owned()
+            )]
+        );
+
+        let (org, project, now) = (seeded.org_id, seeded.project.id, app.state.clock.now_ns());
+        let row = PriceRow {
+            scope: PriceScope::Project,
+            model_name: "llama3.1:8b".to_owned(),
+            match_pattern: exact_pattern("llama3.1:8b"),
+            provider: None,
+            valid_from: 0,
+            price_input: Some(0.0),
+            price_output: Some(0.0),
+            price_cache_read: None,
+            price_cache_write: None,
+            price_reasoning: None,
+            tiers: None,
+        };
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    model_prices::insert_tx(conn, Uuid::now_v7(), org, Some(project), &row, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        app.state
+            .ingest
+            .prices()
+            .reload_org(app.state.meta.reader(), org)
+            .await
+            .unwrap();
+        create_ok(&app, &seeded, &body).await;
     }
 
     #[tokio::test]

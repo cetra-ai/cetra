@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15; T1–T7 not started
+Status: T1–T7 done on 2026-11-15
 
 # T · Model prices
 
@@ -112,7 +112,7 @@ web/src/routes/$org/$project/settings/models.tsx                                
 
 ### Migration number
 
-Other tracks add migrations in parallel (`main` ends at `0014_backfills.sql` today). T's migration takes **the next free number when T2 is implemented**: the highest `NNNN` in `crates/server/migrations/meta/` plus one, zero-padded to four digits (`0015_model_prices.sql` if `0014_backfills.sql` is still the last). If another branch lands the same number before T merges, renumber T's file at merge and shift the version literals of T2 § Version numbers again.
+Other tracks add migrations in parallel (`main` ends at `0015_email_verified_via.sql` today). T's migration takes **the next free number when T2 is implemented**: the highest `NNNN` in `crates/server/migrations/meta/` plus one, zero-padded to four digits (`0016_model_prices.sql` if `0015_email_verified_via.sql` is still the last). If another branch lands the same number before T merges, renumber T's file at merge and regenerate the schema snapshot (the tests read `expected_version()`, so no version literal changes; T2 § Schema version).
 
 ## Decisions
 
@@ -137,6 +137,7 @@ These are written in `docs/mvp-decisions.md` § Track T and in specs 02, 04, 09 
 
 - **CG-T1.** `/models/resolve` answers at the current time only; it has no `at` parameter. A user checking a row with a future `valid_from` sees today's winner. Accepted.
 - **CG-T2.** There is no project-wide list of the models seen in traces with no price ("unpriced models"). A later track can add it from storage (`cost_source = 'none'` on `llm` spans grouped by model).
+- **CG-T3.** A `PATCH` of an LLM connection's `adapter` (`routes/connections.rs`, `UpdateLlmConnectionRequest.adapter`) is not checked against budgeted rules. `model_price` asks with the connection's adapter as the provider (D-T-11), so a change of provider can leave a budgeted judge rule whose only price is a provider-specific custom row with no price (D-T-8 is not run for it). This predates T and is left for a follow-up.
 
 ## Conventions
 

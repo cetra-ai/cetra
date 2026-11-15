@@ -28,6 +28,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
+- Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from
   `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
   `llmobs.toml` (D-S-2).

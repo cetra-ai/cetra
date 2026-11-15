@@ -27,7 +27,7 @@ mod warn;
 #[doc(hidden)]
 pub mod fuzz_entry;
 
-pub use cost::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows};
+pub use cost::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows, exact_pattern};
 pub use decode::{decode_json, decode_protobuf};
 pub use error::{DecodeError, JsonErrorCategory, PriceError};
 pub use normalize::{IngestContext, IngestLimits, Normalized, normalize};

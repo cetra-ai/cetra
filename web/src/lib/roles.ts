@@ -59,6 +59,11 @@ export function canManageConnections(role: OrgRole | undefined): boolean {
   return atLeast(role, "admin");
 }
 
+/** Mirrors `OrgPerm::ManagePrices`: org admins and owners (D-T-6). */
+export function canManageOrgPrices(role: OrgRole | undefined): boolean {
+  return atLeast(role, "admin");
+}
+
 /** Mirrors `ProjectPerm::ManageEvaluation`: project members and above (D-I-24). */
 export function canManageEvaluation(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");

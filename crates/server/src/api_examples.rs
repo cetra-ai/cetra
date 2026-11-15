@@ -538,6 +538,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         ),
         example_status("post_api_key", "static/api-key-created.json", 201),
         example(
+            "list_org_model_prices",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-model-prices.json",
+            "application/json",
+        ),
+        example(
             "list_llm_connections",
             params(&[("org", "acme")]),
             BTreeMap::new(),
@@ -609,6 +616,25 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "post_score_definition",
             BTreeMap::new(),
             "static/score-definition.json",
+        ),
+        example(
+            "list_models",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/model-prices.json",
+            "application/json",
+        ),
+        example(
+            "resolve_model_price",
+            BTreeMap::new(),
+            params(&[("model", "gpt-4o"), ("provider", "openai")]),
+            "static/model-price-resolution.json",
+            "application/json",
+        ),
+        example_created(
+            "post_model_price",
+            BTreeMap::new(),
+            "static/model-price.json",
         ),
         example(
             "list_personal_tokens",

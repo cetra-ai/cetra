@@ -360,7 +360,7 @@ async fn every_fixture_is_stored_as_normalized() {
         .await;
         let seeded = app.seed().await;
         let prices = PriceTable::new(rows.clone()).expect("prices.json compiles");
-        app.state.ingest.replace_prices(prices.clone());
+        app.state.ingest.prices().set_builtin(prices.clone());
         for case in &group {
             check_case(&app, &seeded, case, &prices, Wire::Json).await;
             check_case(&app, &seeded, case, &prices, Wire::Protobuf).await;

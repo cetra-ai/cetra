@@ -19,6 +19,7 @@ pub mod invites;
 pub mod keys;
 pub mod members;
 pub mod metrics;
+pub mod model_prices;
 pub mod online_rules;
 pub mod openapi;
 pub mod org_sso;
