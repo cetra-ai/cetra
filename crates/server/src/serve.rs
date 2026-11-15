@@ -43,6 +43,13 @@ const COMMIT_WAIT: Duration = Duration::from_secs(5);
 /// Best-effort cap on `Storage::shutdown` (spec 12).
 const STORAGE_SHUTDOWN: Duration = Duration::from_secs(30);
 
+/// Concurrent HTTP/2 streams per gRPC connection (G-1). A stream holds a reservation before its
+/// body is read, so this bounds the requests one client can hold open.
+const GRPC_MAX_STREAMS: u32 = 100;
+
+/// Requests in flight per gRPC connection (G-1), across all its streams.
+const GRPC_CONCURRENCY_PER_CONNECTION: usize = 32;
+
 /// How often idle rate-limit keys are dropped (D143).
 const PRUNE_EVERY: Duration = Duration::from_secs(60);
 
@@ -427,6 +434,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             let service = grpc::service(state.clone());
             let serve = tokio::spawn(async move {
                 tonic::transport::Server::builder()
+                    .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
+                    .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
                     .add_service(service)
                     .serve_with_incoming_shutdown(TcpIncoming::from(listener), async move {
                         let _ = rx.await;
@@ -1221,6 +1230,22 @@ mod tests {
         running.shutdown().await.unwrap();
     }
 
+    /// `TRACES` with a 4 KiB attribute, which is over a 1 KiB `max_grpc_message_bytes`.
+    fn oversized() -> ExportTraceServiceRequest {
+        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let padding = KeyValue {
+            key: "pad".to_owned(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue("x".repeat(4096))),
+            }),
+            ..Default::default()
+        };
+        message.resource_spans[0].scope_spans[0].spans[0]
+            .attributes
+            .push(padding);
+        message
+    }
+
     #[tokio::test]
     async fn grpc_refuses_a_message_over_the_configured_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -1233,26 +1258,78 @@ mod tests {
         .await
         .unwrap();
         let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
-        let mut message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
-        let padding = KeyValue {
-            key: "pad".to_owned(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue("x".repeat(4096))),
-            }),
-            ..Default::default()
-        };
-        message.resource_spans[0].scope_spans[0].spans[0]
-            .attributes
-            .push(padding);
 
         let mut client = TraceServiceClient::connect(format!("http://{addr}"))
             .await
             .unwrap();
         let status = client
-            .export(authorized(message))
+            .export(authorized(oversized()))
             .await
             .expect_err("the message is over the limit");
         assert_eq!(status.code(), tonic::Code::OutOfRange, "{status:?}");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_oversized_message_is_refused_before_it_is_decoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = ByteSize::kib(1);
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let status = client
+            .export(tonic::Request::new(oversized()))
+            .await
+            .expect_err("no credentials");
+        assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}");
+        assert_eq!(status.message(), "missing or invalid credentials");
+        drop(client);
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_export_is_busy_while_the_budget_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        // The smallest budget config accepts: at least `max_request_bytes` (10 MiB by default).
+        let budget = ByteSize::mib(10);
+        let running = bind(
+            with_grpc(dir.path(), |config| {
+                config.ingest.max_grpc_message_bytes = budget;
+                config.ingest.max_inflight_bytes = budget;
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let addr = running.grpc_local_addr.expect("the gRPC listener is bound");
+        // One reservation of the whole budget: the next admission cannot reserve its message.
+        let state = running.state.as_ref().expect("the server is running");
+        let held = state
+            .ingest
+            .reserve_exact(budget.as_u64())
+            .expect("the budget is free");
+
+        let mut client = TraceServiceClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap();
+        let message = decode_json(TRACES.as_bytes()).expect("fixture decodes");
+        let status = client
+            .export(authorized(message))
+            .await
+            .expect_err("the budget is held");
+        assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        assert_eq!(status.message(), "server is busy, retry later");
+        drop(held);
         drop(client);
         running.shutdown().await.unwrap();
     }

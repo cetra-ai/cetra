@@ -13,6 +13,8 @@ Authentication: `Authorization: Bearer <sk-…>` (project secret key with `inges
 
 Responses follow OTLP: `200` with `ExportTraceServiceResponse` in the request's encoding (with `partial_success.rejected_spans` and an error message when some spans were dropped), `400` malformed, `401` no or bad key, `403` a credential that is not a key with the `ingest` scope, `413` too large, `415` unknown `Content-Type` (parameters such as `charset` are ignored) or `Content-Encoding`, `402` the org's monthly units cap (`quota_exceeded`, no retry; track P, D-P-17), `429` per-org rate limit (with `Retry-After`; track P, D-P-19); the `402` carries `Retry-After` = seconds until the cap resets (D-P-37), `503` with `Retry-After: 1` when the server is overloaded (memtable at its hard limit, in-flight budget full), the WAL has failed, the disk is full or the server is shutting down (D-G-3). Error bodies are the API's problem+json, not a `google.rpc.Status` (D-G-6). gRPC uses `UNAUTHENTICATED`, `PERMISSION_DENIED`, `INVALID_ARGUMENT`, `RESOURCE_EXHAUSTED` (message size, and the units cap without `RetryInfo`), `UNAVAILABLE` (overload, and the per-org rate limit, D-P-35) and `UNAVAILABLE` (overload) the same way.
 
+gRPC authenticates before it decodes (G-1, D-G-29). A tower layer around the service checks the credential, the key's `ingest` scope, the project, the org's units cap, and reserves `ingest.max_grpc_message_bytes` of the in-flight budget, all before the request body is read. A refused request is answered without decoding anything, and the budget it holds is that reservation only. The server accepts at most 100 concurrent HTTP/2 streams per connection (`max_concurrent_streams`) and runs at most 32 requests per connection at once (`concurrency_limit_per_connection`; the rest wait). After decoding, the reservation shrinks to the decoded message's size.
+
 **Durability contract:** a `200` means every accepted span is in the fsynced WAL.
 
 ### Limits (configurable)
@@ -20,7 +22,7 @@ Responses follow OTLP: `200` with `ExportTraceServiceResponse` in the request's 
 | Limit | Default | On violation |
 |---|---|---|
 | HTTP request body, before and after decompression (`ingest.max_request_bytes`); decompression stops at the limit | 10 MiB | 413 |
-| gRPC message | 32 MiB | `RESOURCE_EXHAUSTED` |
+| gRPC message (`ingest.max_grpc_message_bytes`); reserved against the in-flight budget before the body is read, after authentication (G-1) | 32 MiB | `RESOURCE_EXHAUSTED` |
 | Single attribute value | 8 MiB | truncated (below) |
 | Spans per request, counted after decoding (`ingest.max_spans_per_request`) | 50 000 | 413 (gRPC `INVALID_ARGUMENT`) |
 | Request bytes held at once, all requests: raw bodies reserved before reading, decompressed output reserved per 64 KiB (`ingest.max_inflight_bytes`, D-G-5) | 256 MiB | 503, `Retry-After: 1`, no waiting |
