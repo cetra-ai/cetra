@@ -14191,7 +14191,7 @@
           },
           "password_enabled": {
             "type": "boolean",
-            "description": "Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set."
+            "description": "Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is\nset; instance admins then still sign in with a password at `/login?password=1` (D-S-4)."
           },
           "providers": {
             "type": "array",

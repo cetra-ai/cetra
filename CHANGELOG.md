@@ -49,6 +49,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- Auth: with `auth.disable_password = true`, instance admins can still sign in with their
+  password at `/login?password=1`, change it, and set it from a reset link
+  (`llmobs admin reset-password`) (D-S-3).
 - Deletion, project and organization drop dialogs no longer promise erasure within 24 hours: data is hidden within seconds, removed within 24 hours, and its stored copies are purged after the storage grace period (`storage.gc.grace`, D181).
 - Alert email is capped at 1,000 messages per org per UTC day, "Send test" is limited to 5 a minute
   per user and per channel, and when signup is open an email channel may only list verified

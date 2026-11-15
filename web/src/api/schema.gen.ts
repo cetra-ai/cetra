@@ -2434,7 +2434,10 @@ export interface components {
             org_create_allowed: boolean;
             /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
             org_create_url?: string;
-            /** @description Password login is enabled. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is set. */
+            /**
+             * @description Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+             *     set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
+             */
             password_enabled: boolean;
             /** @description Configured OAuth and OIDC providers. */
             providers: components["schemas"]["AuthProvider"][];
