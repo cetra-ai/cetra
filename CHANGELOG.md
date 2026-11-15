@@ -31,3 +31,5 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   the open one holds records, and deletes the segments it has flushed (D-A1-14).
 - `llmobs query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
   server does, instead of reading the rest of the statement as a string.
+- An export whose client stops reading for 30 s releases its query, and its memory admission, instead
+  of holding them until the connection closes.
