@@ -246,6 +246,30 @@ build-release: js-install
 check-release: build-release
     ./target/release/cetra version | grep -qx 'ui: embedded'
 
+# Local demo (docs/testing-locally.md): the release binary on target/demo, with a known admin,
+# org `demo`, project `demo` and ingest key. The mock LLM on 127.0.0.1 needs private egress.
+demo_key := "sk-llmobs-demo0000000000000000000000000000"
+
+# Start the release binary (`just build-release` first) on target/demo with a known admin
+demo-serve:
+    test -x target/release/llmobs || { echo "run 'just build-release' first"; exit 1; }
+    LLMOBS_DATA_DIR=target/demo/data \
+    LLMOBS_INIT_ADMIN_EMAIL=admin@demo.test \
+    LLMOBS_INIT_ADMIN_PASSWORD=demo-password \
+    LLMOBS_INIT_ORG=demo \
+    LLMOBS_INIT_PROJECT=demo \
+    LLMOBS_INIT_SECRET_KEY={{demo_key}} \
+    LLMOBS_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true \
+    ./target/release/llmobs serve
+
+# Send demo traces and scores to the server started by `just demo-serve`
+demo-seed traces="300":
+    python3 tools/demo/seed.py --key {{demo_key}} --traces {{traces}} --email admin@demo.test --password demo-password
+
+# OpenAI-compatible mock judge and webhook receiver on 127.0.0.1:8090
+demo-llm:
+    python3 tools/demo/mock_llm.py --port 8090
+
 # Run the binary with arguments, e.g. `just run --version`
 run *args:
     cargo run -p cetra-cli -- {{args}}

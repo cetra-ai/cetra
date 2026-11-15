@@ -118,6 +118,7 @@ tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
 tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
 fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
+tools/demo/                  demo seed script and mock LLM judge for trying llmobs by hand (docs/testing-locally.md)
 docs/                        decisions, specs, plans, research
 ```
 
@@ -177,6 +178,7 @@ Run everything through `just`:
 | `just fuzz-seed` | write the fuzz seed files from the test fixtures (track R M3) |
 | `just fuzz-cmin` | minimize every corpus, then fit the size and file-count budgets |
 | `just fuzz-lock` · `just fuzz-tools` | write `fuzz/Cargo.lock` from the root lock · install the fuzz toolchain and cargo-fuzz |
+| `just demo-serve` · `just demo-llm` · `just demo-seed [traces]` | run the release binary on `target/demo` with a known admin, a mock LLM judge and webhook receiver, and demo traces and scores (`docs/testing-locally.md`) |
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
