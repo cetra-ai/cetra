@@ -79,6 +79,8 @@ parquet = { version = "59.2", default-features = false, features = [
 object_store = "0.13"
 # Structured fuzz inputs (track R M3). Storage uses it under cfg(fuzzing) and in tests.
 arbitrary = { version = "1.5.0", features = ["derive"] }
+# Bounded LZ4 frame check of WAL IPC buffers (track R M3). The version and features arrow-ipc uses.
+lz4_flex = { version = "0.14.0", default-features = false, features = ["std", "frame"] }
 # catalog.db (D39). `macros` exists for `sqlx::migrate!` only. Queries use the
 # runtime API, not `query!`, so no `DATABASE_URL` is required. `sqlite` bundles
 # SQLite so the binary does not need a system library.

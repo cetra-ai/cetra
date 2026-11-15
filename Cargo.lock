@@ -3616,6 +3616,7 @@ dependencies = [
  "hex",
  "humantime-serde",
  "llmobs-core",
+ "lz4_flex",
  "object_store",
  "parquet",
  "proptest",

@@ -23,6 +23,7 @@ datafusion-datasource.workspace = true
 futures.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
+lz4_flex = { workspace = true }
 # `fs` is already a default feature of the pin. `aws` is the S3 backend (D119).
 object_store = { workspace = true, features = ["fs", "aws"] }
 parquet.workspace = true

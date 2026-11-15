@@ -126,9 +126,15 @@ impl Drop for Scratch {
 /// a caught decoder panic would look like a crash. An uncaught panic still
 /// aborts: the entries are called from libFuzzer's `extern "C"` wrapper, which
 /// cannot unwind.
+///
+/// A no-op outside fuzzing builds, so `cargo test` keeps every other test's panic
+/// message.
 fn quiet_caught_panics() {
-    static HOOK: OnceLock<()> = OnceLock::new();
-    HOOK.get_or_init(|| std::panic::set_hook(Box::new(|_| {})));
+    #[cfg(fuzzing)]
+    {
+        static HOOK: OnceLock<()> = OnceLock::new();
+        HOOK.get_or_init(|| std::panic::set_hook(Box::new(|_| {})));
+    }
 }
 
 /// Frames arbitrary bytes as WAL records and decodes them; the IPC payload is read as a batch.

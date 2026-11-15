@@ -455,20 +455,31 @@ mod tests {
         assert_eq!(queue.take(usize::MAX).len(), QUEUE_MAX);
     }
 
-    /// The minimized `parquet_file` input (`fuzz/regressions/parquet_file`): an
-    /// 8-byte file whose footer claims 0x152f bytes of metadata, with a footer
-    /// hint of 0x00ffffff. Upstream's push decoder underflows on it
-    /// (parquet `push_decoder.rs:391`). The guard turns that panic into a decode
-    /// failure, so every read reports the file corrupt.
+    /// The committed `parquet_file` regression input (21 bytes, read as the fuzz
+    /// entry reads it): table byte 0x19 (traces), footer hint 0x00ffffff, a time
+    /// bound, then the file. The file is the 8 bytes `2f 15 00 00 "PAR1"`, whose
+    /// footer claims 0x152f bytes of metadata. Upstream's push decoder underflows
+    /// on it (parquet `push_decoder.rs:391`). The guard turns that panic into a
+    /// decode failure, so every read reports the file corrupt.
     #[test]
     fn a_footer_claiming_more_metadata_than_the_file_is_corrupt() {
         const DAY_NS: i64 = 86_400_000_000_000;
-        let file = Bytes::from_static(b"\x2f\x15\x00\x00PAR1");
+        const REGRESSION: &[u8] = include_bytes!(
+            "../../../fuzz/regressions/parquet_file/min-crash-3c4803703fcac6d6394de27518277ee19c29540a"
+        );
+        assert_eq!(REGRESSION.len(), 21);
+        let footer_hint = u64::from(u32::from_le_bytes(REGRESSION[1..5].try_into().unwrap()));
+        let file = Bytes::copy_from_slice(&REGRESSION[13..]);
+        assert_eq!(
+            &file[..4],
+            &0x152f_u32.to_le_bytes(),
+            "the footer claims 0x152f bytes"
+        );
         let size = u64::try_from(file.len()).unwrap();
         let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
         let runtime = crate::fuzz_entry::runtime();
 
-        let traces = crate::fuzz_entry::parquet_meta(FileTable::Traces, size, 0x00ff_ffff);
+        let traces = crate::fuzz_entry::parquet_meta(FileTable::Traces, size, footer_hint);
         runtime.block_on(async {
             store
                 .put(
@@ -496,7 +507,7 @@ mod tests {
             );
         });
 
-        let spans = crate::fuzz_entry::parquet_meta(FileTable::Spans, size, 0x00ff_ffff);
+        let spans = crate::fuzz_entry::parquet_meta(FileTable::Spans, size, footer_hint);
         runtime.block_on(async {
             store
                 .put(

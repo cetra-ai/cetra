@@ -56,7 +56,7 @@ Because rows may sit in the day before or after their own date, day pruning (§6
 
 One WAL per table (`spans`, `scores`), each a sequence of segment files. A segment is named with the seq of its first record, zero-padded to 20 digits, plus `.wal`. Segments rotate at `storage.wal.segment_bytes` (default 64 MiB). Rotation happens between groups, so one group can make a segment larger than the limit.
 
-Record format. Every integer is little-endian. The checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. A payload longer than 256 MiB is rejected. Before decoding, every IPC buffer must lie inside its message body, and each LZ4 buffer's declared decompressed size must be at most 256 times its compressed length plus 64 bytes, with at most 1 GiB decompressed per record; a record that breaks either bound is corrupt.
+Record format. Every integer is little-endian. The checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. A payload longer than 256 MiB is rejected. The writer rejects a batch whose decoded size exceeds 1 GiB. Before decoding, a reader checks that every IPC buffer lies inside its message body, that the codec is LZ4 frame (any other codec is corrupt), and each LZ4 buffer's size prefix: -1 is stored raw, 0 is empty, and any other size must be at most 256 times its compressed length plus 64 bytes and must equal what its LZ4 frame decodes to. The decoded size of a record, stored-raw buffers included, is at most 1 GiB; a record that breaks any of these is corrupt.
 
 ```
 u32  payload_len
