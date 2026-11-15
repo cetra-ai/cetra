@@ -58,6 +58,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- A WAL record with a corrupt compressed-buffer length is rejected as corrupt instead of aborting the server at startup.
 - A Parquet decoder panic on a corrupt data file no longer drops the request, stops compaction or
   prevents startup: the read fails, and the file is verified and quarantined (track R).
 - The default query memory pool now honours a systemd `MemoryMax=` (or any cgroup limit of the process), not only a container's limit.
