@@ -107,7 +107,10 @@ pub use reads::{
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
-pub use sql::{EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_ROWS, SqlColumn, SqlJson, SqlRequest};
+pub use sql::{
+    EXPORT_MAX_CHUNK_BYTES, EXPORT_MAX_ROWS, ExportFormat, SQL_MAX_RESULT_BYTES, SQL_MAX_ROWS,
+    SqlColumn, SqlJson, SqlRequest,
+};
 pub use views::{
     ColumnInfo, ColumnKind, FunctionInfo, ProjectQuery, QueryContext, SqliteView, TimeWindow,
     ViewColumns, ViewName, function_catalog, view_catalog,
@@ -462,9 +465,10 @@ impl Storage {
         if let Err(error) =
             gc::collect_once(&committer, &objects, &hooks, catalog::now_ns(), gc::MAX_AGE).await
         {
-            // The error names the object key. Keys contain project ids.
+            // The label only: the error names a staged path, which can be a
+            // media path (spec 03 §9).
             tracing::warn!("staged object collection failed");
-            tracing::debug!(%error, "staged object collection error");
+            tracing::debug!(error = error.label(), "staged object collection error");
         }
         if let Err(error) = gc::collect_obsolete(
             &committer,
@@ -475,9 +479,9 @@ impl Storage {
         )
         .await
         {
-            // The error names the object key. Keys contain project ids.
+            // The label only: the error names an object key.
             tracing::warn!("obsolete file collection failed");
-            tracing::debug!(%error, "obsolete file collection error");
+            tracing::debug!(error = error.label(), "obsolete file collection error");
         }
         let media = MediaGc {
             committer: Arc::clone(&committer),

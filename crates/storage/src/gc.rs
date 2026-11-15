@@ -93,9 +93,10 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
                     )
                     .await
                     {
-                        // The error names the object key. Keys contain project ids.
+                        // The label only: the error names a staged path, which
+                        // can be a media path (spec 03 §9).
                         tracing::warn!("staged object collection failed");
-                        tracing::debug!(%error, "staged object collection error");
+                        tracing::debug!(error = error.label(), "staged object collection error");
                     }
                     if let Err(error) = collect_obsolete(
                         &start.committer,
@@ -106,9 +107,9 @@ pub(crate) fn spawn(start: GcStart) -> GcHandle {
                     )
                     .await
                     {
-                        // The error names the object key. Keys contain project ids.
+                        // The label only: the error names an object key.
                         tracing::warn!("obsolete file collection failed");
-                        tracing::debug!(%error, "obsolete file collection error");
+                        tracing::debug!(error = error.label(), "obsolete file collection error");
                     }
                     if tokio::time::Instant::now() >= next_media {
                         if let Err(error) = start.media.collect_all(now_ns()).await {
@@ -155,12 +156,12 @@ pub(crate) async fn collect_once(
             StagedRemoval::Deleted { bytes: size } => {
                 deleted += 1;
                 bytes = bytes.saturating_add(size);
-                tracing::debug!(path, "deleted staged object");
+                tracing::debug!(path = %loggable_path(path), "deleted staged object");
             }
             StagedRemoval::Published => {
                 conflicts += 1;
                 tracing::error!("staged object is also a catalog file; left in place");
-                tracing::debug!(path, "staged path is present in data_files");
+                tracing::debug!(path = %loggable_path(path), "staged path is present in data_files");
             }
             StagedRemoval::MediaStored => {
                 // No fields: the path holds the blob's hash (spec 03 §9).
@@ -173,6 +174,20 @@ pub(crate) async fn collect_once(
         tracing::info!(deleted, bytes, conflicts, "collected staged objects");
     }
     Ok(())
+}
+
+/// A staged path for logs. Staged rows include media paths,
+/// `media/<project>/<sha256>`, and the SHA-256 identifies the blob's content
+/// (spec 03 §9), so a media path logs only `media/<project>`. Other paths hold
+/// project ids and UUIDs only and are logged as they are.
+fn loggable_path(path: &str) -> String {
+    match path.strip_prefix("media/") {
+        Some(rest) => match rest.split_once('/') {
+            Some((project, _sha)) => format!("media/{project}"),
+            None => "media".to_owned(),
+        },
+        None => path.to_owned(),
+    }
 }
 
 fn cutoff_ns(now: i64, max_age: Duration) -> i64 {
@@ -357,7 +372,7 @@ mod tests {
     use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
     use sha2::{Digest, Sha256};
 
-    use super::{ObsoleteReport, OrphanReport, collect_obsolete, collect_once};
+    use super::{ObsoleteReport, OrphanReport, collect_obsolete, collect_once, loggable_path};
     use crate::MediaBlob;
     use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTable, now_ns};
     use crate::config::{
@@ -942,6 +957,39 @@ mod tests {
             ObsoleteReport::default()
         );
         storage.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn media_paths_log_the_project_only() {
+        let sha = "ab".repeat(32);
+        assert_eq!(
+            loggable_path(&format!("media/p-1/{sha}")),
+            "media/p-1",
+            "the hash must not reach the log"
+        );
+        assert_eq!(loggable_path("media/p-1"), "media");
+        assert_eq!(loggable_path("media/"), "media");
+    }
+
+    #[test]
+    fn other_staged_paths_are_logged_as_they_are() {
+        assert_eq!(
+            loggable_path("tables/spans/0190f1a2-7c3d-7e4f-8a9b-0c1d2e3f4a5b/x.parquet"),
+            "tables/spans/0190f1a2-7c3d-7e4f-8a9b-0c1d2e3f4a5b/x.parquet"
+        );
+        assert_eq!(loggable_path("mediaish/p/x"), "mediaish/p/x");
+    }
+
+    #[test]
+    fn gc_errors_log_a_static_label() {
+        let object = GcError::Object(crate::error::ObjectError::io(
+            "deleting object",
+            Path::new("media/p-1/secret-hash"),
+            std::io::Error::other("boom"),
+        ));
+        assert_eq!(object.label(), "object");
+        assert!(!object.label().contains("secret-hash"));
+        assert_eq!(GcError::Fault.label(), "fault");
     }
 
     // ---- Orphan collection (N M2, D-N-21) ----

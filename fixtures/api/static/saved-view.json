@@ -1,0 +1,15 @@
+{
+  "id": "01900000-0000-7000-8000-000000000211",
+  "kind": "sql",
+  "name": "Cost per model per day",
+  "state": {
+    "query": "SELECT model, date_trunc('day', start_time) AS day, sum(cost_total) AS cost FROM spans WHERE span_kind = 'llm' GROUP BY model, day ORDER BY day, cost DESC",
+    "params": {},
+    "range": "24h"
+  },
+  "owner_user_id": "01900000-0000-7000-8000-000000000100",
+  "shared": false,
+  "is_default": false,
+  "created_at": "2026-01-01T09:00:00.000000000Z",
+  "updated_at": "2026-01-01T09:00:00.000000000Z"
+}
