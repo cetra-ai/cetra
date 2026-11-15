@@ -32,6 +32,7 @@ pub(super) struct ScoreVersion {
 }
 
 /// One project's state.
+#[derive(Clone)]
 pub(super) struct ProjectModel {
     /// Which project: `trace_shape` needs it for user, session and environment.
     pub(super) project: P,
@@ -49,6 +50,7 @@ pub(super) struct ProjectModel {
 }
 
 /// A registered deletion, as the model sees it.
+#[derive(Clone)]
 pub(super) struct ModelDeletion {
     pub(super) id: Uuid,
     pub(super) cutoff: i64,
@@ -60,6 +62,7 @@ pub(super) struct ModelDeletion {
     pub(super) applied_seen: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct Model {
     pub(super) a: ProjectModel,
     pub(super) b: ProjectModel,
@@ -91,7 +94,7 @@ pub(super) struct ScorePush {
 
 /// One WAL (`spans` or `scores`) as a lossy crash sees it (R2.9): which of its records are
 /// durable, and which model rows each record carried.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct Wal<T> {
     /// One entry per record appended in this life, in order: the rows the model stored for it.
     /// An entry is empty when the keep rule kept nothing; the record is in the WAL all the same.

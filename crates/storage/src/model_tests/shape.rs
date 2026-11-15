@@ -67,6 +67,11 @@ impl P {
     /// The project's number. Mixed into the content so the projects differ; at most 31 (16
     /// lanes), which the score id's 8-bit salt field holds.
     pub(super) fn salt(self) -> u8 {
+        debug_assert!(
+            self.0 < 32,
+            "project {} does not fit the 5-bit salt",
+            self.0
+        );
         self.0
     }
 }
@@ -109,14 +114,17 @@ pub(super) fn trace_shape(project: P, trace: u8) -> TraceShape {
     }
 }
 
-/// The id of the deletion an op registers at `clock` (R2.11). A UUIDv7-shaped value with a fixed
-/// timestamp and the clock in its random bits, so a parent that replays the same ops registers the
-/// same ids. `ops::apply` raises the clock by at least a microsecond per op, so the ids of one data
-/// directory differ. The top two bits of the clock are zero, so the variant bits do not collide.
-pub(super) fn deletion_id(clock: i64) -> Uuid {
+/// The id of the deletion a project's op registers at `clock` (R2.11). A UUIDv7-shaped value with a
+/// fixed timestamp, the project's salt in byte 7 and the clock in the last eight bytes, so a parent
+/// that replays the same ops registers the same ids. Lanes share one harness and start their clocks
+/// at the same value, so the salt keeps their ids apart (`Deletion.id` is a global catalog key).
+/// `ops::apply` raises the clock by at least a microsecond per op, so the ids of one project differ.
+/// The top two bits of the clock are zero, so the variant bits do not collide.
+pub(super) fn deletion_id(project: P, clock: i64) -> Uuid {
     debug_assert!(clock >= 0, "a deletion id needs a non-negative clock");
     const FIXED_MILLIS: u64 = 1_700_000_000_000;
     let mut random = [0_u8; 10];
+    random[1] = project.salt();
     random[2..].copy_from_slice(&clock.to_be_bytes());
     uuid::Builder::from_unix_timestamp_millis(FIXED_MILLIS, &random).into_uuid()
 }
@@ -287,6 +295,36 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    /// The id before the project salt existed: the clock in the random bits, byte 7 zero.
+    fn deletion_id_without_salt(clock: i64) -> Uuid {
+        const FIXED_MILLIS: u64 = 1_700_000_000_000;
+        let mut random = [0_u8; 10];
+        random[2..].copy_from_slice(&clock.to_be_bytes());
+        uuid::Builder::from_unix_timestamp_millis(FIXED_MILLIS, &random).into_uuid()
+    }
+
+    #[test]
+    fn deletion_ids_of_lanes_at_one_clock_differ() {
+        for clock in [0, 1, 1_000, 12 * HOUR_NS] {
+            assert_ne!(
+                deletion_id(P(0), clock),
+                deletion_id(P(2), clock),
+                "lane 0 and lane 1 register distinct deletion ids at clock {clock}"
+            );
+            assert_ne!(deletion_id(P(2), clock), deletion_id(P(3), clock));
+            assert_eq!(
+                deletion_id(P::A, clock),
+                deletion_id_without_salt(clock),
+                "project A's deletion ids are unchanged at clock {clock}"
+            );
+        }
+        assert_eq!(
+            deletion_id(P(2), 7),
+            deletion_id(P(2), 7),
+            "a fixed input gives a fixed id"
+        );
+    }
 
     #[test]
     fn p_ids_are_distinct_and_a_b_unchanged() {

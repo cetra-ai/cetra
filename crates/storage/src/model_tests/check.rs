@@ -130,10 +130,11 @@ pub(super) fn check_dropped(h: &Harness, model: &Model, index: usize) {
     for deletion in &model.b.deletions {
         let status = h
             .block_on(h.storage().deletion_status(deletion.id))
-            .expect("deletion_status of a deletion of B");
+            .expect("deletion_status of a deletion of the dropped project");
         assert!(
             matches!(status, DeletionStatus::Applied { .. }),
-            "op {index}, project B: deletion {} of the dropped project reads {status:?}, expected Applied",
+            "op {index}, project {:?}: deletion {} of the dropped project reads {status:?}, expected Applied",
+            model.b.project,
             deletion.id
         );
     }

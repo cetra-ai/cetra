@@ -1519,8 +1519,9 @@ async fn commit_inner(
         inner.flushed[table_index(table)] = sequence;
     }
     inner.catalog = Arc::clone(&next);
-    // `current` is the catalog this commit replaced: once it is dropped, the
-    // versions only it held are dead and their entries can go.
+    // `current` is the catalog this commit replaced. Entries whose versions no
+    // snapshot or catalog holds any more can go; the previous publish still holds
+    // this commit's replaced versions, so they go at the next commit.
     drop(current);
     inner.superseded.retain(|_, versions| {
         versions.retain(|version| version.strong_count() > 0);
@@ -3048,6 +3049,62 @@ mod tests {
                 ("spans/other".to_owned(), 0),
                 ("spans/raised".to_owned(), 3),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_superseded_version_is_pruned_once_no_snapshot_holds_it() {
+        let (_dir, committer) = opened().await;
+        let spans = project("018f6b4e-7c1a-7c1a-8c1a-000000000084");
+        let raised = file(FileTable::Spans, spans, day(1), 1, "spans/raised");
+        let raised_id = raised.id;
+        committer.stage(&["spans/raised".to_owned()]).await.unwrap();
+        let add = CatalogEdit {
+            add: vec![raised],
+            remove: Vec::new(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: Vec::new(),
+            quarantine: Vec::new(),
+        };
+        committer.commit(&add, |_| {}).await.unwrap();
+        let before = committer.catalog().await;
+
+        let raise = CatalogEdit {
+            add: Vec::new(),
+            remove: Vec::new(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: vec![(raised_id, 3)],
+            quarantine: Vec::new(),
+        };
+        committer.commit(&raise, |_| {}).await.unwrap();
+        assert_eq!(
+            committer
+                .inner
+                .lock()
+                .await
+                .superseded
+                .get(&raised_id)
+                .map(Vec::len),
+            Some(1),
+            "the replaced version is kept while the snapshot holds it"
+        );
+
+        drop(before);
+        committer.stage(&["spans/other".to_owned()]).await.unwrap();
+        let other = CatalogEdit {
+            add: vec![file(FileTable::Spans, spans, day(1), 2, "spans/other")],
+            remove: Vec::new(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: Vec::new(),
+            quarantine: Vec::new(),
+        };
+        committer.commit(&other, |_| {}).await.unwrap();
+        assert!(
+            committer.inner.lock().await.superseded.is_empty(),
+            "the next commit prunes the versions no snapshot holds"
         );
     }
 

@@ -1006,7 +1006,7 @@ fn delete_traces(
         Err(error) => return read_failed_under_faults(harness, before, &error),
     };
     let covered: BTreeSet<u8> = targets.union(&evals).copied().collect();
-    let id = deletion_id(clock);
+    let id = deletion_id(project, clock);
     step(StepEvent::Begin);
     register(
         harness,
@@ -1066,7 +1066,7 @@ fn delete_user(
         Err(error) => return read_failed_under_faults(harness, before, &error),
     };
     let covered: BTreeSet<u8> = expected_traces.union(&evals).copied().collect();
-    let id = deletion_id(clock);
+    let id = deletion_id(project, clock);
     step(StepEvent::Begin);
     register(
         harness,

@@ -708,7 +708,9 @@ fn regression_compaction_restart_resend() {
 }
 
 /// Lane 1 (projects 2 and 3) runs M1's `regression_compaction_restart_resend` ops on its first
-/// project, then drops its second project and settles (R6.1).
+/// project, then writes scores, deletes them and traces and a user, and applies retention on both
+/// projects, before it drops its second project and settles (R6.1). Retention never picks `D + 2`
+/// (`RETENTION_DAYS`), and trace 2 (class 2) is never re-sent.
 #[test]
 fn a_lane_one_case_runs() {
     let lane = (P(2), P(3));
@@ -728,6 +730,58 @@ fn a_lane_one_case_runs() {
                 project: lane.0,
                 trace: 1,
                 pick: 0,
+            },
+            Op::Append {
+                project: lane.1,
+                trace: 0,
+                count: 3,
+                split: false,
+            },
+            Op::Append {
+                project: lane.1,
+                trace: 6,
+                count: 2,
+                split: true,
+            },
+            Op::Score {
+                project: lane.0,
+                target: 1,
+                name: 0,
+            },
+            Op::Score {
+                project: lane.0,
+                target: 13,
+                name: 0,
+            },
+            Op::Score {
+                project: lane.1,
+                target: 0,
+                name: 1,
+            },
+            Op::StaleScore {
+                project: lane.0,
+                pick: 0,
+                back: 0,
+            },
+            Op::DeleteScore {
+                project: lane.0,
+                pick: 1,
+            },
+            Op::DeleteTraces {
+                project: lane.1,
+                picks: vec![6],
+            },
+            Op::DeleteUser {
+                project: lane.0,
+                user: 0,
+            },
+            Op::Retention {
+                project: lane.0,
+                keep: 0,
+            },
+            Op::Retention {
+                project: lane.1,
+                keep: 1,
             },
             Op::DropB,
             Op::Settle,

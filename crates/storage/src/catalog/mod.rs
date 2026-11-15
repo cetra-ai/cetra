@@ -368,6 +368,57 @@ mod tests {
     }
 
     #[test]
+    fn a_raise_replaces_the_file_and_returns_the_old_arc() {
+        let first = file(10, day(2));
+        let raised_id = first.id;
+        let added = CatalogEdit {
+            add: vec![first, file(20, day(2))],
+            remove: Vec::new(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: Vec::new(),
+            quarantine: Vec::new(),
+        };
+        let (before, _, _) = Catalog::empty().apply(&added).unwrap();
+        let pre_raise = Arc::clone(
+            before
+                .files(FileTable::Spans, project(), day(2)..=day(2))
+                .next()
+                .unwrap(),
+        );
+        assert_eq!(pre_raise.id, raised_id);
+
+        let raise = CatalogEdit {
+            add: Vec::new(),
+            remove: Vec::new(),
+            flushed_seq: None,
+            sources: Vec::new(),
+            raise: vec![(raised_id, 7)],
+            quarantine: Vec::new(),
+        };
+        let (after, removed, superseded) = before.apply(&raise).unwrap();
+        assert!(removed.is_empty());
+        assert_eq!(superseded.len(), 1);
+        assert!(Arc::ptr_eq(&superseded[0], &pre_raise));
+        let now: Vec<_> = after
+            .files(FileTable::Spans, project(), day(2)..=day(2))
+            .collect();
+        assert_eq!(now.len(), 2);
+        assert_eq!(now[0].id, raised_id);
+        assert_eq!(now[0].deletions_applied_seq, 7);
+        assert!(!Arc::ptr_eq(now[0], &pre_raise));
+        assert_eq!(
+            before
+                .files(FileTable::Spans, project(), day(2)..=day(2))
+                .next()
+                .unwrap()
+                .deletions_applied_seq,
+            0,
+            "the older catalog keeps the version it published"
+        );
+    }
+
+    #[test]
     fn files_are_ordered_and_a_reversed_range_is_empty() {
         let edit = CatalogEdit {
             add: vec![file(20, day(2)), file(10, day(2)), file(5, day(3))],
