@@ -413,3 +413,44 @@ fn stale_score_after_day_close_of_tombstone() {
         },
     ]);
 }
+
+/// M1-2 (spec 03 § 5): a compaction that day-closes the scores partition drops the tombstone of a
+/// deleted score, so a stale version of that key would read as live. `StaleScore` leaves such keys
+/// out, so this case makes no call. Without that rule the stale version is written and the case
+/// fails.
+#[test]
+fn stale_score_skips_deleted_keys() {
+    let ops = [
+        Op::Score {
+            project: P::A,
+            target: 0,
+            name: 0,
+        },
+        Op::DeleteScore {
+            project: P::A,
+            pick: 0,
+        },
+        Op::Compact { hours: 72 },
+        Op::StaleScore {
+            project: P::A,
+            pick: 0,
+            back: 1,
+        },
+    ];
+    run_case(&ops);
+
+    let mut harness = Harness::new();
+    let mut model = Model::new();
+    let mut clock = midnight(day(0)) + 12 * HOUR_NS;
+    for op in &ops[..3] {
+        apply(op, &mut harness, &mut model, &mut clock);
+    }
+    let versions = model.a.scores.values().next().map(Vec::len);
+    apply(&ops[3], &mut harness, &mut model, &mut clock);
+    // A call would also write the model, so an unchanged version count means no call.
+    assert_eq!(
+        model.a.scores.values().next().map(Vec::len),
+        versions,
+        "StaleScore wrote a version of a deleted key"
+    );
+}

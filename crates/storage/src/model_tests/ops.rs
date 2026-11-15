@@ -90,7 +90,8 @@ pub(super) enum Op {
         pick: u8,
     },
     /// Writes an older version of one score the model has written (`pick % len`, in key
-    /// order; a no-op when the project has none). `back % 3 == 0` re-sends the newest
+    /// order, among the keys whose live winner is not deleted, see `stale_candidates`; a no-op
+    /// when there is none). `back % 3 == 0` re-sends the newest
     /// version `last` at a later ingest: a tie on `updated_at`, broken by ingest. Otherwise
     /// it writes `max(1, last - 1)`. Its `updated_at` is `created_at + version`, so the live
     /// score stays the newest version, whatever its ingest.
@@ -448,6 +449,32 @@ fn picked_score(model: &Model, project: P, pick: u8) -> Option<ScoreKey> {
     Some(keys[usize::from(pick) % keys.len()])
 }
 
+/// The keys `StaleScore` may pick: those whose live winner (the visible version with the greatest
+/// `(created_at + version, ingest)`, as `expected_scores` orders them) is not a tombstone. A
+/// compaction that day-closes the scores partition drops a tombstone, so after it a stale version
+/// reads as live while the model still expects the tombstone to win (known limit M1-2, spec 03 § 5).
+/// Such keys are left out, and a `StaleScore` with no candidate is a no-op without a call.
+fn stale_candidates(model: &Model, project: P) -> Vec<ScoreKey> {
+    let state = model.project(project);
+    state
+        .scores
+        .iter()
+        .filter(|(key, versions)| {
+            versions
+                .iter()
+                .filter(|version| !state.covers_score(key, version.ingest))
+                .max_by_key(|version| {
+                    (
+                        score_created_at(key) + i64::from(version.version),
+                        version.ingest,
+                    )
+                })
+                .is_some_and(|winner| !winner.deleted)
+        })
+        .map(|(key, _)| *key)
+        .collect()
+}
+
 /// The newest version the model has of `key`.
 fn last_version(model: &Model, key: ScoreKey) -> u32 {
     model.project(key.project).scores[&key]
@@ -485,9 +512,11 @@ fn delete_score(harness: &Harness, model: &mut Model, project: P, pick: u8, cloc
 /// Writes an older (or equal, see `Op::StaleScore`) version of a score the model has written.
 /// The version repeats the `deleted` flag of the stored version it names, if one exists.
 fn stale_score(harness: &Harness, model: &mut Model, project: P, pick: u8, back: u8, clock: i64) {
-    let Some(key) = picked_score(model, project, pick) else {
+    let candidates = stale_candidates(model, project);
+    if candidates.is_empty() {
         return;
-    };
+    }
+    let key = candidates[usize::from(pick) % candidates.len()];
     let last = last_version(model, key);
     let version = if back.is_multiple_of(3) {
         last
