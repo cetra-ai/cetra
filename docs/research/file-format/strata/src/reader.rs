@@ -8,6 +8,7 @@ use futures::future::try_join_all;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
+use crate::io::ScanKind;
 use crate::narrow::{Dictionary, decode_chunk};
 use crate::payload::read_payload_column;
 use crate::segment::{Kind, SegmentRef};
@@ -105,19 +106,30 @@ async fn read_narrow(file: &StrataFile, column: usize, field: &Field) -> Result<
         }
     };
 
-    let bodies = try_join_all(entries.iter().map(|entry| async move {
-        if entry.segment_len == 0 {
-            return Ok::<Option<Vec<u8>>, StrataError>(None);
-        }
-        let segment = SegmentRef {
-            offset: entry.segment_offset,
-            len: entry.segment_len,
-        };
-        file.read_segment(&segment, Kind::NarrowChunk)
-            .await
-            .map(Some)
-    }))
-    .await?;
+    // The chunks are one scan wave. Constant chunks have no segment and are decoded without one.
+    let segments: Vec<(SegmentRef, Kind)> = entries
+        .iter()
+        .filter(|entry| entry.segment_len > 0)
+        .map(|entry| {
+            let segment = SegmentRef {
+                offset: entry.segment_offset,
+                len: entry.segment_len,
+            };
+            (segment, Kind::NarrowChunk)
+        })
+        .collect();
+    let mut fetched = file.fetch(&segments, ScanKind::Scan).await?.into_iter();
+    let mut bodies: Vec<Option<Vec<u8>>> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        bodies.push(if entry.segment_len == 0 {
+            None
+        } else {
+            Some(fetched.next().ok_or(StrataError::Corrupt {
+                what: "segment range",
+                offset: entry.segment_offset,
+            })?)
+        });
+    }
 
     let mut arrays = Vec::with_capacity(entries.len());
     for (entry, body) in entries.iter().zip(&bodies) {

@@ -9,11 +9,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-use futures::future::try_join_all;
 use memchr::memmem::Finder;
 
-use super::frames::{FrameEntry, decode_frame, frame_of};
-use super::header::{EdgeGroup, PayloadHeader};
+use super::frames::{decode_fetched_frame, frame_of};
+use super::header::PayloadHeader;
 use super::read::{read_header, read_rows};
 use super::trigram::{add_trigrams, filter_bit, get_bit};
 use super::{EDGE, EDGE_ENTRY_LEN, EDGE_GROUP_CHUNKS, FILTER_MIN_BITS, MAX_NEEDLE, ROLLUP_BITS};
@@ -21,6 +20,7 @@ use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::format::Cursor;
 use crate::hot::{DirectoryRecord, Layer};
+use crate::io::ScanKind;
 use crate::segment::{Kind, SegmentRef};
 
 /// The decoded body of one frame: its raw bytes and the ranges of its chunks in them.
@@ -300,18 +300,26 @@ pub(crate) async fn payload_contains(
             _ => true,
         })
         .collect();
-    let fetched = try_join_all(candidates.iter().map(|&f| {
-        let entry = header.frames.get(f);
-        async move {
-            let entry = entry.ok_or(StrataError::Corrupt {
-                what: "payload frame",
-                offset: at,
-            })?;
-            read_frame(file, entry).await
-        }
-    }))
-    .await?;
-    let decoded: HashMap<usize, Decoded> = candidates.iter().copied().zip(fetched).collect();
+    // One point wave for the candidate frames.
+    let frame_corrupt = || StrataError::Corrupt {
+        what: "payload frame",
+        offset: at,
+    };
+    let mut frame_segments = Vec::with_capacity(candidates.len());
+    for &f in &candidates {
+        let entry = header.frames.get(f).ok_or_else(frame_corrupt)?;
+        let segment = SegmentRef {
+            offset: entry.offset,
+            len: entry.len,
+        };
+        frame_segments.push((segment, Kind::PayloadFrame));
+    }
+    let raws = file.fetch(&frame_segments, ScanKind::Point).await?;
+    let mut decoded: HashMap<usize, Decoded> = HashMap::with_capacity(candidates.len());
+    for (&f, raw) in candidates.iter().zip(raws) {
+        let entry = header.frames.get(f).ok_or_else(frame_corrupt)?;
+        decoded.insert(f, decode_fetched_frame(entry, raw)?);
+    }
     let frames_read = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
 
     // Matches inside one chunk.
@@ -352,22 +360,35 @@ pub(crate) async fn payload_contains(
         .map(|&(l, _)| l as usize / EDGE_GROUP_CHUNKS)
         .collect();
     let group_list: Vec<usize> = groups_needed.into_iter().collect();
-    let fetched_groups = try_join_all(group_list.iter().map(|&g| {
-        let group = header.edge_groups.get(g);
-        let count = edge_group_len(header.n_chunks, g);
-        async move {
-            match (group, count) {
-                (Some(group), Some(count)) => read_edge_group(file, group, count).await,
-                _ => Err(StrataError::Corrupt {
+    // One point wave for the edge groups needed; each entry is (group offset, tail count).
+    let mut group_segments = Vec::with_capacity(group_list.len());
+    let mut group_meta = Vec::with_capacity(group_list.len());
+    for &g in &group_list {
+        match (
+            header.edge_groups.get(g),
+            edge_group_len(header.n_chunks, g),
+        ) {
+            (Some(group), Some(count)) => {
+                let segment = SegmentRef {
+                    offset: group.offset,
+                    len: group.len,
+                };
+                group_segments.push((segment, Kind::PayloadEdges));
+                group_meta.push((group.offset, count));
+            }
+            _ => {
+                return Err(StrataError::Corrupt {
                     what: "payload chunk id",
                     offset: at,
-                }),
+                });
             }
         }
-    }))
-    .await?;
-    let groups: HashMap<usize, Vec<Vec<u8>>> =
-        group_list.iter().copied().zip(fetched_groups).collect();
+    }
+    let bodies = file.fetch(&group_segments, ScanKind::Point).await?;
+    let mut groups: HashMap<usize, Vec<Vec<u8>>> = HashMap::with_capacity(group_list.len());
+    for ((&g, body), (offset, count)) in group_list.iter().zip(&bodies).zip(group_meta) {
+        groups.insert(g, decode_edge_group(body, offset, count)?);
+    }
     let edge_groups_read = u32::try_from(groups.len()).unwrap_or(u32::MAX);
 
     // The window is the last `k` bytes of the left tail followed by the first `k` bytes of the
@@ -404,37 +425,6 @@ pub(crate) async fn payload_contains(
         frames_read,
         edge_groups_read,
     })
-}
-
-/// Reads one frame segment and decodes its chunk ranges.
-async fn read_frame(file: &StrataFile, entry: &FrameEntry) -> Result<Decoded> {
-    let segment = SegmentRef {
-        offset: entry.offset,
-        len: entry.len,
-    };
-    let raw = file.read_segment(&segment, Kind::PayloadFrame).await?;
-    if usize::try_from(entry.raw_len).ok() != Some(raw.len()) {
-        return Err(StrataError::Corrupt {
-            what: "payload frame length",
-            offset: entry.offset,
-        });
-    }
-    let ranges = decode_frame(&raw, entry.offset, entry.n_chunks)?;
-    Ok((raw, ranges))
-}
-
-/// Reads one edge group segment and decodes its `count` tails.
-async fn read_edge_group(
-    file: &StrataFile,
-    group: &EdgeGroup,
-    count: usize,
-) -> Result<Vec<Vec<u8>>> {
-    let segment = SegmentRef {
-        offset: group.offset,
-        len: group.len,
-    };
-    let body = file.read_segment(&segment, Kind::PayloadEdges).await?;
-    decode_edge_group(&body, group.offset, count)
 }
 
 /// Number of chunks in edge group `g` of a column with `n_chunks` chunks, or `None` when the

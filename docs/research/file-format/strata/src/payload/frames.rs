@@ -234,6 +234,22 @@ pub(crate) fn decode_frame(
     Ok(ranges)
 }
 
+/// Checks a fetched frame body against its entry, then decodes its chunk ranges. Returns the
+/// raw body with the ranges, which index into it.
+pub(crate) fn decode_fetched_frame(
+    entry: &FrameEntry,
+    raw: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<Range<usize>>)> {
+    if usize::try_from(entry.raw_len).ok() != Some(raw.len()) {
+        return Err(StrataError::Corrupt {
+            what: "payload frame length",
+            offset: entry.offset,
+        });
+    }
+    let ranges = decode_frame(&raw, entry.offset, entry.n_chunks)?;
+    Ok((raw, ranges))
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

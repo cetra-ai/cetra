@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::{Array, FixedSizeBinaryArray};
@@ -17,6 +18,7 @@ use crate::format::{
 };
 use crate::hot::{DirectoryRecord, HotTail, Layer, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
+use crate::io::{IoStats, ScanKind, coalesce};
 use crate::narrow::{BlockEntry, decode_chunk, is_utf8_map};
 use crate::segment::{Kind, SegmentRef, decode_segment};
 
@@ -144,6 +146,12 @@ pub struct StrataFile {
     key_filters: Mutex<HashMap<u32, Arc<KeyFilter>>>,
     /// Block-table entries of each column, read on first use.
     blocks: Mutex<HashMap<usize, Arc<Vec<BlockEntry>>>>,
+    /// Ranged GET requests issued by `fetch`.
+    requests: AtomicU64,
+    /// Bytes fetched by `fetch`.
+    bytes: AtomicU64,
+    /// Waves run by `fetch`.
+    waves: AtomicU64,
 }
 
 impl StrataFile {
@@ -334,6 +342,9 @@ impl StrataFile {
             sort_key_entries,
             key_filters: Mutex::new(HashMap::new()),
             blocks: Mutex::new(HashMap::new()),
+            requests: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            waves: AtomicU64::new(0),
         })
     }
 
@@ -391,11 +402,97 @@ impl StrataFile {
         }
     }
 
-    /// Reads and checks one segment of the given kind.
+    /// Reads and checks one segment of the given kind. It is one wave of one request.
     pub async fn read_segment(&self, r: &SegmentRef, kind: Kind) -> Result<Vec<u8>> {
-        let end = segment_end(r.offset, r.len, self.postscript.hot_offset)?;
-        let bytes = self.store.get_range(&self.path, r.offset..end).await?;
-        decode_segment(&bytes, r.offset, kind)
+        let mut bodies = self.fetch(&[(*r, kind)], ScanKind::Point).await?;
+        match (bodies.pop(), bodies.is_empty()) {
+            (Some(body), true) => Ok(body),
+            _ => Err(StrataError::Corrupt {
+                what: "segment range",
+                offset: r.offset,
+            }),
+        }
+    }
+
+    /// Reads, checks and decodes `segments` as one wave. Returns the decoded bodies in input
+    /// order.
+    ///
+    /// The byte ranges are merged by `kind`, the merged ranges are fetched concurrently, and
+    /// each segment is sliced out of its merged range and decoded. Nothing is counted when a
+    /// segment is malformed.
+    pub(crate) async fn fetch(
+        &self,
+        segments: &[(SegmentRef, Kind)],
+        kind: ScanKind,
+    ) -> Result<Vec<Vec<u8>>> {
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hot_offset = self.postscript.hot_offset;
+        let mut ranges = Vec::with_capacity(segments.len());
+        for (r, _) in segments {
+            let end = segment_end(r.offset, r.len, hot_offset)?;
+            ranges.push(r.offset..end);
+        }
+        let (merged, owner) = coalesce(&ranges, kind);
+        let parts = try_join_all(
+            merged
+                .iter()
+                .map(|range| self.store.get_range(&self.path, range.clone())),
+        )
+        .await?;
+
+        let mut bodies = Vec::with_capacity(segments.len());
+        for (((r, segment_kind), range), &m) in segments.iter().zip(&ranges).zip(&owner) {
+            let corrupt = || StrataError::Corrupt {
+                what: "segment range",
+                offset: r.offset,
+            };
+            let whole = merged.get(m).ok_or_else(corrupt)?;
+            let part = parts.get(m).ok_or_else(corrupt)?;
+            let at = range
+                .start
+                .checked_sub(whole.start)
+                .and_then(|p| usize::try_from(p).ok())
+                .ok_or_else(corrupt)?;
+            let len = range
+                .end
+                .checked_sub(range.start)
+                .and_then(|l| usize::try_from(l).ok())
+                .ok_or_else(corrupt)?;
+            let slice = part
+                .get(at..at.checked_add(len).ok_or_else(corrupt)?)
+                .ok_or_else(corrupt)?;
+            bodies.push(decode_segment(slice, r.offset, *segment_kind)?);
+        }
+
+        let fetched_bytes: u64 = merged
+            .iter()
+            .map(|range| range.end.saturating_sub(range.start))
+            .sum();
+        self.requests.fetch_add(
+            u64::try_from(merged.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.bytes.fetch_add(fetched_bytes, Ordering::Relaxed);
+        self.waves.fetch_add(1, Ordering::Relaxed);
+        Ok(bodies)
+    }
+
+    /// The I/O counters since the file was opened, or since the last `reset_io_stats`.
+    pub fn io_stats(&self) -> IoStats {
+        IoStats {
+            requests: self.requests.load(Ordering::Relaxed),
+            bytes: self.bytes.load(Ordering::Relaxed),
+            waves: self.waves.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Zeroes the I/O counters.
+    pub fn reset_io_stats(&self) {
+        self.requests.store(0, Ordering::Relaxed);
+        self.bytes.store(0, Ordering::Relaxed);
+        self.waves.store(0, Ordering::Relaxed);
     }
 
     /// The block-table entries of column `column`, in row order. They are read from the
@@ -426,14 +523,17 @@ impl StrataFile {
         for page in &pages {
             segment_end(page.offset, page.len, hot_offset)?;
         }
-        let bodies = try_join_all(pages.iter().map(|page| async move {
-            let segment = SegmentRef {
-                offset: page.offset,
-                len: page.len,
-            };
-            self.read_segment(&segment, Kind::BlockTablePage).await
-        }))
-        .await?;
+        let segments: Vec<(SegmentRef, Kind)> = pages
+            .iter()
+            .map(|page| {
+                let segment = SegmentRef {
+                    offset: page.offset,
+                    len: page.len,
+                };
+                (segment, Kind::BlockTablePage)
+            })
+            .collect();
+        let bodies = self.fetch(&segments, ScanKind::Point).await?;
 
         let corrupt_page = |offset: u64| StrataError::Corrupt {
             what: "block page",
@@ -579,19 +679,26 @@ impl StrataFile {
             offset: hot_offset,
         };
 
-        let bodies = try_join_all(candidates.iter().map(|entry| async move {
-            if entry.segment_len == 0 {
-                return Ok::<Option<Vec<u8>>, StrataError>(None);
-            }
-            let segment = SegmentRef {
-                offset: entry.segment_offset,
-                len: entry.segment_len,
-            };
-            self.read_segment(&segment, Kind::NarrowChunk)
-                .await
-                .map(Some)
-        }))
-        .await?;
+        let segments: Vec<(SegmentRef, Kind)> = candidates
+            .iter()
+            .filter(|entry| entry.segment_len > 0)
+            .map(|entry| {
+                let segment = SegmentRef {
+                    offset: entry.segment_offset,
+                    len: entry.segment_len,
+                };
+                (segment, Kind::NarrowChunk)
+            })
+            .collect();
+        let mut fetched = self.fetch(&segments, ScanKind::Point).await?.into_iter();
+        let mut bodies: Vec<Option<Vec<u8>>> = Vec::with_capacity(candidates.len());
+        for entry in &candidates {
+            bodies.push(if entry.segment_len == 0 {
+                None
+            } else {
+                Some(fetched.next().ok_or_else(corrupt)?)
+            });
+        }
 
         let mut rows = Vec::new();
         for (entry, body) in candidates.iter().zip(&bodies) {
@@ -1313,6 +1420,104 @@ mod tests {
                     ..
                 })
             ));
+        });
+    }
+
+    /// Writes `batch` with `config` and opens it.
+    async fn open_written(batch: &RecordBatch, config: &Config) -> StrataFile {
+        let mut w =
+            StrataWriter::new(batch.schema(), &["trace_id", "start_time"], config.clone()).unwrap();
+        w.write(batch).unwrap();
+        let (bytes, _) = w.finish().unwrap();
+        open_patched(bytes).await.unwrap()
+    }
+
+    #[test]
+    fn fetch_returns_the_bodies_of_read_segment_in_one_wave() {
+        runtime().block_on(async {
+            let file = open_written(&batch(20_000), &Config::default()).await;
+            let column = file.schema().index_of("input_tokens").unwrap();
+            let entries = file.block_entries(column).await.unwrap();
+            let segments: Vec<(SegmentRef, Kind)> = entries
+                .iter()
+                .map(|e| {
+                    let segment = SegmentRef {
+                        offset: e.segment_offset,
+                        len: e.segment_len,
+                    };
+                    (segment, Kind::NarrowChunk)
+                })
+                .collect();
+            assert_eq!(segments.len(), 5);
+            let mut expected = Vec::new();
+            for (segment, kind) in &segments {
+                expected.push(file.read_segment(segment, *kind).await.unwrap());
+            }
+
+            file.reset_io_stats();
+            let bodies = file.fetch(&segments, ScanKind::Point).await.unwrap();
+            assert_eq!(bodies, expected);
+            let stats = file.io_stats();
+            assert_eq!(stats.waves, 1);
+            assert!(stats.requests <= 5);
+            let total: u64 = segments.iter().map(|(s, _)| u64::from(s.len)).sum();
+            assert!(stats.bytes >= total);
+
+            file.reset_io_stats();
+            assert_eq!(file.io_stats(), IoStats::default());
+
+            let forged = (
+                SegmentRef {
+                    offset: file.postscript.hot_offset,
+                    len: 64,
+                },
+                Kind::NarrowChunk,
+            );
+            assert!(is_corrupt(&file.fetch(&[forged], ScanKind::Point).await));
+        });
+    }
+
+    #[test]
+    fn one_wave_per_concurrent_read() {
+        runtime().block_on(async {
+            // A dictionary column: block pages, dictionary, chunks.
+            let file = open_written(&batch(20_000), &Config::default()).await;
+            let model = file.schema().index_of("model").unwrap();
+            file.reset_io_stats();
+            crate::reader::read_column(&file, model).await.unwrap();
+            assert_eq!(file.io_stats().waves, 3);
+
+            // A plain column: block pages, chunks.
+            let file = open_written(&batch(20_000), &Config::default()).await;
+            let tokens = file.schema().index_of("input_tokens").unwrap();
+            file.reset_io_stats();
+            crate::reader::read_column(&file, tokens).await.unwrap();
+            assert_eq!(file.io_stats().waves, 2);
+
+            // A payload column: header, then refs pages and frames.
+            let config = Config {
+                payload_min_avg: 0,
+                ..Config::default()
+            };
+            let file = open_written(&wide_batch(2_000), &config).await;
+            let blob = file.schema().index_of("blob").unwrap();
+            assert_eq!(file.directory()[blob].layer, Layer::Payload);
+            file.reset_io_stats();
+            crate::reader::read_column(&file, blob).await.unwrap();
+            assert_eq!(file.io_stats().waves, 2);
+        });
+    }
+
+    #[test]
+    fn lookup_is_one_wave() {
+        runtime().block_on(async {
+            let file = open_written(&batch(20_000), &Config::default()).await;
+            let ids = crate::reader::read_column(&file, 0).await.unwrap();
+            let key = ids.as_fixed_size_binary().value(1_000).to_vec();
+            file.reset_io_stats();
+            let rows = file.lookup(&key).await.unwrap();
+            assert!(!rows.is_empty());
+            assert_eq!(file.io_stats().waves, 1);
         });
     }
 }

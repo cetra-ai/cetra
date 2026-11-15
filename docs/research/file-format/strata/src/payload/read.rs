@@ -3,17 +3,16 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryBuilder, StringBuilder};
-use arrow::datatypes::{DataType, Field};
-use futures::future::{try_join, try_join_all};
-
-use super::frames::{decode_frame, frame_of};
+use super::frames::{decode_fetched_frame, frame_of};
 use super::header::PayloadHeader;
 use super::refs::decode_page;
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::DirectoryRecord;
+use crate::io::ScanKind;
 use crate::segment::{Kind, SegmentRef};
+use arrow::array::{ArrayRef, BinaryBuilder, StringBuilder};
+use arrow::datatypes::{DataType, Field};
 
 /// Largest total of value bytes in one column: Arrow's string and binary offsets are `i32`.
 const MAX_VALUE_BYTES: u64 = i32::MAX as u64;
@@ -40,23 +39,49 @@ pub(crate) async fn read_header(
     Ok(header)
 }
 
+/// The segments of the refs pages of `header`, in page order.
+pub(crate) fn refs_page_segments(header: &PayloadHeader) -> Vec<(SegmentRef, Kind)> {
+    header
+        .ref_pages
+        .iter()
+        .map(|page| {
+            let segment = SegmentRef {
+                offset: page.offset,
+                len: page.len,
+            };
+            (segment, Kind::PayloadRefs)
+        })
+        .collect()
+}
+
 /// Reads the refs pages of a column and returns each row's chunk ids, `None` for a null row.
-/// `at` is the header's offset, used in errors.
+/// `at` is the header's offset, used in errors. The pages are one scan wave.
 pub(crate) async fn read_rows(
     file: &StrataFile,
     header: &PayloadHeader,
     at: u64,
 ) -> Result<Vec<Option<Vec<u32>>>> {
+    let bodies = file
+        .fetch(&refs_page_segments(header), ScanKind::Scan)
+        .await?;
+    rows_from_pages(header, &bodies, at)
+}
+
+/// Decodes the refs pages of `header`, given their fetched bodies in page order, and returns
+/// each row's chunk ids. `at` is the header's offset, used in errors.
+pub(crate) fn rows_from_pages(
+    header: &PayloadHeader,
+    bodies: &[Vec<u8>],
+    at: u64,
+) -> Result<Vec<Option<Vec<u32>>>> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
-    let pages = try_join_all(header.ref_pages.iter().map(|page| async move {
-        let segment = SegmentRef {
-            offset: page.offset,
-            len: page.len,
-        };
-        let body = file.read_segment(&segment, Kind::PayloadRefs).await?;
-        decode_page(&body, page.offset)
-    }))
-    .await?;
+    let mut pages = Vec::with_capacity(header.ref_pages.len());
+    for (page, body) in header.ref_pages.iter().zip(bodies) {
+        pages.push(decode_page(body, page.offset)?);
+    }
+    if pages.len() != header.ref_pages.len() {
+        return Err(corrupt("payload ref page rows"));
+    }
 
     // Page i holds exactly the rows from its first row up to the next page's first row (or to
     // the end of the column).
@@ -94,22 +119,24 @@ pub(crate) async fn read_payload_column(
 
     let header = read_header(file, record).await?;
 
-    let frames_fetch = try_join_all(header.frames.iter().map(|frame| async move {
+    // One wave: the refs pages, then the frames.
+    let mut segments = refs_page_segments(&header);
+    let n_pages = segments.len();
+    segments.extend(header.frames.iter().map(|frame| {
         let segment = SegmentRef {
             offset: frame.offset,
             len: frame.len,
         };
-        file.read_segment(&segment, Kind::PayloadFrame).await
+        (segment, Kind::PayloadFrame)
     }));
-    let (rows, raws) = try_join(read_rows(file, &header, at), frames_fetch).await?;
+    let mut bodies = file.fetch(&segments, ScanKind::Scan).await?;
+    // `fetch` returns one body per segment, so `n_pages` is at most the number of bodies.
+    let raws = bodies.split_off(n_pages);
+    let rows = rows_from_pages(&header, &bodies, at)?;
 
     let mut frames: Vec<(Vec<u8>, Vec<Range<usize>>)> = Vec::with_capacity(header.frames.len());
     for (entry, raw) in header.frames.iter().zip(raws) {
-        if usize::try_from(entry.raw_len).ok() != Some(raw.len()) {
-            return Err(corrupt("payload frame length"));
-        }
-        let ranges = decode_frame(&raw, entry.offset, entry.n_chunks)?;
-        frames.push((raw, ranges));
+        frames.push(decode_fetched_frame(entry, raw)?);
     }
 
     let utf8 = match field.data_type() {
