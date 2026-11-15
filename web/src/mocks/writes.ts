@@ -19,6 +19,7 @@ import deletionResolvingDocument from "../../../fixtures/api/static/deletion-res
 import evalJobQueuedDocument from "../../../fixtures/api/static/eval-job-queued.json";
 import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
+import experimentDocument from "../../../fixtures/api/static/experiment.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
@@ -307,6 +308,26 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_dataset_item_from_trace",
     method: "post",
     path: "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+  },
+  {
+    operationId: "post_experiment",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments",
+  },
+  {
+    operationId: "delete_experiment",
+    method: "delete",
+    path: "/api/v1/projects/{project}/experiments/{id}",
+  },
+  {
+    operationId: "post_experiment_results",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments/{id}/items",
+  },
+  {
+    operationId: "post_experiment_finish",
+    method: "post",
+    path: "/api/v1/projects/{project}/experiments/{id}/finish",
   },
 ];
 
@@ -617,6 +638,23 @@ const RESPONSES: Record<string, Respond> = {
   post_dataset_import: () => HttpResponse.json(datasetImportResultDocument, { status: 201 }),
   post_dataset_item_from_trace: () =>
     HttpResponse.json(datasetItemFromTraceDocument, { status: 201 }),
+  post_experiment: ({ body }) =>
+    HttpResponse.json(
+      {
+        experiment: { ...experimentDocument, ...named(body) },
+        items: [],
+        next_cursor: null,
+      },
+      { status: 201 },
+    ),
+  delete_experiment: () => noContent(),
+  post_experiment_results: ({ body }) =>
+    HttpResponse.json({
+      stored: Array.isArray(body.results) ? body.results.length : 0,
+      skipped: 0,
+    }),
+  post_experiment_finish: ({ params }) =>
+    HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
