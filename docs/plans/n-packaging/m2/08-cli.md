@@ -3,10 +3,11 @@
 Read [00-design.md](00-design.md) first, especially § Design › Trigger and § Design › Restore
 (D-N-17, D-N-21).
 
-**Also (cross-track review X15):** `llmobs admin migrate [--config <file>]` opens `meta.db` with
-`MetaDb::open` and the storage with `Storage::open` (the server must be stopped: a held `LOCK` maps
-to `AdminError::Locked`), which runs both databases' migrations (and B9's pre-migration copies),
-then shuts the storage down and exits, printing `meta.db and catalog.db are at this version's
+**Also (cross-track review X15):** `llmobs admin migrate [--config <file>]` requires `catalog.db`
+(`AdminError::NoCatalog`) and `meta.db` (`AdminError::NoMetaDb`), then opens the storage with
+`Maintenance::open` **first** (the server must be stopped: a held `LOCK` maps to
+`AdminError::Locked` before `meta.db` is touched), then `meta.db` with `MetaDb::open`. That runs both
+databases' migrations (and B9's pre-migration copies); it then closes both and exits, printing `meta.db and catalog.db are at this version's
 schema`. A restore of an older backup runs it before `reapply-deletions`, so the server never starts
 on restored data before the deletions are re-applied. Test `migrate_on_a_stopped_server_succeeds` and
 `migrate_while_the_server_runs_is_refused`; spec 09 § CLI gets the row `| \`llmobs admin migrate\` |
@@ -102,7 +103,7 @@ opens `Maintenance::open(config.storage_config())`.
   backup from the live bucket; run with --dry-run first, then add --rollback-bucket`).
 - First, `<data_dir>/catalog.db` must exist, else a new
   `AdminError::NoCatalog` (`no catalog.db in the data directory: restore it before running
-  gc-orphans`). `Storage::open` would otherwise create an empty catalog, and every object would
+  gc-orphans`). `Maintenance::open` would otherwise create an empty catalog, and every object would
   then look like an orphan.
 - `OpenError::Locked { .. }` maps to the existing `AdminError::Locked`. Its message becomes `the
   server is running: stop it first`; update the rotate-key tests that assert the old text.
