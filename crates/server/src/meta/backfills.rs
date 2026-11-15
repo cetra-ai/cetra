@@ -68,7 +68,6 @@ pub(crate) struct BackfillRow {
 
 /// A backfill to insert. `Copy`, so `insert_backfill` takes it by value without a clippy
 /// `needless_pass_by_value`.
-#[allow(dead_code)] // I6.5 reads it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct NewBackfill {
     /// Chosen by the caller.
@@ -134,7 +133,6 @@ struct BackfillRecord {
 ///
 /// Returns `MetaError::Conflict` when the rule already has a running backfill, and
 /// [`MetaError`] when the insert or the read-back fails.
-#[allow(dead_code)] // I6.5 calls it.
 pub(crate) async fn insert_backfill(
     conn: &mut SqliteConnection,
     new: NewBackfill,
@@ -170,7 +168,6 @@ pub(crate) async fn insert_backfill(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[allow(dead_code)] // I6.5 calls it.
 pub(crate) async fn list_backfills(
     pool: &SqlitePool,
     rule: Uuid,

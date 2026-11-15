@@ -5,6 +5,7 @@ pub(crate) mod admin;
 pub(crate) mod alert_rules;
 pub(crate) mod api_keys;
 pub(crate) mod auth;
+pub(crate) mod backfills;
 pub(crate) mod channels;
 pub(crate) mod connections;
 pub(crate) mod deletions;

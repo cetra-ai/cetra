@@ -62,8 +62,6 @@ pub(crate) const ERROR_EVALUATOR: &str = "evaluator could not be read";
 
 /// A checked backfill window and its limits (D-I-42).
 #[derive(Debug, Clone, Copy, PartialEq)]
-// I6.5 reads it.
-#[allow(dead_code)]
 pub(crate) struct Window {
     pub(crate) from: i64,
     pub(crate) to: i64,
@@ -76,8 +74,6 @@ pub(crate) struct Window {
 /// # Errors
 ///
 /// Every failing field, in the order of the validation table.
-// I6.5 calls it.
-#[allow(dead_code)]
 pub(crate) fn validate(
     from: i64,
     to: i64,
@@ -381,8 +377,6 @@ pub(crate) async fn unscored(
 
 /// What the estimate needs of a judge evaluator (D-I-42).
 #[derive(Debug, Clone, PartialEq)]
-// I6.5 reads it.
-#[allow(dead_code)]
 pub(crate) struct JudgeCost {
     /// `chars().count()` of the prompt template.
     pub(crate) template_chars: usize,
@@ -395,8 +389,6 @@ pub(crate) struct JudgeCost {
 
 /// Tokens and cost of the sampled targets.
 #[derive(Debug, Clone, Copy, PartialEq)]
-// I6.5 reads it.
-#[allow(dead_code)]
 pub(crate) struct CostEstimate {
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
@@ -405,8 +397,6 @@ pub(crate) struct CostEstimate {
 
 /// What a backfill would do (D-I-38, D-I-42).
 #[derive(Debug, Clone, Copy, PartialEq)]
-// I6.5 reads it.
-#[allow(dead_code)]
 pub(crate) struct Estimate {
     pub(crate) matched: u64,
     pub(crate) capped: bool,
@@ -439,8 +429,6 @@ fn estimate_cost(sampled: u64, judge: &JudgeCost) -> CostEstimate {
 /// # Errors
 ///
 /// [`BackfillReadError`] from a page read.
-// I6.5 calls it.
-#[allow(dead_code)]
 pub(crate) async fn estimate(
     state: &AppState,
     rule: &BackfillRule,
