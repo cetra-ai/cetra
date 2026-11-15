@@ -63,7 +63,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             method: axum::http::Method::GET,
             path: "/api/v1/projects/{project}/members",
             access: Access::Project {
-                perm: ProjectPerm::View,
+                perm: ProjectPerm::ViewMembers,
                 session_only: false,
             },
             documented: true,
@@ -380,6 +380,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: true,
                         },
                         now,
@@ -389,9 +392,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let cookie = start_session(&app.state, user.id, None, None, None)
-            .await
-            .unwrap();
+        let cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         (user.id, cookie_pair(&cookie))
     }
 
@@ -764,5 +773,36 @@ mod tests {
             .await
             .unwrap();
         assert!(stored.is_none());
+    }
+
+    /// Auth review #10: a read key, often a CI secret, never lists the org's people.
+    #[tokio::test]
+    async fn an_api_key_cannot_list_project_members() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let path = format!("/api/v1/projects/{}/members", seeded.project.id);
+        for key in [&seeded.read_key, &seeded.ingest_key] {
+            let response = app
+                .request(Method::GET, &path)
+                .header(header::AUTHORIZATION.as_str(), &format!("Bearer {key}"))
+                .send()
+                .await;
+            assert_eq!(response.status, 403);
+        }
+        let current = app
+            .request(Method::GET, "/api/v1/projects/current/members")
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
+            .send()
+            .await;
+        assert_eq!(current.status, 403);
+        let session = app
+            .request(Method::GET, &path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(session.status, 200);
     }
 }

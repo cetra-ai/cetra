@@ -276,6 +276,9 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(
+                                crate::meta::users::EmailVerifiedVia::MailToken,
+                            ),
                             is_instance_admin: false,
                         },
                         now,
@@ -285,9 +288,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let set_cookie = start_session(&app.state, user.id, None, None, None)
-            .await
-            .unwrap();
+        let set_cookie = start_session(
+            &app.state,
+            user.id,
+            None,
+            None,
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
         let pair = set_cookie
             .to_str()
             .unwrap()

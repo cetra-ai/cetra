@@ -1446,10 +1446,14 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let mut orgs = PathItem::new(HttpMethod::Get, list_orgs);
     orgs.post = Some(post_org);
-    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners)")
+    let delete_org = operation("delete_org", "orgs", "Delete an organization (owners, session only)")
         .description(Some(
-            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only.",
+            "Answers 202; the organization and all its projects are erased in the background. Its deletion record is then kept in the database and the audit log only. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
         ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
         .parameters(Some(with_query::<DropParams>(vec![path_string(
             "org",
             "Org UUID or slug.",
@@ -1678,11 +1682,15 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     let delete_project = operation(
         "delete_project",
         "projects",
-        "Delete a project (org admins; API keys are refused)",
+        "Delete a project (org admins; session only)",
     )
     .description(Some(
-        "Answers 202; the project is gone from every route at once and its data is erased in the background.",
+        "Answers 202; the project is gone from every route at once and its data is erased in the background. Needs a browser session: API keys and personal access tokens get 403 (D-P-70).",
     ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
     .parameters(Some(with_query::<DropParams>(vec![project_param()])))
     .responses(responses(
         "202",

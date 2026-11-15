@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::auth::oidc::flow::{self, LoginError, StartError};
 use crate::auth::oidc::state_cookie;
-use crate::auth::session::start_session;
+use crate::auth::session::{SessionOrigin, start_session};
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
@@ -118,7 +118,9 @@ async fn callback(
                     .get(header::USER_AGENT)
                     .and_then(|value| value.to_str().ok()),
                 Some(ip),
-                logged_in.sso_org,
+                logged_in
+                    .sso_org
+                    .map_or(SessionOrigin::Provider, SessionOrigin::OrgProvider),
             )
             .await
             {
@@ -286,7 +288,8 @@ mod tests {
         }
     }
 
-    async fn invite(app: &TestApp, email: &str) {
+    /// Returns the invitation's plaintext token.
+    async fn invite(app: &TestApp, email: &str) -> String {
         let org_id: String = sqlx::query_scalar("SELECT id FROM orgs LIMIT 1")
             .fetch_one(app.state.meta.reader())
             .await
@@ -299,6 +302,7 @@ mod tests {
         let user = Uuid::parse_str(&user_id).expect("user id");
         let now = app.state.clock.now_ns();
         let token = new_opaque_token().expect("token");
+        let plaintext = token.plaintext.clone();
         let email = email.to_owned();
         app.state
             .meta
@@ -320,6 +324,7 @@ mod tests {
             })
             .await
             .expect("invite");
+        plaintext
     }
 
     #[tokio::test]
@@ -965,7 +970,15 @@ mod tests {
         app.state
             .meta
             .write(move |conn| {
-                Box::pin(async move { users::set_email_verified(conn, user_id, now).await })
+                Box::pin(async move {
+                    users::set_email_verified(
+                        conn,
+                        user_id,
+                        now,
+                        users::EmailVerifiedVia::MailToken,
+                    )
+                    .await
+                })
             })
             .await
             .expect("verify");
@@ -1131,6 +1144,90 @@ mod tests {
             password_status(&app, "grace@example.com").await,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Auth review #9: an invitation token proves nothing about the mailbox, so an account made
+    /// with it loses its password, sessions and tokens when the identity provider links it.
+    #[tokio::test]
+    async fn an_invite_verified_password_loses_that_password_when_google_links_it() {
+        let idp = MockIdp::start().await;
+        let base = idp.issuer().to_owned();
+        let app = TestApp::with_google(&base, |config| {
+            config.auth.signup = SignupPolicy::InviteOnly;
+            config.auth.google = Some(google(&[], true));
+        })
+        .await;
+        setup_admin(&app).await;
+        // The inviter holds the token, so they register the victim's address with their own
+        // password.
+        let token = invite(&app, "victim@example.com").await;
+        let created = app
+            .request(Method::POST, "/api/auth/signup")
+            .json(&json!({
+                "email": "victim@example.com",
+                "password": PASSWORD,
+                "invite_token": token,
+            }))
+            .send()
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let session = one_cookie(&created, SESSION_NAME);
+        let minted = app
+            .request(Method::POST, "/api/v1/me/tokens")
+            .header(header::COOKIE.as_str(), &session)
+            .json(&json!({ "name": "cli", "scopes": ["read"] }))
+            .send()
+            .await;
+        assert_eq!(minted.status, StatusCode::CREATED);
+        let pat: String = minted.json::<serde_json::Value>()["secret"]
+            .as_str()
+            .expect("secret")
+            .to_owned();
+        let via: Option<String> =
+            sqlx::query_scalar("SELECT email_verified_via FROM users WHERE email = ?")
+                .bind("victim@example.com")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("via");
+        assert_eq!(via.as_deref(), Some("invite"));
+        assert_eq!(
+            password_status(&app, "victim@example.com").await,
+            StatusCode::OK
+        );
+
+        let pending = begin(&app, "google", "/").await;
+        let code = idp.issue_code(grant("victim", &pending, "victim@example.com", Some(true)));
+        let response = finish(
+            &app,
+            "google",
+            &pending,
+            &format!("code={code}&state={}", pending.state),
+        )
+        .await;
+        assert_eq!(location(&response), "/");
+        assert_eq!(
+            password_status(&app, "victim@example.com").await,
+            StatusCode::UNAUTHORIZED
+        );
+        let old_session = app
+            .request(Method::GET, "/api/auth/me")
+            .header(header::COOKIE.as_str(), &session)
+            .send()
+            .await;
+        assert_eq!(old_session.status, StatusCode::UNAUTHORIZED);
+        let old_pat = app
+            .request(Method::GET, "/api/auth/me")
+            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {pat}"))
+            .send()
+            .await;
+        assert_eq!(old_pat.status, StatusCode::UNAUTHORIZED);
+        let via: Option<String> =
+            sqlx::query_scalar("SELECT email_verified_via FROM users WHERE email = ?")
+                .bind("victim@example.com")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("via");
+        assert_eq!(via.as_deref(), Some("idp"));
     }
 
     #[tokio::test]
@@ -1478,6 +1575,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(users::EmailVerifiedVia::MailToken),
                             is_instance_admin: false,
                         },
                         now,
@@ -1511,6 +1609,7 @@ mod tests {
                             name: None,
                             password_hash: None,
                             email_verified_at: Some(now),
+                            email_verified_via: Some(users::EmailVerifiedVia::MailToken),
                             is_instance_admin: true,
                         },
                         now,
