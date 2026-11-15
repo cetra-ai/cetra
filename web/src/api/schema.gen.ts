@@ -439,7 +439,7 @@ export interface paths {
         put?: never;
         /**
          * Delete a user
-         * @description Needs a `control_plane` bearer token with the `users` scope. Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown subject answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user in one transaction. Its invites and API keys stay, without their creator. Orgs where the user was the only owner stay, without an owner, and are listed in `sole_owner_of` for the control plane to resolve. An unknown user answers 200 with an empty list, so a retry is safe. An instance admin cannot be managed (403 `forbidden`).
          */
         post: operations["post_internal_user_delete"];
         delete?: never;
@@ -459,7 +459,7 @@ export interface paths {
         put?: never;
         /**
          * Disable a user
-         * @description Needs a `control_plane` bearer token with the `users` scope. Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Revokes the user's sessions and personal tokens, as `revoke` does, and sets the user disabled. Unlike the instance admin's disable, the last owner of an org may be disabled: the org stays. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
          */
         post: operations["post_internal_user_disable"];
         delete?: never;
@@ -479,7 +479,7 @@ export interface paths {
         put?: never;
         /**
          * End a user's sessions and personal tokens
-         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown subject answers 404.
+         * @description Needs a `control_plane` bearer token with the `users` scope. The user is named by its OIDC subject at the control plane's provider (`entitlements.control_plane_provider`), or, when no identity has that subject, by its email if that user has no identity at that provider (D-S-9). The email is checked only then (400 for an invalid one). Deletes the user's web sessions and revokes its personal tokens; the user can sign in again. An instance admin cannot be managed (403 `forbidden`). An unknown user answers 404.
          */
         post: operations["post_internal_user_revoke"];
         delete?: never;
@@ -3613,8 +3613,16 @@ export interface components {
              */
             sole_owner_of: string[];
         };
-        /** @description Body of the `users` routes (D-P-39): the user's subject at the control plane's provider. */
+        /**
+         * @description Body of the `users` routes (D-P-39, D-S-9): the user's subject at the control plane's
+         *     provider, and its email for a user the subject does not find.
+         */
         InternalUserRef: {
+            /**
+             * @description Email, normalized like every email (D136). Used only when no identity has the subject,
+             *     and then only for a user with no identity at that provider (D-S-9).
+             */
+            email: string;
             /** @description The OIDC subject (`identities.subject`) of the user at `entitlements.control_plane_provider`. */
             subject: string;
         };

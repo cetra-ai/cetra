@@ -9,6 +9,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Upgrade notes
 
+- The control plane's `users/revoke`, `users/disable` and `users/delete` calls must now send
+  `email` with `subject`; a body without it is refused with 400.
 - Migration `0015` adds `users.email_verified_via` and `web_sessions.via_provider`. Verified accounts
   that exist already have no recorded origin and count as unproven: when an identity provider links
   one of them, its password is cleared. With `auth.enforce_sso_domains`, sessions that predate the
@@ -77,6 +79,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   visitor without a session, the invite page go straight to that provider; signing out lands on a
   page that does not. Instance admins sign in with their password at `/login?password=1`, which the
   login page links to (D-S-4, D-S-5, D-S-6).
+- Internal API: `POST /api/internal/v1/users/{revoke,disable,delete}` take `{subject, email}` and
+  find a user who never signed in through the control plane by email (D-S-9).
 
 ### Fixed
 
