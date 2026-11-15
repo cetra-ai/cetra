@@ -20377,6 +20377,16 @@
           "value"
         ],
         "properties": {
+          "dataset_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Dataset item (stable id) the score is about; set together with `experiment_id`."
+          },
+          "experiment_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Experiment the score belongs to; set together with `dataset_item_id`, on a trace target\n(D-J-12)."
+          },
           "metadata": {
             "type": "object",
             "description": "String metadata stored with the score.",

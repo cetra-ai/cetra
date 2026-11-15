@@ -5145,6 +5145,17 @@ export interface components {
         };
         /** @description One score to write. Spec 06 § Scores, D-F-1, D-G-28. */
         ScoreCreate: {
+            /**
+             * Format: uuid
+             * @description Dataset item (stable id) the score is about; set together with `experiment_id`.
+             */
+            dataset_item_id?: string;
+            /**
+             * Format: uuid
+             * @description Experiment the score belongs to; set together with `dataset_item_id`, on a trace target
+             *     (D-J-12).
+             */
+            experiment_id?: string;
             /** @description String metadata stored with the score. */
             metadata?: {
                 [key: string]: string;

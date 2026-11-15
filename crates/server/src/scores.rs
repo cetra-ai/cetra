@@ -3,7 +3,7 @@
 //! Every write path ends in [`write`] or [`delete`]. The score routes call them (G3.4), and
 //! public feedback calls [`write`] (G3.5).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use llmobs_core::enums::ScoreSource;
 use llmobs_core::ids::ProjectId;
@@ -187,6 +187,20 @@ pub(crate) async fn write(
             check_item(index, item, writer, project, now, &definitions, &mut errors)
         })
         .collect();
+    // Experiment ids must name an experiment of the project. The window does not apply: a late
+    // flush of a hidden experiment's scores is accepted (D-J-14).
+    let experiment_ids: BTreeSet<Uuid> =
+        items.iter().filter_map(|item| item.experiment_id).collect();
+    if !experiment_ids.is_empty() {
+        let ids: Vec<Uuid> = experiment_ids.into_iter().collect();
+        let known =
+            crate::meta::experiments::existing_ids(state.meta.reader(), project.id, &ids).await?;
+        for (index, item) in items.iter().enumerate() {
+            if item.experiment_id.is_some_and(|id| !known.contains(&id)) {
+                errors.push(field(index, "experiment_id", "unknown experiment"));
+            }
+        }
+    }
     if !errors.is_empty() {
         return Err(invalid(errors));
     }
@@ -198,9 +212,11 @@ pub(crate) async fn write(
         .into_iter()
         .zip(sources)
         .map(|(item, source)| {
-            let id = item
-                .score_id
-                .unwrap_or_else(|| derive_id(project.id, &item.target, &item.name, source, author));
+            // An experiment score's author is its experiment (spec 06, D-J-12).
+            let id = item.score_id.unwrap_or_else(|| {
+                let author = item.experiment_id.unwrap_or(author);
+                derive_id(project.id, &item.target, &item.name, source, author)
+            });
             Pending { id, source, item }
         })
         .collect();
@@ -249,6 +265,8 @@ pub(crate) async fn write(
                 value,
                 reason,
                 metadata,
+                experiment_id,
+                dataset_item_id,
                 ..
             } = item;
             let session_id = match target {
@@ -267,8 +285,8 @@ pub(crate) async fn write(
                 source,
                 evaluator_id,
                 rule_id,
-                experiment_id: None,
-                dataset_item_id: None,
+                experiment_id,
+                dataset_item_id,
                 author_user_id: author_user,
                 metadata,
                 created_at,
@@ -367,6 +385,23 @@ fn check_item(
             message: "session_id must be 1 to 255 bytes".to_owned(),
             position: None,
         });
+    }
+    match (item.experiment_id, item.dataset_item_id) {
+        (Some(_), Some(_)) => {
+            if !matches!(item.target, ScoreTarget::Trace { .. }) {
+                errors.push(FieldError {
+                    field: format!("scores[{index}].target"),
+                    message: "an experiment score needs a trace target".to_owned(),
+                    position: None,
+                });
+            }
+        }
+        (None, None) => {}
+        _ => errors.push(field(
+            index,
+            "experiment_id",
+            "experiment_id and dataset_item_id go together",
+        )),
     }
     if let ScoreValue::Categorical { label, .. } = &item.value
         && !text_ok(label)
@@ -577,6 +612,8 @@ mod tests {
     use llmobs_core::ids::OrgId;
 
     use super::*;
+    use crate::meta::datasets::{DatasetFields, insert_dataset};
+    use crate::meta::experiments::{NewExperiment, insert_tx};
     use crate::meta::score_definitions::{DefinitionCategory, DefinitionFields, insert_definition};
     use crate::test_support::{Seeded, TestApp, set_limits};
     use llmobs_core::enums::ScoreDataType;
@@ -619,6 +656,8 @@ mod tests {
             reason: None,
             source: None,
             metadata: BTreeMap::new(),
+            experiment_id: None,
+            dataset_item_id: None,
         }
     }
 
@@ -1762,7 +1801,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ids.len(), MAX_SCORES);
-        let distinct: std::collections::BTreeSet<Uuid> = ids.into_iter().collect();
+        let distinct: BTreeSet<Uuid> = ids.into_iter().collect();
         assert_eq!(distinct.len(), MAX_SCORES);
     }
 
@@ -2041,6 +2080,8 @@ mod tests {
             reason: None,
             source: None,
             metadata: BTreeMap::new(),
+            experiment_id: None,
+            dataset_item_id: None,
         };
         let id = "01900000-0000-7000-8000-000000000402";
         let before_cap = app
@@ -2096,5 +2137,231 @@ mod tests {
             .send()
             .await;
         assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
+    }
+
+    /// An experiment of `project`, in a dataset of its own, created at `created_at`.
+    async fn experiment(app: &TestApp, project: ProjectId, created_at: i64) -> Uuid {
+        let dataset = Uuid::now_v7();
+        let experiment = Uuid::now_v7();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_dataset(
+                        conn,
+                        dataset,
+                        project,
+                        DatasetFields {
+                            name: format!("faq-{dataset}"),
+                            description: None,
+                            input_schema: None,
+                            expected_schema: None,
+                        },
+                        created_at,
+                    )
+                    .await?;
+                    insert_tx(
+                        conn,
+                        &NewExperiment {
+                            id: experiment,
+                            project_id: project,
+                            dataset_id: dataset,
+                            dataset_name: format!("faq-{dataset}"),
+                            dataset_version: 1,
+                            name: "baseline".to_owned(),
+                            description: None,
+                            metadata: "{}".to_owned(),
+                            repetitions: 1,
+                            item_count: 1,
+                            created_by: None,
+                            created_at,
+                        },
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        experiment
+    }
+
+    fn trace_target() -> ScoreTarget {
+        ScoreTarget::Trace {
+            trace_id: TRACE.parse().unwrap(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiment_fields_are_stored() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let experiment = experiment(&app, seeded.project.id, app.state.clock.now_ns()).await;
+        let dataset_item = Uuid::now_v7();
+        write(
+            &app.state,
+            &seeded.project,
+            Writer::Sdk { key_id: author() },
+            vec![ScoreCreate {
+                target: trace_target(),
+                experiment_id: Some(experiment),
+                dataset_item_id: Some(dataset_item),
+                ..item("accuracy", 0.5)
+            }],
+        )
+        .await
+        .unwrap();
+
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].experiment_id, Some(experiment));
+        assert_eq!(rows[0].dataset_item_id, Some(dataset_item));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiment_fields_go_together() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let experiment = experiment(&app, seeded.project.id, app.state.clock.now_ns()).await;
+        let result = write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![ScoreCreate {
+                target: trace_target(),
+                experiment_id: Some(experiment),
+                ..item("accuracy", 0.5)
+            }],
+        )
+        .await;
+        assert_eq!(
+            refused(result),
+            vec![(
+                "scores[0].experiment_id".to_owned(),
+                "experiment_id and dataset_item_id go together".to_owned(),
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn experiment_scores_need_a_trace_target() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let experiment = experiment(&app, seeded.project.id, app.state.clock.now_ns()).await;
+        let result = write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![ScoreCreate {
+                experiment_id: Some(experiment),
+                dataset_item_id: Some(Uuid::now_v7()),
+                ..item("accuracy", 0.5)
+            }],
+        )
+        .await;
+        assert_eq!(
+            refused(result),
+            vec![(
+                "scores[0].target".to_owned(),
+                "an experiment score needs a trace target".to_owned(),
+            )]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_experiment_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let foreign = experiment(&app, other.id, app.state.clock.now_ns()).await;
+        for experiment_id in [Uuid::now_v7(), foreign] {
+            let result = write(
+                &app.state,
+                &seeded.project,
+                api_writer(),
+                vec![ScoreCreate {
+                    target: trace_target(),
+                    experiment_id: Some(experiment_id),
+                    dataset_item_id: Some(Uuid::now_v7()),
+                    ..item("accuracy", 0.5)
+                }],
+            )
+            .await;
+            assert_eq!(
+                refused(result),
+                vec![(
+                    "scores[0].experiment_id".to_owned(),
+                    "unknown experiment".to_owned(),
+                )]
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn derived_id_uses_the_experiment() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let first = experiment(&app, seeded.project.id, now).await;
+        let second = experiment(&app, seeded.project.id, now).await;
+        let dataset_item = Uuid::now_v7();
+        let scored = |experiment: Uuid| ScoreCreate {
+            target: trace_target(),
+            experiment_id: Some(experiment),
+            dataset_item_id: Some(dataset_item),
+            ..item("accuracy", 0.5)
+        };
+        let write_one = |experiment: Uuid| {
+            write(
+                &app.state,
+                &seeded.project,
+                api_writer(),
+                vec![scored(experiment)],
+            )
+        };
+
+        let a = write_one(first).await.unwrap();
+        let b = write_one(second).await.unwrap();
+        let again = write_one(first).await.unwrap();
+        assert_eq!(
+            a[0],
+            derive_id(
+                seeded.project.id,
+                &trace_target(),
+                "accuracy",
+                ScoreSource::Api,
+                first,
+            )
+        );
+        assert_ne!(a[0], b[0]);
+        assert_eq!(a, again);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_experiment_scores_are_accepted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"data_access_days": 30}),
+        );
+        let experiment = experiment(&app, seeded.project.id, app.state.clock.now_ns()).await;
+        app.state
+            .clock
+            .advance(std::time::Duration::from_secs(31 * 24 * 3600));
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![ScoreCreate {
+                target: trace_target(),
+                experiment_id: Some(experiment),
+                dataset_item_id: Some(Uuid::now_v7()),
+                ..item("accuracy", 0.5)
+            }],
+        )
+        .await
+        .unwrap();
     }
 }
