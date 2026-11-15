@@ -10,6 +10,8 @@ import { RulePreview } from "@/components/alerts/rule-preview";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
+import { UpgradeButton } from "@/components/plan/upgrade-button";
+import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -92,6 +94,7 @@ export function RuleForm(props: {
   const { org, project, rule, onSaved, onCancel } = props;
   const queryClient = useQueryClient();
   const channels = useQuery(channelsQuery(org, project));
+  const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
   const create = $api.useMutation("post", "/api/v1/projects/{project}/alert-rules");
   const update = $api.useMutation("patch", "/api/v1/projects/{project}/alert-rules/{id}");
   const [form, setForm] = useState<RuleFormValues>(() =>
@@ -471,6 +474,7 @@ export function RuleForm(props: {
             Upgrade your plan, disable another rule, or save this one disabled.
           </p>
         ) : null}
+        {planLimited ? <UpgradeButton url={upgradeUrl} /> : null}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="outline" disabled={pending} onClick={onCancel}>
             Cancel

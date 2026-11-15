@@ -7,6 +7,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import eventsFixture from "../../../../../../../fixtures/api/static/alert-events.json";
 import ruleFixture from "../../../../../../../fixtures/api/static/alert-rule.json";
+import entitlementsFixture from "../../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}`;
@@ -112,6 +113,10 @@ it("shows the plan limit when enabling", async () => {
 
   expect(await screen.findByText("Your plan allows 1 enabled alert rule.")).toBeInTheDocument();
   expect(screen.getByText("Upgrade your plan or disable another rule.")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Upgrade" })).toHaveAttribute(
+    "href",
+    entitlementsFixture.upgrade_url,
+  );
 });
 
 it("shows other toggle errors next to the switch", async () => {

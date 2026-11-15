@@ -5,13 +5,11 @@ use llmobs_core::ids::OrgId;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 
-/// The most enabled alert rules `org_id` may have; `None` means no limit.
-///
-/// Track P's M4 (D179) replaces this body with
-/// `entitlements::of(state, org_id).limits.max_alert_rules`. Until then every org is unlimited,
-/// which is the self-hosted behaviour (D172).
-pub(crate) fn rule_limit(_state: &AppState, _org_id: OrgId) -> Option<u64> {
-    None
+/// The most enabled alert rules `org_id` may have (D178, D-P-23); `None` means no limit.
+pub(crate) fn rule_limit(state: &AppState, org_id: OrgId) -> Option<u64> {
+    crate::entitlements::of(state, org_id)
+        .limits
+        .max_alert_rules
 }
 
 /// `Err(ApiError::PlanLimit)` when one more enabled rule would exceed `limit`.
