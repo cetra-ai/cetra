@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(session_me(&app, &user.cookie).await.status, 200);
 
         let token = "users";
-        let revoked = post_user(&app, "revoke", &token, "sub-rev").await;
+        let revoked = post_user(&app, "revoke", token, "sub-rev").await;
         assert_eq!(revoked.status, 204);
 
         assert_eq!(session_me(&app, &user.cookie).await.status, 401);
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(orgs_with(&app, &pat).await.status, 200);
 
         let token = "users";
-        let disabled = post_user(&app, "disable", &token, "sub-dis").await;
+        let disabled = post_user(&app, "disable", token, "sub-dis").await;
         assert_eq!(disabled.status, 204);
 
         assert_eq!(session_me(&app, &user.cookie).await.status, 401);
@@ -420,7 +420,7 @@ mod tests {
         let token = "users";
 
         assert_eq!(
-            post_user(&app, "disable", &token, "sub-twice").await.status,
+            post_user(&app, "disable", token, "sub-twice").await.status,
             204
         );
         let first = user_row(&app, user.id).await.unwrap().disabled_at;
@@ -428,7 +428,7 @@ mod tests {
 
         app.state.clock.advance(std::time::Duration::from_secs(60));
         assert_eq!(
-            post_user(&app, "disable", &token, "sub-twice").await.status,
+            post_user(&app, "disable", token, "sub-twice").await.status,
             204
         );
         assert_eq!(user_row(&app, user.id).await.unwrap().disabled_at, first);
@@ -492,7 +492,7 @@ mod tests {
             .unwrap();
 
         let token = "users";
-        let deleted = post_user(&app, "delete", &token, "sub-del").await;
+        let deleted = post_user(&app, "delete", token, "sub-del").await;
         assert_eq!(deleted.status, 200);
         let body: Value = deleted.json();
         assert_eq!(body, json!({ "sole_owner_of": [sole.to_string()] }));
@@ -519,7 +519,7 @@ mod tests {
             .unwrap();
         assert!(broken.is_empty(), "{} dangling references", broken.len());
 
-        let again = post_user(&app, "delete", &token, "sub-del").await;
+        let again = post_user(&app, "delete", token, "sub-del").await;
         assert_eq!(again.status, 200);
         assert_eq!(again.json::<Value>(), json!({ "sole_owner_of": [] }));
     }
@@ -544,7 +544,7 @@ mod tests {
         linked_user(&app, "admin@example.com", "sub-admin", true).await;
         let token = "users";
         for route in ["revoke", "disable", "delete"] {
-            let refused = post_user(&app, route, &token, "sub-admin").await;
+            let refused = post_user(&app, route, token, "sub-admin").await;
             assert_eq!(refused.status, 403, "{route}");
             assert_eq!(refused.problem().code, ProblemCode::Forbidden, "{route}");
         }
@@ -563,15 +563,12 @@ mod tests {
     async fn unknown_subjects() {
         let app = TestApp::new().await;
         let token = "users";
+        assert_eq!(post_user(&app, "revoke", token, "nobody").await.status, 404);
         assert_eq!(
-            post_user(&app, "revoke", &token, "nobody").await.status,
+            post_user(&app, "disable", token, "nobody").await.status,
             404
         );
-        assert_eq!(
-            post_user(&app, "disable", &token, "nobody").await.status,
-            404
-        );
-        let deleted = post_user(&app, "delete", &token, "nobody").await;
+        let deleted = post_user(&app, "delete", token, "nobody").await;
         assert_eq!(deleted.status, 200);
         assert_eq!(deleted.json::<Value>(), json!({ "sole_owner_of": [] }));
     }
@@ -617,7 +614,7 @@ mod tests {
             .await
             .unwrap();
         let token = "users";
-        let unknown = post_user(&app, "revoke", &token, "sub-other").await;
+        let unknown = post_user(&app, "revoke", token, "sub-other").await;
         assert_eq!(unknown.status, 404);
         assert_eq!(session_me(&app, &user.cookie).await.status, 200);
     }

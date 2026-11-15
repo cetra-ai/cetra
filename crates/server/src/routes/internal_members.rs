@@ -277,7 +277,7 @@ mod tests {
         retire(&app, gone).await;
 
         let token = "members";
-        let found = lookup_with(&app, &token, "sub-lookup", "ignored@example.com").await;
+        let found = lookup_with(&app, token, "sub-lookup", "ignored@example.com").await;
         assert_eq!(found.status, 200);
         assert_eq!(
             found.json::<Value>(),
@@ -303,7 +303,7 @@ mod tests {
         .await;
 
         let token = "members";
-        let found = lookup_with(&app, &token, "unknown-subject", "  Mail@Example.COM ").await;
+        let found = lookup_with(&app, token, "unknown-subject", "  Mail@Example.COM ").await;
         assert_eq!(found.status, 200);
         let body: Value = found.json();
         assert_eq!(body["user_id"], json!(user.to_string()));
@@ -315,7 +315,7 @@ mod tests {
     async fn lookup_of_an_unknown_user_is_empty() {
         let app = TestApp::new().await;
         let token = "members";
-        let none = lookup_with(&app, &token, "nobody", "nobody@example.com").await;
+        let none = lookup_with(&app, token, "nobody", "nobody@example.com").await;
         assert_eq!(none.status, 200);
         assert_eq!(none.json::<Value>(), json!({ "orgs": [] }));
     }
@@ -324,7 +324,7 @@ mod tests {
     async fn lookup_refuses_an_invalid_email() {
         let app = TestApp::new().await;
         let token = "members";
-        let refused = lookup_with(&app, &token, "nobody", "not-an-email").await;
+        let refused = lookup_with(&app, token, "nobody", "not-an-email").await;
         assert_eq!(refused.status, 400);
     }
 
@@ -338,7 +338,7 @@ mod tests {
         member(&app, home, "cy@example.com", OrgRole::Member).await;
         let token = "members";
 
-        let (all, logs) = capture_logs(async { members_with(&app, &token, home, "").await }).await;
+        let (all, logs) = capture_logs(async { members_with(&app, token, home, "").await }).await;
         assert_eq!(all.status, 200);
         assert!(!logs.contains("example.com"));
         let emails: Vec<String> = all.json::<Value>()["data"]
@@ -357,7 +357,7 @@ mod tests {
             ]
         );
 
-        let some = members_with(&app, &token, home, "?role=owner,admin").await;
+        let some = members_with(&app, token, home, "?role=owner,admin").await;
         assert_eq!(some.status, 200);
         let body: Value = some.json();
         let roles: Vec<(&str, &str)> = body["data"]
@@ -383,7 +383,7 @@ mod tests {
         let app = TestApp::new().await;
         let home = org(&app, "Roles", "roles").await;
         let token = "members";
-        let refused = members_with(&app, &token, home, "?role=owner,boss").await;
+        let refused = members_with(&app, token, home, "?role=owner,boss").await;
         assert_eq!(refused.status, 400);
     }
 
@@ -391,12 +391,12 @@ mod tests {
     async fn members_of_an_unknown_or_inactive_org_are_not_found() {
         let app = TestApp::new().await;
         let token = "members";
-        let unknown = members_with(&app, &token, OrgId::new_v7(), "").await;
+        let unknown = members_with(&app, token, OrgId::new_v7(), "").await;
         assert_eq!(unknown.status, 404);
 
         let gone = org(&app, "Retired", "retired").await;
         retire(&app, gone).await;
-        let inactive = members_with(&app, &token, gone, "").await;
+        let inactive = members_with(&app, token, gone, "").await;
         assert_eq!(inactive.status, 404);
     }
 
@@ -406,12 +406,12 @@ mod tests {
         let home = org(&app, "Scoped", "scoped").await;
         let users = "users";
         assert_eq!(
-            lookup_with(&app, &users, "sub", "x@example.com")
+            lookup_with(&app, users, "sub", "x@example.com")
                 .await
                 .status,
             403
         );
-        assert_eq!(members_with(&app, &users, home, "").await.status, 403);
+        assert_eq!(members_with(&app, users, home, "").await.status, 403);
         let anonymous = app
             .request(Method::POST, "/api/internal/v1/memberships/lookup")
             .json(&json!({ "subject": "sub", "email": "x@example.com" }))
@@ -432,7 +432,7 @@ mod tests {
         )
         .await;
         let token = "members";
-        let found = lookup_with(&app, &token, "sub-wins", "other@example.com").await;
+        let found = lookup_with(&app, token, "sub-wins", "other@example.com").await;
         let body: Value = found.json();
         assert_eq!(body["user_id"], json!(linked.to_string()));
         assert_ne!(body["user_id"], json!(other.to_string()));

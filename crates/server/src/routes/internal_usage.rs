@@ -203,7 +203,7 @@ mod tests {
         let app = TestApp::new().await;
         seed_usage(&app).await;
         let token = "usage";
-        let full: Page<InternalUsageRow> = get(&app, &token, "?from=2026-01-01&to=2026-01-03")
+        let full: Page<InternalUsageRow> = get(&app, token, "?from=2026-01-01&to=2026-01-03")
             .await
             .json();
 
@@ -217,7 +217,7 @@ mod tests {
                 }
                 None => "?from=2026-01-01&to=2026-01-03&limit=2".to_owned(),
             };
-            let response = get(&app, &token, &query).await;
+            let response = get(&app, token, &query).await;
             assert_eq!(response.status.as_u16(), 200);
             let page: Page<InternalUsageRow> = response.json();
             assert!(page.data.len() <= 2);
@@ -239,11 +239,11 @@ mod tests {
         seed_usage(&app).await;
         let token = "usage";
         // 2026-01-01 + 92 days is 2026-04-03.
-        let allowed = get(&app, &token, "?from=2026-01-01&to=2026-04-03").await;
+        let allowed = get(&app, token, "?from=2026-01-01&to=2026-04-03").await;
         assert_eq!(allowed.status.as_u16(), 200);
-        let refused = get(&app, &token, "?from=2026-01-01&to=2026-04-04").await;
+        let refused = get(&app, token, "?from=2026-01-01&to=2026-04-04").await;
         assert_eq!(refused.status.as_u16(), 400);
-        let inverted = get(&app, &token, "?from=2026-01-03&to=2026-01-01").await;
+        let inverted = get(&app, token, "?from=2026-01-03&to=2026-01-01").await;
         assert_eq!(inverted.status.as_u16(), 400);
     }
 
@@ -259,7 +259,7 @@ mod tests {
             "?from=yesterday&to=2026-01-03",
             "?from=2026-01-01&to=2026-02-30",
         ] {
-            let response = get(&app, &token, query).await;
+            let response = get(&app, token, query).await;
             assert_eq!(response.status.as_u16(), 400, "{query}");
         }
     }
@@ -271,10 +271,10 @@ mod tests {
         let token = "usage";
         let base = "?from=2026-01-01&to=2026-01-03";
         for limit in ["0", "10001", "-1"] {
-            let response = get(&app, &token, &format!("{base}&limit={limit}")).await;
+            let response = get(&app, token, &format!("{base}&limit={limit}")).await;
             assert_eq!(response.status.as_u16(), 400, "limit {limit}");
         }
-        let response = get(&app, &token, &format!("{base}&limit=10000")).await;
+        let response = get(&app, token, &format!("{base}&limit=10000")).await;
         assert_eq!(response.status.as_u16(), 200);
         let page: Value = response.json();
         assert_eq!(page["data"].as_array().map(Vec::len), Some(4));
@@ -296,7 +296,7 @@ mod tests {
         ] {
             let response = get(
                 &app,
-                &token,
+                token,
                 &format!("?from=2026-01-01&to=2026-01-03&cursor={cursor}"),
             )
             .await;

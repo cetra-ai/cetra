@@ -435,9 +435,9 @@ mod tests {
         let token = "orgs";
         let id = Uuid::now_v7();
         let request = body(id, "Retry", "retry@example.com", None);
-        let first = create(&app, &token, &request).await;
+        let first = create(&app, token, &request).await;
         assert_eq!(first.status, 201);
-        let second = create(&app, &token, &request).await;
+        let second = create(&app, token, &request).await;
         assert_eq!(second.status, 200);
         let first: InternalOrg = first.json();
         let second: InternalOrg = second.json();
@@ -458,7 +458,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let third = create(&app, &token, &request).await;
+        let third = create(&app, token, &request).await;
         assert_eq!(third.status, 200);
         assert_eq!(third.json::<InternalOrg>(), first);
         assert_eq!(org_count_for(&app, id).await, 1);
@@ -482,7 +482,7 @@ mod tests {
         let disabled_id = Uuid::now_v7();
         let refused = create(
             &app,
-            &token,
+            token,
             &body(disabled_id, "Blocked", "disabled@example.com", None),
         )
         .await;
@@ -493,7 +493,7 @@ mod tests {
         let admin_id = Uuid::now_v7();
         let refused = create(
             &app,
-            &token,
+            token,
             &body(admin_id, "Admin Owned", "ada@example.com", None),
         )
         .await;
@@ -509,7 +509,7 @@ mod tests {
 
         let v4 = create(
             &app,
-            &token,
+            token,
             &body(Uuid::new_v4(), "Acme", "v4@example.com", None),
         )
         .await;
@@ -518,7 +518,7 @@ mod tests {
 
         let blank = create(
             &app,
-            &token,
+            token,
             &body(Uuid::now_v7(), "   ", "blank@example.com", None),
         )
         .await;
@@ -527,7 +527,7 @@ mod tests {
 
         let bad_email = create(
             &app,
-            &token,
+            token,
             &body(Uuid::now_v7(), "Acme", "not-an-email", None),
         )
         .await;
@@ -536,7 +536,7 @@ mod tests {
 
         let unknown = create(
             &app,
-            &token,
+            token,
             &json!({
                 "id": Uuid::now_v7(),
                 "name": "Acme",
@@ -582,7 +582,7 @@ mod tests {
         let first = Uuid::now_v7();
         let created = create(
             &app,
-            &token,
+            token,
             &body(first, "Acme Cloud", "first@example.com", None),
         )
         .await;
@@ -592,7 +592,7 @@ mod tests {
         let second = Uuid::now_v7();
         let created = create(
             &app,
-            &token,
+            token,
             &body(second, "Acme Cloud", "second@example.com", None),
         )
         .await;
@@ -614,15 +614,10 @@ mod tests {
         let token = "orgs";
 
         let id = Uuid::now_v7();
-        let created = create(
-            &app,
-            &token,
-            &body(id, "Doomed", "doomed@example.com", None),
-        )
-        .await;
+        let created = create(&app, token, &body(id, "Doomed", "doomed@example.com", None)).await;
         assert_eq!(created.status, 201);
 
-        let (first, logs) = capture_logs(async { drop_org_request(&app, &token, id).await }).await;
+        let (first, logs) = capture_logs(async { drop_org_request(&app, token, id).await }).await;
         assert_eq!(first.status, 202);
         let deletion: Value = first.json();
         assert_eq!(deletion["requested_by"]["kind"], "control_plane");
@@ -636,12 +631,12 @@ mod tests {
         assert!(!logs.contains("doomed@example.com"));
         let deletion_id = deletion["id"].clone();
 
-        let again = drop_org_request(&app, &token, id).await;
+        let again = drop_org_request(&app, token, id).await;
         assert_eq!(again.status, 202);
         assert_eq!(again.json::<Value>()["id"], deletion_id);
 
         crate::deletion::run_once(&app.state).await.unwrap();
-        let applied = drop_org_request(&app, &token, id).await;
+        let applied = drop_org_request(&app, token, id).await;
         assert_eq!(applied.status, 200);
         let applied: Value = applied.json();
         assert_eq!(applied["status"], "applied");
@@ -684,14 +679,14 @@ mod tests {
         let token = "orgs";
         let id = Uuid::now_v7();
         assert_eq!(
-            create(&app, &token, &body(id, "Once", "once@example.com", None))
+            create(&app, token, &body(id, "Once", "once@example.com", None))
                 .await
                 .status,
             201
         );
-        assert_eq!(drop_org_request(&app, &token, id).await.status, 202);
+        assert_eq!(drop_org_request(&app, token, id).await.status, 202);
 
-        let dropping = create(&app, &token, &body(id, "Once", "once@example.com", None)).await;
+        let dropping = create(&app, token, &body(id, "Once", "once@example.com", None)).await;
         assert_eq!(dropping.status, 409);
         assert_eq!(dropping.problem().code, ProblemCode::Conflict);
         assert_eq!(
@@ -700,7 +695,7 @@ mod tests {
         );
 
         crate::deletion::run_once(&app.state).await.unwrap();
-        let dropped = create(&app, &token, &body(id, "Once", "once@example.com", None)).await;
+        let dropped = create(&app, token, &body(id, "Once", "once@example.com", None)).await;
         assert_eq!(dropped.status, 409);
         assert_eq!(
             dropped.problem().detail.as_deref(),
@@ -709,7 +704,7 @@ mod tests {
 
         let fresh = create(
             &app,
-            &token,
+            token,
             &body(Uuid::now_v7(), "Fresh", "fresh@example.com", None),
         )
         .await;
