@@ -69,6 +69,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Storage needs crash-recovery and concurrency tests.
 - `LLMOBS_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
 - `LLMOBS_TEST_S3_ENDPOINT` (with `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` credentials) runs the storage S3 test against a real S3-compatible server; `crates/storage/tests/s3.rs` shows how to start one (D119).
+- `LLMOBS_BENCH_CORPUS` overrides the benchmark corpus path. `LLMOBS_TEST_S3_REGION` (default `us-east-1`) and `LLMOBS_TEST_S3_PATH_STYLE` (default `true`) complete `LLMOBS_TEST_S3_ENDPOINT` for the benches and the soak. `LLMOBS_SOAK_*` configure the soak (`crates/storage/tests/soak.rs`).
 - Tests cover the current behaviour only.
 - UI tests use the MSW mocks from `fixtures/api/`; a page test overrides an endpoint with `server.use` instead of mocking modules.
 - Captured OTLP fixtures are recorded with `just capture` (tools/capture) and never edited by hand; `just check-capture` before committing one.
@@ -97,6 +98,7 @@ sdks/typescript/             TypeScript SDK (pnpm)                              
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
+tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
 tools/e2e/                   run.sh for just e2e: a real llmobs serve and both SDK suites (D-G-20)
 docs/                        decisions, specs, plans, research
@@ -149,6 +151,10 @@ Run everything through `just`:
 | `just capture <group>/<case>` | record an OTLP fixture from a scenario, e.g. `just capture openinference/openai-chat-tool` |
 | `just capture-all` | recapture every scenario |
 | `just check-capture` | lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded) |
+| `just fetch-corpus` | download the pinned benchmark corpus (OpenAssistant oasst2, Apache-2.0) into `target/bench-corpus` |
+| `just soak` | the storage soak (D-R-11), configured by `LLMOBS_SOAK_*` |
+| `just soak-plot <out>` | plots and a summary table of a soak run |
+| `just check-soak-plot` | lint and type-check `tools/soak` |
 | `just e2e` | build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `llmobs serve` |
 | `just dist <target>` | release archive of one target into `target/dist` (and the image context on Linux) |
 | `just image [tag]` · `just image-smoke [tag]` | build and smoke-test the Docker image from `target/dist` |

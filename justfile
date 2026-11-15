@@ -34,6 +34,18 @@ fetch-corpus:
     echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
     mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
 
+# Storage soak (D-R-11). Needs LLMOBS_SOAK_DIR and LLMOBS_SOAK_OUT; see crates/storage/tests/soak.rs
+soak:
+    RUST_MIN_STACK=33554432 cargo test --release -p llmobs-storage --all-features --test soak -- --ignored --nocapture --exact soak
+
+# Plots of a soak run's samples into <out>/plots
+soak-plot out:
+    cd tools/soak && uv run --locked python plot.py {{absolute_path(out)}}
+
+# Lint and type-check the soak plot script (not part of `just check`)
+check-soak-plot:
+    cd tools/soak && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy plot.py
+
 # Opt-in live provider tests. Ignored by `just check` (D167).
 eval-live:
     cargo test -p llmobs-eval --test live -- --ignored --test-threads 1
