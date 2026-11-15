@@ -39,6 +39,11 @@ test:
 model cases="500":
     LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 
+# The concurrent model stress test (track R M6), release mode. `secs` is the
+# run time; LLMOBS_STRESS_* variables tune it (docs/plans/r-hardening/06-m6-concurrency.md).
+stress secs="300":
+    LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
+
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
 # Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
 # Ubuntu 24.04 and later restrict them with AppArmor: run

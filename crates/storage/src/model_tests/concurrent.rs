@@ -17,8 +17,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bytesize::ByteSize;
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -26,7 +24,7 @@ use super::check::{
     Observed, Read, Strictness, check_full, check_quiet_state, check_settled_files, compare, days,
     observe,
 };
-use super::harness::{Harness, HarnessOptions, MODEL_PUT_SIZES, concurrent_tweaks};
+use super::harness::{Harness, HarnessOptions, concurrent_tweaks, memory_store};
 use super::model::Model;
 use super::observe::ReadFailure;
 use super::ops::{
@@ -158,7 +156,7 @@ impl Stats {
     }
 
     /// Matched reads, over every kind.
-    fn matched_reads(&self) -> u64 {
+    pub(super) fn matched_reads(&self) -> u64 {
         self.reads.iter().map(|count| count.load(SeqCst)).sum()
     }
 }
@@ -242,6 +240,11 @@ impl Lane {
             .range(lo - log.base..=last - log.base)
             .cloned()
             .collect())
+    }
+
+    /// Steps whose storage call has returned: the index of the lane's last published state.
+    pub(super) fn steps(&self) -> usize {
+        self.published.load(SeqCst)
     }
 
     /// Marks the lane idle (no step will come) or busy again, and wakes the waiting readers.
@@ -910,7 +913,7 @@ pub(super) fn settle_concurrent(
 }
 
 /// What a case's lane holds between its segments.
-fn is_barrier(op: &Op) -> bool {
+pub(super) fn is_barrier(op: &Op) -> bool {
     matches!(
         op,
         Op::Restart | Op::Crash | Op::LossyCrash { .. } | Op::Settle
@@ -944,12 +947,7 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) -> St
     let mut harness = Harness::with_options(
         HarnessOptions {
             workers: WORKERS,
-            store: options.remote.then(|| {
-                (
-                    Arc::new(InMemory::new()) as Arc<dyn ObjectStore>,
-                    MODEL_PUT_SIZES,
-                )
-            }),
+            store: options.remote.then(memory_store),
             ..HarnessOptions::default()
         },
         tweaks,
@@ -1014,7 +1012,7 @@ pub(super) fn run_concurrent_case(ops: &[Op], options: &ConcurrentOptions) -> St
 
 /// `concurrent_tweaks` for a remote case (R6.6): a 64 KiB read cache. A model file is a few KiB,
 /// so the cache holds a handful of files, and its readers evict each other's blocks.
-fn concurrent_remote_tweaks(config: &mut StorageConfig) {
+pub(super) fn concurrent_remote_tweaks(config: &mut StorageConfig) {
     concurrent_tweaks(config);
     config.query.read_cache_bytes = Some(ByteSize::kib(64));
 }
@@ -1344,12 +1342,7 @@ fn object_bytes_reads_both_stores() {
         let mut harness = Harness::with_options(
             HarnessOptions {
                 workers: WORKERS,
-                store: remote.then(|| {
-                    (
-                        Arc::new(InMemory::new()) as Arc<dyn ObjectStore>,
-                        MODEL_PUT_SIZES,
-                    )
-                }),
+                store: remote.then(memory_store),
                 ..HarnessOptions::default()
             },
             concurrent_tweaks,

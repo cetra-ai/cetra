@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use bytesize::ByteSize;
-use object_store::memory::InMemory;
 use sha2::{Digest, Sha256};
 
 use super::super::check::check_full;
-use super::super::harness::{Harness, HarnessOptions, MODEL_PUT_SIZES};
+use super::super::harness::{Harness, HarnessOptions, memory_store};
 use super::super::ops::{Op, new_model};
 use super::super::shape::{HOUR_NS, P, day, midnight};
 use super::fill::{Text, append_filler, filler, filler_batch, filler_rows};
@@ -989,7 +988,7 @@ fn the_read_cache_never_fills_the_disk() {
         let mut h = Harness::with_options(
             HarnessOptions {
                 root: Some(root.to_path_buf()),
-                store: Some((Arc::new(InMemory::new()), MODEL_PUT_SIZES)),
+                store: Some(memory_store()),
                 unrecorded: true,
                 ..HarnessOptions::default()
             },
