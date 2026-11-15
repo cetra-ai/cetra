@@ -538,3 +538,27 @@ At 50k spans/s with an average normalized span of about 3 KiB (LLM spans 10–50
 - With zstd at roughly 5–8× on JSON-heavy text, compressed output is about 20–30 MiB/s, or 2–2.5 TiB/day.
 
 Sustained use at this rate needs S3 and a bigger box. The target box (8 cores, 32 GiB) is sized for bursts at that rate and sustained ingest about an order of magnitude lower.
+
+## 12. Format versions (D-R-12, D-R-26 to D-R-32)
+
+From the first public release (D185), a data directory written by any release must open with every later one, and a directory written by a newer binary must be refused by an older one without being changed. Before that release there is no constraint.
+
+**One number.** `FORMAT_VERSION` (`crates/storage/src/format.rs`, a `u16`, 1 at the first release) is the format version of the whole data directory. It is stored in three places:
+
+| Surface | Where the number is | A reader that finds a newer one |
+|---|---|---|
+| Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. (M8) | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
+| WAL | an 8-byte header at the start of every segment (§1) (M8) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
+| Parquet | KV key `llmobs.format_version` in every file (§3) (M8) | not read at query time: the directory marker comes first. Checked by the golden tests. |
+
+`llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
+
+**What is a format change.** Not one: a new nullable Parquet column (§3), a `catalog.db` migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default), a new config key. Every other change is one: a new or changed WAL `kind`, segment header, compression or payload schema; a changed Parquet column type, sort order or file layout; a renamed or re-typed catalog column, a dropped table, an `UPDATE` of existing rows, a new value in a TEXT enum column (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`); a changed object path layout; a changed checksum; a changed read-cache block size.
+
+**A release that changes a format** bumps `FORMAT_VERSION`, keeps a reader for what the previous release wrote (older WAL segments are replayed before the new format is written; older Parquet files are read, not rewritten at upgrade; a catalog migration runs at open), has tests that open the previous releases' golden directories, and adds a line under `### Upgrade notes` in `CHANGELOG.md`.
+
+**Opening.** `catalog.db` is opened first. Its `user_version`: above `FORMAT_VERSION` is refused; `0` with an empty catalog is a new directory and is stamped; `0` with data is a pre-release directory and is refused (`PreFormat`). A migration the binary does not know (`_sqlx_migrations` has a version it lacks) is refused (`SchemaTooNew`). Downgrading is not supported: the way back is the backup taken before the upgrade (12 § Upgrades).
+
+**Golden directories.** `fixtures/storage/golden/<version>/` is a small data directory written by the release's own build (`just golden-dir <version>`), with `expected.json`: the answers of the public reads. A test opens a copy of every one with the current code and compares; none is committed before the first stable release, and until then the same test generates a directory into a temp dir and checks it. `fixtures/storage/golden/RELEASES` lists the released versions. Each stable release adds its directory and keeps the old ones: every 0.x directory until 1.0, every release's directory from 1.0 on (D-R-12).
+
+**Not covered here:** `meta.db`, `secret.key`, `admin.sock` and the backup `manifest.json`. They belong to the server (04) and to online backups (12).
