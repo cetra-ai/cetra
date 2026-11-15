@@ -1,5 +1,4 @@
 //! Dataset validation: names, sizes, JSON Schemas (D-J-2, D-J-4). No database access.
-#![allow(dead_code)] // J1.3 removes this line. Test builds need it too: `Schemas::of` and the batch cap are unused until J1.3.
 
 use std::fmt;
 
@@ -19,9 +18,13 @@ pub(crate) const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 /// Largest item: `input` + `expected_output` + `metadata`, serialized, in bytes.
 pub(crate) const MAX_ITEM_BYTES: usize = 1024 * 1024;
 /// Items in one batch add.
+// Used by J1.4 add_items; no J1.3 caller.
+#[allow(dead_code)]
 pub(crate) const MAX_BATCH_ITEMS: usize = 1_000;
 /// Schema failures listed when a schema change is refused.
 pub(crate) const MAX_SCHEMA_FAILURES: usize = 20;
+/// Item JSON read when a new schema is checked against the live items (D-J-2).
+pub(crate) const MAX_SCHEMA_CHECK_BYTES: usize = 64 * 1024 * 1024;
 
 /// An item's values, before or after storage. `Debug` is hand-written: sizes only.
 #[derive(Clone, PartialEq)]
@@ -107,6 +110,8 @@ impl Schemas {
 
     /// [`Self::compile`] of a stored dataset; an `Err(column)` becomes
     /// `MetaError::Corrupt { table: "datasets", column }`.
+    // Used by M2's import; no J1 caller.
+    #[allow(dead_code)]
     pub(crate) fn of(dataset: &DatasetRow) -> Result<Self, MetaError> {
         Self::compile(
             dataset.input_schema.as_deref(),
@@ -116,14 +121,6 @@ impl Schemas {
             table: "datasets",
             column,
         })
-    }
-
-    /// No schema at all.
-    pub(crate) fn none() -> Self {
-        Self {
-            input: None,
-            expected: None,
-        }
     }
 }
 
@@ -144,13 +141,13 @@ pub(crate) fn check_item(prefix: &str, item: &ItemValues, schemas: &Schemas) -> 
     if let Some(message) = input_schema.and_then(|v| first_failure(v, &item.input)) {
         errors.push(field_error(&input_field, &message));
     }
-    if let (Some(expected), Some(validator)) = (&item.expected_output, &schemas.expected) {
-        if let Some(message) = first_failure(validator, expected) {
-            errors.push(field_error(
-                &field_path(prefix, "expected_output"),
-                &message,
-            ));
-        }
+    if let (Some(expected), Some(validator)) = (&item.expected_output, &schemas.expected)
+        && let Some(message) = first_failure(validator, expected)
+    {
+        errors.push(field_error(
+            &field_path(prefix, "expected_output"),
+            &message,
+        ));
     }
     errors
 }
@@ -202,7 +199,11 @@ fn field_error(field: &str, message: &str) -> FieldError {
 }
 
 /// The serialized size of an item's three values, in bytes.
-fn json_bytes(input: &Value, expected: Option<&Value>, metadata: &Map<String, Value>) -> usize {
+pub(crate) fn json_bytes(
+    input: &Value,
+    expected: Option<&Value>,
+    metadata: &Map<String, Value>,
+) -> usize {
     let size = |text: Result<String, serde_json::Error>| text.map_or(0, |s| s.len());
     size(serde_json::to_string(input))
         + expected.map_or(0, |value| size(serde_json::to_string(value)))
@@ -315,10 +316,15 @@ mod tests {
     #[test]
     fn item_size() {
         let big = json!("x".repeat(1_048_577));
-        let errors = check_item("items[0]", &item(big.clone(), None), &Schemas::none());
+        let no_schemas = Schemas::compile(None, None).expect("no schemas compile");
+        let errors = check_item("items[0]", &item(big.clone(), None), &no_schemas);
         assert_eq!(errors[0].field, "items[0]");
         assert_eq!(errors[0].message, "is larger than 1 MiB");
-        let errors = check_item("", &item(big, None), &Schemas::none());
+        let errors = check_item(
+            "",
+            &item(big, None),
+            &Schemas::compile(None, None).expect("no schemas compile"),
+        );
         assert_eq!(errors[0].field, "item");
     }
 

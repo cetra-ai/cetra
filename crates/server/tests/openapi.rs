@@ -502,6 +502,31 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/score-definitions/{id}",
         "delete_score_definition",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets",
+        "list_datasets",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets",
+        "post_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "get_dataset",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "patch_dataset",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "delete_dataset",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -537,6 +562,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_org_deletions",
     "list_evaluators",
     "list_score_definitions",
+    "list_datasets",
     "list_online_rules",
     "post_online_rule_preview",
     "post_backfill_estimate",
@@ -571,6 +597,7 @@ const TAGS: &[&str] = &[
     "scores",
     "evaluation",
     "score_definitions",
+    "datasets",
     "schema",
     "saved_views",
     "sql",
@@ -853,6 +880,8 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset" || *id == "patch_dataset" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
@@ -942,6 +971,7 @@ fn document_lint() {
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
+        ("DatasetPage", "Dataset"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
@@ -1215,6 +1245,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DeletionPage",
         "EvaluatorPage",
         "ScoreDefinitionPage",
+        "DatasetPage",
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",

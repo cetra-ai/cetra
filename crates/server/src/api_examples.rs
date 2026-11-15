@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::common::Page;
+use crate::api::datasets::Dataset;
 use crate::api::metrics::MetricsResponse;
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
@@ -21,6 +22,7 @@ use crate::api::users::{EndUserDetail, EndUserSummary};
 use crate::test_support::{EXAMPLE_PROJECT, TestApp};
 
 const MEDIA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
+const EXAMPLE_DATASET: &str = "01900000-0000-7000-8000-000000000c01";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Example {
@@ -198,6 +200,7 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         .parse()
         .unwrap_or_else(|error| panic!("{error}"));
     app.load_example_dataset(project).await;
+    app.seed_example_faq_dataset().await;
     let cookie = cookie.as_str();
     let mut out = Output::default();
 
@@ -313,6 +316,23 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     let scores: Page<Score> = fetch(&app, cookie, "/scores").await;
     out.add("list_scores", &[], &[], "responses/scores.json", &scores);
 
+    let datasets: Page<Dataset> = fetch(&app, cookie, "/datasets").await;
+    out.add(
+        "list_datasets",
+        &[],
+        &[],
+        "responses/datasets.json",
+        &datasets,
+    );
+    let dataset: Dataset = fetch(&app, cookie, &format!("/datasets/{EXAMPLE_DATASET}")).await;
+    out.add(
+        "get_dataset",
+        &[("dataset", EXAMPLE_DATASET)],
+        &[],
+        &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
+        &dataset,
+    );
+
     let metrics: MetricsResponse = fetch(
         &app,
         cookie,
@@ -370,6 +390,12 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 
     // Static entries, copied from the hand-written list this generator replaces.
     out.manifest.extend([
+        // The create answer has the shape of the read, so the read's file serves it too.
+        example_created(
+            "post_dataset",
+            BTreeMap::new(),
+            &format!("responses/datasets/{EXAMPLE_DATASET}.json"),
+        ),
         example(
             "list_admin_users",
             BTreeMap::new(),

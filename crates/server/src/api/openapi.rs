@@ -46,6 +46,7 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::datasets::{CreateDatasetRequest, Dataset, DatasetListParams, UpdateDatasetRequest};
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
@@ -289,6 +290,10 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateScoreDefinitionRequest>();
     set.insert::<UpdateScoreDefinitionRequest>();
     set.insert_page::<ScoreDefinition>("ScoreDefinitionPage");
+    set.insert::<Dataset>();
+    set.insert::<CreateDatasetRequest>();
+    set.insert::<UpdateDatasetRequest>();
+    set.insert_page::<Dataset>("DatasetPage");
     set.insert::<ChannelKind>();
     set.insert::<DeliveryStatus>();
     set.insert::<ChannelDelivery>();
@@ -422,6 +427,7 @@ pub fn openapi() -> OpenApi {
                 "score_definitions",
                 "Named score shapes that score writes and evaluators must fit.",
             ),
+            tag("datasets", "Versioned datasets and their items."),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
             tag("sql", "SQL console over the project's views."),
@@ -743,6 +749,7 @@ fn paths() -> Paths {
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
+    let paths = dataset_paths(paths);
     let paths = saved_view_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
@@ -2750,6 +2757,85 @@ fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}/backfills/estimate"),
             PathItem::new(HttpMethod::Post, estimate),
+        )
+}
+
+const DATASET_READ: &str = "Any project member, or an API key with `read`.";
+const DATASET_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
+    let dataset = path_string("dataset", "Dataset id, or its name.");
+    let list = operation("list_datasets", "datasets", "List datasets")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<DatasetListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("DatasetPage", "One page of datasets."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_dataset", "datasets", "Create a dataset")
+        .description(Some(DATASET_WRITE))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDatasetRequest")))
+        .responses(responses(
+            "201",
+            json_of::<Dataset>("The created dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let get = operation("get_dataset", "datasets", "Get a dataset")
+        .description(Some(DATASET_READ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The dataset."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_dataset", "datasets", "Update a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Setting a schema validates every live item first; up to 20 failures are listed (D-J-2).",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("UpdateDatasetRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The updated dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let delete = operation("delete_dataset", "datasets", "Delete a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Experiments keep their results; their dataset link is cleared.",
+        ))
+        .parameters(Some(vec![project_param(), dataset]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Delete, delete),
         )
 }
 

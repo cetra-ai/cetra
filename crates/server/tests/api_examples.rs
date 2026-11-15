@@ -21,6 +21,7 @@ use llmobs_server::api::common::Page;
 use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
+use llmobs_server::api::datasets::{CreateDatasetRequest, Dataset};
 use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
 use llmobs_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
@@ -436,6 +437,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     // `UpdateOnlineRuleRequest` has no `Serialize`, so it is only deserialized.
     let update_text = fs::read_to_string(api_dir().join("requests/online-rule-update.json"))
@@ -490,6 +492,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
             "post_score_definition",
             "requests/score-definition-create.json",
         ),
+        ("post_dataset", "requests/dataset-create.json"),
         ("post_backfill", "requests/backfill-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
     ];
@@ -552,6 +555,8 @@ fn generated_files_roundtrip() {
             "list_users" => roundtrip::<Page<EndUserSummary>>(&example.file),
             "get_user" => roundtrip::<EndUserDetail>(&example.file),
             "list_scores" => roundtrip::<Page<Score>>(&example.file),
+            "list_datasets" => roundtrip::<Page<Dataset>>(&example.file),
+            "get_dataset" | "post_dataset" => roundtrip::<Dataset>(&example.file),
             "list_api_keys" => roundtrip::<Page<ApiKey>>(&example.file),
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
