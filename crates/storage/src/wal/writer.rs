@@ -68,6 +68,9 @@ const ROTATE_CAPACITY: usize = 1;
 #[derive(Debug)]
 pub(crate) struct WriterShared {
     failed: AtomicBool,
+    /// Set by [`crate::Storage::flush_now`]: the flush task flushes whatever the
+    /// memtable holds, regardless of `flush.max_bytes` and `flush.max_age`.
+    force_flush: AtomicBool,
     memtable_bytes: AtomicU64,
     memtable: Mutex<Memtable>,
     /// Rotation requests from the flush task.
@@ -84,6 +87,16 @@ impl WriterShared {
     /// The writer task has stopped on an I/O error.
     pub(crate) fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
+    }
+
+    /// Set or clear the forced flush of [`crate::Storage::flush_now`].
+    pub(crate) fn set_force_flush(&self, on: bool) {
+        self.force_flush.store(on, Ordering::Release);
+    }
+
+    /// A forced flush is requested.
+    pub(crate) fn force_flush(&self) -> bool {
+        self.force_flush.load(Ordering::Acquire)
     }
 
     /// Bytes of the active and frozen memtables, for the backpressure check.
@@ -287,6 +300,7 @@ pub(crate) fn spawn(mut params: WriterParams) -> WalWriterHandle {
     let memtable = std::mem::replace(&mut params.memtable, Memtable::new(params.table));
     let state = Arc::new(WriterShared {
         failed: AtomicBool::new(false),
+        force_flush: AtomicBool::new(false),
         memtable_bytes: AtomicU64::new(bytes),
         memtable: Mutex::new(memtable),
         rotate_tx,

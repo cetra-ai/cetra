@@ -176,7 +176,7 @@ async fn run(mut params: FlushParams) {
                 Ok(()) => pending = None,
                 Err(error) => {
                     log_truncate(params.table, &error);
-                    sleep_backoff(&mut params.stop, backoff).await;
+                    sleep_backoff(&mut params.stop, &params.notify, backoff).await;
                     backoff = next_backoff(backoff);
                     continue;
                 }
@@ -201,7 +201,7 @@ async fn run(mut params: FlushParams) {
                 }
             }
             Err(_) => {
-                sleep_backoff(&mut params.stop, backoff).await;
+                sleep_backoff(&mut params.stop, &params.notify, backoff).await;
                 backoff = next_backoff(backoff);
             }
         }
@@ -216,13 +216,22 @@ fn next_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(MAX_BACKOFF)
 }
 
-async fn sleep_backoff(stop: &mut watch::Receiver<bool>, backoff: Duration) {
+/// Waits out an error backoff. A forced flush (`notify`) ends the wait at once.
+async fn sleep_backoff(stop: &mut watch::Receiver<bool>, notify: &Notify, backoff: Duration) {
     tokio::select! {
         () = tokio::time::sleep(backoff) => {}
         result = stop.changed() => {
             let _ = result;
         }
+        () = notify.notified() => {}
     }
+}
+
+/// A forced flush is due only when there is something to flush (N M2, D-N-18).
+/// Without this check an empty memtable would spin the task.
+fn forced(memtable: &Memtable, shared: &WriterShared) -> bool {
+    // The same emptiness test `Memtable::freeze` makes before it freezes.
+    shared.force_flush() && (memtable.has_frozen() || !memtable.partitions().is_empty())
 }
 
 async fn wait_until_due(params: &FlushParams) {
@@ -251,7 +260,7 @@ async fn wait_until_due(params: &FlushParams) {
 }
 
 fn flush_due(memtable: &Memtable, params: &FlushParams) -> bool {
-    if memtable.has_frozen() || stopping(&params.stop) {
+    if memtable.has_frozen() || stopping(&params.stop) || forced(memtable, &params.shared) {
         return true;
     }
     let over_size = u64::try_from(memtable.active_bytes()).unwrap_or(u64::MAX) >= params.max_bytes;
@@ -274,7 +283,7 @@ fn flush_wait(
     let aged = memtable
         .active_oldest()
         .is_some_and(|oldest| oldest.elapsed() >= max_age);
-    let ready = memtable.has_frozen() || over_size || aged;
+    let ready = memtable.has_frozen() || over_size || aged || forced(&memtable, shared);
     let due = memtable
         .active_oldest()
         .map(|oldest| max_age.saturating_sub(oldest.elapsed()));
