@@ -15,6 +15,7 @@ pub mod deletions;
 pub mod entitlements;
 pub mod eval_jobs;
 pub mod evaluators;
+pub mod experiments;
 pub mod internal;
 pub mod invites;
 pub mod keys;

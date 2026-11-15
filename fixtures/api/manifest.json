@@ -111,6 +111,16 @@
     "file": "static/evaluator.json"
   },
   {
+    "operation_id": "get_experiment",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000e01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment.json"
+  },
+  {
     "operation_id": "get_invite_preview",
     "path_params": {
       "token": "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA"
@@ -646,6 +656,14 @@
     "file": "static/evaluators.json"
   },
   {
+    "operation_id": "list_experiments",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiments.json"
+  },
+  {
     "operation_id": "list_llm_connections",
     "path_params": {
       "org": "acme"
@@ -882,6 +900,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluator-test-result.json"
+  },
+  {
+    "operation_id": "post_experiment",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/experiment-created.json"
   },
   {
     "operation_id": "post_llm_connection",

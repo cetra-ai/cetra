@@ -1572,6 +1572,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List experiments
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_experiments"];
+        put?: never;
+        /**
+         * Create an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.
+         */
+        post: operations["post_experiment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an experiment
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_experiment"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.
+         */
+        delete: operations["delete_experiment"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/finish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish an experiment
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_finish"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/experiments/{id}/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post results
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).
+         */
+        post: operations["post_experiment_results"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -2948,6 +3036,42 @@ export interface components {
             /** @description Signing secret of a webhook, 16 to 256 characters. Write-only, and required for a webhook. */
             webhook_secret?: string;
         };
+        /** @description `POST /api/v1/projects/{project}/experiments` body. */
+        CreateExperimentRequest: {
+            /** @description The dataset, by id or by name. */
+            dataset: string;
+            /**
+             * Format: int64
+             * @description The version to pin. Defaults to the dataset's current version. 0 is refused.
+             */
+            dataset_version?: number;
+            /** @description Free text, at most 2 000 characters. */
+            description?: string;
+            /** @description A JSON object of at most 64 KiB. */
+            metadata?: Record<string, never>;
+            /** @description Experiment name, 1 to 200 characters after trimming. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20. Defaults to 1.
+             */
+            repetitions?: number;
+        };
+        /**
+         * @description The created experiment and the first page of its pinned items. The SDK pages the rest with
+         *     `GET …/datasets/{dataset}/items?version=` from `next_cursor`.
+         */
+        CreateExperimentResponse: {
+            /** @description The experiment, `running`. */
+            experiment: components["schemas"]["Experiment"];
+            /** @description The first 1 000 items of the pinned version, by item id. */
+            items: components["schemas"]["DatasetItem"][];
+            /**
+             * @description The item id to pass as `cursor` of `GET …/items` for the next page, or null on the last
+             *     page.
+             */
+            next_cursor?: string;
+        };
         /** @description `POST /api/internal/v1/orgs` (D-P-29). */
         CreateInternalOrgRequest: {
             /**
@@ -3701,6 +3825,115 @@ export interface components {
              */
             output_tokens?: number;
         };
+        /** @description One experiment: a run of a task over a pinned dataset version. */
+        Experiment: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The dataset. Omitted once the dataset is deleted.
+             */
+            dataset_id?: string;
+            /** @description The dataset's name when the experiment was created. */
+            dataset_name: string;
+            /**
+             * Format: int64
+             * @description The dataset version the experiment is pinned to.
+             */
+            dataset_version: number;
+            /** @description Free text. Omitted when unset. */
+            description?: string;
+            /** @description The error the experiment finished with. Omitted when none. */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description When the experiment finished. Omitted while it runs. JSON is RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Experiment id.
+             */
+            id: string;
+            /**
+             * Format: int64
+             * @description Live items of the pinned version.
+             */
+            item_count: number;
+            /** @description A JSON object. */
+            metadata: Record<string, never>;
+            /** @description Not unique. 1 to 200 characters. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Repetitions of every item, 1 to 20.
+             */
+            repetitions: number;
+            /**
+             * Format: int64
+             * @description Results stored so far.
+             */
+            result_count: number;
+            /** @description `running`, `completed` or `failed`. */
+            status: components["schemas"]["ExperimentStatus"];
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        ExperimentPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Experiment"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One result: what the task answered for one item and repetition. */
+        ExperimentResult: {
+            /**
+             * Format: uuid
+             * @description The dataset item. Its input and expected output are copied from the pinned version.
+             */
+            dataset_item_id: string;
+            /** @description What went wrong, at most 4 096 characters. Omitted when none. */
+            error?: string;
+            /**
+             * Format: int64
+             * @description Time the task took, in nanoseconds. Omitted when unknown.
+             */
+            latency_ns?: number;
+            /** @description Any JSON value. */
+            output?: unknown;
+            /**
+             * Format: int64
+             * @description 0 to `repetitions` − 1.
+             */
+            repetition: number;
+            /** @description The trace of the task run. Omitted when none. */
+            trace_id?: components["schemas"]["TraceId"];
+        };
+        /** @description `POST …/experiments/{id}/items` body: 1 to 500 results. */
+        ExperimentResultsRequest: {
+            /** @description The results, 1 to 500 of them. One row per item and repetition: a later post replaces it. */
+            results: components["schemas"]["ExperimentResult"][];
+        };
+        /** @description What `POST …/items` stored. */
+        ExperimentResultsResponse: {
+            /**
+             * Format: int64
+             * @description Rows not stored because their trace is being deleted (D-J-9).
+             */
+            skipped: number;
+            /**
+             * Format: int64
+             * @description Rows written.
+             */
+            stored: number;
+        };
+        /**
+         * @description `running`, `completed` or `failed`.
+         * @enum {string}
+         */
+        ExperimentStatus: "running" | "completed" | "failed";
         /**
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
@@ -3741,6 +3974,11 @@ export interface components {
             message: string;
             /** @description Location inside the field value, for filter and SQL errors. */
             position?: components["schemas"]["TextPosition"];
+        };
+        /** @description `POST …/experiments/{id}/finish` body. */
+        FinishExperimentRequest: {
+            /** @description Why the run failed, at most 4 096 characters. Omitted for `completed`. */
+            error?: string;
         };
         /** @description `POST /api/auth/password/forgot`. */
         ForgotPasswordRequest: {
@@ -13978,6 +14216,466 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_experiments: {
+        parameters: {
+            query?: {
+                /** @description Keep one dataset's experiments: its id or name. */
+                dataset?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of experiments, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment and the first page of its pinned items. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateExperimentResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The experiment. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_experiment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_finish: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FinishExperimentRequest"];
+            };
+        };
+        responses: {
+            /** @description The experiment after the finish. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Experiment"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_experiment_results: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Experiment id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExperimentResultsRequest"];
+            };
+        };
+        responses: {
+            /** @description The rows stored and skipped. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExperimentResultsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

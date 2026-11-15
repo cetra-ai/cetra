@@ -1,6 +1,4 @@
 //! `experiments` and `experiment_items` rows (spec 04 § Datasets & experiments, D-J-10).
-// Used by tests only until J3.4 serves the rows; J3.4 removes this line.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

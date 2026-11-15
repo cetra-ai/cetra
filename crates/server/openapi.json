@@ -9841,6 +9841,621 @@
         }
       }
     },
+    "/api/v1/projects/{project}/experiments": {
+      "get": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "List experiments",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "list_experiments",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "query",
+            "description": "Keep one dataset's experiments: its id or name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of experiments, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Create an experiment",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.",
+        "operationId": "post_experiment",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateExperimentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The experiment and the first page of its pinned items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateExperimentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/experiments/{id}": {
+      "get": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Get an experiment",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_experiment",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Experiment id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The experiment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Experiment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Delete an experiment",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.",
+        "operationId": "delete_experiment",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Experiment id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/experiments/{id}/finish": {
+      "post": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Finish an experiment",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).",
+        "operationId": "post_experiment_finish",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Experiment id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FinishExperimentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The experiment after the finish.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Experiment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/experiments/{id}/items": {
+      "post": {
+        "tags": [
+          "experiments"
+        ],
+        "summary": "Post results",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).",
+        "operationId": "post_experiment_results",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Experiment id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExperimentResultsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rows stored and skipped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExperimentResultsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/media/{sha256}": {
       "get": {
         "tags": [
@@ -16179,6 +16794,72 @@
         },
         "additionalProperties": false
       },
+      "CreateExperimentRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/experiments` body.",
+        "required": [
+          "name",
+          "dataset"
+        ],
+        "properties": {
+          "dataset": {
+            "type": "string",
+            "description": "The dataset, by id or by name."
+          },
+          "dataset_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version to pin. Defaults to the dataset's current version. 0 is refused."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, at most 2 000 characters."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "A JSON object of at most 64 KiB."
+          },
+          "name": {
+            "type": "string",
+            "description": "Experiment name, 1 to 200 characters after trimming."
+          },
+          "repetitions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Repetitions of every item, 1 to 20. Defaults to 1."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateExperimentResponse": {
+        "type": "object",
+        "description": "The created experiment and the first page of its pinned items. The SDK pages the rest with\n`GET …/datasets/{dataset}/items?version=` from `next_cursor`.",
+        "required": [
+          "experiment",
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "experiment": {
+            "$ref": "#/components/schemas/Experiment",
+            "description": "The experiment, `running`."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DatasetItem"
+            },
+            "description": "The first 1 000 items of the pinned version, by item id."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The item id to pass as `cursor` of `GET …/items` for the next page, or null on the last\npage. Always present."
+          }
+        }
+      },
       "CreateInternalOrgRequest": {
         "type": "object",
         "description": "`POST /api/internal/v1/orgs` (D-P-29).",
@@ -17593,6 +18274,195 @@
           }
         }
       },
+      "Experiment": {
+        "type": "object",
+        "description": "One experiment: a run of a task over a pinned dataset version.",
+        "required": [
+          "id",
+          "name",
+          "dataset_name",
+          "dataset_version",
+          "metadata",
+          "repetitions",
+          "item_count",
+          "result_count",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time. JSON is RFC 3339."
+          },
+          "dataset_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The dataset. Omitted once the dataset is deleted."
+          },
+          "dataset_name": {
+            "type": "string",
+            "description": "The dataset's name when the experiment was created."
+          },
+          "dataset_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The dataset version the experiment is pinned to."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text. Omitted when unset."
+          },
+          "error": {
+            "type": "string",
+            "description": "The error the experiment finished with. Omitted when none."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the experiment finished. Omitted while it runs. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Experiment id."
+          },
+          "item_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live items of the pinned version."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "A JSON object."
+          },
+          "name": {
+            "type": "string",
+            "description": "Not unique. 1 to 200 characters."
+          },
+          "repetitions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Repetitions of every item, 1 to 20."
+          },
+          "result_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Results stored so far."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ExperimentStatus",
+            "description": "`running`, `completed` or `failed`."
+          }
+        }
+      },
+      "ExperimentPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Experiment"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "ExperimentResult": {
+        "type": "object",
+        "description": "One result: what the task answered for one item and repetition.",
+        "required": [
+          "dataset_item_id",
+          "repetition"
+        ],
+        "properties": {
+          "dataset_item_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The dataset item. Its input and expected output are copied from the pinned version."
+          },
+          "error": {
+            "type": "string",
+            "description": "What went wrong, at most 4 096 characters. Omitted when none."
+          },
+          "latency_ns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Time the task took, in nanoseconds. Omitted when unknown."
+          },
+          "output": {
+            "description": "Any JSON value."
+          },
+          "repetition": {
+            "type": "integer",
+            "format": "int64",
+            "description": "0 to `repetitions` − 1."
+          },
+          "trace_id": {
+            "$ref": "#/components/schemas/TraceId",
+            "description": "The trace of the task run. Omitted when none."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentResultsRequest": {
+        "type": "object",
+        "description": "`POST …/experiments/{id}/items` body: 1 to 500 results.",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExperimentResult"
+            },
+            "description": "The results, 1 to 500 of them. One row per item and repetition: a later post replaces it."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExperimentResultsResponse": {
+        "type": "object",
+        "description": "What `POST …/items` stored.",
+        "required": [
+          "stored",
+          "skipped"
+        ],
+        "properties": {
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows not stored because their trace is being deleted (D-J-9)."
+          },
+          "stored": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows written."
+          }
+        }
+      },
+      "ExperimentStatus": {
+        "type": "string",
+        "description": "`running`, `completed` or `failed`.",
+        "enum": [
+          "running",
+          "completed",
+          "failed"
+        ]
+      },
       "Feature": {
         "type": "string",
         "description": "A feature an org may be entitled to. Names are append-only (D-P-12).",
@@ -17687,6 +18557,17 @@
             "description": "Location inside the field value, for filter and SQL errors."
           }
         }
+      },
+      "FinishExperimentRequest": {
+        "type": "object",
+        "description": "`POST …/experiments/{id}/finish` body.",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Why the run failed, at most 4 096 characters. Omitted for `completed`."
+          }
+        },
+        "additionalProperties": false
       },
       "ForgotPasswordRequest": {
         "type": "object",
@@ -22843,6 +23724,10 @@
     {
       "name": "datasets",
       "description": "Versioned datasets and their items."
+    },
+    {
+      "name": "experiments",
+      "description": "Experiments run by the SDK and their results."
     },
     {
       "name": "schema",

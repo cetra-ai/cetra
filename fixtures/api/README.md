@@ -43,6 +43,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Dataset | `01900000-0000-7000-8000-000000000c01`, `faq`, at version 2 with 3 live items. `datasets.json` and `datasets/…c01.json` use it. `requests/dataset-create.json` has the same name and schema |
 | Dataset items | `01900000-0000-7000-8000-000000000d01`, `…0d02`, `…0d03` |
 | Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2) |
+| Experiments | `01900000-0000-7000-8000-000000000e01` (`baseline`, completed, pinned to `faq` version 2), `…0e02` (`candidate`, completed in `experiments.json`, running in `experiment-created.json`). `experiment.json`, `experiments.json`, `experiment-created.json` and `requests/experiment-results.json` use them. They are not live experiments |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |
