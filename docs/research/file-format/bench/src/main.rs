@@ -6,6 +6,7 @@
 
 mod counting;
 mod payload;
+mod pqfast;
 mod profile;
 
 use std::path::{Path, PathBuf};
@@ -24,7 +25,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjPath;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
-use strata::{Config, StrataFile, StrataTable, StrataWriter};
+use strata::{CmpOp, Config, Lit, Predicate, StrataFile, StrataTable, StrataWriter, trace_detail, trace_list};
 use fmt_testdata::datagen;
 use llmobs_core::batch::spans_to_record_batch;
 use llmobs_core::enums::SpanKind;
@@ -604,87 +605,313 @@ async fn table(ctx: &SessionContext, loc: &Location, variant: &str) -> R<Vec<Arc
 
 // ------------------------------------------------------------------ query
 
+/// Columns of the 9-column light trace lookup (shared with `profile`).
+pub const LIGHT_COLS: [&str; 9] = ["span_id", "parent_span_id", "name", "start_time", "end_time", "status", "model", "total_tokens", "cost_total"];
+/// Columns of the top-50 LLM list (shared with `profile`).
+pub const LIST_COLS: [&str; 10] = ["trace_id", "span_id", "name", "start_time", "duration_ns", "status", "model", "total_tokens", "cost_total", "input_preview"];
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Sql,
+    TraceFull,
+    TraceLight,
+    ListLlm,
+}
+
+/// One query. `sql` is the statement for `Sql` and `ListLlm`; trace kinds build one per id.
+struct Query {
+    name: &'static str,
+    kind: Kind,
+    sql: String,
+}
+
+/// How a variant answers the queries: DataFusion over the registered table (with the Strata
+/// files it reads, for waves), the Strata fast paths, or the Parquet lookups.
+enum Runner {
+    Sql(SessionContext, Vec<Arc<StrataFile>>),
+    StFast(Vec<Arc<StrataFile>>),
+    PqFast(Vec<pqfast::PqFile>),
+}
+
+fn parse_id(s: &str) -> R<[u8; 16]> {
+    let k: [u8; 16] = profile::unhex(s).try_into().map_err(|_| "bad trace id")?;
+    Ok(k)
+}
+
+fn first_line(e: impl std::fmt::Display) -> String {
+    e.to_string().lines().next().unwrap_or("").to_owned()
+}
+
+/// Runs one query (all its statements, or all its lookups) and returns the row count, or None
+/// when the runner does not support the query.
+async fn run_query(r: &Runner, q: &Query, ids: &[[u8; 16]]) -> R<Option<usize>> {
+    let t0 = datagen::DAY_START;
+    let h = 3_600 * datagen::NS;
+    match r {
+        Runner::Sql(ctx, _) => {
+            let sqls: Vec<String> = match q.kind {
+                Kind::TraceFull => ids.iter().map(|id| format!("SELECT * FROM t WHERE trace_id = X'{}'", hex(id))).collect(),
+                Kind::TraceLight => ids.iter().map(|id| format!("SELECT {} FROM t WHERE trace_id = X'{}'", LIGHT_COLS.join(", "), hex(id))).collect(),
+                Kind::Sql | Kind::ListLlm => vec![q.sql.clone()],
+            };
+            let mut rows = 0;
+            for s in &sqls {
+                rows += ctx.sql(s).await?.collect().await?.iter().map(RecordBatch::num_rows).sum::<usize>();
+            }
+            Ok(Some(rows))
+        }
+        Runner::StFast(files) => {
+            let schema = files.first().ok_or("no strata files")?.schema();
+            match q.kind {
+                Kind::TraceFull => {
+                    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                    let mut rows = 0;
+                    for id in ids {
+                        rows += trace_detail(files, *id, &names).await?.num_rows();
+                    }
+                    Ok(Some(rows))
+                }
+                Kind::TraceLight => {
+                    let mut rows = 0;
+                    for id in ids {
+                        rows += trace_detail(files, *id, &LIGHT_COLS).await?.num_rows();
+                    }
+                    Ok(Some(rows))
+                }
+                Kind::ListLlm => {
+                    let pred = Predicate::Cmp(schema.index_of("span_kind")?, CmpOp::Eq, Lit::Utf8("llm".into()));
+                    let b = trace_list(files, (t0 + 14 * h)..(t0 + 15 * h), Some(pred), 50, &LIST_COLS).await?;
+                    Ok(Some(b.num_rows()))
+                }
+                Kind::Sql => Ok(None),
+            }
+        }
+        Runner::PqFast(files) => {
+            let first = files.first().ok_or("no parquet files")?;
+            let names: Vec<&str> = match q.kind {
+                Kind::TraceFull => first.meta.schema().fields().iter().map(|f| f.name().as_str()).collect(),
+                Kind::TraceLight => LIGHT_COLS.to_vec(),
+                Kind::Sql | Kind::ListLlm => return Ok(None),
+            };
+            let mut proj: Vec<usize> = names.iter().map(|n| first.meta.schema().index_of(n)).collect::<Result<_, _>>()?;
+            proj.sort_unstable();
+            let mut rows = 0;
+            for id in ids {
+                for batches in try_join_all(files.iter().map(|f| pqfast::lookup(f, id, &proj))).await? {
+                    rows += batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+                }
+            }
+            Ok(Some(rows))
+        }
+    }
+}
+
+/// The Strata files a runner reads (empty for Parquet lookups and non-Strata SQL).
+fn strata_files(r: &Runner) -> &[Arc<StrataFile>] {
+    match r {
+        Runner::Sql(_, files) | Runner::StFast(files) => files.as_slice(),
+        Runner::PqFast(_) => &[],
+    }
+}
+
+/// I/O of one measured run. Trace queries divide every figure by the number of ids.
+struct Io {
+    reqs: f64,
+    kib: f64,
+    wmax: Option<f64>,
+    wsum: Option<f64>,
+}
+
+fn reset_io(loc: &Location, r: &Runner) {
+    loc.store.reset();
+    for f in strata_files(r) {
+        f.reset_io_stats();
+    }
+}
+
+fn read_io(loc: &Location, r: &Runner, per: f64) -> Io {
+    let (reqs, bytes) = loc.store.stats();
+    let waves: Vec<u64> = strata_files(r).iter().map(|f| f.io_stats().waves).collect();
+    Io {
+        reqs: reqs as f64 / per,
+        kib: bytes as f64 / 1024.0 / per,
+        wmax: waves.iter().max().map(|w| *w as f64 / per),
+        wsum: (!waves.is_empty()).then(|| waves.iter().sum::<u64>() as f64 / per),
+    }
+}
+
+fn fmt_wave(w: Option<f64>) -> String {
+    w.map_or("-".to_owned(), |w| format!("{w:.1}"))
+}
+
+/// Runs the queries on one runner: a warm-up run (lazy metadata loads), then `runs` measured
+/// runs. The I/O figures come from the first measured run.
+async fn measure(loc: &Location, label: &str, r: &Runner, queries: &[Query], ids: &[[u8; 16]], runs: usize, only: Option<&str>) -> R<()> {
+    for q in queries {
+        if only.is_some_and(|o| o != q.name) {
+            continue;
+        }
+        match run_query(r, q, ids).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                println!("{label:16} {:20} n/a", q.name);
+                continue;
+            }
+            Err(e) => {
+                println!("{label:16} {:20} ERROR {}", q.name, first_line(&e));
+                continue;
+            }
+        }
+        let per = if matches!(q.kind, Kind::TraceFull | Kind::TraceLight) { ids.len() as f64 } else { 1.0 };
+        let mut times = Vec::new();
+        let mut rows = 0;
+        let mut io = None;
+        let mut failed = None;
+        for run in 0..runs {
+            if run == 0 {
+                reset_io(loc, r);
+            }
+            let t = Instant::now();
+            let res = run_query(r, q, ids).await;
+            let el = t.elapsed().as_secs_f64() * 1e3 / per;
+            match res {
+                Ok(Some(n)) => {
+                    rows = n;
+                    times.push(el);
+                }
+                Ok(None) => {
+                    failed = Some("unsupported".to_owned());
+                    break;
+                }
+                Err(e) => {
+                    failed = Some(first_line(&e));
+                    break;
+                }
+            }
+            if run == 0 {
+                io = Some(read_io(loc, r, per));
+            }
+        }
+        if let Some(e) = failed {
+            println!("{label:16} {:20} ERROR {e}", q.name);
+            continue;
+        }
+        let Some(io) = io else { continue };
+        times.sort_by(f64::total_cmp);
+        println!(
+            "{label:16} {:20} median {:>9.2} ms  min {:>9.2} ms  rows {rows:>6}  reqs {:>8.1}  KiB {:>10.1}  waves_max {:>6}  waves_sum {:>6}",
+            q.name,
+            times[times.len() / 2],
+            times[0],
+            io.reqs,
+            io.kib,
+            fmt_wave(io.wmax),
+            fmt_wave(io.wsum)
+        );
+    }
+    Ok(())
+}
+
+/// The `.parquet` objects of a variant, sorted by path, opened concurrently.
+async fn open_pq_fast(loc: &Location, variant: &str) -> R<Vec<pqfast::PqFile>> {
+    let mut metas: Vec<ObjectMeta> = loc.store.list(Some(&loc.prefix.clone().join(variant))).try_collect().await?;
+    metas.retain(|m| m.location.to_string().ends_with(".parquet"));
+    metas.sort_by(|a, b| a.location.cmp(&b.location));
+    let store: Arc<dyn ObjectStore> = loc.store.clone();
+    try_join_all(metas.into_iter().map(|m| pqfast::open(store.clone(), m.location))).await
+}
+
+fn needle_sql(n: &str) -> String {
+    format!("SELECT count(*) FROM t WHERE input LIKE '%{n}%'")
+}
+
+/// G7: one `LIKE` count per needle on each directory variant. Time is the minimum over `runs`
+/// of the mean per needle, in one warm context. Cold bytes are the mean per needle over fresh
+/// contexts.
+async fn substring_needles(loc: &Location, variants: &[&str], needles: &[String], runs: usize) -> R<()> {
+    let per = needles.len() as f64;
+    for &v in variants {
+        let ctx = new_ctx(loc, Some(1))?;
+        table(&ctx, loc, v).await?;
+        for n in needles {
+            ctx.sql(&needle_sql(n)).await?.collect().await?;
+        }
+        let mut best = f64::INFINITY;
+        for _ in 0..runs {
+            let t = Instant::now();
+            for n in needles {
+                ctx.sql(&needle_sql(n)).await?.collect().await?;
+            }
+            best = best.min(t.elapsed().as_secs_f64() * 1e3 / per);
+        }
+        let mut kib = 0.0;
+        for n in needles {
+            let ctx = new_ctx(loc, Some(1))?;
+            table(&ctx, loc, v).await?;
+            loc.store.reset();
+            ctx.sql(&needle_sql(n)).await?.collect().await?;
+            kib += loc.store.stats().1 as f64 / 1024.0;
+        }
+        println!("substring_needles {v:16} min {best:>9.2} ms per needle  cold KiB {:>10.1} per needle  ({} needles, {runs} runs)", kib / per, needles.len());
+    }
+    Ok(())
+}
+
 async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     let loc = location(dir)?;
-    let ids: Vec<String> = read_text(&loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().map(str::to_owned).collect();
+    let ids: Vec<[u8; 16]> = read_text(&loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().take(20).map(parse_id).collect::<R<_>>()?;
     let t0 = datagen::DAY_START;
     let h = 3_600 * datagen::NS;
     let ts = |ns: i64| format!("to_timestamp_nanos({ns})");
-    let queries: Vec<(&str, String)> = vec![
-        ("count_errors_6h", format!(
-            "SELECT count(*) FROM t WHERE status = 'error' AND start_time >= {} AND start_time < {}", ts(t0 + 10 * h), ts(t0 + 16 * h))),
-        ("model_rollup_day", "SELECT model, count(*), sum(total_tokens), sum(cost_total), avg(duration_ns) FROM t WHERE span_kind = 'llm' GROUP BY model ORDER BY model".to_owned()),
-        ("list_llm_1h", format!(
-            "SELECT trace_id, span_id, name, start_time, duration_ns, status, model, total_tokens, cost_total, input_preview FROM t WHERE span_kind = 'llm' AND start_time >= {} AND start_time < {} ORDER BY start_time DESC LIMIT 50", ts(t0 + 14 * h), ts(t0 + 15 * h))),
-        ("user_filter", "SELECT count(*), sum(cost_total) FROM t WHERE user_id = 'user-1234'".to_owned()),
-        ("metadata_filter", "SELECT count(*) FROM t WHERE metadata['customer_id'] = '\"cust-42\"'".to_owned()),
-        ("trace_lookup_full", "TRACE".to_owned()),
-        ("trace_lookup_light", "TRACE_LIGHT".to_owned()),
-        ("substring_input", "SELECT count(*) FROM t WHERE input LIKE '%zqxjneedle%'".to_owned()),
-        ("scan_all_payload", "SELECT sum(length(input)) + sum(length(output)) FROM t".to_owned()),
+    let list_cols = LIST_COLS.join(", ");
+    let queries = vec![
+        Query { name: "count_errors_6h", kind: Kind::Sql, sql: format!(
+            "SELECT count(*) FROM t WHERE status = 'error' AND start_time >= {} AND start_time < {}", ts(t0 + 10 * h), ts(t0 + 16 * h)) },
+        Query { name: "model_rollup_day", kind: Kind::Sql, sql: "SELECT model, count(*), sum(total_tokens), sum(cost_total), avg(duration_ns) FROM t WHERE span_kind = 'llm' GROUP BY model ORDER BY model".to_owned() },
+        Query { name: "list_llm_1h", kind: Kind::ListLlm, sql: format!(
+            "SELECT {list_cols} FROM t WHERE span_kind = 'llm' AND start_time >= {} AND start_time < {} ORDER BY start_time DESC, trace_id DESC, span_id DESC LIMIT 50", ts(t0 + 14 * h), ts(t0 + 15 * h)) },
+        Query { name: "user_filter", kind: Kind::Sql, sql: "SELECT count(*), sum(cost_total) FROM t WHERE user_id = 'user-1234'".to_owned() },
+        Query { name: "metadata_filter", kind: Kind::Sql, sql: "SELECT count(*) FROM t WHERE metadata['customer_id'] = '\"cust-42\"'".to_owned() },
+        Query { name: "trace_lookup_full", kind: Kind::TraceFull, sql: String::new() },
+        Query { name: "trace_lookup_light", kind: Kind::TraceLight, sql: String::new() },
+        Query { name: "substring_input", kind: Kind::Sql, sql: "SELECT count(*) FROM t WHERE input LIKE '%zqxjneedle%'".to_owned() },
+        Query { name: "scan_all_payload", kind: Kind::Sql, sql: "SELECT sum(length(input)) + sum(length(output)) FROM t".to_owned() },
     ];
+    let only = only.as_deref();
+    let needle_runs: usize = std::env::var("FMT_NEEDLE_RUNS").ok().map(|s| s.parse()).transpose()?.unwrap_or(runs);
+    println!("{:16} {:20} {:>9} {:>9} {:>6}  {:>8} {:>10}  {:>10} {:>10}", "variant", "query", "median", "min", "rows", "reqs", "KiB", "waves_max", "waves_sum");
+    println!("(trace queries: reqs, KiB and waves per id; waves are for st and st_fast only; rows are totals)");
+
     let variants: Vec<&str> = PQ_VARIANTS.iter().chain(VX_VARIANTS).chain(&["st"]).copied().collect();
-    for format in variants {
-        if !has_files(&loc, format).await? {
+    let mut dirs: Vec<&str> = Vec::new();
+    for variant in variants {
+        if !has_files(&loc, variant).await? {
             continue;
         }
-        let store = loc.store.clone();
         let ctx = new_ctx(&loc, None)?;
-        table(&ctx, &loc, format).await?;
-        for (name, sql) in &queries {
-            if only.as_deref().is_some_and(|o| o != *name) {
-                continue;
+        let files = table(&ctx, &loc, variant).await?;
+        measure(&loc, variant, &Runner::Sql(ctx, files), &queries, &ids, runs, only).await?;
+        dirs.push(variant);
+    }
+    if has_files(&loc, "st").await? {
+        let files = open_strata(&loc, "st").await?;
+        measure(&loc, "st_fast", &Runner::StFast(files), &queries, &ids, runs, only).await?;
+    }
+    for variant in PQ_VARIANTS {
+        if has_files(&loc, variant).await? {
+            let files = open_pq_fast(&loc, variant).await?;
+            measure(&loc, &format!("pq_fast/{variant}"), &Runner::PqFast(files), &queries, &ids, runs, only).await?;
+        }
+    }
+    if only.is_none_or(|o| o == "substring_needles") {
+        if let Some(text) = read_text(&loc, "needles.txt").await? {
+            let mut needles = Vec::new();
+            for line in text.lines() {
+                needles.push(String::from_utf8(profile::unhex(line))?);
             }
-            let mut times = Vec::new();
-            let mut first_io = (0, 0);
-            let mut rows = 0;
-            let mut value = String::new();
-            for r in 0..runs {
-                let sqls: Vec<String> = match sql.as_str() {
-                    "TRACE" => ids.iter().take(20).map(|id| format!("SELECT * FROM t WHERE trace_id = X'{id}'")).collect(),
-                    "TRACE_LIGHT" => ids.iter().take(20).map(|id| format!("SELECT span_id, parent_span_id, name, start_time, end_time, status, model, total_tokens, cost_total FROM t WHERE trace_id = X'{id}'")).collect(),
-                    s => vec![s.to_owned()],
-                };
-                store.reset();
-                let t = Instant::now();
-                rows = 0;
-                let mut failed = None;
-                for s in &sqls {
-                    match async { ctx.sql(s).await?.collect().await }.await {
-                        Ok(batches) => {
-                            rows += batches.iter().map(RecordBatch::num_rows).sum::<usize>();
-                            if sqls.len() == 1 && r == 0 {
-                                value = arrow::util::pretty::pretty_format_batches(&batches)
-                                    .map(|t| t.to_string().lines().nth(3).unwrap_or("").replace(' ', ""))
-                                    .unwrap_or_default();
-                                value.truncate(60);
-                            }
-                        }
-                        Err(e) => {
-                            failed = Some(e.to_string());
-                            break;
-                        }
-                    }
-                }
-                if let Some(e) = failed {
-                    println!("{format:10} {name:20} ERROR {}", e.lines().next().unwrap_or(""));
-                    times.clear();
-                    break;
-                }
-                let el = t.elapsed().as_secs_f64() * 1000.0 / sqls.len() as f64;
-                times.push(el);
-                if r == 0 {
-                    first_io = store.stats();
-                }
+            if !needles.is_empty() {
+                substring_needles(&loc, &dirs, &needles, needle_runs).await?;
             }
-            if times.is_empty() {
-                continue;
-            }
-            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            println!(
-                "{format:10} {name:20} median {:>9.2} ms  min {:>9.2} ms  rows {rows:>5}  io: {:>6} reqs {:>9} KiB  {value}",
-                times[times.len() / 2], times[0], first_io.0, first_io.1 >> 10
-            );
         }
     }
     Ok(())

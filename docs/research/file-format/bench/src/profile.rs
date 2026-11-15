@@ -15,7 +15,7 @@ use cpu_time::ProcessTime;
 use datafusion::physical_plan::{ExecutionPlan, collect};
 use datafusion::prelude::SessionContext;
 
-use crate::{Location, has_files, new_ctx, read_text};
+use crate::{LIGHT_COLS, LIST_COLS, Location, has_files, new_ctx, read_text};
 
 type R<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -121,19 +121,19 @@ fn print_phase(label: &str, p: &Phase) {
     println!("      metrics/query (ms, KiB, rows): {line}");
 }
 
-/// Unused until the M7.2b runners convert trace ids.
-#[allow(dead_code)]
-fn unhex(s: &str) -> Vec<u8> {
+/// Hex text to bytes. Invalid digits become zero, so only a wrong length is detectable.
+pub(crate) fn unhex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or(0)).collect()
 }
 
 pub async fn profile(loc: &Location, runs: usize, register: impl AsyncFn(&SessionContext, &str) -> R<()>) -> R<()> {
     let ids: Vec<String> = read_text(loc, "trace_ids.txt").await?.ok_or("no trace_ids.txt")?.lines().take(20).map(str::to_owned).collect();
-    let light = "span_id, parent_span_id, name, start_time, end_time, status, model, total_tokens, cost_total";
+    let light = LIGHT_COLS.join(", ");
+    let list_cols = LIST_COLS.join(", ");
     let t0 = fmt_testdata::datagen::DAY_START;
     let h = 3_600 * fmt_testdata::datagen::NS;
     let list = format!(
-        "SELECT trace_id, span_id, name, start_time, duration_ns, status, model, total_tokens, cost_total, input_preview FROM t WHERE span_kind = 'llm' AND start_time >= to_timestamp_nanos({}) AND start_time < to_timestamp_nanos({}) ORDER BY start_time DESC, trace_id DESC, span_id DESC LIMIT 50",
+        "SELECT {list_cols} FROM t WHERE span_kind = 'llm' AND start_time >= to_timestamp_nanos({}) AND start_time < to_timestamp_nanos({}) ORDER BY start_time DESC, trace_id DESC, span_id DESC LIMIT 50",
         t0 + 14 * h,
         t0 + 15 * h
     );
