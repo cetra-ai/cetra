@@ -4,7 +4,8 @@
 //! `meta.db`. A second process fails on the lock before `meta.db`.
 //!
 //! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
-//! most [`DRAIN`], aborts background tasks, waits at most [`COMMIT_WAIT`] for
+//! most [`DRAIN`], stops the usage loop (it finishes any flush in progress),
+//! aborts background tasks, waits at most [`COMMIT_WAIT`] for
 //! detached commits (D-G-38), flushes `last_used` and usage, gives storage
 //! [`STORAGE_SHUTDOWN`] (spec 12's 30 s flush budget; `Storage::shutdown` also
 //! caps each flush at 30 s), then closes `meta.db`. The worst case is 55 s,
@@ -163,6 +164,8 @@ pub struct Running {
     otlp_shutdown_tx: Option<oneshot::Sender<()>>,
     grpc_serve: Option<JoinHandle<io::Result<()>>>,
     grpc_shutdown_tx: Option<oneshot::Sender<()>>,
+    usage_stop_tx: Option<oneshot::Sender<()>>,
+    usage_task: Option<JoinHandle<()>>,
     state: Option<AppState>,
     /// Background work. Shutdown aborts whatever is here.
     tasks: Vec<JoinHandle<()>>,
@@ -187,6 +190,9 @@ impl Drop for Running {
         }
         if let Some(serve) = self.grpc_serve.take() {
             serve.abort();
+        }
+        if let Some(task) = &self.usage_task {
+            task.abort();
         }
         for task in &self.tasks {
             task.abort();
@@ -412,7 +418,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     ));
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
-    tasks.push(spawn_usage(state.clone()));
+    let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
+    let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_notices(state.clone()));
     tracing::info!(%local_addr, "listening");
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -468,6 +475,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         otlp_shutdown_tx,
         grpc_serve,
         grpc_shutdown_tx,
+        usage_stop_tx: Some(usage_stop_tx),
+        usage_task: Some(usage_task),
         state: Some(state),
         tasks,
     })
@@ -584,15 +593,22 @@ fn spawn_retention(state: AppState) -> JoinHandle<()> {
     })
 }
 
-fn spawn_usage(state: AppState) -> JoinHandle<()> {
+/// The usage flush loop. A send on `stop` (or dropping it) ends the loop. The flush runs in the
+/// branch body rather than inside the `select!`, so a stop that arrives during a flush waits for
+/// that flush to commit; it is never cancelled mid-write (D-G-11).
+fn spawn_usage(state: AppState, mut stop: oneshot::Receiver<()>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(USAGE_EVERY);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
-            interval.tick().await;
-            if let Err(error) = state.usage.flush(&state.meta).await {
-                tracing::error!(error = %error, "usage flush failed");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(error) = state.usage.flush(&state.meta).await {
+                        tracing::error!(error = %error, "usage flush failed");
+                    }
+                }
+                _ = &mut stop => break,
             }
         }
     })
@@ -657,6 +673,16 @@ impl Running {
             drain_optional(self.grpc_serve.take()),
         );
         let serve_error = serve_result.or(otlp_result).or(grpc_result);
+        // The usage loop stops cooperatively, so an in-flight flush commits before the final one.
+        if let Some(sender) = self.usage_stop_tx.take() {
+            let _ = sender.send(());
+        }
+        if let Some(task) = self.usage_task.take() {
+            let joined = task.await;
+            if let Err(error) = joined {
+                tracing::error!(error = %error, "usage task failed");
+            }
+        }
         for task in self.tasks.drain(..) {
             task.abort();
             let _ = task.await;
@@ -994,6 +1020,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spans, 3);
+    }
+
+    #[tokio::test]
+    async fn the_usage_loop_stops_when_signalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task = spawn_usage(state, stop_rx);
+        stop_tx.send(()).unwrap();
+        // Not aborted: the loop returns by itself, well before its 10 s interval.
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the loop stops on its signal")
+            .unwrap();
+        running.shutdown().await.unwrap();
     }
 
     #[tokio::test]
