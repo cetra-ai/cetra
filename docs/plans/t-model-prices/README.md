@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15; T1–T7 not started
+Status: T1–T7 done on 2026-11-15
 
 # T · Model prices
 

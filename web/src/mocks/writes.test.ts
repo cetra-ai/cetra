@@ -71,6 +71,7 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/members") ||
         path.startsWith("/api/v1/projects/{project}/evaluators") ||
         path.startsWith("/api/v1/projects/{project}/score-definitions") ||
+        path.startsWith("/api/v1/projects/{project}/models") ||
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules") ||
         path.startsWith("/api/v1/projects/{project}/online-rules") ||
@@ -452,6 +453,28 @@ it.each(rows)(
     check?.(response.json ?? {});
   },
 );
+
+it("answers the project model price writes", async () => {
+  const created = await send(
+    "POST",
+    `${PROJECT}/models`,
+    JSON.stringify({ model_name: "  Local  ", price_input: 0, price_output: 0 }),
+  );
+  expect(created.status).toBe(201);
+  expect(created.json?.model_name).toBe("Local");
+
+  const id = "01900000-0000-7000-8000-000000000c01";
+  const patched = await send(
+    "PATCH",
+    `${PROJECT}/models/${id}`,
+    JSON.stringify({ model_name: "Local", price_input: 0, price_output: 0 }),
+  );
+  expect(patched.status).toBe(200);
+  expect(patched.json?.id).toBe(id);
+
+  const deleted = await send("DELETE", `${PROJECT}/models/${id}`);
+  expect(deleted.status).toBe(204);
+});
 
 it("answers the org model price writes", async () => {
   const created = await send(

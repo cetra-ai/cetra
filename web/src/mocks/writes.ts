@@ -17,6 +17,7 @@ import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.j
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
+import modelPriceDocument from "../../../fixtures/api/static/model-price.json";
 import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
@@ -183,6 +184,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_score_definition",
     method: "delete",
     path: "/api/v1/projects/{project}/score-definitions/{id}",
+  },
+  { operationId: "post_model_price", method: "post", path: "/api/v1/projects/{project}/models" },
+  {
+    operationId: "patch_model_price",
+    method: "patch",
+    path: "/api/v1/projects/{project}/models/{id}",
+  },
+  {
+    operationId: "delete_model_price",
+    method: "delete",
+    path: "/api/v1/projects/{project}/models/{id}",
   },
   { operationId: "post_admin_user", method: "post", path: "/api/v1/admin/users" },
   { operationId: "patch_admin_user", method: "patch", path: "/api/v1/admin/users/{id}" },
@@ -457,6 +469,11 @@ const RESPONSES: Record<string, Respond> = {
   patch_score_definition: ({ body }) =>
     HttpResponse.json({ ...scoreDefinitionDocument, ...named(body) }),
   delete_score_definition: () => noContent(),
+  post_model_price: ({ body }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body) }, { status: 201 }),
+  patch_model_price: ({ body, params }) =>
+    HttpResponse.json({ ...modelPriceDocument, ...priced(body), id: params.id }),
+  delete_model_price: () => noContent(),
 
   post_admin_user: ({ body }) => {
     const { name: _name, ...unnamedUser } = adminUserCreatedDocument.user;
