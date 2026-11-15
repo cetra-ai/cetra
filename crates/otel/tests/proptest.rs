@@ -69,6 +69,10 @@ const PROMOTED: &[&str] = &[
     "gen_ai.operation.name",
     "gen_ai.conversation.id",
     "tag.tags",
+    "llmobs.metadata.note",
+    "llmobs.environment",
+    "deployment.environment.name",
+    "gen_ai.request.temperature",
 ];
 
 const GENAI_EVENTS: &[&str] = &[
@@ -232,11 +236,29 @@ fn kv(value: impl Strategy<Value = AnyValue> + 'static) -> impl Strategy<Value =
 }
 
 fn attributes() -> impl Strategy<Value = Vec<KeyValue>> {
-    prop::collection::vec(kv(generated_value().boxed()), 0..6).prop_map(|mut items| {
-        if let Some(first) = items.first().cloned() {
-            items.push(first);
-        }
-        items
+    (
+        prop::collection::vec(kv(generated_value().boxed()), 0..6),
+        prop::collection::vec(promoted_kv(), 0..3),
+    )
+        .prop_map(|(mut items, promoted)| {
+            items.extend(promoted);
+            if let Some(first) = items.first().cloned() {
+                items.push(first);
+            }
+            items
+        })
+}
+
+/// A promoted column key with a value over `LIMIT`, so the column must be cut.
+/// Random keys and values almost never reach that, so the check would not run.
+fn promoted_kv() -> impl Strategy<Value = KeyValue> {
+    let long = (LIMIT + 1..=1_024usize).prop_map(|len| "y".repeat(len));
+    let tags =
+        (LIMIT + 1..=512usize).prop_map(|len| format!(r#"["{}","{SENTINEL}"]"#, "t".repeat(len)));
+    (prop::sample::select(PROMOTED), prop_oneof![long, tags]).prop_map(|(key, value)| KeyValue {
+        key: key.to_owned(),
+        value: Some(string_value(value)),
+        key_strindex: 0,
     })
 }
 
@@ -377,20 +399,44 @@ fn check_span(span: &Span) {
     }
     preview_bound(span.input_preview.as_deref());
     preview_bound(span.output_preview.as_deref());
+    for preview in [&span.input_preview, &span.output_preview]
+        .into_iter()
+        .flatten()
+    {
+        bounded(preview);
+    }
     bounded(&span.name);
-    if let Some(message) = &span.status_message {
-        bounded(message);
+    // Every string column of Span, spec 02 § Truncation. Keys are not bounded.
+    let columns = [
+        &span.status_message,
+        &span.service_name,
+        &span.session_id,
+        &span.user_id,
+        &span.environment,
+        &span.release,
+        &span.provider,
+        &span.request_model,
+        &span.response_model,
+        &span.operation,
+        &span.request_params,
+        &span.scope_name,
+        &span.scope_version,
+        &span.system_instructions,
+        &span.tool_definitions,
+    ];
+    for value in columns.into_iter().flatten() {
+        bounded(value);
+    }
+    for tag in &span.tags {
+        bounded(tag);
+    }
+    for value in span.metadata.values() {
+        bounded(value);
     }
     if let Some(value) = &span.input {
         bounded(value);
     }
     if let Some(value) = &span.output {
-        bounded(value);
-    }
-    if let Some(value) = &span.system_instructions {
-        bounded(value);
-    }
-    if let Some(value) = &span.tool_definitions {
         bounded(value);
     }
     for value in span.attributes.values() {
@@ -400,7 +446,13 @@ fn check_span(span: &Span) {
         bounded(value);
     }
     for event in &span.events {
+        bounded(&event.name);
         if let Some(attributes) = &event.attributes {
+            bounded(attributes);
+        }
+    }
+    for link in &span.links {
+        if let Some(attributes) = &link.attributes {
             bounded(attributes);
         }
     }

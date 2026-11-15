@@ -235,7 +235,7 @@ Max per blob: `media.max_bytes` (default 32 MiB); larger blobs are dropped and r
 
 ## Truncation
 
-After media extraction, these strings are checked against `ingest.max_attribute_bytes` (8 MiB): `input`, `output`, `system_instructions`, `tool_definitions`, every value in `attributes` and `resource_attributes`, each event's `attributes` JSON, `status_message`, and `name`.
+After media extraction, these strings are checked against `ingest.max_attribute_bytes` (8 MiB): `input`, `output`, `system_instructions`, `tool_definitions`, every value in `attributes`, `resource_attributes` and `metadata`, each element of `tags`, `name`, `status_message`, each event's `name` and `attributes` JSON, each link's `attributes` JSON, and the promoted string columns `service_name`, `session_id`, `user_id`, `environment`, `release`, `provider`, `request_model`, `response_model`, `operation`, `request_params`, `scope_name` and `scope_version`. Map keys are not cut. `input_preview` and `output_preview` are derived from the cut payloads, so they need no check of their own. `media_refs` (hashes) and `conventions` (enums) are not strings to cut.
 
 - **Messages.** The candidate list is measured by its serialized length.
   1. Keep every system message, the first user message, and the longest suffix that still fits. Where a contiguous run of messages was removed, insert one placeholder `{"role":"system","parts":[{"type":"text","content":"[llmobs: K messages truncated]"}]}`. `K` is the number removed in that run.
@@ -244,7 +244,7 @@ After media extraction, these strings are checked against `ingest.max_attribute_
 - **JSON payloads.** `input` or `output` whose format is `json` is cut as one string. The format becomes `text`, because the cut text is no longer valid JSON.
 - **Other strings.** Cut at the largest UTF-8 character boundary ≤ the limit, then append `…[llmobs: truncated, original N bytes]`. The stored value is slightly longer than the limit. A value whose length equals the limit is kept.
 
-`truncated` lists the column name (`input`, `output`, `system_instructions`, `tool_definitions`, `name`, `status_message`), the attribute key, or `events[<i>].attributes`. The list is sorted and has no duplicates. Spans are never rejected for size alone (only the request).
+`truncated` lists the column name (`input`, `output`, `system_instructions`, `tool_definitions`, `name`, `status_message`, `service_name`, `session_id`, and the other promoted columns above), the attribute key, `metadata.<key>` for a metadata value, `tags` for a tag, `events[<i>].name`, `events[<i>].attributes`, or `links[<i>].attributes`. The list is sorted and has no duplicates. Spans are never rejected for size alone (only the request).
 
 ## Cost computation
 

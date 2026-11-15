@@ -93,8 +93,9 @@ This applies after media extraction (rule 14), with `limit = max_attribute_bytes
 - each event's `attributes` JSON;
 - `status_message`;
 - `name` (spans can carry absurd names).
+- Added by fix B-2 (spec 02 § Truncation has the full list): the promoted string columns, `metadata` values, `tags` elements, event names and link attributes.
 
-`truncated` gets the column name (`input`, `output`, …, `name`, `status_message`), the attribute key, or `events[<i>].attributes`. It's sorted and unique.
+`truncated` gets the column name (`input`, `output`, …, `name`, `status_message`, `session_id`, …), the attribute key, `metadata.<key>`, `tags`, `events[<i>].name`, `events[<i>].attributes` or `links[<i>].attributes`. It's sorted and unique.
 
 **Strings** (rule 14): cut at the largest char boundary ≤ `limit`, then append `…[llmobs: truncated, original N bytes]` (core marker prefix + `N bytes]`).
 
