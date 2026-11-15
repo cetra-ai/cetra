@@ -341,7 +341,7 @@ With an S3 object store, every page read is a ranged GET. The S3 store is wrappe
 - flush and compaction write their fresh outputs into the cache after uploading them, since recent data is what gets read;
 - the cache survives a restart: open rebuilds its index from the files, oldest first by modification time;
 - it writes nothing while free disk is under `2 × storage.min_free_bytes`, and gives blocks back while free disk is under `storage.min_free_bytes` (§10);
-- verification of a suspect file (§10) reads the S3 store directly, never the cache.
+- verification of a suspect file (§10) reads the S3 store directly, never the cache, and a file found healthy has its cached blocks dropped, so a bad block cannot outlive the check.
 
 There is no custom `ParquetFileReaderFactory`; the metadata cache is DataFusion's built-in one (§4). With a local object store there is no cache.
 

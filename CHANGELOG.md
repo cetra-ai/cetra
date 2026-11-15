@@ -18,6 +18,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 ### Fixed
 
 - With S3, a multipart upload that fails is now aborted, so its parts no longer stay on the bucket (track R).
+- With S3, a file that passes verification has its read-cache blocks dropped, so a bad cached block no longer keeps failing queries (track R).
 - Storage: a local object deleted by garbage collection, or a directory created just before a crash, could reappear or disappear after a power loss.
 - Storage: in interval mode (`wal.sync = "<duration>"`), a power loss could leave a torn WAL segment that was no longer the last one, and the next start refused it as corrupt. A segment is now fsynced before a newer one is created.
 - Storage: a WAL group whose fsync failed is no longer truncated with a second fsync, and the segment a failed group discards stays removed after a power loss.

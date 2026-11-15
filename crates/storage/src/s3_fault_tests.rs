@@ -22,6 +22,7 @@ use crate::config::StorageConfig;
 use crate::error::{AnchorError, OpenError};
 use crate::media::MediaBlob;
 use crate::objects::{Objects, PutSizes};
+use crate::read_cache::cached_name;
 use crate::test_support::{
     Call, ChaosStore, Fault, Status, collect_orphans_dry_run, span_row, span_rows,
 };
@@ -65,21 +66,14 @@ async fn wait_for_catalog(storage: &Storage, table: Table, rows: u64) {
 
 /// Rows of the `spans` view, counted through the query path (and so the read
 /// cache).
-async fn span_count(storage: &Storage) -> usize {
+async fn span_count(storage: &Storage) -> Result<usize, datafusion::error::DataFusionError> {
     use datafusion::execution::context::SessionContext;
     use datafusion::prelude::SessionConfig;
     let query = storage.query(project(), Default::default()).await.unwrap();
     let ctx = SessionContext::new_with_config_rt(SessionConfig::new(), Arc::clone(&query.runtime));
-    ctx.register_table("spans_t", query.spans).unwrap();
-    ctx.sql("SELECT name FROM spans_t")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap()
-        .iter()
-        .map(|batch| batch.num_rows())
-        .sum()
+    ctx.register_table("spans_t", query.spans)?;
+    let batches = ctx.sql("SELECT name FROM spans_t").await?.collect().await?;
+    Ok(batches.iter().map(|batch| batch.num_rows()).sum())
 }
 
 /// A read-only handle on `catalog.db`.
@@ -139,7 +133,7 @@ async fn open_fails_on_a_store_error_and_a_later_open_succeeds() {
 
     chaos.release();
     let storage = open(config(dir.path()), &chaos).await.unwrap();
-    assert_eq!(span_count(&storage).await, 1);
+    assert_eq!(span_count(&storage).await.unwrap(), 1);
     storage.shutdown().await.unwrap();
 }
 
@@ -356,5 +350,51 @@ async fn staged_collection_continues_after_one_failed_delete() {
     // The next pass collects whatever the failed one left.
     storage.collect_staged(Duration::ZERO).await.unwrap();
     assert!(storage.staged_paths().await.unwrap().is_empty());
+    storage.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_corrupt_read_does_not_stay_in_the_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let inner = Arc::new(InMemory::new());
+    let chaos = ChaosStore::new(Arc::clone(&inner) as _);
+    let storage = open(config(dir.path()), &chaos).await.unwrap();
+    storage
+        .append_spans(project(), spans_at(&[1]))
+        .await
+        .unwrap();
+    wait_for_catalog(&storage, Table::Spans, 1).await;
+    let file = storage.catalog_files(FileTable::Spans)[0].clone();
+    let path = ObjectPath::from(file.path.as_str());
+    let name = cached_name(&path).expect("a data file has a cache name");
+    storage
+        .objects
+        .read_cache()
+        .expect("the read cache is on")
+        .evict_file(&name);
+
+    // One corrupt byte in the first read from the store. The read may fail, or
+    // return rows: the byte may fall outside what the query decodes.
+    chaos.push(Call::Get, Fault::Corrupt);
+    let _ = span_count(&storage).await;
+
+    // Verification reads the store, not the cache, so the file is healthy.
+    storage.verify_queue().suspect([file.id], now_ns());
+    let report = storage.verify_pass().await;
+    assert_eq!(report.healthy, 1, "{report:?}");
+
+    // Whatever the corrupt read cached must not outlive the healthy verdict.
+    let cached = storage
+        .objects
+        .get_range(&file.path, Some(0..file.size))
+        .await
+        .unwrap();
+    let stored = inner.get(&path).await.unwrap().bytes().await.unwrap();
+    assert!(
+        cached == stored,
+        "the cache still holds a corrupt block: {} cached bytes differ from the object",
+        cached.len()
+    );
+    assert_eq!(span_count(&storage).await.unwrap(), 1);
     storage.shutdown().await.unwrap();
 }
