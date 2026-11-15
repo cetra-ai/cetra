@@ -358,7 +358,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
                 state
                     .deletions
                     .guard
-                    .add_user(project, user, row.created_at);
+                    .add_user(project, user, row.id, row.created_at);
             }
         }
         DeletionKind::TraceIds if row.trace_count.is_none() => {
@@ -368,7 +368,7 @@ async fn data_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<(), 
             state
                 .deletions
                 .guard
-                .add_traces(project, &requested, row.created_at);
+                .add_traces(project, &requested, row.id, row.created_at);
         }
         _ => {}
     }
@@ -420,7 +420,7 @@ async fn register(
     state
         .deletions
         .guard
-        .add_traces(project, &traces, row.created_at);
+        .add_traces(project, &traces, row.id, row.created_at);
     let scope = match row.kind {
         DeletionKind::User => DeletionScope::User {
             user_id: row
