@@ -393,12 +393,15 @@ mod tests {
 
     #[test]
     fn full_size_like_predicates_run_on_a_two_megabyte_stack() {
-        // One LIKE, then 511 Boolean comparisons: a type-correct chain of 512
-        // operators that the analyzer, the optimizer and the physical planner
-        // all walk, and that runs.
-        let mut sql = String::from("SELECT 'a' AS a WHERE 'a' ~~ 'a'");
-        for _ in 0..511 {
-            sql.push_str(" = true");
+        // 256 LIKE predicates on a column, joined by OR: 511 operators, a
+        // left-deep tree 255 ORs deep. The column is not a constant and the
+        // patterns differ, so the optimizer keeps every OR (it does not fold
+        // them or merge them into an IN list), and the physical planner walks
+        // the whole tree. A chain of `= true` would not do: the simplifier
+        // removes those comparisons, so the planner would see none of them.
+        let mut sql = String::from("SELECT name FROM spans WHERE name ~~ 'p0'");
+        for index in 1..256 {
+            sql.push_str(&format!(" OR name ~~ 'p{index}'"));
         }
         on_two_megabytes(sql, OnStack::Run);
     }
