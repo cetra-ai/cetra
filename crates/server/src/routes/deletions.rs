@@ -28,8 +28,7 @@ use crate::http::error::{self, ApiError};
 use crate::meta::MetaError;
 use crate::meta::deletions as store;
 use crate::meta::members::org_role;
-use crate::meta::orgs::mark_org_deleting;
-use crate::meta::projects::{mark_project_deleting, project_ids_of_org};
+use crate::meta::projects::mark_project_deleting;
 use crate::routes::read::{self, READ_TIMEOUT};
 use crate::routes::time_cursor::{decode_time_cursor, encode_time_cursor};
 
@@ -240,51 +239,12 @@ async fn drop_org(
             "type the organization slug to confirm",
         ));
     }
-    let id = Uuid::now_v7();
-    let now = state.clock.now_ns();
-    let org = access.org.id;
-    let new = store::NewDeletion {
-        id,
-        org_id: org,
-        project_id: None,
-        kind: store::DeletionKind::Org,
-        user_id: None,
-        request: store::RequestDetails {
-            name: Some(access.org.name.clone()),
-            slug: Some(access.org.slug.clone()),
-            ..Default::default()
-        },
-        actor_kind: store::ActorKind::User,
-        actor_id: user_id,
-        state: store::DeletionState::Pending,
-        created_at: now,
-    };
-    let row = state
-        .meta
-        .write(move |conn| {
-            Box::pin(async move {
-                if !mark_org_deleting(conn, org, now).await? {
-                    return Err(MetaError::Conflict(
-                        "the organization is already being deleted",
-                    ));
-                }
-                let projects = project_ids_of_org(&mut *conn, org).await?;
-                let row = store::insert_deletion(conn, &new).await?;
-                store::insert_projects(conn, id, &projects).await?;
-                Ok(row)
-            })
-        })
-        .await?;
-    state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        kind = store::DeletionKind::Org.as_str(),
-        org_id = %org,
-        actor_kind = store::ActorKind::User.as_str(),
-        actor_id = %user_id,
-        "deletion requested"
-    );
+    let row =
+        crate::deletion::request_org_drop(&state, &access.org, (store::ActorKind::User, user_id))
+            .await?
+            .ok_or(MetaError::Conflict(
+                "the organization is already being deleted",
+            ))?;
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 
@@ -622,6 +582,7 @@ fn actor_kind_json(kind: store::ActorKind) -> DeletionActorKind {
     match kind {
         store::ActorKind::User => DeletionActorKind::User,
         store::ActorKind::ApiKey => DeletionActorKind::ApiKey,
+        store::ActorKind::ControlPlane => DeletionActorKind::ControlPlane,
     }
 }
 

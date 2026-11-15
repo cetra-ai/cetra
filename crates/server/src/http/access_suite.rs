@@ -368,6 +368,13 @@ fn checked_routes() -> Vec<RouteDef> {
 }
 
 fn concrete_path(route: &RouteDef, world: &World) -> String {
+    // The control plane's drop would delete the world's org. An id that no org has answers 404
+    // and drops nothing, which the matrix records as allowed.
+    if route.method == Method::DELETE && route.path == "/api/internal/v1/orgs/{org_id}" {
+        return route
+            .path
+            .replace("{org_id}", "01900000-0000-7000-8000-000000009999");
+    }
     let id = if route.path.contains("api-keys") {
         world.key_id.as_str()
     } else if route.path.contains("tokens/{id}") {

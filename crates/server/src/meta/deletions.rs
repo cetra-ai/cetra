@@ -100,6 +100,8 @@ pub(crate) enum ActorKind {
     User,
     /// A project API key.
     ApiKey,
+    /// The control plane (cloud), by a `control_plane` token; the id is the token's `id`.
+    ControlPlane,
 }
 
 impl ActorKind {
@@ -108,6 +110,7 @@ impl ActorKind {
         match self {
             Self::User => "user",
             Self::ApiKey => "api_key",
+            Self::ControlPlane => "control_plane",
         }
     }
 
@@ -116,6 +119,7 @@ impl ActorKind {
         Some(match text {
             "user" => Self::User,
             "api_key" => Self::ApiKey,
+            "control_plane" => Self::ControlPlane,
             _ => return None,
         })
     }
@@ -749,6 +753,46 @@ pub(crate) async fn deletion_by_id(
         .fetch_optional(pool)
         .await?;
     record.map(row_from).transpose()
+}
+
+/// The org's newest org deletion, of any status; `None` when the org was never dropped. The
+/// control plane's repeated `DELETE` answers with it (D-P-49).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the stored row does not decode.
+pub(crate) async fn org_drop_of(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<Option<DeletionRow>, MetaError> {
+    // The SQL is built only from constants.
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM deletions WHERE org_id = ? AND kind = 'org' \
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    );
+    let record: Option<DeletionRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(org.to_string())
+        .fetch_optional(pool)
+        .await?;
+    record.map(row_from).transpose()
+}
+
+/// Whether any org deletion exists for `org`, in this transaction. An id with one is never
+/// created again (D-P-49).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn org_drop_exists_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<bool, MetaError> {
+    let found: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM deletions WHERE org_id = ? AND kind = 'org' LIMIT 1")
+            .bind(org.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(found.is_some())
 }
 
 /// One row by id when it belongs to `project`; `None` otherwise (the route answers 404).

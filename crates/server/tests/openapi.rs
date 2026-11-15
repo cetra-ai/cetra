@@ -76,6 +76,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "put_org_entitlements_token",
     ),
     ("post", "/api/internal/v1/orgs", "post_internal_org"),
+    (
+        "delete",
+        "/api/internal/v1/orgs/{org_id}",
+        "delete_internal_org",
+    ),
     ("get", "/api/internal/v1/usage", "list_internal_usage"),
     (
         "post",
@@ -528,6 +533,7 @@ fn document_lint() {
             "create_key_scores"
                 | "post_feedback"
                 | "post_internal_org"
+                | "delete_internal_org"
                 | "list_internal_usage"
                 | "post_internal_user_revoke"
                 | "post_internal_user_disable"
@@ -610,7 +616,7 @@ fn document_lint() {
         } else if *id == "put_org_entitlements_token" {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
-            expected_errors.extend(["400", "401", "403", "422", "429"]);
+            expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
         } else if *id == "list_internal_usage"
             || *id == "post_internal_user_delete"
             || *id == "post_internal_membership_lookup"

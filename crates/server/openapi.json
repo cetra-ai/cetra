@@ -802,7 +802,7 @@
           "internal"
         ],
         "summary": "Create an org",
-        "description": "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+        "description": "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         "operationId": "post_internal_org",
         "requestBody": {
           "content": {
@@ -865,8 +865,107 @@
               }
             }
           },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
             "description": "The query took longer than its time limit, needed more memory than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/api/internal/v1/orgs/{org_id}": {
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Drop an org",
+        "description": "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        "operationId": "delete_internal_org",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Org UUID.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org drop is applied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deletion"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The org drop, in status pending or resolving.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deletion"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12639,11 +12738,11 @@
           "id": {
             "type": "string",
             "format": "uuid",
-            "description": "The user id or the API key id."
+            "description": "The user, API key or control-plane token id."
           },
           "kind": {
             "$ref": "#/components/schemas/DeletionActorKind",
-            "description": "`user` or `api_key`."
+            "description": "`user`, `api_key` or `control_plane`."
           }
         }
       },
@@ -12652,7 +12751,8 @@
         "description": "Who requested a deletion.",
         "enum": [
           "user",
-          "api_key"
+          "api_key",
+          "control_plane"
         ]
       },
       "DeletionFailure": {

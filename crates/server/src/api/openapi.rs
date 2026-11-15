@@ -1231,7 +1231,7 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let post_internal_org = operation("post_internal_org", "internal", "Create an org")
         .description(Some(
-            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`).",
+            "Needs a `control_plane` bearer token with the `orgs` scope. The id is the control plane's, and it is a UUIDv7. An existing id answers 200 with the stored org and changes nothing. A new id creates the org and makes the owner its owner: a new user is created verified without a password, and an existing user is reused. A disabled user or an instance admin cannot be the owner (422 `owner_not_allowed`). An id that is being deleted, or was deleted, answers 409 `conflict`; a deleted id is never reused.",
         ))
         .securities(Some(vec![SecurityRequirement::new(
             "bearer",
@@ -1246,7 +1246,27 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
                     json_of::<InternalOrg>("The org with this id already exists."),
                 ),
             ],
-            &[400, 401, 403, 422, 429],
+            &[400, 401, 403, 409, 422, 429],
+        ))
+        .build();
+    let delete_internal_org = operation("delete_internal_org", "internal", "Drop an org")
+        .description(Some(
+            "Needs a `control_plane` bearer token with the `orgs` scope. Starts the org's drop (D-M-7) with no confirm: the org is gone from every route at once, and its projects and data are erased in the background. Answers 202 with the deletion while it runs and 200 once it is applied. Repeats answer for the org's newest org deletion, so the call is idempotent. An org that was never dropped answers 404.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "bearer",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_uuid("org_id", "Org UUID.")]))
+        .responses(responses_with(
+            [
+                (
+                    "202",
+                    json_of::<Deletion>("The org drop, in status pending or resolving."),
+                ),
+                ("200", json_of::<Deletion>("The org drop is applied.")),
+            ],
+            &[401, 403, 404, 429],
         ))
         .build();
     let list_internal_usage = operation("list_internal_usage", "internal", "List org usage by day")
@@ -1393,6 +1413,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/internal/v1/orgs",
             PathItem::new(HttpMethod::Post, post_internal_org),
+        )
+        .path(
+            "/api/internal/v1/orgs/{org_id}",
+            PathItem::new(HttpMethod::Delete, delete_internal_org),
         )
         .path(
             "/api/internal/v1/usage",
