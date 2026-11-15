@@ -178,10 +178,11 @@ pub(crate) fn build_router(state: &AppState, routes: Vec<RouteDef>) -> Router<Ap
     let mut router = Router::new();
     for route in routes {
         let access = route.access;
+        let path = route.path;
         let layered = route.handler.route_layer(middleware::from_fn_with_state(
             state.clone(),
             move |State(state): State<AppState>, request: Request, next: Next| {
-                enforce(state, access, request, next)
+                enforce(state, access, path, request, next)
             },
         ));
         router = router.route(route.path, layered);
@@ -189,8 +190,25 @@ pub(crate) fn build_router(state: &AppState, routes: Vec<RouteDef>) -> Router<Ap
     router
 }
 
-async fn enforce(state: AppState, access: Access, request: Request, next: Next) -> Response {
-    match prepare(state, access, request).await {
+/// Whether `path` is a control-plane route on an instance that is not a cloud cell (D-P-50).
+/// Those routes do not exist there: they answer 404 before any token is read.
+pub(crate) fn hidden_without_control_plane(state: &AppState, path: &str) -> bool {
+    path.starts_with("/api/internal/") && !state.config.entitlements.control_plane
+}
+
+async fn enforce(
+    state: AppState,
+    access: Access,
+    path: &'static str,
+    request: Request,
+    next: Next,
+) -> Response {
+    let outcome = if hidden_without_control_plane(&state, path) {
+        Err(ApiError::NotFound)
+    } else {
+        prepare(state, access, request).await
+    };
+    match outcome {
         Ok(request) => {
             let mut response = next.run(request).await;
             // The handler's own 404 or 400 must not look like a denial.
@@ -617,7 +635,7 @@ mod tests {
     use crate::meta::personal_tokens::{self, NewToken};
     use crate::meta::projects::insert_project;
     use crate::meta::users::{self, NewUser, insert_user};
-    use crate::test_support::{TestApp, TestResponse, control_plane_token};
+    use crate::test_support::{TestApp, TestResponse, control_plane_token, org_token};
 
     struct People {
         ada: HeaderValueCookie,
@@ -1052,6 +1070,59 @@ mod tests {
             .send()
             .await;
         assert_eq!(org.status, 404);
+    }
+
+    #[tokio::test]
+    async fn internal_routes_are_hidden_without_the_control_plane() {
+        let app = TestApp::with_config(|c| c.entitlements.control_plane = false).await;
+        let org = OrgId::new_v7();
+        let orgs = format!("Bearer {}", control_plane_token("orgs"));
+        let usage = format!("Bearer {}", control_plane_token("usage"));
+        let org_bearer = format!(
+            "Bearer {}",
+            org_token(
+                org,
+                "2025-12-01T00:00:00Z",
+                "2099-01-01T00:00:00Z",
+                "2099-02-01T00:00:00Z",
+                &[],
+                &json!({}),
+            )
+        );
+
+        let created = app
+            .request(Method::POST, "/api/internal/v1/orgs")
+            .header("authorization", &orgs)
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_outcome(&created, StatusCode::NOT_FOUND, "denied-404", "create org");
+
+        let entitlements = app
+            .request(
+                Method::PUT,
+                &format!("/api/internal/v1/orgs/{org}/entitlements"),
+            )
+            .header("authorization", &org_bearer)
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_outcome(
+            &entitlements,
+            StatusCode::NOT_FOUND,
+            "denied-404",
+            "org token",
+        );
+
+        let report = app
+            .request(
+                Method::GET,
+                "/api/internal/v1/usage?from=2026-01-01&to=2026-01-01",
+            )
+            .header("authorization", &usage)
+            .send()
+            .await;
+        assert_outcome(&report, StatusCode::NOT_FOUND, "denied-404", "usage");
     }
 
     #[tokio::test]

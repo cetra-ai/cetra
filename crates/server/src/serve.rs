@@ -292,6 +292,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         license,
         defaults,
         config.public_url.origin(),
+        config.entitlements.control_plane,
     )
     .await
     {

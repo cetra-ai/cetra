@@ -335,6 +335,7 @@ impl TestApp {
             license,
             defaults,
             config.public_url.origin(),
+            config.entitlements.control_plane,
         )
         .await
         .expect("stored org tokens load");
@@ -797,7 +798,11 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
         security: SecurityConfig::default(),
-        entitlements: EntitlementsConfig::default(),
+        // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
+        entitlements: EntitlementsConfig {
+            control_plane: true,
+            ..EntitlementsConfig::default()
+        },
         orgs: OrgsConfig::default(),
         encryption_key: None,
         license_key: None,

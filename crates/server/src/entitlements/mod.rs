@@ -199,14 +199,31 @@ impl EntitlementsState {
     ///
     /// A stored token that no longer verifies for this cell (a retired key, a changed
     /// `public_url`) is skipped with a `warn` naming the org id and the reason.
+    ///
+    /// With `control_plane` off (D-P-50) no stored token is read: the org map stays empty.
     pub(crate) async fn load(
         meta: &MetaDb,
         license: LicenseState,
         defaults: Defaults,
         public_url: &str,
+        control_plane: bool,
     ) -> Result<Self, MetaError> {
         let mut orgs = HashMap::new();
-        for stored in crate::meta::entitlements::all_tokens(meta.reader()).await? {
+        let stored_tokens = crate::meta::entitlements::all_tokens(meta.reader()).await?;
+        if !control_plane {
+            if !stored_tokens.is_empty() {
+                tracing::warn!(
+                    count = stored_tokens.len(),
+                    "stored org tokens ignored: entitlements.control_plane is off"
+                );
+            }
+            return Ok(Self {
+                license,
+                defaults,
+                orgs: RwLock::new(orgs),
+            });
+        }
+        for stored in stored_tokens {
             let granted = grant_from_token(&stored.token, public_url, &defaults.limits).and_then(
                 |(org, grant)| {
                     if org == stored.org_id {
@@ -765,6 +782,7 @@ mod tests {
             LicenseState::Absent,
             defaults,
             PublicUrl::default().origin(),
+            true,
         ))
         .await;
         let loaded = loaded.unwrap();
@@ -773,6 +791,52 @@ mod tests {
         assert!(logs.contains("WARN"), "{logs}");
         assert!(logs.contains(&other_org.to_string()), "{logs}");
         assert!(logs.contains("the token is for another cell"), "{logs}");
+        assert!(!logs.contains("llmobs1."), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn stored_tokens_are_ignored_when_off() {
+        let app = TestApp::new().await;
+        let org = new_org(&app, "opt-out").await;
+        let received = app.state.clock.now_ns();
+        let token = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+        );
+        let record = StoredToken {
+            org_id: org,
+            token,
+            token_id: Uuid::now_v7(),
+            issued_at: received - 1,
+            received_at: received,
+        };
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { put_token(conn, &record).await }))
+            .await
+            .unwrap();
+
+        let defaults = app.state.entitlements.defaults().clone();
+        let (loaded, logs) = capture_logs(EntitlementsState::load(
+            &app.state.meta,
+            LicenseState::Absent,
+            defaults,
+            PublicUrl::default().origin(),
+            false,
+        ))
+        .await;
+        let loaded = loaded.unwrap();
+        assert!(loaded.grant(org).is_none());
+        assert_eq!(
+            loaded.resolve(org, received),
+            app.state.entitlements.resolve(org, received)
+        );
+        assert!(logs.contains("stored org tokens ignored"), "{logs}");
+        assert!(logs.contains("count=1"), "{logs}");
         assert!(!logs.contains("llmobs1."), "{logs}");
     }
 

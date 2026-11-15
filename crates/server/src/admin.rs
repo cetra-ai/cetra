@@ -264,9 +264,15 @@ async fn entitlements_in(
     let license =
         LicenseState::from_key(config.license_key.as_ref().map(|key| key.expose().as_str()));
     let defaults = Defaults::from_config(&config.entitlements.defaults);
-    let state = EntitlementsState::load(meta, license, defaults, config.public_url.origin())
-        .await
-        .map_err(map_meta)?;
+    let state = EntitlementsState::load(
+        meta,
+        license,
+        defaults,
+        config.public_url.origin(),
+        config.entitlements.control_plane,
+    )
+    .await
+    .map_err(map_meta)?;
     let now = Clock::System.now_ns();
     let resolved = state.resolve(row.id, now);
     let retention_window_days = state
