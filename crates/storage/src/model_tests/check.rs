@@ -1,8 +1,11 @@
 //! The checks after each op: storage's reads against the model's expected rows
 //! (docs/plans/r-hardening/01-m1-model.md § R1.3).
 //!
-//! A failure panics with the op index, the project, and the expected and observed values.
-//! proptest prints the shrunk op list.
+//! Each read is a [`Read`]. [`observe`] runs it on one snapshot of a storage and [`compare`]
+//! checks the result against a model state, with no panic on a difference, so the reader threads
+//! of the concurrent mode can use them too (docs/plans/r-hardening/06-m6-concurrency.md § R6.3).
+//! [`check_read`] runs both on the driver thread and panics with the op index, the read, and the
+//! expected and observed values. proptest prints the shrunk op list.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -14,15 +17,17 @@ use llmobs_core::schema::{scores, spans};
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};
 use super::observe::{
-    ALL_ROWS, LatestScore, SessionRow, observe_alert, observe_filter_trace_ids, observe_kpis,
-    observe_latest, observe_scores, observe_scores_by_id, observe_sessions, observe_span_detail,
-    observe_spans, observe_trace_detail, observe_traces, observe_users, window_of,
+    ALL_ROWS, LatestScore, ReadFailure, SessionRow, observe_alert, observe_filter_trace_ids,
+    observe_kpis, observe_latest, observe_scores, observe_scores_by_id, observe_sessions,
+    observe_span_detail, observe_spans, observe_trace_detail, observe_traces, observe_users,
+    window_of,
 };
 use super::ops::{SPANS, TRACES, score_key_space};
 use super::shape::{DAY_NS, P, ScoreKey, day, hex, midnight, score_id, span_id, trace_id};
+use crate::Storage;
 use crate::catalog::FileTable;
 use crate::deletion::DeletionStatus;
-use crate::reads::{AlertMeasure, Kpi, KpiName, ListScope, MAX_PAGE};
+use crate::reads::{AlertMeasure, AlertValue, Kpi, KpiName, ListScope, MAX_PAGE};
 use crate::test_support::{
     Call, collect_orphans_dry_run, obsolete_rows, orphan_objects, parquet_rows, trace_ids_of,
 };
@@ -30,12 +35,199 @@ use crate::test_support::{
 /// Visible copies per span key, as `ProjectModel::visible_spans` returns them.
 type Visible = BTreeMap<(u8, u8), Vec<i64>>;
 
+/// One read the checks and the reader threads run. `observe` runs it on one snapshot; `compare`
+/// checks the result against a model state.
+#[derive(Debug, Clone)]
+pub(super) enum Read {
+    Spans(P),
+    /// Every trace row, unwindowed, evaluation traces kept.
+    Traces(P),
+    /// The trace list over days D+1..D+2, evaluation traces kept.
+    Windowed(P),
+    /// The trace list without evaluation traces.
+    NoEval(P),
+    /// `trace_detail` of trace number `.1`.
+    TraceDetail(P, u8),
+    /// `span_detail` of span `.2` of trace `.1`.
+    SpanDetail(P, u8, u8),
+    Scores(P),
+    /// `scores_by_id` of the ids given. M1's checks ask for every id of the lanes' key space, so
+    /// ids the model hides or never saw are tested too.
+    ScoresById(P, Vec<String>),
+    Latest(P),
+    Sessions(P),
+    Users(P),
+    /// The KPIs over a window of whole days (`days`).
+    Metrics(P, (i64, i64)),
+    /// The trace ids `filter_trace_ids` returns over a window of whole days.
+    FilterTraceIds(P, (i64, i64)),
+    /// One `alert_value` over a window of whole days.
+    AlertValue(P, (i64, i64), AlertMeasure),
+}
+
+/// What a read returned: one variant per kind of read.
+#[derive(Debug, Clone)]
+pub(super) enum Observed {
+    Spans(Vec<(i64, String, String)>),
+    Traces(Vec<ExpectedTrace>),
+    /// Boxed: the row is much larger than the other variants' payloads.
+    TraceDetail(Option<Box<(ExpectedTrace, Vec<String>)>>),
+    SpanDetail(Option<i64>),
+    Scores(Vec<ExpectedScore>),
+    Latest(Vec<LatestScore>),
+    Sessions(Vec<SessionRow>),
+    Users(Vec<(String, i64)>),
+    Kpis(Vec<Kpi>),
+    TraceIds(Vec<String>),
+    Alert(AlertValue),
+}
+
+/// Runs `read` on one snapshot of `storage`, reading every page of it from that snapshot.
+pub(super) async fn observe(storage: &Storage, read: &Read) -> Result<Observed, ReadFailure> {
+    Ok(match read {
+        Read::Spans(project) => Observed::Spans(observe_spans(storage, *project, MAX_PAGE).await?),
+        Read::Traces(project) => {
+            Observed::Traces(observe_traces(storage, *project, ALL_ROWS, MAX_PAGE).await?)
+        }
+        Read::Windowed(project) => Observed::Traces(
+            observe_traces(
+                storage,
+                *project,
+                ListScope {
+                    window: Some(window_of(days(1, 2))),
+                    include_eval: true,
+                    include_experiments: true,
+                },
+                MAX_PAGE,
+            )
+            .await?,
+        ),
+        Read::NoEval(project) => Observed::Traces(
+            observe_traces(
+                storage,
+                *project,
+                ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: true,
+                },
+                MAX_PAGE,
+            )
+            .await?,
+        ),
+        Read::TraceDetail(project, trace) => Observed::TraceDetail(
+            observe_trace_detail(storage, *project, *trace)
+                .await?
+                .map(Box::new),
+        ),
+        Read::SpanDetail(project, trace, span_no) => {
+            Observed::SpanDetail(observe_span_detail(storage, *project, *trace, *span_no).await?)
+        }
+        Read::Scores(project) => {
+            Observed::Scores(observe_scores(storage, *project, MAX_PAGE).await?)
+        }
+        Read::ScoresById(project, ids) => {
+            Observed::Scores(observe_scores_by_id(storage, *project, ids).await?)
+        }
+        Read::Latest(project) => Observed::Latest(observe_latest(storage, *project).await?),
+        Read::Sessions(project) => Observed::Sessions(observe_sessions(storage, *project).await?),
+        Read::Users(project) => Observed::Users(observe_users(storage, *project).await?),
+        Read::Metrics(project, window) => {
+            Observed::Kpis(observe_kpis(storage, *project, *window).await?)
+        }
+        Read::FilterTraceIds(project, window) => {
+            Observed::TraceIds(observe_filter_trace_ids(storage, *project, *window).await?)
+        }
+        Read::AlertValue(project, window, measure) => {
+            Observed::Alert(observe_alert(storage, *project, *window, measure.clone()).await?)
+        }
+    })
+}
+
+/// Compares `observed`, what `read` returned, with the state of `model` that `read` names. `Err`
+/// holds a printable description of the first difference (expected and observed).
+pub(super) fn compare(model: &Model, read: &Read, observed: &Observed) -> Result<(), String> {
+    match (read, observed) {
+        (Read::Spans(project), Observed::Spans(rows)) => {
+            compare_span_keys(model.project(*project), rows)
+        }
+        (Read::Traces(project), Observed::Traces(rows)) => {
+            compare_traces(model.project(*project), rows)
+        }
+        (Read::Windowed(project), Observed::Traces(rows)) => {
+            let state = model.project(*project);
+            let expected = state.traces_in(Some(days(1, 2)), true);
+            compare_trace_rows(state, rows, &expected, "the trace list over days D+1..D+2")
+        }
+        (Read::NoEval(project), Observed::Traces(rows)) => {
+            let state = model.project(*project);
+            let expected = state.traces_in(None, false);
+            compare_trace_rows(
+                state,
+                rows,
+                &expected,
+                "the trace list without evaluation traces",
+            )
+        }
+        (Read::TraceDetail(project, trace), Observed::TraceDetail(detail)) => {
+            compare_trace_detail(model.project(*project), *trace, detail.as_deref())
+        }
+        (Read::SpanDetail(project, trace, span_no), Observed::SpanDetail(ingest)) => {
+            compare_span_detail(model.project(*project), *trace, *span_no, *ingest)
+        }
+        (Read::Scores(project), Observed::Scores(rows)) => {
+            compare_scores(model.project(*project), rows)
+        }
+        (Read::ScoresById(project, ids), Observed::Scores(rows)) => {
+            compare_scores_by_id(model.project(*project), ids, rows)
+        }
+        (Read::Latest(project), Observed::Latest(rows)) => {
+            compare_latest(model.project(*project), rows)
+        }
+        (Read::Sessions(project), Observed::Sessions(rows)) => {
+            compare_sessions(model.project(*project), rows)
+        }
+        (Read::Users(project), Observed::Users(rows)) => {
+            compare_users(model.project(*project), rows)
+        }
+        (Read::Metrics(project, window), Observed::Kpis(kpis)) => {
+            compare_kpis(model.project(*project), *window, kpis)
+        }
+        (Read::FilterTraceIds(project, window), Observed::TraceIds(ids)) => {
+            compare_filter_ids(model.project(*project), *window, ids)
+        }
+        (Read::AlertValue(project, window, measure), Observed::Alert(value)) => {
+            compare_alert(model.project(*project), *window, measure, *value)
+        }
+        _ => unreachable!("observe returns the kind of the read it runs: {read:?}"),
+    }
+}
+
+/// Runs `read` on `h`'s storage and compares the result with `model`. Panics, with the op index
+/// and the read, when the read fails or differs from the model.
+pub(super) fn check_read(h: &Harness, model: &Model, read: &Read, index: usize) {
+    let observed = h
+        .block_on(observe(h.storage(), read))
+        .unwrap_or_else(|error| panic!("op {index}, {read:?}: the read failed: {error}"));
+    check_observed(model, read, &observed, index);
+}
+
+/// [`compare`], panicking with the op index and the read on a difference.
+pub(super) fn check_observed(model: &Model, read: &Read, observed: &Observed, index: usize) {
+    if let Err(diff) = compare(model, read, observed) {
+        panic!("op {index}, {read:?}: {diff}");
+    }
+}
+
 /// After an op that touched one project: that project's spans, trace list and scores.
 pub(super) fn check_quick(h: &Harness, model: &Model, project: P, index: usize) {
-    let state = model.project(project);
-    check_span_keys(h, state, project, index);
-    check_traces(h, state, project, index);
-    check_scores(h, state, project, index);
+    for read in [
+        Read::Spans(project),
+        Read::Traces(project),
+        Read::Scores(project),
+    ] {
+        check_read(h, model, &read, index);
+    }
 }
 
 /// After Restart, Crash, LossyCrash and Settle, and at the end: both projects, the reads of
@@ -52,12 +244,11 @@ pub(super) fn check_full(h: &Harness, model: &mut Model, index: usize) {
     }
     let model: &Model = model;
     for project in model.projects() {
-        let state = model.project(project);
         check_quick(h, model, project, index);
         check_paging(h, project, index);
-        check_samples(h, state, project, index);
+        check_samples(h, model, project, index);
         check_score_reads(h, model, project, index);
-        check_aggregates(h, state, project, index);
+        check_aggregates(h, model, project, index);
     }
 }
 
@@ -140,10 +331,16 @@ pub(super) fn check_dropped(h: &Harness, model: &Model, index: usize) {
     }
 }
 
-/// Reads in small pages return exactly the rows of one page, in the same order.
+/// Reads in small pages return exactly the rows of one page, in the same order. Each page
+/// series is one read on one snapshot; the two series are two reads.
 fn check_paging(h: &Harness, project: P, index: usize) {
-    let paged = observe_spans(h, project, 7);
-    let single = observe_spans(h, project, MAX_PAGE);
+    let storage = h.storage();
+    let paged = h
+        .block_on(observe_spans(storage, project, 7))
+        .expect("span_list in pages of 7");
+    let single = h
+        .block_on(observe_spans(storage, project, MAX_PAGE))
+        .expect("span_list in one page");
     assert_eq!(
         paged, single,
         "op {index}, project {project:?}: span rows read in pages of 7 differ from one page"
@@ -155,61 +352,38 @@ fn check_paging(h: &Harness, project: P, index: usize) {
             .all(|pair| sort_key(&pair[0]) <= sort_key(&pair[1])),
         "op {index}, project {project:?}: span rows are not in (start_time, span_id, trace_id) order"
     );
+    let traces_paged = h
+        .block_on(observe_traces(storage, project, ALL_ROWS, 2))
+        .expect("trace_list in pages of 2");
+    let traces_single = h
+        .block_on(observe_traces(storage, project, ALL_ROWS, MAX_PAGE))
+        .expect("trace_list in one page");
     assert_eq!(
-        observe_traces(h, project, ALL_ROWS, 2),
-        observe_traces(h, project, ALL_ROWS, MAX_PAGE),
+        traces_paged, traces_single,
         "op {index}, project {project:?}: trace rows read in pages of 2 differ from one page"
     );
     // Session scores share one `created_at`, so pages of 2 cut through ties.
+    let scores_paged = h
+        .block_on(observe_scores(storage, project, 2))
+        .expect("score_list in pages of 2");
+    let scores_single = h
+        .block_on(observe_scores(storage, project, MAX_PAGE))
+        .expect("score_list in one page");
     assert_eq!(
-        observe_scores(h, project, 2),
-        observe_scores(h, project, MAX_PAGE),
+        scores_paged, scores_single,
         "op {index}, project {project:?}: score rows read in pages of 2 differ from one page"
     );
 }
 
-/// The live scores of `project` are the model's live scores, each field equal, and the rows
-/// come in `created_at DESC, score_id DESC` order as read (`reads/scores.rs`).
-fn check_scores(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    let observed = observe_scores(h, project, MAX_PAGE);
-    let mut ordered = state.expected_scores();
-    ordered.sort_by(|a, b| (b.created_at, &b.score_id).cmp(&(a.created_at, &a.score_id)));
-    let observed_ids: Vec<String> = observed.iter().map(|row| row.score_id.clone()).collect();
-    let expected_ids: Vec<String> = ordered.iter().map(|row| row.score_id.clone()).collect();
-    assert_eq!(
-        observed_ids, expected_ids,
-        "op {index}, project {project:?}: score rows are not in created_at DESC, score_id DESC order"
-    );
-    assert_same_scores(
-        observed,
-        state.expected_scores(),
-        &format!("op {index}, project {project:?}: the score list"),
-    );
-}
-
-/// `scores_by_id` over every score key the lane's projects can write (`score_key_space`) returns
-/// exactly this project's live scores, so ids the model hides or never saw are tested too.
-/// `latest_scores` returns the live score of each key.
+/// The score reads of `check_full`: `scores_by_id` over every score key the lane's projects can
+/// write (`score_key_space`), and `latest_scores`.
 fn check_score_reads(h: &Harness, model: &Model, project: P, index: usize) {
-    let state = model.project(project);
     let ids: Vec<String> = score_key_space(model.projects())
         .iter()
         .map(|key| score_id(key).to_string())
         .collect();
-    assert_same_scores(
-        observe_scores_by_id(h, project, &ids),
-        state.expected_scores(),
-        &format!("op {index}, project {project:?}: scores_by_id over every written id"),
-    );
-
-    let mut observed = observe_latest(h, project);
-    let mut expected = expected_latest(state);
-    observed.sort_by(|a, b| (&a.target_key, &a.name).cmp(&(&b.target_key, &b.name)));
-    expected.sort_by(|a, b| (&a.target_key, &a.name).cmp(&(&b.target_key, &b.name)));
-    assert_eq!(
-        observed, expected,
-        "op {index}, project {project:?}: latest_scores differ from the live scores"
-    );
+    check_read(h, model, &Read::ScoresById(project, ids), index);
+    check_read(h, model, &Read::Latest(project), index);
 }
 
 /// What `latest_scores` must return: the live score of each `(target_key, name)`. The model
@@ -237,27 +411,31 @@ fn expected_latest(state: &ProjectModel) -> Vec<LatestScore> {
 }
 
 /// Two sets of scores, compared by `score_id` with every field equal.
-pub(super) fn assert_same_scores(
-    mut observed: Vec<ExpectedScore>,
-    mut expected: Vec<ExpectedScore>,
+fn same_scores(
+    observed: &[ExpectedScore],
+    expected: &[ExpectedScore],
     what: &str,
-) {
+) -> Result<(), String> {
+    let mut observed: Vec<&ExpectedScore> = observed.iter().collect();
+    let mut expected: Vec<&ExpectedScore> = expected.iter().collect();
     observed.sort_by(|a, b| a.score_id.cmp(&b.score_id));
     expected.sort_by(|a, b| a.score_id.cmp(&b.score_id));
     let observed_ids: Vec<&str> = observed.iter().map(|row| row.score_id.as_str()).collect();
     let expected_ids: Vec<&str> = expected.iter().map(|row| row.score_id.as_str()).collect();
-    assert_eq!(
-        observed_ids, expected_ids,
-        "{what}: the score ids differ from the model's"
-    );
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "{what}: the score ids differ from the model's: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
+    }
     for (want, got) in expected.iter().zip(&observed) {
         if let Some(problem) = score_mismatch(want, got) {
-            panic!(
+            return Err(format!(
                 "{what}, score {}: {problem}\nexpected {want:?}\nobserved {got:?}",
                 want.score_id
-            );
+            ));
         }
     }
+    Ok(())
 }
 
 /// What differs between an expected and an observed score row, or `None`.
@@ -281,23 +459,14 @@ fn score_mismatch(expected: &ExpectedScore, observed: &ExpectedScore) -> Option<
 
 /// `span_list` shows each visible span key exactly once: the keys read equal the visible keys,
 /// and no key repeats.
-fn check_span_keys(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    compare_span_keys(state, &observe_spans(h, project, MAX_PAGE), index, project);
-}
-
-/// The `span_list` rows `observed` (`(start_time, trace_id, span_id)`) against the model: the keys
-/// are the visible keys, each listed once. `check_quick` and the `FaultyRead` op share it (R4.5).
-pub(super) fn compare_span_keys(
+fn compare_span_keys(
     state: &ProjectModel,
     observed: &[(i64, String, String)],
-    index: usize,
-    project: P,
-) {
+) -> Result<(), String> {
     let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (_, trace, span) in observed {
         *counts.entry((trace.clone(), span.clone())).or_default() += 1;
     }
-    let observed = counts;
     let expected: BTreeSet<(String, String)> = state
         .visible_spans()
         .into_keys()
@@ -308,44 +477,36 @@ pub(super) fn compare_span_keys(
             )
         })
         .collect();
-    assert_eq!(
-        observed.keys().cloned().collect::<BTreeSet<_>>(),
-        expected,
-        "op {index}, project {project:?}: the span keys read differ from the model's visible keys"
-    );
-    for (key, count) in &observed {
-        assert_eq!(
-            *count, 1,
-            "op {index}, project {project:?}: span {key:?} is listed {count} times, expected once"
-        );
+    let observed_keys: BTreeSet<(String, String)> = counts.keys().cloned().collect();
+    if observed_keys != expected {
+        return Err(format!(
+            "the span keys read differ from the model's visible keys: observed {observed_keys:?}, expected {expected:?}"
+        ));
     }
+    for (key, count) in &counts {
+        if *count != 1 {
+            return Err(format!(
+                "span {key:?} is listed {count} times, expected once"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The `traces` list has the expected trace ids in `start_time DESC, trace_id DESC` order,
 /// and each row matches its expected row.
-fn check_traces(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    let observed = observe_traces(h, project, ALL_ROWS, MAX_PAGE);
-    compare_traces(state, &observed, index, project);
-}
-
-/// The trace list `observed` against the model's expected traces of `project`: the ids in order,
-/// then each row. `check_quick` and the `FaultyRead` op share it (R4.5).
-pub(super) fn compare_traces(
-    state: &ProjectModel,
-    observed: &[ExpectedTrace],
-    index: usize,
-    project: P,
-) {
+fn compare_traces(state: &ProjectModel, observed: &[ExpectedTrace]) -> Result<(), String> {
     let visible = state.visible_spans();
     let mut expected = state.expected_traces();
     expected.sort_by(|a, b| (b.start_time, &b.trace_id).cmp(&(a.start_time, &a.trace_id)));
 
     let observed_ids: Vec<&str> = observed.iter().map(|row| row.trace_id.as_str()).collect();
     let expected_ids: Vec<&str> = expected.iter().map(|row| row.trace_id.as_str()).collect();
-    assert_eq!(
-        observed_ids, expected_ids,
-        "op {index}, project {project:?}: trace ids or their order differ"
-    );
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "trace ids or their order differ: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
+    }
     for (want, got) in expected.iter().zip(observed) {
         let trace = trace_number(&want.trace_id);
         if let Some(problem) = trace_mismatch(
@@ -354,87 +515,121 @@ pub(super) fn compare_traces(
             state.unsettled(trace),
             copies_of(&visible, trace),
         ) {
-            panic!(
-                "op {index}, project {project:?}, trace {trace}: {problem}\n\
-                 expected {want:?}\nobserved {got:?}"
-            );
+            return Err(format!(
+                "trace {trace}: {problem}\nexpected {want:?}\nobserved {got:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The score list: its rows in `created_at DESC, score_id DESC` order, and each row as the
+/// model has it.
+fn compare_scores(state: &ProjectModel, observed: &[ExpectedScore]) -> Result<(), String> {
+    let mut ordered = state.expected_scores();
+    ordered.sort_by(|a, b| (b.created_at, &b.score_id).cmp(&(a.created_at, &a.score_id)));
+    let observed_ids: Vec<&str> = observed.iter().map(|row| row.score_id.as_str()).collect();
+    let expected_ids: Vec<&str> = ordered.iter().map(|row| row.score_id.as_str()).collect();
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "score rows are not in created_at DESC, score_id DESC order: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
+    }
+    same_scores(observed, &state.expected_scores(), "the score list")
+}
+
+/// `scores_by_id` for `ids`: the live scores of the project among them. A score the model has
+/// that the ids do not name is not expected, so a score written after the ids were chosen
+/// never counts as missing.
+fn compare_scores_by_id(
+    state: &ProjectModel,
+    ids: &[String],
+    observed: &[ExpectedScore],
+) -> Result<(), String> {
+    let requested: BTreeSet<&str> = ids.iter().map(String::as_str).collect();
+    let expected: Vec<ExpectedScore> = state
+        .expected_scores()
+        .into_iter()
+        .filter(|score| requested.contains(score.score_id.as_str()))
+        .collect();
+    same_scores(observed, &expected, "scores_by_id over the requested ids")
+}
+
+/// `latest_scores`: the live score of each `(target_key, name)`.
+fn compare_latest(state: &ProjectModel, observed: &[LatestScore]) -> Result<(), String> {
+    let mut observed = observed.to_vec();
+    let mut expected = expected_latest(state);
+    observed.sort_by(|a, b| (&a.target_key, &a.name).cmp(&(&b.target_key, &b.name)));
+    expected.sort_by(|a, b| (&a.target_key, &a.name).cmp(&(&b.target_key, &b.name)));
+    if observed != expected {
+        return Err(format!(
+            "latest_scores differ from the live scores: observed {observed:?}, expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// The trace detail of `trace`: `None` for a trace the model does not expect, else its row and
+/// its span ids.
+fn compare_trace_detail(
+    state: &ProjectModel,
+    trace: u8,
+    observed: Option<&(ExpectedTrace, Vec<String>)>,
+) -> Result<(), String> {
+    let id = hex(trace_id(trace).as_bytes());
+    let want = state
+        .expected_traces()
+        .into_iter()
+        .find(|row| row.trace_id == id);
+    match (want, observed) {
+        (None, None) => Ok(()),
+        (None, Some((row, _))) => Err(format!(
+            "trace {trace} is not expected but has a detail: {row:?}"
+        )),
+        (Some(want), None) => Err(format!(
+            "trace {trace} is expected but has no detail\nexpected {want:?}"
+        )),
+        (Some(want), Some((row, span_ids))) => {
+            let visible = state.visible_spans();
+            if let Some(problem) = trace_mismatch(
+                &want,
+                row,
+                state.unsettled(trace),
+                copies_of(&visible, trace),
+            ) {
+                return Err(format!(
+                    "trace {trace} detail: {problem}\nexpected {want:?}\nobserved {row:?}"
+                ));
+            }
+            check_span_ids(span_ids, &visible, trace)
         }
     }
 }
 
-/// Sampled details (`check_full` only): 3 span keys and 3 traces per project, the first,
-/// middle and last of each, plus one miss of each kind when there is one.
-fn check_samples(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    let visible = state.visible_spans();
-    let keys: Vec<(u8, u8)> = visible.keys().copied().collect();
-    // The keys with two or more visible copies: the only ones where `span_detail` picks
-    // between duplicates.
-    let duplicated: Vec<(u8, u8)> = visible
-        .iter()
-        .filter(|(_, ingests)| ingests.len() >= 2)
-        .map(|(key, _)| *key)
-        .collect();
-    for key in picks(&keys).into_iter().chain(picks(&duplicated)) {
-        let (trace, span_no) = key;
-        let newest = visible[&key]
-            .iter()
-            .copied()
-            .max()
-            .expect("a visible key has a copy");
-        assert_eq!(
-            observe_span_detail(h, project, trace, span_no),
-            Some(newest),
-            "op {index}, project {project:?}: span_detail of {key:?} is not the newest visible copy"
-        );
-    }
-    let missing_key = (0..TRACES)
-        .flat_map(|trace| (0..SPANS).map(move |span_no| (trace, span_no)))
-        .find(|key| !visible.contains_key(key));
-    if let Some((trace, span_no)) = missing_key {
-        assert!(
-            observe_span_detail(h, project, trace, span_no).is_none(),
-            "op {index}, project {project:?}: span_detail of the hidden key {:?} is not None",
+/// The span detail of span `span_no` of `trace`: the ingest time of its newest visible copy, or
+/// `None` when no copy is visible.
+fn compare_span_detail(
+    state: &ProjectModel,
+    trace: u8,
+    span_no: u8,
+    observed: Option<i64>,
+) -> Result<(), String> {
+    let newest = state
+        .visible_spans()
+        .get(&(trace, span_no))
+        .and_then(|ingests| ingests.iter().copied().max());
+    if observed != newest {
+        return Err(format!(
+            "span_detail of {:?} is {observed:?}, expected the newest visible copy {newest:?}",
             (trace, span_no)
-        );
+        ));
     }
-
-    let expected = state.expected_traces();
-    let positions: Vec<usize> = (0..expected.len()).collect();
-    for position in picks(&positions) {
-        let want = &expected[position];
-        let trace = trace_number(&want.trace_id);
-        let (row, span_ids) = observe_trace_detail(h, project, trace).unwrap_or_else(|| {
-            panic!("op {index}, project {project:?}: trace {trace} is expected but has no detail")
-        });
-        if let Some(problem) = trace_mismatch(
-            want,
-            &row,
-            state.unsettled(trace),
-            copies_of(&visible, trace),
-        ) {
-            panic!(
-                "op {index}, project {project:?}, trace {trace} detail: {problem}\n\
-                 expected {want:?}\nobserved {row:?}"
-            );
-        }
-        check_span_ids(&span_ids, &visible, trace, index, project);
-    }
-
-    let expected_numbers: BTreeSet<u8> = expected
-        .iter()
-        .map(|row| trace_number(&row.trace_id))
-        .collect();
-    if let Some(absent) = (0..TRACES).find(|trace| !expected_numbers.contains(trace)) {
-        assert!(
-            observe_trace_detail(h, project, absent).is_none(),
-            "op {index}, project {project:?}: trace {absent} is not expected but has a detail"
-        );
-    }
+    Ok(())
 }
 
 /// The span ids of a trace detail equal its visible keys, each at least once and at most once
 /// per visible copy.
-fn check_span_ids(observed: &[String], visible: &Visible, trace: u8, index: usize, project: P) {
+fn check_span_ids(observed: &[String], visible: &Visible, trace: u8) -> Result<(), String> {
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     for id in observed {
         *seen.entry(id.clone()).or_default() += 1;
@@ -444,18 +639,63 @@ fn check_span_ids(observed: &[String], visible: &Visible, trace: u8, index: usiz
         .filter(|((key_trace, _), _)| *key_trace == trace)
         .map(|((_, span_no), ingests)| (hex(span_id(*span_no).as_bytes()), ingests.len()))
         .collect();
-    assert_eq!(
-        seen.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>(),
-        "op {index}, project {project:?}, trace {trace}: the detail's span ids differ from the visible keys"
-    );
+    if seen.keys().collect::<Vec<_>>() != expected.keys().collect::<Vec<_>>() {
+        return Err(format!(
+            "trace {trace}: the detail's span ids differ from the visible keys"
+        ));
+    }
     for (id, count) in &seen {
         let copies = expected[id];
-        assert!(
-            *count >= 1 && *count <= copies,
-            "op {index}, project {project:?}, trace {trace}: span {id} is read {count} times, \
-             the model has {copies} visible copies"
-        );
+        if *count < 1 || *count > copies {
+            return Err(format!(
+                "trace {trace}: span {id} is read {count} times, the model has {copies} visible copies"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The sampled reads of `check_full`: 3 span keys and 3 traces per project, the first, middle
+/// and last of each, plus one miss of each kind when there is one.
+fn check_samples(h: &Harness, model: &Model, project: P, index: usize) {
+    let state = model.project(project);
+    let visible = state.visible_spans();
+    let keys: Vec<(u8, u8)> = visible.keys().copied().collect();
+    // The keys with two or more visible copies: the only ones where `span_detail` picks
+    // between duplicates.
+    let duplicated: Vec<(u8, u8)> = visible
+        .iter()
+        .filter(|(_, ingests)| ingests.len() >= 2)
+        .map(|(key, _)| *key)
+        .collect();
+    let mut reads: Vec<Read> = Vec::new();
+    for (trace, span_no) in picks(&keys).into_iter().chain(picks(&duplicated)) {
+        reads.push(Read::SpanDetail(project, trace, span_no));
+    }
+    let missing_key = (0..TRACES)
+        .flat_map(|trace| (0..SPANS).map(move |span_no| (trace, span_no)))
+        .find(|key| !visible.contains_key(key));
+    if let Some((trace, span_no)) = missing_key {
+        reads.push(Read::SpanDetail(project, trace, span_no));
+    }
+
+    let expected = state.expected_traces();
+    let positions: Vec<usize> = (0..expected.len()).collect();
+    for position in picks(&positions) {
+        reads.push(Read::TraceDetail(
+            project,
+            trace_number(&expected[position].trace_id),
+        ));
+    }
+    let expected_numbers: BTreeSet<u8> = expected
+        .iter()
+        .map(|row| trace_number(&row.trace_id))
+        .collect();
+    if let Some(absent) = (0..TRACES).find(|trace| !expected_numbers.contains(trace)) {
+        reads.push(Read::TraceDetail(project, absent));
+    }
+    for read in &reads {
+        check_read(h, model, read, index);
     }
 }
 
@@ -623,9 +863,9 @@ fn previous_window((from, to): (i64, i64)) -> (i64, i64) {
     (from - (to - from), from)
 }
 
-/// Sessions, users, the windowed and evaluation-excluded trace lists, the metrics KPIs and their
-/// previous values, the filter deletion scope and the alert values (`check_full` only), per
-/// project.
+/// The aggregate reads of `check_full`, per project: the trace lists, sessions and users, the
+/// metrics KPIs and the filter deletion scope over days D..D+4 and D+2..D+4, and the alert
+/// values over days D..D+4 and D+1..D+2.
 ///
 /// Set-valued parts are exact even when a trace is unsettled. A duplicate adds a copy of a key,
 /// never a trace, and copies of a key share their content, so the traces, their merged start
@@ -633,84 +873,56 @@ fn previous_window((from, to): (i64, i64)) -> (i64, i64) {
 /// one copy each. A sum is exact when no trace in its group has extra copies. Otherwise a
 /// duplicate can only add: a token or cost sum is at least the expected one, and an error sum
 /// is at most the extra copies above it.
-fn check_aggregates(h: &Harness, state: &ProjectModel, project: P, index: usize) {
-    let at = format!("op {index}, project {project:?}");
-    let copies = Copies::of(state);
-    check_trace_lists(h, state, &copies, project, &at);
-    check_sessions_and_users(h, state, &copies, project, &at);
+fn check_aggregates(h: &Harness, model: &Model, project: P, index: usize) {
+    for read in [
+        Read::Windowed(project),
+        Read::NoEval(project),
+        Read::Sessions(project),
+        Read::Users(project),
+    ] {
+        check_read(h, model, &read, index);
+    }
     // Days D..D+4 has every trace; D+2..D+4 leaves the previous window, D..D+2, non-empty.
     for span in [(0, 4), (2, 4)] {
-        let label = format!("{at}: days D+{}..D+{}", span.0, span.1);
         let window = days(span.0, span.1);
-        check_kpis(h, state, project, window, &label);
-        check_filter_ids(h, state, project, window, &label);
+        check_read(h, model, &Read::Metrics(project, window), index);
+        check_read(h, model, &Read::FilterTraceIds(project, window), index);
     }
     // Days D+1..D+2 holds a class-2 trace whose score is in the window but whose trace starts
     // after it, so the semi-join excludes it.
+    let mut measures = vec![AlertMeasure::ErrorRate, AlertMeasure::Cost];
+    measures.extend((0..3).map(|k| AlertMeasure::ScoreAvg {
+        name: format!("n{k}"),
+    }));
     for span in [(0, 4), (1, 2)] {
-        let label = format!("{at}: alerts over days D+{}..D+{}", span.0, span.1);
-        check_alerts(h, state, &copies, project, days(span.0, span.1), &label);
+        let window = days(span.0, span.1);
+        for measure in &measures {
+            let read = Read::AlertValue(project, window, measure.clone());
+            check_read(h, model, &read, index);
+        }
     }
 }
 
-/// The trace list over days D+1..D+2 (merged `start_time`, evaluation traces kept) and the trace
-/// list without evaluation traces.
-fn check_trace_lists(h: &Harness, state: &ProjectModel, copies: &Copies, project: P, at: &str) {
-    let window = days(1, 2);
-    let windowed = observe_traces(
-        h,
-        project,
-        ListScope {
-            window: Some(window_of(window)),
-            include_eval: true,
-            include_experiments: true,
-        },
-        MAX_PAGE,
-    );
-    compare_trace_rows(
-        state,
-        copies,
-        &windowed,
-        &state.traces_in(Some(window), true),
-        &format!("{at}: the trace list over days D+1..D+2"),
-    );
-    let kept = observe_traces(
-        h,
-        project,
-        ListScope {
-            window: None,
-            include_eval: false,
-            include_experiments: true,
-        },
-        MAX_PAGE,
-    );
-    compare_trace_rows(
-        state,
-        copies,
-        &kept,
-        &state.traces_in(None, false),
-        &format!("{at}: the trace list without evaluation traces"),
-    );
-}
-
-/// Two trace lists: the same trace ids, each once, then each row as `trace_mismatch` compares it.
+/// The trace rows `observed` against `expected`, both of one trace list: the same trace ids, each
+/// once, then each row as `trace_mismatch` compares it.
 fn compare_trace_rows(
     state: &ProjectModel,
-    copies: &Copies,
     observed: &[ExpectedTrace],
     expected: &[ExpectedTrace],
     what: &str,
-) {
+) -> Result<(), String> {
+    let copies = Copies::of(state);
     let mut observed: Vec<&ExpectedTrace> = observed.iter().collect();
     let mut expected: Vec<&ExpectedTrace> = expected.iter().collect();
     observed.sort_by(|a, b| a.trace_id.cmp(&b.trace_id));
     expected.sort_by(|a, b| a.trace_id.cmp(&b.trace_id));
     let observed_ids: Vec<&str> = observed.iter().map(|row| row.trace_id.as_str()).collect();
     let expected_ids: Vec<&str> = expected.iter().map(|row| row.trace_id.as_str()).collect();
-    assert_eq!(
-        observed_ids, expected_ids,
-        "{what}: the trace ids differ from the model's"
-    );
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "{what}: the trace ids differ from the model's: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
+    }
     for (want, got) in expected.iter().zip(&observed) {
         let trace = trace_number(&want.trace_id);
         if let Some(problem) = trace_mismatch(
@@ -719,21 +931,26 @@ fn compare_trace_rows(
             state.unsettled(trace),
             copies_of(&copies.visible, trace),
         ) {
-            panic!("{what}, trace {trace}: {problem}\nexpected {want:?}\nobserved {got:?}");
+            return Err(format!(
+                "{what}, trace {trace}: {problem}\nexpected {want:?}\nobserved {got:?}"
+            ));
         }
     }
+    Ok(())
 }
 
 /// `rows` keyed by `key`, which must be unique.
-fn keyed<T>(rows: impl IntoIterator<Item = (String, T)>, what: &str) -> BTreeMap<String, T> {
+fn keyed<T>(
+    rows: impl IntoIterator<Item = (String, T)>,
+    what: &str,
+) -> Result<BTreeMap<String, T>, String> {
     let mut map = BTreeMap::new();
     for (key, row) in rows {
-        assert!(
-            map.insert(key.clone(), row).is_none(),
-            "{what}: {key} is listed twice"
-        );
+        if map.insert(key.clone(), row).is_some() {
+            return Err(format!("{what}: {key} is listed twice"));
+        }
     }
-    map
+    Ok(map)
 }
 
 /// Floats compare with `1e-9`. A sum that may be unsettled is at least the expected one.
@@ -787,73 +1004,87 @@ fn sums_mismatch(
     (!differing.is_empty()).then(|| format!("differing sums {differing:?}, expected {want:?}"))
 }
 
-/// `session_list` and `user_list` over all traces: the same keys, the trace counts, and the
-/// session sums.
-fn check_sessions_and_users(
-    h: &Harness,
-    state: &ProjectModel,
-    copies: &Copies,
-    project: P,
-    at: &str,
-) {
+/// `session_list` over all traces: the same session ids, the trace counts, and the sums.
+fn compare_sessions(state: &ProjectModel, observed: &[SessionRow]) -> Result<(), String> {
+    let copies = Copies::of(state);
     let rows = state.expected_traces();
     let mut sessions: BTreeMap<String, Vec<&ExpectedTrace>> = BTreeMap::new();
-    let mut users: BTreeMap<String, Vec<&ExpectedTrace>> = BTreeMap::new();
     for row in &rows {
         if let Some(session) = &row.session_id {
             sessions.entry(session.clone()).or_default().push(row);
         }
+    }
+    let observed = keyed(
+        observed.iter().map(|row| (row.session_id.clone(), row)),
+        "the session list",
+    )?;
+    let observed_ids: Vec<&String> = observed.keys().collect();
+    let expected_ids: Vec<&String> = sessions.keys().collect();
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "the session ids differ from the model's: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
+    }
+    for (session, members) in &sessions {
+        let got = observed[session];
+        let want = Sums::of(members, &copies);
+        if got.trace_count != want.traces {
+            return Err(format!(
+                "session {session} trace_count is {}, expected {}",
+                got.trace_count, want.traces
+            ));
+        }
+        if let Some(problem) =
+            sums_mismatch(&want, got.error_count, got.total_tokens, got.cost_total)
+        {
+            return Err(format!("session {session}: {problem}\nobserved {got:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// `user_list` over all traces: the same user ids, and each user's trace count.
+fn compare_users(state: &ProjectModel, observed: &[(String, i64)]) -> Result<(), String> {
+    let rows = state.expected_traces();
+    let mut users: BTreeMap<String, Vec<&ExpectedTrace>> = BTreeMap::new();
+    for row in &rows {
         if let Some(user) = &row.user_id {
             users.entry(user.clone()).or_default().push(row);
         }
     }
-
-    let observed: BTreeMap<String, SessionRow> = keyed(
-        observe_sessions(h, project)
-            .into_iter()
-            .map(|row| (row.session_id.clone(), row)),
-        &format!("{at}: the session list"),
-    );
-    assert_eq!(
-        observed.keys().collect::<Vec<_>>(),
-        sessions.keys().collect::<Vec<_>>(),
-        "{at}: the session ids differ from the model's"
-    );
-    for (session, members) in &sessions {
-        let got = &observed[session];
-        let want = Sums::of(members, copies);
-        assert_eq!(
-            got.trace_count, want.traces,
-            "{at}: session {session} trace_count"
-        );
-        if let Some(problem) =
-            sums_mismatch(&want, got.error_count, got.total_tokens, got.cost_total)
-        {
-            panic!("{at}: session {session}: {problem}\nobserved {got:?}");
-        }
+    let observed = keyed(
+        observed.iter().map(|(user, count)| (user.clone(), *count)),
+        "the user list",
+    )?;
+    let observed_ids: Vec<&String> = observed.keys().collect();
+    let expected_ids: Vec<&String> = users.keys().collect();
+    if observed_ids != expected_ids {
+        return Err(format!(
+            "the user ids differ from the model's: observed {observed_ids:?}, expected {expected_ids:?}"
+        ));
     }
-
-    let observed_users: BTreeMap<String, i64> =
-        keyed(observe_users(h, project), &format!("{at}: the user list"));
-    assert_eq!(
-        observed_users.keys().collect::<Vec<_>>(),
-        users.keys().collect::<Vec<_>>(),
-        "{at}: the user ids differ from the model's"
-    );
     for (user, members) in &users {
         let count = i64::try_from(members.len()).expect("a model has few traces");
-        assert_eq!(observed_users[user], count, "{at}: user {user} trace_count");
+        if observed[user] != count {
+            return Err(format!(
+                "user {user} trace_count is {}, expected {count}",
+                observed[user]
+            ));
+        }
     }
+    Ok(())
 }
 
 /// One KPI, which must be listed once.
-fn kpi(kpis: &[Kpi], name: KpiName) -> Kpi {
+fn kpi(kpis: &[Kpi], name: KpiName) -> Result<Kpi, String> {
     let mut found = kpis.iter().filter(|kpi| kpi.name == name);
     let kpi = found
         .next()
-        .unwrap_or_else(|| panic!("the metrics have no {name:?} KPI"));
-    assert!(found.next().is_none(), "the metrics list {name:?} twice");
-    *kpi
+        .ok_or_else(|| format!("the metrics have no {name:?} KPI"))?;
+    if found.next().is_some() {
+        return Err(format!("the metrics list {name:?} twice"));
+    }
+    Ok(*kpi)
 }
 
 /// The KPIs `window` gives, as `metrics` computes them: each KPI's expected value and whether it
@@ -888,111 +1119,126 @@ fn expected_kpis(
     ]
 }
 
-/// The KPIs over `window` and their `previous` values, which cover `previous_window(window)`.
+/// The KPIs `kpis` read over `window` against the model, and the same over the previous window.
 /// The percentile is not compared (approximate); it must only be listed.
-fn check_kpis(h: &Harness, state: &ProjectModel, project: P, window: (i64, i64), label: &str) {
-    compare_kpis(state, window, &observe_kpis(h, project, window), label);
-}
-
-/// The KPIs `kpis` read over `window` against the model, as `check_kpis` compares them.
-/// `FaultyRead` shares it (R4.5).
-pub(super) fn compare_kpis(state: &ProjectModel, window: (i64, i64), kpis: &[Kpi], label: &str) {
+fn compare_kpis(state: &ProjectModel, window: (i64, i64), kpis: &[Kpi]) -> Result<(), String> {
     let copies = Copies::of(state);
     let current = expected_kpis(state, &copies, window);
     let previous = expected_kpis(state, &copies, previous_window(window));
     for ((name, want, exact), (_, want_previous, previous_exact)) in current.iter().zip(&previous) {
-        let got = kpi(kpis, *name);
-        assert!(
-            float_sum_matches(*want, got.value, *exact),
-            "{label}: the {name:?} KPI is {:?}, expected {want:?}",
-            got.value
-        );
-        assert!(
-            float_sum_matches(*want_previous, got.previous, *previous_exact),
-            "{label}: the {name:?} KPI's previous value is {:?}, expected {want_previous:?}",
-            got.previous
-        );
+        let got = kpi(kpis, *name)?;
+        if !float_sum_matches(*want, got.value, *exact) {
+            return Err(format!(
+                "the {name:?} KPI is {:?}, expected {want:?}",
+                got.value
+            ));
+        }
+        if !float_sum_matches(*want_previous, got.previous, *previous_exact) {
+            return Err(format!(
+                "the {name:?} KPI's previous value is {:?}, expected {want_previous:?}",
+                got.previous
+            ));
+        }
     }
-    let _ = kpi(kpis, KpiName::LatencyP95);
+    kpi(kpis, KpiName::LatencyP95)?;
+    Ok(())
 }
 
 /// `filter_trace_ids` over `window`: the traces of the window's trace list, evaluation excluded.
-fn check_filter_ids(
-    h: &Harness,
+fn compare_filter_ids(
     state: &ProjectModel,
-    project: P,
     window: (i64, i64),
-    label: &str,
-) {
+    observed: &[String],
+) -> Result<(), String> {
     let mut want_ids: Vec<String> = state
         .traces_in(Some(window), false)
         .into_iter()
         .map(|row| row.trace_id)
         .collect();
     want_ids.sort();
-    assert_eq!(
-        observe_filter_trace_ids(h, project, window),
-        want_ids,
-        "{label}: filter_trace_ids differs from the trace list"
-    );
+    if observed != want_ids.as_slice() {
+        return Err(format!(
+            "filter_trace_ids differs from the trace list: observed {observed:?}, expected {want_ids:?}"
+        ));
+    }
+    Ok(())
 }
 
-/// `alert_value` over `window`: the trace measures, and the average of each score name.
-fn check_alerts(
-    h: &Harness,
+/// One `alert_value` over `window` for `measure`: the sample size and the value. The trace
+/// measures are exact for their set-valued parts; the sums are as `compare_kpis` decides.
+fn compare_alert(
     state: &ProjectModel,
-    copies: &Copies,
-    project: P,
     window: (i64, i64),
-    at: &str,
-) {
-    let members = state.traces_in(Some(window), false);
-    let refs: Vec<&ExpectedTrace> = members.iter().collect();
-    let sums = Sums::of(&refs, copies);
-    let errors = i64::try_from(members.iter().filter(|row| row.error_count > 0).count())
-        .expect("a model has few traces");
-
-    let rate = observe_alert(h, project, window, AlertMeasure::ErrorRate);
-    let want_rate = (sums.traces > 0).then(|| errors as f64 / sums.traces as f64);
-    assert_eq!(rate.count, sums.traces, "{at}: the ErrorRate alert count");
-    assert!(
-        float_sum_matches(want_rate, rate.value, true),
-        "{at}: the ErrorRate alert is {:?}, expected {want_rate:?}",
-        rate.value
-    );
-
-    let cost = observe_alert(h, project, window, AlertMeasure::Cost);
-    assert_eq!(cost.count, sums.traces, "{at}: the Cost alert count");
-    assert!(
-        float_sum_matches(
-            Some(sums.cost_total.unwrap_or(0.0)),
-            cost.value,
-            sums.settled
-        ),
-        "{at}: the Cost alert is {:?}, expected {:?}",
-        cost.value,
-        sums.cost_total
-    );
-
-    for k in 0..3 {
-        let name = format!("n{k}");
-        let (count, mean) = expected_score_avg(state, window, &name);
-        let got = observe_alert(
-            h,
-            project,
-            window,
-            AlertMeasure::ScoreAvg { name: name.clone() },
-        );
-        assert_eq!(got.count, count, "{at}: the ScoreAvg {name} alert count");
-        // Exact even when a trace is unsettled. Duplicates add copies, not traces, so the
-        // semi-join's trace set (and so the score set and its mean) is the same. That relies on
-        // the shapes keeping `start_time`, `end_time` and `environment` identical across the
-        // copies of a span: otherwise a copy could move a trace in or out of the window.
-        assert!(
-            float_sum_matches(mean, got.value, true),
-            "{at}: the ScoreAvg {name} alert is {:?}, expected {mean:?}",
-            got.value
-        );
+    measure: &AlertMeasure,
+    value: AlertValue,
+) -> Result<(), String> {
+    match measure {
+        AlertMeasure::ErrorRate => {
+            let copies = Copies::of(state);
+            let members = state.traces_in(Some(window), false);
+            let refs: Vec<&ExpectedTrace> = members.iter().collect();
+            let sums = Sums::of(&refs, &copies);
+            let errors = i64::try_from(members.iter().filter(|row| row.error_count > 0).count())
+                .expect("a model has few traces");
+            let want_rate = (sums.traces > 0).then(|| errors as f64 / sums.traces as f64);
+            if value.count != sums.traces {
+                return Err(format!(
+                    "the ErrorRate alert count is {}, expected {}",
+                    value.count, sums.traces
+                ));
+            }
+            if !float_sum_matches(want_rate, value.value, true) {
+                return Err(format!(
+                    "the ErrorRate alert is {:?}, expected {want_rate:?}",
+                    value.value
+                ));
+            }
+            Ok(())
+        }
+        AlertMeasure::Cost => {
+            let copies = Copies::of(state);
+            let members = state.traces_in(Some(window), false);
+            let refs: Vec<&ExpectedTrace> = members.iter().collect();
+            let sums = Sums::of(&refs, &copies);
+            if value.count != sums.traces {
+                return Err(format!(
+                    "the Cost alert count is {}, expected {}",
+                    value.count, sums.traces
+                ));
+            }
+            if !float_sum_matches(
+                Some(sums.cost_total.unwrap_or(0.0)),
+                value.value,
+                sums.settled,
+            ) {
+                return Err(format!(
+                    "the Cost alert is {:?}, expected {:?}",
+                    value.value, sums.cost_total
+                ));
+            }
+            Ok(())
+        }
+        AlertMeasure::ScoreAvg { name } => {
+            let (count, mean) = expected_score_avg(state, window, name);
+            if value.count != count {
+                return Err(format!(
+                    "the ScoreAvg {name} alert count is {}, expected {count}",
+                    value.count
+                ));
+            }
+            // Exact even when a trace is unsettled. Duplicates add copies, not traces, so the
+            // semi-join's trace set (and so the score set and its mean) is the same. That relies on
+            // the shapes keeping `start_time`, `end_time` and `environment` identical across the
+            // copies of a span: otherwise a copy could move a trace in or out of the window.
+            if !float_sum_matches(mean, value.value, true) {
+                return Err(format!(
+                    "the ScoreAvg {name} alert is {:?}, expected {mean:?}",
+                    value.value
+                ));
+            }
+            Ok(())
+        }
+        other => unreachable!("the checks read only ErrorRate, Cost and ScoreAvg, not {other:?}"),
     }
 }
 

@@ -10,16 +10,10 @@ use std::time::Duration;
 use proptest::prelude::*;
 use proptest::strategy::Union;
 
-use super::check::{
-    assert_same_scores, check_s3_audit, check_settled_files, compare_kpis, compare_span_keys,
-    compare_traces, days,
-};
+use super::check::{Read, check_observed, check_s3_audit, check_settled_files, days, observe};
 use super::harness::Harness;
 use super::model::{Model, ModelDeletion, ProjectModel, ScorePush, SpanCopy, SpanPush};
-use super::observe::{
-    ALL_ROWS, try_observe_eval_trace_ids, try_observe_kpis, try_observe_scores, try_observe_spans,
-    try_observe_traces, try_observe_user_scope,
-};
+use super::observe::{ReadFailure, observe_eval_trace_ids, observe_spans, observe_user_scope};
 use super::shape::{
     HOUR_NS, P, ScoreKey, Target, day, deletion_id, hex, midnight, score, score_created_at, span,
     trace_id,
@@ -902,33 +896,21 @@ fn evict_cache(harness: &Harness) {
 /// only under an injected fault; a successful one must match the model as `check_quick` requires.
 fn faulty_read(harness: &Harness, model: &Model, project: P, pick: u8, index: usize) {
     let before = injected_so_far(harness);
-    let state = model.project(project);
-    let at = format!("op {index}, project {project:?}");
-    let outcome = match pick % 4 {
-        0 => try_observe_traces(harness, project, ALL_ROWS, MAX_PAGE)
-            .map(|observed| compare_traces(state, &observed, index, project)),
-        1 => try_observe_spans(harness, project, MAX_PAGE)
-            .map(|observed| compare_span_keys(state, &observed, index, project)),
-        2 => try_observe_scores(harness, project, MAX_PAGE).map(|observed| {
-            assert_same_scores(
-                observed,
-                state.expected_scores(),
-                &format!("{at}: the score list"),
-            );
-        }),
-        _ => {
-            let window = days(0, 4);
-            try_observe_kpis(harness, project, window).map(|kpis| {
-                compare_kpis(state, window, &kpis, &format!("{at}: the aggregates"));
-            })
-        }
+    let read = match pick % 4 {
+        0 => Read::Traces(project),
+        1 => Read::Spans(project),
+        2 => Read::Scores(project),
+        _ => Read::Metrics(project, days(0, 4)),
     };
-    if let Err(error) = outcome {
-        assert!(
-            allow_failure(harness, before),
-            "a read failed without an injected fault: {error}"
-        );
-        harness.faulty_read_errors.fetch_add(1, Ordering::Relaxed);
+    match harness.block_on(observe(harness.storage(), &read)) {
+        Ok(observed) => check_observed(model, &read, &observed, index),
+        Err(error) => {
+            assert!(
+                allow_failure(harness, before),
+                "a read failed without an injected fault: {error}"
+            );
+            harness.faulty_read_errors.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -959,8 +941,12 @@ fn resolve_evals(
     harness: &Harness,
     state: &ProjectModel,
     targets: &BTreeSet<u8>,
-) -> Result<BTreeSet<u8>, String> {
-    let observed = try_observe_eval_trace_ids(harness, state.project, &ids_of(targets))?;
+) -> Result<BTreeSet<u8>, ReadFailure> {
+    let observed = harness.block_on(observe_eval_trace_ids(
+        harness.storage(),
+        state.project,
+        &ids_of(targets),
+    ))?;
     let expected = state.eval_traces_for(targets);
     assert_eq!(
         hex_of(&observed),
@@ -973,7 +959,7 @@ fn resolve_evals(
 
 /// Fails the op (panics) unless the injected faults of this op (`before`) explain a failed read
 /// (R4.5). The op then makes no call and changes no model state.
-fn read_failed_under_faults(harness: &Harness, before: u64, error: &str) {
+fn read_failed_under_faults(harness: &Harness, before: u64, error: &ReadFailure) {
     assert!(
         allow_failure(harness, before),
         "a read failed without an injected fault: {error}"
@@ -1047,10 +1033,11 @@ fn delete_user(
     let before = injected_so_far(harness);
     let name = format!("u{}", user % 2);
     let (expected_traces, expected_sessions) = model.project(project).user_scope(&name);
-    let observed = match try_observe_user_scope(harness, project, &name, clock) {
-        Ok(observed) => observed,
-        Err(error) => return read_failed_under_faults(harness, before, &error),
-    };
+    let observed =
+        match harness.block_on(observe_user_scope(harness.storage(), project, &name, clock)) {
+            Ok(observed) => observed,
+            Err(error) => return read_failed_under_faults(harness, before, &error),
+        };
     assert_eq!(
         hex_of(&observed.trace_ids),
         hex_numbers(&expected_traces),
@@ -1340,7 +1327,8 @@ mod tests {
 
     /// The span rows storage returns for `project` now.
     fn stored_spans(harness: &Harness, project: P) -> usize {
-        try_observe_spans(harness, project, MAX_PAGE)
+        harness
+            .block_on(observe_spans(harness.storage(), project, MAX_PAGE))
             .expect("span_list on a project")
             .len()
     }

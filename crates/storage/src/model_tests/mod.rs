@@ -487,16 +487,26 @@ fn drop_keeps_project_a() {
         !model.b.deletions.is_empty(),
         "project B has a deletion to check after the drop"
     );
+    let storage = harness.storage();
     assert!(
-        observe_spans(&harness, P::B, MAX_PAGE).is_empty(),
+        harness
+            .block_on(observe_spans(storage, P::B, MAX_PAGE))
+            .expect("span_list on the dropped project")
+            .is_empty(),
         "dropped project B still lists spans"
     );
     assert!(
-        observe_traces(&harness, P::B, ALL_ROWS, MAX_PAGE).is_empty(),
+        harness
+            .block_on(observe_traces(storage, P::B, ALL_ROWS, MAX_PAGE))
+            .expect("trace_list on the dropped project")
+            .is_empty(),
         "dropped project B still lists traces"
     );
     assert!(
-        observe_scores(&harness, P::B, MAX_PAGE).is_empty(),
+        harness
+            .block_on(observe_scores(storage, P::B, MAX_PAGE))
+            .expect("score_list on the dropped project")
+            .is_empty(),
         "dropped project B still lists scores"
     );
 }
