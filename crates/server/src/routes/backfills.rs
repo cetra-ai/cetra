@@ -23,6 +23,7 @@ use crate::eval::rule_check::Subject;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::backfills::{self as backfills, BackfillRow, NewBackfill};
 use crate::meta::evaluators;
@@ -146,6 +147,7 @@ async fn create_backfill(
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<CreateBackfillRequest>,
 ) -> Result<(StatusCode, error::Json<Backfill>), ApiError> {
+    refuse_outbound(&state, "backfill")?;
     let user_id = principal::session_user(&principal)?.id;
     let project = access.project.id;
     let now = state.clock.now_ns();
@@ -984,5 +986,18 @@ mod tests {
         assert_eq!(data[2]["status"], "done");
         assert!(data[2].get("error").is_none(), "{listed}");
         assert!(data[2].get("finished_at").is_some(), "{listed}");
+    }
+
+    #[tokio::test]
+    async fn create_backfill_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        app.state.clock.set(NOW);
+        let seeded = app.seed().await;
+        let evaluator = judge_with_model(&app, &seeded, PRICED).await;
+        let rule = create_rule(&app, &seeded, &trace_rule(evaluator, true)).await;
+        let response = create(&app, &seeded, rule, &window_body(10)).await;
+        crate::http::restore::tests::assert_refused(&response, "backfill");
+        let listed: Value = list(&app, &seeded, rule).await.json();
+        assert_eq!(listed["data"], json!([]));
     }
 }

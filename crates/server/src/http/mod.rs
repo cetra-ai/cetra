@@ -10,6 +10,7 @@ pub(crate) mod client_ip;
 mod csrf;
 pub(crate) mod error;
 mod health;
+pub(crate) mod restore;
 
 use std::sync::Arc;
 use std::time::Instant;

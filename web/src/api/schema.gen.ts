@@ -4548,7 +4548,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
