@@ -12,8 +12,10 @@
 //!   cloud platform (see `row_provider`). A LiteLLM provider with no mapping keeps its own
 //!   name, so its rows never price another provider's spans. A missing `litellm_provider`
 //!   gives null.
-//! - Rows are sorted by `(model_name, provider_rank, provider)` (see `provider_rank`). A span
-//!   with no provider takes the first matching row, so the publisher's row wins.
+//! - Rows are sorted by `(model_name lowercased, provider_rank, provider, model_name)` (see
+//!   `provider_rank`). The lookup matches names case-insensitively, so case variants of one
+//!   model are adjacent. A span with no provider takes the first matching row, so the
+//!   publisher's row wins.
 //! - Prices are per-token costs times 1e6: `input_cost_per_token` → `price_input`,
 //!   `output_cost_per_token` → `price_output`, `cache_read_input_token_cost` →
 //!   `price_cache_read`, `cache_creation_input_token_cost` → `price_cache_write`,
@@ -355,6 +357,31 @@ fn rows_put_the_publisher_first() {
     );
 }
 
+/// Case variants of one model sort together, so the publisher's row wins even when its
+/// name differs in case from a lower-ranked provider's row.
+#[test]
+fn case_variants_sort_by_provider_rank() {
+    let raw = serde_json::json!({
+        "sambanova/DeepSeek-R1": {
+            "mode": "chat", "litellm_provider": "sambanova", "input_cost_per_token": 5e-6
+        },
+        "deepseek/deepseek-r1": {
+            "mode": "chat", "litellm_provider": "deepseek", "input_cost_per_token": 5.5e-7
+        }
+    });
+    let (rows, collisions) = convert(raw.as_object().expect("object"));
+    assert_eq!(collisions, 0);
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.model_name.as_str(), row.provider.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("deepseek-r1", Some("deepseek")),
+            ("DeepSeek-R1", Some("sambanova")),
+        ]
+    );
+}
+
 /// Rewrites `prices/builtin.json` when `LLMOBS_LITELLM_JSON` points at a download.
 #[test]
 #[allow(clippy::print_stderr)]
@@ -402,16 +429,20 @@ fn convert(entries: &Map<String, Value>) -> (Vec<PriceRow>, usize) {
         }
     }
     let mut rows: Vec<PriceRow> = winners.into_values().map(|winner| winner.row).collect();
+    // The lookup matches names case-insensitively and takes the first row, so the sort
+    // groups a model's case variants together before the provider rank decides.
     rows.sort_by(|left, right| {
         (
-            &left.model_name,
+            left.model_name.to_ascii_lowercase(),
             provider_rank(left.provider.as_deref()),
             &left.provider,
+            &left.model_name,
         )
             .cmp(&(
-                &right.model_name,
+                right.model_name.to_ascii_lowercase(),
                 provider_rank(right.provider.as_deref()),
                 &right.provider,
+                &right.model_name,
             ))
     });
     (rows, collisions)

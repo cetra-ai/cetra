@@ -74,6 +74,11 @@ const PROMOTED: &[&str] = &[
     "llmobs.environment",
     "deployment.environment.name",
     "gen_ai.request.temperature",
+    "gen_ai.request.max_tokens",
+    "gen_ai.provider.name",
+    "llmobs.release",
+    "langfuse.release",
+    "lmnr.span.release",
 ];
 
 const GENAI_EVENTS: &[&str] = &[
@@ -136,6 +141,29 @@ fn text() -> impl Strategy<Value = String> {
         3 => json_text(),
         2 => data_uri(),
         1 => (1usize..=65_536).prop_map(|len| "x".repeat(len)),
+    ]
+}
+
+/// Text over `LIMIT`, so the bounded columns and fields are cut. Random text reaches
+/// `LIMIT` only rarely, so the checks would otherwise see short values.
+fn long_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => (LIMIT + 1..=1_024usize).prop_map(|len| "z".repeat(len)),
+        1 => (LIMIT + 1..=512usize).prop_map(|len| format!("{}{SENTINEL}", "z".repeat(len))),
+    ]
+}
+
+fn scope_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => text(),
+        1 => long_text(),
+    ]
+}
+
+fn event_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => prop::sample::select(GENAI_EVENTS).prop_map(str::to_owned),
+        1 => (LIMIT + 1..=512usize).prop_map(|len| format!("gen_ai.{}", "e".repeat(len))),
     ]
 }
 
@@ -283,27 +311,40 @@ fn timestamp() -> impl Strategy<Value = u64> {
 }
 
 fn event() -> impl Strategy<Value = Event> {
+    (event_name(), timestamp(), attributes()).prop_map(|(name, time, attributes)| Event {
+        time_unix_nano: time,
+        name,
+        attributes,
+        dropped_attributes_count: 0,
+    })
+}
+
+/// A link gets a long attribute in about half its cases, so the link's attribute JSON is cut.
+fn link() -> impl Strategy<Value = Link> {
     (
-        prop::sample::select(GENAI_EVENTS),
-        timestamp(),
+        id_bytes(16),
+        id_bytes(8),
         attributes(),
+        prop::option::of(long_kv()),
     )
-        .prop_map(|(name, time, attributes)| Event {
-            time_unix_nano: time,
-            name: name.to_owned(),
-            attributes,
-            dropped_attributes_count: 0,
+        .prop_map(|(trace_id, span_id, mut attributes, long)| {
+            attributes.extend(long);
+            Link {
+                trace_id,
+                span_id,
+                trace_state: String::new(),
+                attributes,
+                dropped_attributes_count: 0,
+                flags: 0,
+            }
         })
 }
 
-fn link() -> impl Strategy<Value = Link> {
-    (id_bytes(16), id_bytes(8), attributes()).prop_map(|(trace_id, span_id, attributes)| Link {
-        trace_id,
-        span_id,
-        trace_state: String::new(),
-        attributes,
-        dropped_attributes_count: 0,
-        flags: 0,
+fn long_kv() -> impl Strategy<Value = KeyValue> {
+    (key(), long_text()).prop_map(|(key, text)| KeyValue {
+        key,
+        value: Some(string_value(text)),
+        key_strindex: 0,
     })
 }
 
@@ -343,8 +384,8 @@ fn request() -> impl Strategy<Value = ExportTraceServiceRequest> {
     prop::collection::vec(
         (
             attributes(),
-            text(),
-            text(),
+            scope_text(),
+            scope_text(),
             prop::collection::vec(otlp_span(), 0..=2),
         ),
         0..=2,

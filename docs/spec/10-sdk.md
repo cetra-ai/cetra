@@ -1,6 +1,6 @@
 # 10 — SDKs (Python, TypeScript)
 
-Both SDKs are thin layers over OpenTelemetry: tracing goes out as OTLP/HTTP (protobuf) to `/v1/traces`; everything else is plain JSON over HTTP (`requests` in Python, `fetch` in TypeScript); scores and feedback use small hand-written clients (D-F-1, D-F-16). License: MIT (independent of the server license decision).
+Both SDKs are thin layers over OpenTelemetry: tracing goes out as OTLP/HTTP (protobuf) to `/v1/traces`; everything else is plain JSON over HTTP (`requests` in Python, `fetch` in TypeScript); scores and feedback use small hand-written clients (D-F-1, D-F-16, D-F-17). License: MIT (independent of the server license decision).
 
 ## Design rules
 

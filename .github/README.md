@@ -64,8 +64,7 @@ report to the job summary without posting PR comments.
 
 ## Linker
 
-The Rust jobs that link (`rust-lint`, `rust-test`, `e2e`, and `rust-deny` for consistency) pass
-`mold: "true"` to `actions/rust/action.yml`, which installs mold 3.0.0 on Linux x86_64 after
+The Rust jobs that link (`rust-lint`, `rust-test`, `e2e`) pass `mold: "true"` to `actions/rust/action.yml`, which installs mold 3.0.0 on Linux x86_64 after
 checking its sha256. Release and packaging jobs do not install it and use the default linker.
 The Rust jobs link with mold rather than the default `rust-lld`, selected workflow-wide by
 `RUSTFLAGS: -Clinker-features=-lld -Clink-arg=-fuse-ld=mold` in `ci.yml`. mold

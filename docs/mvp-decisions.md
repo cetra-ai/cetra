@@ -253,7 +253,7 @@ Decisions of track F (`docs/plans/f-sdk/`), numbered `D-F-<n>` (`docs/roadmap.md
 | D-F-14 | Threads | The Python SDK does not patch `threading` or executors; the README documents `contextvars.copy_context().run(fn)` and OTel's threading instrumentor (spec 10 § Python API). |
 | D-F-15 | Init once | Any `init()` call after the first logs one warning and changes nothing; Python re-creates the score queue's worker thread in a forked child (`os.register_at_fork`), and OTel's batch processor already does the same for spans (spec 10 § Design rules, § Lifecycle). |
 | D-F-16 | Browser feedback | `llmobs/browser` exports only `feedback({ baseUrl, publicKey, traceId, spanId?, name?, value, comment? })`, which posts spec 06's end-user feedback body to `POST {baseUrl}/api/public/feedback` with the `pk-` key; it imports nothing from OTel and never throws (spec 10 § TypeScript API, 06 § Scores). |
-| D-F-17 | Non-OTLP clients | The SDKs' non-OTLP calls are hand-written: scores and feedback use `requests` (Python) and `fetch` (TypeScript), with no client generated from the OpenAPI spec (D-F-1, D-F-16). Whether track J's datasets and experiments use a generated client is J's decision. |
+| D-F-17 | Non-OTLP clients | The SDKs' non-OTLP calls are hand-written: scores use `requests` (Python) and `fetch` (TypeScript), and feedback is a TypeScript-only client (`fetch`, in the browser entry); the Python SDK has no feedback client. No client is generated from the OpenAPI spec (D-F-1, D-F-16). Whether track J's datasets and experiments use a generated client is J's decision. |
 
 ## Track B1 — Normalization
 
