@@ -92,6 +92,14 @@ updates:
       # which TypeScript 7 does not ship. Remove when openapi-typescript supports it.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
+      # OTel JS stays on the 2.12 line until OpenInference JS supports 3.0 (D-F-8).
+      # otlp-transformer 0.300+ and @opentelemetry/api 1.10+ belong to the 3.x line.
+      - dependency-name: "@opentelemetry/*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@opentelemetry/otlp-transformer"
+        versions: [">=0.300.0"]
+      - dependency-name: "@opentelemetry/api"
+        versions: [">=1.10.0"]
     schedule:
       interval: weekly
       day: monday
