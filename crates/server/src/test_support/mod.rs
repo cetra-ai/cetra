@@ -22,14 +22,14 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode
 use bytesize::ByteSize;
 use http_body_util::BodyExt;
 use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::ids::{OrgId, ProjectId};
+use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use llmobs_core::names::PRODUCT;
 use llmobs_core::score::Score;
 use llmobs_core::span::Span;
 use llmobs_storage::config::{
     AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
 };
-use llmobs_storage::{MediaBlob, Storage};
+use llmobs_storage::{MediaBlob, ProjectQuery, QueryContext, Storage};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::SqliteConnection;
@@ -653,7 +653,60 @@ pub(crate) fn dataset_span(index: usize) -> Span {
         .expect("the dataset has that many spans")
 }
 
+/// Every row of `project`, no window: for tests that read storage directly.
+pub(crate) async fn raw_query(storage: &Storage, project: ProjectId) -> ProjectQuery {
+    storage
+        .query(
+            project,
+            crate::entitlements::query_options(crate::entitlements::Visibility::Window(None), None),
+        )
+        .await
+        .expect("query opens")
+}
+
+/// Spans of `project` in storage, no window: `SELECT count(*) FROM spans` over
+/// `QueryContext::new(raw_query(storage, project).await, None)`.
+pub(crate) async fn raw_span_count(storage: &Storage, project: ProjectId) -> u64 {
+    let ctx = QueryContext::new(raw_query(storage, project).await, None).expect("context");
+    let batches = ctx
+        .session()
+        .sql("SELECT count(*) AS n FROM spans")
+        .await
+        .expect("count plans")
+        .collect()
+        .await
+        .expect("count runs");
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("count is Int64")
+        .value(0);
+    u64::try_from(count).unwrap_or(0)
+}
+
 impl TestApp {
+    /// Commits one span of `trace` that starts at `start_time`, through [`Self::commit_spans`].
+    /// `span_index` makes the span id distinct within the trace.
+    pub(crate) async fn commit_trace_at(
+        &self,
+        project: &ProjectRow,
+        trace: TraceId,
+        span_index: u8,
+        start_time: i64,
+    ) {
+        let mut span: Span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = format!("c4{span_index:014x}")
+            .parse::<SpanId>()
+            .expect("span id hex");
+        span.parent_span_id = None;
+        span.start_time = start_time;
+        span.end_time = start_time + 1_000_000_000;
+        span.ingest_time = self.state.clock.now_ns();
+        self.commit_spans(project, vec![span]).await;
+    }
+
     /// Commits `spans` to `project` through the ingest path: the live bus sees them and the
     /// usage counters count them. The spans' `project_id` is set to `project`.
     pub(crate) async fn commit_spans(&self, project: &ProjectRow, mut spans: Vec<Span>) {

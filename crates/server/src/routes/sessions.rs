@@ -62,7 +62,7 @@ async fn list_sessions(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::session_list(
         &ctx,
         storage::SessionListRequest {
@@ -90,7 +90,7 @@ async fn get_session(
     error::Path(path): error::Path<SessionPath>,
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<SessionDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::session_detail(
         &ctx,
         &path.session_id,

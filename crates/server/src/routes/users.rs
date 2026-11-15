@@ -60,7 +60,7 @@ async fn list_users(
         params.include_eval,
         params.include_experiments,
     )?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::user_list(
         &ctx,
         storage::UserListRequest {
@@ -86,7 +86,7 @@ async fn get_user(
     error::Path(path): error::Path<UserPath>,
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<EndUserDetail>, ApiError> {
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::user_detail(
         &ctx,
         &path.user_id,

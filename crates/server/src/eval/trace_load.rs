@@ -9,10 +9,11 @@ use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use llmobs_core::names::environment::EVAL;
 use llmobs_core::span::Span;
 use llmobs_storage::error::QueryError;
-use llmobs_storage::{QueryContext, QueryOptions, RunError, TraceSpansRequest, trace_spans};
+use llmobs_storage::{QueryContext, RunError, TraceSpansRequest, trace_spans};
 use serde::Serialize;
 
 use crate::api::convert::{self, ConvertError};
+use crate::entitlements::{Visibility, query_options};
 use crate::http::AppState;
 use crate::routes::read::READ_TIMEOUT;
 
@@ -89,11 +90,21 @@ pub(crate) enum LoadError {
 pub(crate) async fn load_trace(
     state: &AppState,
     project: ProjectId,
+    visibility: Visibility,
     trace_id: TraceId,
     target_span: Option<SpanId>,
     around: Option<i64>,
 ) -> Result<LoadedTrace, LoadError> {
-    load_trace_capped(state, project, trace_id, target_span, around, MAX_SPANS).await
+    load_trace_capped(
+        state,
+        project,
+        visibility,
+        trace_id,
+        target_span,
+        around,
+        MAX_SPANS,
+    )
+    .await
 }
 
 /// [`load_trace`] with the span cap as a parameter, so a test can reach `truncated` with a few
@@ -101,6 +112,7 @@ pub(crate) async fn load_trace(
 async fn load_trace_capped(
     state: &AppState,
     project: ProjectId,
+    visibility: Visibility,
     trace_id: TraceId,
     target_span: Option<SpanId>,
     around: Option<i64>,
@@ -112,7 +124,7 @@ async fn load_trace_capped(
         .map_err(|_| LoadError::Busy)?;
     let source = state
         .storage
-        .query(project, QueryOptions::new(around, None))
+        .query(project, query_options(visibility, around))
         .await
         .map_err(|error| match error {
             QueryError::Busy => LoadError::Busy,
@@ -328,9 +340,16 @@ mod tests {
         )
         .await;
 
-        let loaded = load_trace(&app.state, seeded.project.id, trace_id(), None, None)
-            .await
-            .expect("loaded");
+        let loaded = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(
             ids(&loaded.spans),
             ids(&[root, early, late]),
@@ -350,15 +369,31 @@ mod tests {
         app.commit_spans(&seeded.project, vec![root, early, late])
             .await;
 
-        let loaded = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 2)
-            .await
-            .expect("loaded");
+        let loaded = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+            2,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(loaded.spans.len(), 2);
         assert!(loaded.truncated);
 
-        let whole = load_trace_capped(&app.state, seeded.project.id, trace_id(), None, None, 3)
-            .await
-            .expect("loaded");
+        let whole = load_trace_capped(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+            3,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(whole.spans.len(), 3);
         assert!(!whole.truncated);
     }
@@ -380,7 +415,7 @@ mod tests {
         )
         .await;
 
-        let ctx = open_query(&app.state, seeded.project.id, None)
+        let ctx = open_query(&app.state, seeded.org_id, seeded.project.id, None)
             .await
             .expect("query");
         let data = trace_spans(
@@ -417,9 +452,16 @@ mod tests {
         app.commit_spans(&seeded.project, vec![old]).await;
         app.commit_spans(&seeded.project, vec![new]).await;
 
-        let loaded = load_trace(&app.state, seeded.project.id, trace_id(), None, None)
-            .await
-            .expect("loaded");
+        let loaded = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await
+        .expect("loaded");
         assert_eq!(loaded.spans.len(), 1);
         assert_eq!(loaded.spans[0].name, "new");
     }
@@ -428,7 +470,15 @@ mod tests {
     async fn unknown_trace_is_not_found() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let result = load_trace(&app.state, seeded.project.id, trace_id(), None, None).await;
+        let result = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(LoadError::NotFound)));
     }
 
@@ -443,6 +493,7 @@ mod tests {
         let result = load_trace(
             &app.state,
             seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
             trace_id(),
             Some(span_id(TARGET)),
             None,
@@ -460,7 +511,15 @@ mod tests {
         judge.environment = Some(EVAL.to_owned());
         app.commit_spans(&seeded.project, vec![judge]).await;
 
-        let result = load_trace(&app.state, seeded.project.id, trace_id(), None, None).await;
+        let result = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(LoadError::EvaluationTrace)));
     }
 

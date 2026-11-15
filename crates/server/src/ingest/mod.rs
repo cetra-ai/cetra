@@ -528,13 +528,13 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{StatusCode, header};
     use axum::response::IntoResponse;
     use bytesize::ByteSize;
     use llmobs_core::ids::ProjectId;
     use llmobs_core::media::MediaBlob as CoreBlob;
     use llmobs_otel::{ExportTraceServiceRequest, Rejections, builtin_price_rows, decode_json};
-    use llmobs_storage::QueryOptions;
     use llmobs_storage::error::ObjectError;
     use prost::Message;
     use sha2::{Digest, Sha256};
@@ -642,12 +642,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::new(None, None))
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -928,12 +923,7 @@ mod tests {
         assert_eq!(read.mime_type, blob.mime_type);
         assert_eq!(stored_spans(&app, seeded.project.id).await, span_total);
         // The span row carries the media reference.
-        let query = app
-            .state
-            .storage
-            .query(seeded.project.id, QueryOptions::new(None, None))
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, seeded.project.id).await;
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("register");

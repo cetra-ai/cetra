@@ -81,7 +81,7 @@ async fn list_scores(
     let trace_id = params.trace_id.map(|id| id.to_string());
     let span_id = params.span_id.map(|id| id.to_string());
     let created = window(params.from, params.to)?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let page = storage::score_list(
         &ctx,
         storage::ScoreListRequest {

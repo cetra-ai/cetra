@@ -19,9 +19,11 @@ pub(crate) mod notices;
 pub(crate) mod rate;
 pub(crate) mod tokens;
 pub(crate) mod units;
+pub(crate) mod window;
 
 pub(crate) use crate::api::entitlements::Feature;
 use tokens::{OrgGrant, OrgTokenError, grant_from_token};
+pub(crate) use window::{Visibility, query_options};
 
 /// The window history looks back this far (D-P-30).
 const WINDOW_LOOKBACK_NS: i64 = 30 * 86_400 * 1_000_000_000;

@@ -225,9 +225,9 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::raw_query;
     use datafusion::prelude::SessionContext;
     use llmobs_otel::decode_json;
-    use llmobs_storage::QueryOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
 
@@ -264,12 +264,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: llmobs_core::ids::ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::new(None, None))
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");

@@ -124,7 +124,7 @@ async fn create_rule(
     let project_id = access.project.id;
     let org_id = access.project.org_id;
     let name = checked_name(&body.name)?;
-    let condition = checked_condition(&state, project_id, body.condition).await?;
+    let condition = checked_condition(&state, org_id, project_id, body.condition).await?;
     let channel_ids = checked_channels(&state, project_id, &body.channel_ids).await?;
     let cooldown_s = checked_cooldown(body.cooldown_s.unwrap_or(DEFAULT_COOLDOWN_S))?;
     let enabled = body.enabled.unwrap_or(true);
@@ -189,7 +189,7 @@ async fn update_rule(
     let org_id = access.project.org_id;
     let name = body.name.as_deref().map(checked_name).transpose()?;
     let condition = match body.condition {
-        Some(condition) => Some(checked_condition(&state, project_id, condition).await?),
+        Some(condition) => Some(checked_condition(&state, org_id, project_id, condition).await?),
         None => None,
     };
     let channel_ids = match &body.channel_ids {
@@ -365,6 +365,7 @@ async fn checked_channels(
 /// `400 invalid_filter` on the `filter` field.
 async fn checked_condition(
     state: &AppState,
+    org: OrgId,
     project: llmobs_core::ids::ProjectId,
     condition: AlertCondition,
 ) -> Result<AlertCondition, ApiError> {
@@ -373,7 +374,7 @@ async fn checked_condition(
         errors,
     })?;
     if let Some(text) = &condition.filter {
-        let ctx = open_query(state, project, None).await?;
+        let ctx = open_query(state, org, project, None).await?;
         llmobs_storage::check_alert_filter(&ctx, text)?;
     }
     Ok(condition)

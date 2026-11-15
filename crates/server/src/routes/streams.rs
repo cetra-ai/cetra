@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use llmobs_core::ids::{ProjectId, TraceId};
+use llmobs_core::ids::{OrgId, ProjectId, TraceId};
 use llmobs_storage::{
     MAX_REFRESH_IDS, QueryContext, RunError, Storage, TimeWindow, TraceRefreshRequest,
 };
@@ -28,6 +28,7 @@ use crate::api::convert;
 use crate::api::traces::{TraceStreamParams, TraceSummary};
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -194,9 +195,11 @@ async fn stream_traces(
     // Subscribed before the filter is checked, so no event is missed. Both drop on an error.
     let bus = state.live.subscribe();
     let project = access.project.id;
-    check_filter(&state, project, &params).await?;
+    let visibility = Visibility::window(&state, access.project.org_id);
+    check_filter(&state, access.project.org_id, project, &params).await?;
     let stream = TraceStream {
         project,
+        visibility,
         params,
         resume: has_last_event_id(&headers),
         storage: Arc::clone(&state.storage),
@@ -213,10 +216,11 @@ async fn stream_traces(
 /// Parses the filter (D-G-22). An invalid one is `400 invalid_filter`, so no stream opens.
 async fn check_filter(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     params: &TraceStreamParams,
 ) -> Result<(), ApiError> {
-    let ctx = open_query(state, project, None).await?;
+    let ctx = open_query(state, org, project, None).await?;
     llmobs_storage::trace_refresh(&ctx, refresh_request(params, &[], None)).await?;
     Ok(())
 }
@@ -224,6 +228,9 @@ async fn check_filter(
 /// What the trace stream's task needs. The task holds no `AppState`.
 struct TraceStream {
     project: ProjectId,
+    /// The org's data window when the stream opened (stale by at most a stream's life, D-G-34;
+    /// accepted, D-P-47).
+    visibility: Visibility,
     params: TraceStreamParams,
     /// The request sent `Last-Event-ID`: the client missed events, so it is told to refetch.
     resume: bool,
@@ -238,6 +245,7 @@ struct TraceStream {
 async fn run_trace_stream(stream: TraceStream, tx: mpsc::Sender<Event>) {
     let TraceStream {
         project,
+        visibility,
         params,
         resume,
         storage,
@@ -313,7 +321,7 @@ async fn run_trace_stream(stream: TraceStream, tx: mpsc::Sender<Event>) {
                     biased;
                     () = shut(&mut closed) => return,
                     () = tx.closed() => return,
-                    outcome = refresh(&storage, project, &params, search, &batch, &mut matched) => outcome,
+                    outcome = refresh(&storage, project, visibility, &params, search, &batch, &mut matched) => outcome,
                 };
                 match outcome {
                     Ok(refreshed) => {
@@ -379,12 +387,13 @@ enum RefreshError {
 async fn refresh(
     storage: &Storage,
     project: ProjectId,
+    visibility: Visibility,
     params: &TraceStreamParams,
     search: Option<&str>,
     batch: &Pending,
     matched: &mut HashSet<TraceId>,
 ) -> Result<Refreshed, RefreshError> {
-    let ctx = open_query_on(storage, project, None, None)
+    let ctx = open_query_on(storage, project, visibility, None, None)
         .await
         .map_err(|error| match error {
             ApiError::Unavailable { .. } => RefreshError::Retry,

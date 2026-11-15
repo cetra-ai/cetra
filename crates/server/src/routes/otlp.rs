@@ -186,12 +186,12 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
+    use crate::test_support::raw_query;
     use axum::http::{Method, StatusCode};
     use bytes::Bytes;
     use bytesize::ByteSize;
     use datafusion::prelude::SessionContext;
     use llmobs_otel::{IngestContext, PriceTable, builtin_price_rows, decode_json, normalize};
-    use llmobs_storage::QueryOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceResponse;
     use prost::Message;
     use serde_json::Value;
@@ -279,12 +279,7 @@ mod tests {
 
     /// Spans in the project, read through the storage query provider.
     async fn stored_spans(app: &TestApp, project: ProjectId) -> usize {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::new(None, None))
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");
@@ -298,12 +293,7 @@ mod tests {
 
     /// All stored span rows, formatted. Used to look at columns the tests need.
     async fn stored_rows(app: &TestApp, project: ProjectId) -> String {
-        let query = app
-            .state
-            .storage
-            .query(project, QueryOptions::new(None, None))
-            .await
-            .expect("query opens");
+        let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
             .expect("spans register");

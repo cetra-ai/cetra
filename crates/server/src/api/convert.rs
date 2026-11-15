@@ -1164,7 +1164,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         app.load_example_dataset(seeded.project.id).await;
-        let ctx = open_query(&app.state, seeded.project.id, None)
+        let ctx = open_query(&app.state, seeded.org_id, seeded.project.id, None)
             .await
             .unwrap();
         (app, ctx)

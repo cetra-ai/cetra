@@ -21,6 +21,7 @@ use crate::api::deletions::{
 use crate::auth::OrgRole;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm};
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -481,7 +482,8 @@ async fn matching(
     project: ProjectId,
     selection: &FilterSelection,
 ) -> Result<Vec<TraceId>, ApiError> {
-    let ctx: QueryContext = read::open_query(state, project, None).await?;
+    let ctx: QueryContext =
+        read::open_query_on(&state.storage, project, Visibility::Exempt, None, None).await?;
     let ids = filter_trace_ids(
         &ctx,
         FilterDeletionRequest {
@@ -640,7 +642,9 @@ mod tests {
     use crate::meta::members::{add_org_member, set_project_override};
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{ProjectRow, insert_project, project_by_id};
-    use crate::test_support::{TestApp, TestRequest, TestResponse, capture_logs, dataset_span};
+    use crate::test_support::{
+        TestApp, TestRequest, TestResponse, capture_logs, dataset_span, raw_span_count, set_limits,
+    };
 
     const A: &str = "a1000000000000000000000000000001";
     const B: &str = "a1000000000000000000000000000002";
@@ -1783,5 +1787,86 @@ mod tests {
         assert_eq!(response.status, StatusCode::ACCEPTED);
         assert!(logs.contains("deletion requested"));
         assert!(!logs.contains("secret-slug-1"));
+    }
+
+    /// D-P-21: a deletion counts, scopes and deletes the traces the org's window hides, since
+    /// deletion reads are exempt from the window.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deletion_counts_include_hidden_traces() {
+        let app = TestApp::with_config(|config| {
+            config.storage.flush.max_age = Duration::from_millis(100);
+        })
+        .await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let auth = Auth::Cookie(seeded.cookie.clone());
+        let day = 86_400_000_000_000_i64;
+        let now = app.state.clock.now_ns();
+        let old: TraceId = A.parse().unwrap();
+        let new: TraceId = B.parse().unwrap();
+        app.commit_trace_at(&seeded.project, old, 1, now - 40 * day)
+            .await;
+        app.commit_trace_at(&seeded.project, new, 2, now - day)
+            .await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        app.state.clock.advance(Duration::from_secs(1));
+        let window = json!({"from": "2025-11-01T00:00:00Z", "to": TO});
+
+        let preview = post(&app, project, "/deletions/preview", window, &auth).await;
+        assert_eq!(preview.status, StatusCode::OK);
+        assert_eq!(
+            preview.json::<Value>(),
+            json!({"matched_traces": 2, "capped": false})
+        );
+
+        let name = dataset_span(0).name;
+        let body = json!({
+            "kind": "filter",
+            "filter": format!("name = '{name}'"),
+            "from": "2025-11-01T00:00:00Z",
+            "to": TO,
+        });
+        let created = post(&app, project, "/deletions", body, &auth).await;
+        assert_eq!(created.status, StatusCode::ACCEPTED);
+        let id = id_of(&created.json());
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 2);
+
+        run_once(&app.state).await.unwrap();
+        let uuid: Uuid = id.parse().unwrap();
+        let mut scope = store::scope_traces(app.state.meta.reader(), uuid)
+            .await
+            .unwrap();
+        scope.sort();
+        let mut expected = vec![old, new];
+        expected.sort();
+        assert_eq!(scope, expected);
+
+        let mut status = Value::Null;
+        for _ in 0..100 {
+            let now = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            )
+            .unwrap();
+            app.state.storage.apply_deletions(now).await.unwrap();
+            run_once(&app.state).await.unwrap();
+            let got: Value = get(&app, project, &format!("/deletions/{id}"), &auth)
+                .await
+                .json();
+            status = got["status"].clone();
+            if status == "applied" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(status, "applied");
+        assert_eq!(raw_span_count(&app.state.storage, project).await, 0);
     }
 }

@@ -119,7 +119,7 @@ async fn get_metrics(
         return Ok(error::Json((*cached).clone()));
     }
     let window = storage::TimeWindow::new(from, to)?;
-    let ctx = open_query(&state, access.project.id, None).await?;
+    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
     let data = storage::metrics(
         &ctx,
         storage::MetricsRequest {

@@ -3,12 +3,13 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use llmobs_core::ids::ProjectId;
+use llmobs_core::ids::{OrgId, ProjectId};
 use llmobs_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value};
 use uuid::Uuid;
 
 use crate::alerts::condition::measure;
 use crate::api::alerts::{AlertCondition, AlertEventKind, AlertState};
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::MetaError;
@@ -141,7 +142,7 @@ pub(crate) struct EvaluateReport {
 pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<EvaluateReport, MetaError> {
     let due = due_rules(state.meta.reader(), now, DUE_SLACK_NS).await?;
     let results = futures::stream::iter(due)
-        .map(|rule| Box::pin(evaluate_rule(state, rule, now)))
+        .map(|(org, rule)| Box::pin(evaluate_rule(state, org, rule, now)))
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
@@ -168,6 +169,7 @@ pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<Evaluate
 /// Evaluates one rule. Returns its id, whether its query failed, and the write's result.
 async fn evaluate_rule(
     state: &AppState,
+    org: OrgId,
     rule: RuleRow,
     now: i64,
 ) -> (Uuid, bool, Result<Recorded, MetaError>) {
@@ -176,34 +178,35 @@ async fn evaluate_rule(
     let expected_updated_at = rule.updated_at;
     let window_from = now.saturating_sub(rule.condition.window.ns());
     let mut event_kind = None;
-    let evaluation = match measure_rule(state, project, &rule.condition, window_from, now).await {
-        Err(reason) => {
-            tracing::warn!(rule_id = %rule_id, reason, "alert evaluation failed");
-            Evaluation::Failed {
-                message: reason.to_owned(),
+    let evaluation =
+        match measure_rule(state, org, project, &rule.condition, window_from, now).await {
+            Err(reason) => {
+                tracing::warn!(rule_id = %rule_id, reason, "alert evaluation failed");
+                Evaluation::Failed {
+                    message: reason.to_owned(),
+                }
             }
-        }
-        Ok(measured) => {
-            let read = reading(&rule.condition, measured.count, measured.value);
-            let next = step(&rule, read, now);
-            event_kind = next.event;
-            Evaluation::Measured {
-                step: next,
-                count: measured.count,
-                value: measured.value,
-                threshold: rule.condition.threshold,
-                window_from,
-                window_to: now,
-                details: EventDetails {
-                    rule_name: rule.name,
-                    metric: rule.condition.metric,
-                    comparator: rule.condition.comparator,
-                    window: rule.condition.window,
-                    filter: rule.condition.filter,
-                },
+            Ok(measured) => {
+                let read = reading(&rule.condition, measured.count, measured.value);
+                let next = step(&rule, read, now);
+                event_kind = next.event;
+                Evaluation::Measured {
+                    step: next,
+                    count: measured.count,
+                    value: measured.value,
+                    threshold: rule.condition.threshold,
+                    window_from,
+                    window_to: now,
+                    details: EventDetails {
+                        rule_name: rule.name,
+                        metric: rule.condition.metric,
+                        comparator: rule.condition.comparator,
+                        window: rule.condition.window,
+                        filter: rule.condition.filter,
+                    },
+                }
             }
-        }
-    };
+        };
     let query_failed = matches!(evaluation, Evaluation::Failed { .. });
     let written = state
         .meta
@@ -233,18 +236,25 @@ async fn evaluate_rule(
 /// filter or a query message.
 async fn measure_rule(
     state: &AppState,
+    org: OrgId,
     project: ProjectId,
     condition: &AlertCondition,
     from: i64,
     to: i64,
 ) -> Result<AlertValue, &'static str> {
     let window = TimeWindow::new(from, to).map_err(|_| "invalid window")?;
-    let ctx = crate::routes::read::open_query_on(&state.storage, project, None, None)
-        .await
-        .map_err(|error| match error {
-            ApiError::Unavailable { .. } => "storage is busy",
-            _ => "query failed",
-        })?;
+    let ctx = crate::routes::read::open_query_on(
+        &state.storage,
+        project,
+        Visibility::window(state, org),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        ApiError::Unavailable { .. } => "storage is busy",
+        _ => "query failed",
+    })?;
     let request = AlertValueRequest {
         window,
         filter: condition.filter.as_deref(),
@@ -768,7 +778,7 @@ mod tests {
             .await
             .unwrap()
             .iter()
-            .map(|rule| rule.id)
+            .map(|(_, rule)| rule.id)
             .collect();
         let mut never = [broken.id, quiet_rule.id];
         never.sort();
