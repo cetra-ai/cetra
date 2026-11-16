@@ -129,7 +129,7 @@ export function JsonView({
           value={query}
           aria-label="Search JSON"
           placeholder="Search"
-          className="h-6 w-40 text-xs"
+          className="h-6 w-40 text-[10.5px]"
           onChange={(event) => setQuery(event.target.value)}
         />
       </div>
@@ -208,7 +208,7 @@ function JsonRowView({
   return (
     <div
       className={cn(
-        "flex min-h-[22px] min-w-0 gap-1 font-mono text-xs",
+        "flex min-h-[22px] min-w-0 gap-1 font-mono text-[10.5px]",
         stringOpen ? "items-start" : "items-center",
       )}
       style={{ paddingLeft: row.depth * 12 }}

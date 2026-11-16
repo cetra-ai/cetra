@@ -25,8 +25,8 @@ export function PayloadView({
   if (!payload) {
     return (
       <section className="flex min-w-0 flex-col gap-1">
-        <h3 className="text-xs font-medium">{label}</h3>
-        <p className="text-xs text-muted-foreground">—</p>
+        <h3 className="text-[10.5px] font-medium">{label}</h3>
+        <p className="text-[10.5px] text-muted-foreground">—</p>
       </section>
     );
   }
@@ -36,16 +36,16 @@ export function PayloadView({
   return (
     <section className="flex min-w-0 flex-col gap-1">
       <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-xs font-medium">{label}</h3>
-        <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+        <h3 className="text-[10.5px] font-medium">{label}</h3>
+        <Badge variant="outline" className="h-4 px-1.5 text-[10.5px] text-muted-foreground">
           {payload.format}
         </Badge>
-        <span className="text-xs text-muted-foreground">{serialized.chars} chars</span>
+        <span className="text-[10.5px] text-muted-foreground">{serialized.chars} chars</span>
         <CopyButton value={serialized.raw} label={label} />
         <FormatSwitch value={mode} onChange={setMode} />
       </div>
       {capped ? (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 text-[10.5px]">
           <p>Large payload ({megabytes(serialized.chars)} MB)</p>
           <button type="button" className="underline" onClick={() => setForce(true)}>
             Render anyway
@@ -69,7 +69,9 @@ function PayloadBody({
 }) {
   if (payload.format === "text") {
     return (
-      <pre className="overflow-auto font-mono text-xs whitespace-pre-wrap">{payload.value}</pre>
+      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
+        {payload.value}
+      </pre>
     );
   }
   if (payload.format === "messages" && mode === "pretty") {
@@ -77,12 +79,16 @@ function PayloadBody({
   }
   if (mode === "raw") {
     return (
-      <pre className="overflow-auto font-mono text-xs whitespace-pre-wrap">{serialized.raw}</pre>
+      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
+        {serialized.raw}
+      </pre>
     );
   }
   if (payload.format === "json" && mode === "json") {
     return (
-      <pre className="overflow-auto font-mono text-xs whitespace-pre-wrap">{serialized.pretty}</pre>
+      <pre className="overflow-auto font-mono text-[10.5px] whitespace-pre-wrap">
+        {serialized.pretty}
+      </pre>
     );
   }
   return <JsonView value={payload.value} />;
@@ -92,7 +98,7 @@ function MessageList({ messages }: { messages: readonly Schema<"Message">[] }) {
   return (
     <ul className="flex flex-col gap-2">
       {messages.map((message) => (
-        <li key={messageKey(message)} className="text-xs">
+        <li key={messageKey(message)} className="text-[10.5px]">
           <span className="font-medium">{message.role}</span>
           <p className="whitespace-pre-wrap">{messageText(message)}</p>
         </li>

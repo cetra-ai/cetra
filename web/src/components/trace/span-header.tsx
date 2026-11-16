@@ -18,7 +18,7 @@ export function SpanHeader({ span, detached }: { span: Schema<"SpanDetail">; det
     span.request_model !== span.response_model;
 
   return (
-    <header className="flex shrink-0 flex-col gap-1 border-b px-3 py-1.5 text-xs">
+    <header className="flex shrink-0 flex-col gap-1 border-b px-3 py-1.5 text-[10.5px]">
       <div className="flex min-w-0 items-center gap-2">
         <KindIcon kind={span.span_kind} />
         <span className="min-w-0 truncate select-text">{span.name}</span>
@@ -95,7 +95,7 @@ export function SpanHeader({ span, detached }: { span: Schema<"SpanDetail">; det
         {span.truncated.length > 0 ? (
           <Tooltip>
             <TooltipTrigger asChild>
-              <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-muted-foreground">
+              <Badge variant="outline" className="h-4 px-1.5 text-[10.5px] text-muted-foreground">
                 truncated at ingest
               </Badge>
             </TooltipTrigger>
@@ -103,7 +103,7 @@ export function SpanHeader({ span, detached }: { span: Schema<"SpanDetail">; det
           </Tooltip>
         ) : null}
         {detached ? (
-          <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+          <Badge variant="secondary" className="h-4 px-1.5 text-[10.5px]">
             detached
           </Badge>
         ) : null}
@@ -111,7 +111,7 @@ export function SpanHeader({ span, detached }: { span: Schema<"SpanDetail">; det
           <Badge
             key={convention}
             variant="outline"
-            className="h-4 px-1.5 text-[10px] text-muted-foreground"
+            className="h-4 px-1.5 text-[10.5px] text-muted-foreground"
           >
             {convention}
           </Badge>

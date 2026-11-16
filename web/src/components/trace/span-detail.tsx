@@ -63,20 +63,20 @@ export function SpanDetail({
         <Tabs value={tab} onValueChange={select} className="min-h-0 flex-1 gap-0">
           <TabsList variant="line" className="h-7 px-3">
             {messages ? (
-              <TabsTrigger value="chat" className="text-xs">
+              <TabsTrigger value="chat" className="text-[10.5px]">
                 Chat
               </TabsTrigger>
             ) : null}
-            <TabsTrigger value="io" className="text-xs">
+            <TabsTrigger value="io" className="text-[10.5px]">
               Input / Output
             </TabsTrigger>
-            <TabsTrigger value="attributes" className="text-xs">
+            <TabsTrigger value="attributes" className="text-[10.5px]">
               Attributes
             </TabsTrigger>
-            <TabsTrigger value="scores" className="text-xs">
+            <TabsTrigger value="scores" className="text-[10.5px]">
               Scores
             </TabsTrigger>
-            <TabsTrigger value="annotate" className="text-xs">
+            <TabsTrigger value="annotate" className="text-[10.5px]">
               Annotate
             </TabsTrigger>
           </TabsList>

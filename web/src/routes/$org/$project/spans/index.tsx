@@ -17,14 +17,18 @@ import { DataTable } from "@/components/data-table/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { appendFilter, filterMessage } from "@/components/filter-bar/logic";
+import { TraceLayoutControls } from "@/components/layout-switcher";
 import { ListToolbar } from "@/components/list-toolbar";
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
 import { orderedSpanColumns, spanColumnSpecs } from "@/components/span-columns";
+import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { formatDuration } from "@/lib/format";
+import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
 import { type RangeState, rangeFromSearch, resolveRange } from "@/lib/time-range";
 
@@ -130,6 +134,7 @@ function SpansPage() {
       search: (prev) => withCols(prev, choice?.join(",")),
     });
   }
+  const layout = useListLayout();
   const traceOpen = search.trace !== undefined;
   const listScroll = useRef(0);
   const wasOpen = useRef(traceOpen);
@@ -151,6 +156,10 @@ function SpansPage() {
   }, [traceOpen]);
 
   useShortcut("dismiss", () => {
+    if (getTraceMaximized()) {
+      setTraceMaximized(false);
+      return;
+    }
     if (!search.trace) {
       return;
     }
@@ -174,6 +183,38 @@ function SpansPage() {
       <div className="absolute inset-0">
         <SplitPane
           name="traces"
+          mode={layout}
+          filmstrip={
+            <Filmstrip
+              items={rows.map((row) => ({
+                id: `${row.trace_id}:${row.span_id}`,
+                label: row.name,
+                detail: formatDuration(row.duration_ns),
+                status: row.status,
+              }))}
+              selectedId={selectedRowId}
+              onSelect={(id) => {
+                const row = rows.find(
+                  (candidate) => `${candidate.trace_id}:${candidate.span_id}` === id,
+                );
+                if (!row) {
+                  return;
+                }
+                void navigate({
+                  to: "/$org/$project/spans",
+                  params: { org, project },
+                  search: (prev) => ({ ...prev, trace: row.trace_id, span: row.span_id }),
+                });
+              }}
+              onBack={() => {
+                void navigate({
+                  to: "/$org/$project/spans",
+                  params: { org, project },
+                  search: (prev) => withoutTrace(prev),
+                });
+              }}
+            />
+          }
           open={traceOpen}
           start={
             <div className="flex h-full min-h-0 flex-col">
@@ -298,6 +339,7 @@ function SpansPage() {
                 traceId={search.trace}
                 spanId={search.span}
                 onAddFilter={onFilter}
+                layout={<TraceLayoutControls />}
                 onClose={() => {
                   return navigate({
                     to: "/$org/$project/spans",

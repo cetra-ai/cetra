@@ -20,6 +20,7 @@ import { DeleteMatchingDialog } from "@/components/deletions/delete-matching-dia
 import { DisabledReason } from "@/components/disabled-reason";
 import { FilterBar } from "@/components/filter-bar/filter-bar";
 import { appendFilter, filterMessage } from "@/components/filter-bar/logic";
+import { TraceLayoutControls } from "@/components/layout-switcher";
 import { ListToolbar } from "@/components/list-toolbar";
 import { LiveToggle } from "@/components/live-toggle";
 import { OnboardingPanel } from "@/components/onboarding/panel";
@@ -28,12 +29,15 @@ import { onboardingShown, tracesNeedOnboarding } from "@/components/onboarding/s
 import { useDefaultSavedView } from "@/components/saved-views/default-view";
 import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
 import { useProject } from "@/components/shell/project-context";
+import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
 import { orderedTraceColumns, scoreNames, traceColumnSpecs } from "@/components/trace-columns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { formatDuration } from "@/lib/format";
+import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { atLeast } from "@/lib/roles";
 import {
   parseTracesSearch,
@@ -168,6 +172,7 @@ function TracesPage() {
       search: (prev) => withCols(prev, choice?.join(",")),
     });
   }
+  const layout = useListLayout();
   const traceOpen = search.trace !== undefined;
   const listScroll = useRef(0);
   const wasOpen = useRef(traceOpen);
@@ -189,6 +194,10 @@ function TracesPage() {
   }, [traceOpen]);
 
   useShortcut("dismiss", () => {
+    if (getTraceMaximized()) {
+      setTraceMaximized(false);
+      return;
+    }
     if (!search.trace) {
       return;
     }
@@ -254,6 +263,32 @@ function TracesPage() {
       <div className="absolute inset-0">
         <SplitPane
           name="traces"
+          mode={layout}
+          filmstrip={
+            <Filmstrip
+              items={rows.map((row) => ({
+                id: row.trace_id,
+                label: row.name,
+                detail: formatDuration(row.duration_ns),
+                status: row.status,
+              }))}
+              selectedId={search.trace}
+              onSelect={(id) => {
+                void navigate({
+                  to: "/$org/$project/traces",
+                  params: { org, project },
+                  search: (prev) => ({ ...withoutSpan(prev), trace: id }),
+                });
+              }}
+              onBack={() => {
+                void navigate({
+                  to: "/$org/$project/traces",
+                  params: { org, project },
+                  search: (prev) => withoutTrace(prev),
+                });
+              }}
+            />
+          }
           open={traceOpen}
           start={
             <div className="flex h-full min-h-0 flex-col">
@@ -473,6 +508,7 @@ function TracesPage() {
                   });
                 }}
                 onAddFilter={onFilter}
+                layout={<TraceLayoutControls />}
                 onClose={() => {
                   return navigate({
                     to: "/$org/$project/traces",

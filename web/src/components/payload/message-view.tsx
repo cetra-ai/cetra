@@ -21,7 +21,7 @@ export function MessageView({
   const role = message.role.length > 0 ? message.role : "other";
   return (
     <article className={cn("border-l-2 pl-2", roleBorder(role))}>
-      <header className="flex flex-wrap items-center gap-2 text-xs">
+      <header className="flex flex-wrap items-center gap-2 text-[10.5px]">
         <span className="font-medium">{role}</span>
         {message.name ? <span className="text-muted-foreground">{message.name}</span> : null}
         {message.finish_reason ? (
@@ -33,7 +33,11 @@ export function MessageView({
       <div className="flex flex-col gap-1">
         {partsOf(message, expanded, projectRef, links)}
         {!expanded && hidden > 0 ? (
-          <button type="button" className="self-start text-xs" onClick={() => setExpanded(true)}>
+          <button
+            type="button"
+            className="self-start text-[10.5px]"
+            onClick={() => setExpanded(true)}
+          >
             Show {hidden} more lines
           </button>
         ) : null}

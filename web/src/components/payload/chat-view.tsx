@@ -25,7 +25,7 @@ export function ChatView({
       <SystemInstructions value={systemInstructions} />
       <Tools tools={tools} called={calledNames(messages)} />
       <MessageList messages={input} projectRef={projectRef} links={links} />
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <div className="flex items-center gap-2 text-[10.5px] text-muted-foreground">
         <span className="h-px flex-1 bg-border" />
         <span>Output</span>
         <span className="h-px flex-1 bg-border" />
@@ -71,18 +71,18 @@ function SystemInstructions({ value }: { value: unknown }) {
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="text-xs font-medium"
+          className="text-[10.5px] font-medium"
           aria-expanded={open}
           onClick={() => setOpen((current) => !current)}
         >
           System instructions
         </button>
-        <span className="text-xs text-muted-foreground">{label}</span>
+        <span className="text-[10.5px] text-muted-foreground">{label}</span>
       </div>
       {open ? (
-        <p className="text-xs break-words whitespace-pre-wrap">{text}</p>
+        <p className="text-[10.5px] break-words whitespace-pre-wrap">{text}</p>
       ) : (
-        <p className="truncate text-xs">{lines[0] ?? ""}</p>
+        <p className="truncate text-[10.5px]">{lines[0] ?? ""}</p>
       )}
     </section>
   );
@@ -96,7 +96,7 @@ function Tools({ tools, called }: { tools: ToolDef[]; called: Set<string> }) {
     <section className="flex flex-col gap-1">
       <button
         type="button"
-        className="self-start text-xs font-medium"
+        className="self-start text-[10.5px] font-medium"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
@@ -106,7 +106,7 @@ function Tools({ tools, called }: { tools: ToolDef[]; called: Set<string> }) {
         <ul className="flex flex-col gap-2">
           {tools.map((tool) => (
             <li key={toolKey(tool.name, seen)} className="flex flex-col gap-1">
-              <div className="text-xs">
+              <div className="text-[10.5px]">
                 {called.has(tool.name) ? (
                   <mark className="rounded bg-kind-tool/30 px-0.5">{tool.name}</mark>
                 ) : (
@@ -114,7 +114,7 @@ function Tools({ tools, called }: { tools: ToolDef[]; called: Set<string> }) {
                 )}
               </div>
               {tool.description ? (
-                <p className="text-xs text-muted-foreground">{tool.description}</p>
+                <p className="text-[10.5px] text-muted-foreground">{tool.description}</p>
               ) : null}
               {tool.schema !== undefined ? <JsonView value={tool.schema} /> : null}
             </li>

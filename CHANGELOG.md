@@ -71,6 +71,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
 - Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
 - Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.
+- A layout switcher on the Traces and Spans lists: split, drawer, rail and bottom.
 
 ### Changed
 

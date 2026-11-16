@@ -38,6 +38,7 @@ export function TraceHeader({
   onClose,
   live,
   actions,
+  layout,
 }: {
   trace: Schema<"TraceSummary">;
   spanId?: string;
@@ -46,6 +47,8 @@ export function TraceHeader({
   live?: { status: StreamStatus; onStop: () => void };
   /** Buttons placed before the copy button. */
   actions?: ReactNode;
+  /** Layout switcher, shown when the trace is open beside a list. */
+  layout?: ReactNode;
 }) {
   const { org, project, ref, data } = useProject();
   const search = pageSearch(spanId, mode);
@@ -129,6 +132,7 @@ export function TraceHeader({
               </Button>
             </DisabledReason>
             {actions}
+            {layout}
             <CopyButton value={href} label="link" />
             {onClose ? (
               <Link

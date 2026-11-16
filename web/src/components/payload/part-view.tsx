@@ -19,7 +19,7 @@ export function PartView({
   links: ToolLinks;
 }) {
   if (part.type === "text" && typeof part.content === "string") {
-    return <p className="text-xs break-words whitespace-pre-wrap">{part.content}</p>;
+    return <p className="text-[10.5px] break-words whitespace-pre-wrap">{part.content}</p>;
   }
   if (part.type === "reasoning" && typeof part.content === "string") {
     return <Reasoning content={part.content} />;
@@ -55,7 +55,7 @@ export function PartView({
   }
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-xs text-muted-foreground">Unknown part</p>
+      <p className="text-[10.5px] text-muted-foreground">Unknown part</p>
       <JsonView value={part} />
     </div>
   );
@@ -75,14 +75,14 @@ function Reasoning({ content }: { content: string }) {
     <div className="flex flex-col gap-1">
       <button
         type="button"
-        className="self-start text-xs text-muted-foreground"
+        className="self-start text-[10.5px] text-muted-foreground"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
         Reasoning · {content.length}
       </button>
       {open ? (
-        <p className="text-xs break-words whitespace-pre-wrap text-muted-foreground italic">
+        <p className="text-[10.5px] break-words whitespace-pre-wrap text-muted-foreground italic">
           {content}
         </p>
       ) : null}

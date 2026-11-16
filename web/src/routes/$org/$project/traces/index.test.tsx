@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { beforeAll, expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
@@ -257,7 +257,10 @@ it("opens a trace beside the list and follows span, escape, and j", async () => 
     expect(router.state.location.search.trace).toBeUndefined();
   });
   expect(router.state.location.search.span).toBeUndefined();
-  expect(screen.queryByRole("grid", { name: "Trace" })).not.toBeInTheDocument();
+  // The drawer slides out before it unmounts.
+  await waitFor(() => {
+    expect(screen.queryByRole("grid", { name: "Trace" })).not.toBeInTheDocument();
+  });
   expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
 
   const firstRow = within(list).getAllByRole("row")[1];
@@ -1299,4 +1302,40 @@ it("disables delete matching for members, with the reason", async () => {
   const button = await screen.findByRole("button", { name: "Delete matching…" });
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription("Only project admins can delete traces");
+});
+
+it("shows the layout switcher in the open trace's header, not in the list toolbar", async () => {
+  await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  expect(screen.queryByRole("radiogroup", { name: "Layout" })).not.toBeInTheDocument();
+  cleanup();
+  await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001");
+  await screen.findByRole("grid", { name: "Trace" });
+  expect(screen.getByRole("radiogroup", { name: "Layout" })).toBeInTheDocument();
+});
+
+it("shows the list and the trace together in bottom mode", async () => {
+  localStorage.setItem("cetra.list_layout", "bottom");
+  await renderApp("/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001");
+  expect(await screen.findByRole("grid", { name: "Trace" })).toBeInTheDocument();
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+});
+
+it("shows the trace in a drawer over the list, and Escape closes it", async () => {
+  localStorage.setItem("cetra.list_layout", "drawer");
+  const { router } = await renderApp(
+    "/acme/support-bot/traces?range=1h&trace=a1000000000000000000000000000001",
+  );
+  const trace = await screen.findByRole("grid", { name: "Trace" });
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Trace" })).toContainElement(trace);
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await waitFor(() => {
+    expect(router.state.location.search.trace).toBeUndefined();
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("complementary", { name: "Trace" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("grid", { name: "Traces" })).toBeInTheDocument();
 });

@@ -34,7 +34,7 @@ export function ScoresTab({ traceId, spanId }: { traceId: string; spanId: string
   const onTrace = byName(forTrace(traceScores.data.data, traceId));
   const onSpan = byName(forSpan(spanScores.data.data, spanId));
   if (onTrace.length === 0 && onSpan.length === 0) {
-    return <p className="text-xs text-muted-foreground">No scores</p>;
+    return <p className="text-[10.5px] text-muted-foreground">No scores</p>;
   }
 
   return (
@@ -48,7 +48,7 @@ export function ScoresTab({ traceId, spanId }: { traceId: string; spanId: string
 function ScoreGroup({ title, scores }: { title: string; scores: Schema<"Score">[] }) {
   return (
     <section className="flex flex-col gap-1">
-      <h3 className="text-xs font-medium">{title}</h3>
+      <h3 className="text-[10.5px] font-medium">{title}</h3>
       {scores.length > 0 ? <ScoreTable scores={scores} /> : null}
     </section>
   );
@@ -56,7 +56,7 @@ function ScoreGroup({ title, scores }: { title: string; scores: Schema<"Score">[
 
 function ScoreTable({ scores }: { scores: Schema<"Score">[] }) {
   return (
-    <table className="w-full text-xs">
+    <table className="w-full text-[10.5px]">
       <thead className="text-left text-muted-foreground">
         <tr>
           <th className="py-1 pr-2 font-medium">Name</th>

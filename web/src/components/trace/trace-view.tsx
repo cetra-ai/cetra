@@ -1,6 +1,7 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { cn } from "cn";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { traceDetailQuery } from "@/api/queries";
@@ -38,6 +39,7 @@ export function TraceView({
   onSelectSpan,
   onAddFilter,
   onClose,
+  layout,
 }: {
   traceId: string;
   spanId?: string;
@@ -46,10 +48,13 @@ export function TraceView({
   onSelectSpan: (spanId: string) => void;
   onAddFilter?: (conjunct: string) => void;
   onClose?: () => void | Promise<void>;
+  layout?: ReactNode;
 }) {
   const { org, project } = useProject();
   const detailOptions = traceDetailQuery(org, project, traceId);
-  const trace = useQuery(detailOptions);
+  // The previous trace stays on screen, dimmed, while the next one loads, so switching does not flash.
+  const trace = useQuery({ ...detailOptions, placeholderData: keepPreviousData });
+  const previous = trace.isPlaceholderData;
   const queryClient = useQueryClient();
   const listLive = useRouterState({
     select: (state) => {
@@ -83,6 +88,7 @@ export function TraceView({
   const detail = trace.data;
   const follow =
     detail !== undefined &&
+    !previous &&
     !stopped &&
     (listLive || traceIsRecent(detail.trace.end_time, Date.now()));
   const queryKeyRef = useRef(detailOptions.queryKey);
@@ -162,7 +168,9 @@ export function TraceView({
   }
 
   const loaded = trace.data;
-  const selected = spanId ?? loaded.spans[0]?.span.span_id;
+  const selected = previous
+    ? loaded.spans[0]?.span.span_id
+    : (spanId ?? loaded.spans[0]?.span.span_id);
   const selectedRow = loaded.spans.find((row) => row.span.span_id === selected);
   const detached = selectedRow?.detached ?? false;
   const rootSpanId = loaded.spans.find((row) => row.span.parent_span_id === undefined)?.span
@@ -170,12 +178,21 @@ export function TraceView({
   const selectedIsRoot = selectedRow !== undefined && selectedRow.span.parent_span_id === undefined;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    // Keyed by the loaded trace so a switch fades the new one in over the dimmed previous one.
+    <div
+      key={loaded.trace.trace_id}
+      aria-busy={previous}
+      className={cn(
+        "trace-swap flex min-h-0 flex-1 flex-col transition-opacity",
+        previous && "pointer-events-none opacity-60",
+      )}
+    >
       <TraceHeader
         trace={loaded.trace}
         spanId={selected}
         mode={active === "transcript" ? active : undefined}
         onClose={onClose}
+        layout={layout}
         live={follow ? { status, onStop: () => setStoppedId(traceId) } : undefined}
         actions={
           <>
@@ -206,7 +223,7 @@ export function TraceView({
               active === "transcript" ? (
                 <TranscriptView
                   key={loaded.trace.trace_id}
-                  traceId={traceId}
+                  traceId={loaded.trace.trace_id}
                   spans={loaded.spans}
                   selectedSpanId={selected}
                   onSelectSpan={onSelectSpan}
@@ -229,7 +246,7 @@ export function TraceView({
             end={
               selected ? (
                 <SpanDetail
-                  traceId={traceId}
+                  traceId={loaded.trace.trace_id}
                   spanId={selected}
                   detached={detached}
                   onAddFilter={onAddFilter}
