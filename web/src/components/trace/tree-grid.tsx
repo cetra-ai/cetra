@@ -20,13 +20,14 @@ import {
 import type { Schema } from "@/api/types";
 import { KindIcon } from "@/components/kind-icon";
 import { StatusDot } from "@/components/status-dot";
+import { SpanBar } from "@/components/trace/span-bar";
 import { TreeToolbar } from "@/components/trace/tree-toolbar";
 import { Badge } from "@/components/ui/badge";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import type { TraceMode } from "@/lib/search/traces";
 import { matchesBinding } from "@/lib/shortcuts";
 import {
-  type BarGeometry,
   barGeometry,
   clampView,
   panBy,
@@ -38,12 +39,14 @@ import {
 } from "@/lib/timeline";
 import {
   ancestorsOf,
+  autoNameWidth,
   defaultCollapsed,
   filterRows,
   hasChildren,
   subtreeEnds,
   visibleRows,
 } from "@/lib/tree";
+import { STORAGE_PREFIX } from "@/product";
 
 const ROW_HEIGHT = 28;
 const LIVE_ROW_CSS = `
@@ -57,7 +60,34 @@ const LIVE_ROW_CSS = `
 }
 `;
 const OVERSCAN = 12;
-const TEMPLATE = "minmax(0, 1.4fr) 72px 64px 72px minmax(0, 1fr)";
+// Duration, Tokens, Cost and Timeline; the Name column is sized apart (auto or dragged).
+const OTHER_COLUMNS = "72px 64px 72px minmax(160px, 1fr)";
+const OTHER_COLUMNS_MIN_PX = 72 + 64 + 72 + 160;
+const NAME_MIN_PX = 140;
+const NAME_MAX_PX = 640;
+const NAME_KEY_STEP_PX = 16;
+const NAME_WIDTH_KEY = `${STORAGE_PREFIX}tree.name_width`;
+
+function readNameWidth(): number | null {
+  try {
+    const value = Number(localStorage.getItem(NAME_WIDTH_KEY));
+    return Number.isFinite(value) && value >= NAME_MIN_PX && value <= NAME_MAX_PX ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeNameWidth(width: number | null): void {
+  try {
+    if (width === null) {
+      localStorage.removeItem(NAME_WIDTH_KEY);
+    } else {
+      localStorage.setItem(NAME_WIDTH_KEY, String(Math.round(width)));
+    }
+  } catch {
+    // Private mode and quota failures leave the in-memory width in place.
+  }
+}
 const ZOOM_WHEEL = 1.2;
 const PAN_WHEEL_PCT = 12;
 
@@ -172,6 +202,52 @@ export function TreeGrid({
     const visible = visibleRows(spans, ends, displayCollapsed);
     return errorSet ? visible.filter((index) => errorSet.has(index)) : visible;
   }, [spans, ends, displayCollapsed, errorSet]);
+
+  // The Name column fits the longest visible name until the user drags it.
+  const [userNameWidth, setUserNameWidth] = useState<number | null>(readNameWidth);
+  const autoWidth = useMemo(() => autoNameWidth(spans, rows), [spans, rows]);
+  const nameWidth = userNameWidth ?? autoWidth;
+  const template = `${nameWidth}px ${OTHER_COLUMNS}`;
+
+  function clampName(width: number): number {
+    const gridWidth = gridRef.current?.clientWidth;
+    const room = gridWidth ? gridWidth - OTHER_COLUMNS_MIN_PX : Number.POSITIVE_INFINITY;
+    return Math.round(Math.max(NAME_MIN_PX, Math.min(NAME_MAX_PX, room, width)));
+  }
+
+  function onNameResizeDown(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = nameWidth;
+    let latest = startWidth;
+    const move = (moveEvent: PointerEvent) => {
+      latest = clampName(startWidth + moveEvent.clientX - startX);
+      setUserNameWidth(latest);
+    };
+    const stop = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      writeNameWidth(latest);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop);
+    handle.addEventListener("pointercancel", stop);
+  }
+
+  function onNameResizeKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const next = clampName(nameWidth + (event.key === "ArrowRight" ? 1 : -1) * NAME_KEY_STEP_PX);
+    setUserNameWidth(next);
+    writeNameWidth(next);
+  }
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -362,217 +438,230 @@ export function TreeGrid({
   const zoomLabel = `${formatDuration(zoom.startNs - timeWindow.startNs)}–${formatDuration(zoom.endNs - timeWindow.startNs)}`;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <TreeToolbar
-        mode={mode}
-        onMode={onMode}
-        query={query}
-        onQuery={setQuery}
-        matchLabel={`${matchPos >= 0 ? matchPos + 1 : 0} / ${matchIndexes.length}`}
-        onPrevious={() => goMatch(-1)}
-        onNext={() => goMatch(1)}
-        errorsOnly={errorsOnly}
-        onErrorsOnly={setErrorsOnly}
-        onExpandAll={() => setCollapsed(new Set())}
-        onCollapseDepth={() => setCollapsed(collapsedToDepth(spans, ends))}
-        onFit={() => setView(null)}
-        zoomLabel={zoomLabel}
-      />
-      <div
-        ref={gridRef}
-        role="grid"
-        aria-label="Trace"
-        aria-rowcount={rows.length + 1}
-        aria-colcount={5}
-        tabIndex={0}
-        className="relative flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
-        onKeyDown={onKeyDown}
-        onPointerMove={onPointerMove}
-        onPointerLeave={() => setNeedle(null)}
-      >
-        <style>{LIVE_ROW_CSS}</style>
-        {needle ? (
-          <div
-            className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
-            style={{ left: needle.x }}
-          >
-            <span className="absolute top-0.5 left-1 text-[10px] whitespace-nowrap text-foreground normal-case">
-              {needle.label}
-            </span>
-          </div>
-        ) : null}
+    <TooltipProvider>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <TreeToolbar
+          mode={mode}
+          onMode={onMode}
+          query={query}
+          onQuery={setQuery}
+          matchLabel={`${matchPos >= 0 ? matchPos + 1 : 0} / ${matchIndexes.length}`}
+          onPrevious={() => goMatch(-1)}
+          onNext={() => goMatch(1)}
+          errorsOnly={errorsOnly}
+          onErrorsOnly={setErrorsOnly}
+          onExpandAll={() => setCollapsed(new Set())}
+          onCollapseDepth={() => setCollapsed(collapsedToDepth(spans, ends))}
+          onFit={() => setView(null)}
+          zoomLabel={zoomLabel}
+        />
         <div
-          role="row"
-          aria-rowindex={1}
-          className="grid h-row shrink-0 items-center border-b bg-background text-[11px] font-medium text-muted-foreground uppercase"
-          style={{ gridTemplateColumns: TEMPLATE }}
+          ref={gridRef}
+          role="grid"
+          aria-label="Trace"
+          aria-rowcount={rows.length + 1}
+          aria-colcount={5}
+          tabIndex={0}
+          className="relative flex min-h-0 flex-1 flex-col outline-none focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2 focus-visible:outline-solid"
+          onKeyDown={onKeyDown}
+          onPointerMove={onPointerMove}
+          onPointerLeave={() => setNeedle(null)}
         >
-          <div role="columnheader" className="min-w-0 truncate px-2">
-            Name
-          </div>
-          <div role="columnheader" className="px-2 text-right">
-            Duration
-          </div>
-          <div role="columnheader" className="px-2 text-right">
-            Tokens
-          </div>
-          <div role="columnheader" className="px-2 text-right">
-            Cost
-          </div>
-          <div
-            role="columnheader"
-            aria-label="Timeline"
-            className="relative h-full"
-            ref={timelineRef}
-            onPointerDown={onHeaderDown}
-            onPointerMove={onHeaderMove}
-            onPointerUp={onHeaderUp}
-          >
-            <span className="sr-only">Timeline</span>
-            {drag ? (
-              <span
-                className="absolute top-0 h-full bg-primary/20"
-                style={{
-                  left: `${Math.min(drag.startPct, drag.endPct)}%`,
-                  width: `${Math.abs(drag.endPct - drag.startPct)}%`,
-                }}
-              />
-            ) : null}
-            {marks.map((mark) => (
-              <span
-                key={mark.ns}
-                aria-hidden="true"
-                className="absolute top-1/2 -translate-y-1/2 text-[10px] normal-case"
-                style={{
-                  left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
-                }}
-              >
-                {mark.label}
+          <style>{LIVE_ROW_CSS}</style>
+          {needle ? (
+            <div
+              className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-foreground/70"
+              style={{ left: needle.x }}
+            >
+              <span className="absolute top-0.5 left-1 text-[10px] whitespace-nowrap text-foreground normal-case">
+                {needle.label}
               </span>
-            ))}
-          </div>
-        </div>
-        <div
-          ref={scrollRef}
-          data-scroll-container
-          className="relative min-h-0 flex-1 overflow-auto"
-        >
-          <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
-            {virtualRows.map((item) => {
-              const spanIndex = rows[item.index];
-              const row = spanIndex === undefined ? undefined : spans[spanIndex];
-              if (spanIndex === undefined || !row) {
-                return null;
-              }
-              const span = row.span;
-              const selected = span.span_id === selectedSpanId;
-              const expandable = hasChildren(ends, spanIndex);
-              const isCollapsed = displayCollapsed.has(span.span_id);
-              const bar = barGeometry(span, zoom);
-              const showTokens = span.span_kind === "llm" || span.span_kind === "embedding";
-              const isMatch = matchSet.has(spanIndex);
-              const dim = needleQuery.length > 0 && !isMatch;
-              return (
-                <div
-                  key={span.span_id}
-                  role="row"
-                  aria-rowindex={item.index + 2}
-                  aria-selected={selected}
-                  data-match={isMatch ? "true" : undefined}
-                  className={cn(
-                    "absolute top-0 grid w-full items-center border-b",
-                    selected
-                      ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                      : "hover:bg-muted",
-                    dim && "opacity-40",
-                    isMatch && !selected && "bg-primary/10",
-                    highlightedSpanIds?.has(span.span_id) && "live-row",
-                  )}
+            </div>
+          ) : null}
+          <div
+            role="row"
+            aria-rowindex={1}
+            className="grid h-row shrink-0 items-center border-b bg-background text-[11px] font-medium text-muted-foreground uppercase"
+            style={{ gridTemplateColumns: template }}
+          >
+            <div role="columnheader" className="relative min-w-0 truncate px-2">
+              Name
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize Name column"
+                aria-valuemin={NAME_MIN_PX}
+                aria-valuemax={NAME_MAX_PX}
+                aria-valuenow={Math.round(nameWidth)}
+                tabIndex={0}
+                title="Drag to resize, double-click to reset"
+                onPointerDown={onNameResizeDown}
+                onKeyDown={onNameResizeKey}
+                onClick={(event) => {
+                  event.stopPropagation();
+                }}
+                onDoubleClick={() => {
+                  setUserNameWidth(null);
+                  writeNameWidth(null);
+                }}
+                className="absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none hover:bg-ring/40 focus-visible:bg-ring/60 focus-visible:outline-hidden"
+              />
+            </div>
+            <div role="columnheader" className="px-2 text-right">
+              Duration
+            </div>
+            <div role="columnheader" className="px-2 text-right">
+              Tokens
+            </div>
+            <div role="columnheader" className="px-2 text-right">
+              Cost
+            </div>
+            <div
+              role="columnheader"
+              aria-label="Timeline"
+              className="relative h-full"
+              ref={timelineRef}
+              onPointerDown={onHeaderDown}
+              onPointerMove={onHeaderMove}
+              onPointerUp={onHeaderUp}
+            >
+              <span className="sr-only">Timeline</span>
+              {drag ? (
+                <span
+                  className="absolute top-0 h-full bg-primary/20"
                   style={{
-                    height: ROW_HEIGHT,
-                    transform: `translateY(${item.start}px)`,
-                    gridTemplateColumns: TEMPLATE,
+                    left: `${Math.min(drag.startPct, drag.endPct)}%`,
+                    width: `${Math.abs(drag.endPct - drag.startPct)}%`,
                   }}
-                  onClick={() => {
-                    gridRef.current?.focus();
-                    onSelectSpan(span.span_id);
+                />
+              ) : null}
+              {marks.map((mark) => (
+                <span
+                  key={mark.ns}
+                  aria-hidden="true"
+                  className="absolute top-1/2 -translate-y-1/2 text-[10px] normal-case"
+                  style={{
+                    left: `${((mark.ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100}%`,
                   }}
                 >
-                  <div role="gridcell" className="min-w-0">
-                    <div
-                      className="flex min-w-0 items-center gap-1 pr-2"
-                      style={{ paddingLeft: row.depth * 12 + 4 }}
-                    >
-                      {expandable ? (
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          aria-expanded={!isCollapsed}
-                          aria-label={isCollapsed ? "Expand" : "Collapse"}
-                          className="inline-flex size-4 shrink-0 items-center justify-center"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggle(span.span_id);
+                  {mark.label}
+                </span>
+              ))}
+            </div>
+          </div>
+          <div
+            ref={scrollRef}
+            data-scroll-container
+            className="relative min-h-0 flex-1 overflow-auto"
+          >
+            <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+              {virtualRows.map((item) => {
+                const spanIndex = rows[item.index];
+                const row = spanIndex === undefined ? undefined : spans[spanIndex];
+                if (spanIndex === undefined || !row) {
+                  return null;
+                }
+                const span = row.span;
+                const selected = span.span_id === selectedSpanId;
+                const expandable = hasChildren(ends, spanIndex);
+                const isCollapsed = displayCollapsed.has(span.span_id);
+                const bar = barGeometry(span, zoom);
+                const showTokens = span.span_kind === "llm" || span.span_kind === "embedding";
+                const isMatch = matchSet.has(spanIndex);
+                const dim = needleQuery.length > 0 && !isMatch;
+                return (
+                  <div
+                    key={span.span_id}
+                    role="row"
+                    aria-rowindex={item.index + 2}
+                    aria-selected={selected}
+                    data-match={isMatch ? "true" : undefined}
+                    className={cn(
+                      "absolute top-0 grid w-full items-center border-b",
+                      selected
+                        ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
+                        : "hover:bg-muted",
+                      dim && "opacity-40",
+                      isMatch && !selected && "bg-primary/10",
+                      highlightedSpanIds?.has(span.span_id) && "live-row",
+                    )}
+                    style={{
+                      height: ROW_HEIGHT,
+                      transform: `translateY(${item.start}px)`,
+                      gridTemplateColumns: template,
+                    }}
+                    onClick={() => {
+                      gridRef.current?.focus();
+                      onSelectSpan(span.span_id);
+                    }}
+                  >
+                    <div role="gridcell" className="min-w-0">
+                      <div
+                        className="flex min-w-0 items-center gap-1 pr-2"
+                        style={{ paddingLeft: row.depth * 12 + 4 }}
+                      >
+                        {expandable ? (
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            aria-expanded={!isCollapsed}
+                            aria-label={isCollapsed ? "Expand" : "Collapse"}
+                            className="inline-flex size-4 shrink-0 items-center justify-center"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggle(span.span_id);
+                            }}
+                          >
+                            {isCollapsed ? (
+                              <ChevronRight className="size-3" />
+                            ) : (
+                              <ChevronDown className="size-3" />
+                            )}
+                          </button>
+                        ) : (
+                          <span className="inline-block size-4 shrink-0" />
+                        )}
+                        <KindIcon kind={span.span_kind} />
+                        <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
+                        {span.status === "error" ? <StatusDot status="error" /> : null}
+                        {row.detached ? (
+                          <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
+                            detached
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div role="gridcell" className="num truncate px-2 text-xs">
+                      {formatDuration(span.duration_ns)}
+                    </div>
+                    <div role="gridcell" className="num truncate px-2 text-xs">
+                      {showTokens ? formatTokens(span.total_tokens) : ""}
+                    </div>
+                    <div role="gridcell" className="num truncate px-2 text-xs">
+                      {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
+                    </div>
+                    <div role="gridcell" className="relative h-full">
+                      {bar ? (
+                        <SpanBar
+                          span={span}
+                          bar={bar}
+                          colorClass={BAR[span.span_kind]}
+                          timelineWidth={timelineWidth}
+                          traceStartNs={timeWindow.startNs}
+                          onDoubleClick={() => {
+                            setView(zoomToSpan(timeWindow, span));
                           }}
-                        >
-                          {isCollapsed ? (
-                            <ChevronRight className="size-3" />
-                          ) : (
-                            <ChevronDown className="size-3" />
-                          )}
-                        </button>
-                      ) : (
-                        <span className="inline-block size-4 shrink-0" />
-                      )}
-                      <KindIcon kind={span.span_kind} />
-                      <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
-                      {span.status === "error" ? <StatusDot status="error" /> : null}
-                      {row.detached ? (
-                        <Badge variant="secondary" className="h-4 px-1.5 text-[10px]">
-                          detached
-                        </Badge>
+                        />
                       ) : null}
                     </div>
                   </div>
-                  <div role="gridcell" className="num truncate px-2 text-xs">
-                    {formatDuration(span.duration_ns)}
-                  </div>
-                  <div role="gridcell" className="num truncate px-2 text-xs">
-                    {showTokens ? formatTokens(span.total_tokens) : ""}
-                  </div>
-                  <div role="gridcell" className="num truncate px-2 text-xs">
-                    {span.cost_total === undefined ? "" : formatCost(span.cost_total)}
-                  </div>
-                  <div role="gridcell" className="relative h-full">
-                    {bar ? (
-                      <button
-                        type="button"
-                        tabIndex={-1}
-                        aria-label={`Timeline ${span.name}`}
-                        className={cn(
-                          "absolute top-1/2 h-3 -translate-y-1/2 rounded-sm border-0 p-0",
-                          BAR[span.span_kind],
-                          span.status === "error" && "outline outline-1 outline-status-error",
-                        )}
-                        style={{
-                          left: `${bar.leftPct}%`,
-                          width: `${bar.widthPct}%`,
-                          clipPath: barClip(bar),
-                        }}
-                        onDoubleClick={(event) => {
-                          event.stopPropagation();
-                          setView(zoomToSpan(timeWindow, span));
-                        }}
-                      />
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
 
@@ -607,19 +696,6 @@ function highlightName(name: string, query: string): ReactNode {
       {name.slice(index + trimmed.length)}
     </>
   );
-}
-
-function barClip(bar: BarGeometry): string | undefined {
-  if (bar.clipStart && bar.clipEnd) {
-    return "polygon(6px 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 6px 100%, 0 50%)";
-  }
-  if (bar.clipStart) {
-    return "polygon(6px 0, 100% 0, 100% 100%, 6px 100%, 0 50%)";
-  }
-  if (bar.clipEnd) {
-    return "polygon(0 0, calc(100% - 6px) 0, 100% 50%, calc(100% - 6px) 100%, 0 100%)";
-  }
-  return undefined;
 }
 
 function timelinePercent(node: HTMLElement | null, clientX: number): number | undefined {
