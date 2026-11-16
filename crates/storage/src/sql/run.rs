@@ -850,8 +850,9 @@ mod tests {
             })
             .await
             .expect_err("timeout");
+        // Far below the seconds the join needs, with room for a loaded test machine.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(5),
             "returned in {:?}",
             started.elapsed()
         );
@@ -1284,8 +1285,9 @@ mod tests {
         }
         assert!(timed_out);
         assert!(stream.next().await.is_none());
+        // Far below the seconds the join needs, with room for a loaded test machine.
         assert!(
-            started.elapsed() < Duration::from_secs(1),
+            started.elapsed() < Duration::from_secs(5),
             "returned in {:?}",
             started.elapsed()
         );

@@ -19,6 +19,18 @@ if [[ "$tag" != "v$version" ]]; then
 fi
 tools/packaging/versions-check.sh
 tools/packaging/release-notes.sh "$version" >/dev/null
+# A stable release has its golden data directory, last in RELEASES (spec 03 § 12, D-R-30).
+if [[ "$version" != *-* ]]; then
+  golden=fixtures/storage/golden
+  if [[ ! -f "$golden/$version/expected.json" ]]; then
+    echo "release-verify: $golden/$version/expected.json is missing: run just golden-dir $version" >&2
+    exit 1
+  fi
+  if [[ "$(grep -v '^#' "$golden/RELEASES" | grep . | tail -n 1)" != "$version" ]]; then
+    echo "release-verify: $golden/RELEASES does not end with $version" >&2
+    exit 1
+  fi
+fi
 if ! git merge-base --is-ancestor HEAD origin/main; then
   echo "release-verify: $tag is not on origin/main" >&2
   exit 1
