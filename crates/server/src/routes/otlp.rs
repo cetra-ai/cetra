@@ -1,7 +1,9 @@
-//! `POST /v1/traces`: OTLP/HTTP trace export (spec 02 § Endpoints, D-G-2 to D-G-9).
+//! `POST /v1/traces`: OTLP/HTTP trace export (spec 02 § Endpoints, D-G-2 to D-G-9), and the
+//! `POST /v1/logs` and `POST /v1/metrics` routes that acknowledge and drop their data
+//! (D-G-40).
 //!
-//! The route is key-only (D-G-15) and undocumented (D-G-6). Its body is read under its own
-//! cap, so the router's JSON limit does not apply.
+//! The routes are key-only (D-G-15) and undocumented (D-G-6). Their bodies are read under their
+//! own cap, so the router's JSON limit does not apply.
 
 use std::time::Instant;
 
@@ -11,13 +13,14 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use cetra_core::ids::ProjectId;
+use cetra_otel::Rejections;
 
 use crate::auth::roles::KeyScope;
 use crate::entitlements::units::check_cap;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::ApiError;
-use crate::ingest::body::{body_encoding, body_format, read_capped};
+use crate::ingest::body::{BodyFormat, body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
 use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
@@ -25,15 +28,129 @@ use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
 /// The OTLP/HTTP route. Undocumented, so it stays out of `openapi.json` (D-G-6).
 pub(crate) fn routes() -> Vec<RouteDef> {
-    vec![RouteDef {
+    let route = |path, handler| RouteDef {
         method: Method::POST,
-        path: "/v1/traces",
+        path,
         access: Access::Key {
             scope: KeyScope::Ingest,
         },
         documented: false,
-        handler: post(export),
-    }]
+        handler,
+    };
+    vec![
+        route("/v1/traces", post(export)),
+        route("/v1/logs", post(export_logs)),
+        route("/v1/metrics", post(export_metrics)),
+    ]
+}
+
+/// `POST /v1/logs` (D-G-40): the request is checked like a trace request, and answered with
+/// an OTLP success. The records are not stored; those that look like GenAI content events
+/// are counted for the project, so the UI can tell the user their content was dropped.
+async fn export_logs(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let started = Instant::now();
+    refuse_over_cap(&state, &access).await?;
+    let project = &access.project;
+    match drop_logs(&state, project, &headers, body, started).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            log_refusal(project.id, &error, started);
+            Err(error.into())
+        }
+    }
+}
+
+async fn drop_logs(
+    state: &AppState,
+    project: &ProjectRow,
+    headers: &HeaderMap,
+    body: Body,
+    started: Instant,
+) -> Result<Response, IngestError> {
+    let format = body_format(headers).map_err(IngestError::Body)?;
+    let encoding = body_encoding(headers).map_err(IngestError::Body)?;
+    let reservation = state.ingest.reserve(content_length(headers))?;
+    let raw = read_capped(body, headers, state.ingest.max_request_bytes())
+        .await
+        .map_err(IngestError::Body)?;
+    let request_bytes = raw.len();
+    let genai = state
+        .ingest
+        .count_genai_logs(raw, reservation, format, encoding)
+        .await?;
+    state
+        .usage
+        .add_log_events(project.org_id, project.id, state.clock.now_ns(), genai);
+    tracing::info!(
+        target: "ingest",
+        project_id = %project.id,
+        request_bytes,
+        genai_log_records = genai,
+        duration_ms = elapsed_ms(started),
+        "logs dropped"
+    );
+    Ok(empty_success(format))
+}
+
+/// `POST /v1/metrics` (D-G-40): checked for the credential, the content type and the size,
+/// then answered with an OTLP success. The body is not decoded and nothing is counted.
+async fn export_metrics(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let started = Instant::now();
+    refuse_over_cap(&state, &access).await?;
+    let project = access.project.id;
+    let checked: Result<_, IngestError> = async {
+        let format = body_format(&headers).map_err(IngestError::Body)?;
+        body_encoding(&headers).map_err(IngestError::Body)?;
+        let _reservation = state.ingest.reserve(content_length(&headers))?;
+        read_capped(body, &headers, state.ingest.max_request_bytes())
+            .await
+            .map_err(IngestError::Body)?;
+        Ok(format)
+    }
+    .await;
+    match checked {
+        Ok(format) => Ok(empty_success(format)),
+        Err(error) => {
+            log_refusal(project, &error, started);
+            Err(error.into())
+        }
+    }
+}
+
+/// The org's units cap applies to every OTLP route, so a capped org is refused alike.
+async fn refuse_over_cap(state: &AppState, access: &ProjectAccess) -> Result<(), ApiError> {
+    check_cap(state, access.project.org_id)
+        .await
+        .map_err(|cap| {
+            tracing::debug!(
+                target: "ingest",
+                project_id = %access.project.id,
+                reason = "quota",
+                "request refused"
+            );
+            cap.into()
+        })
+}
+
+/// A `200` with an empty `Export*ServiceResponse` in the request's encoding.
+fn empty_success(format: BodyFormat) -> Response {
+    let (content_type, payload) = export_response(format, &Rejections::default());
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        payload,
+    )
+        .into_response()
 }
 
 async fn export(
@@ -1016,5 +1133,182 @@ mod tests {
                 .any(|line| line.starts_with("cetra_ingest_spans_total{")),
             "{text}"
         );
+    }
+
+    const LOGS_JSON: &str = r#"{"resourceLogs":[{"scopeLogs":[{"logRecords":[
+        {"eventName":"gen_ai.user.message","body":{"stringValue":"SECRET-BODY-MARKER"}},
+        {"eventName":"gen_ai.choice"},
+        {"body":{"stringValue":"plain log"}}
+    ]}]}]}"#;
+
+    fn post_to(
+        app: &TestApp,
+        path: &str,
+        key: &str,
+        content_type: &str,
+        body: impl Into<Bytes>,
+    ) -> crate::test_support::TestRequest {
+        app.request(Method::POST, path)
+            .header("authorization", &format!("Bearer {key}"))
+            .header("content-type", content_type)
+            .body(body)
+    }
+
+    /// GenAI log records counted for the project, flushed to `usage_daily`.
+    async fn counted_log_events(app: &TestApp, project: ProjectId) -> i64 {
+        app.state
+            .usage
+            .flush(&app.state.meta)
+            .await
+            .expect("usage flushes");
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(genai_log_events), 0) FROM usage_daily WHERE project_id = ?",
+        )
+        .bind(project.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("sum")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn json_logs_are_dropped_and_genai_records_counted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = post_to(
+            &app,
+            "/v1/logs",
+            &seeded.ingest_key,
+            "application/json",
+            LOGS_JSON,
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.header("content-type"), Some("application/json"));
+        assert_eq!(response.body.as_ref(), b"{}");
+        assert_eq!(counted_log_events(&app, seeded.project.id).await, 2);
+        assert_eq!(stored_spans(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn protobuf_logs_are_dropped_and_genai_records_counted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let request = cetra_otel::decode_logs_json(LOGS_JSON.as_bytes()).expect("valid logs");
+        let body = compress(&request.encode_to_vec(), BodyEncoding::Gzip);
+        let response = app
+            .request(Method::POST, "/v1/logs")
+            .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+            .header("content-type", "application/x-protobuf")
+            .header("content-encoding", "gzip")
+            .body(body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/x-protobuf")
+        );
+        assert!(response.body.is_empty());
+        assert_eq!(counted_log_events(&app, seeded.project.id).await, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn logs_are_refused_like_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let no_key = app
+            .request(Method::POST, "/v1/logs")
+            .header("content-type", "application/json")
+            .body(LOGS_JSON)
+            .send()
+            .await;
+        assert_eq!(no_key.status, StatusCode::UNAUTHORIZED);
+        let wrong_type = post_to(
+            &app,
+            "/v1/logs",
+            &seeded.ingest_key,
+            "text/plain",
+            LOGS_JSON,
+        )
+        .send()
+        .await;
+        assert_eq!(wrong_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let malformed = post_to(
+            &app,
+            "/v1/logs",
+            &seeded.ingest_key,
+            "application/json",
+            "{",
+        )
+        .send()
+        .await;
+        assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+        let get = app
+            .request(Method::GET, "/v1/logs")
+            .header("authorization", &format!("Bearer {}", seeded.ingest_key))
+            .send()
+            .await;
+        assert_eq!(get.status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(counted_log_events(&app, seeded.project.id).await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_are_acknowledged_and_dropped() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let json = post_to(
+            &app,
+            "/v1/metrics",
+            &seeded.ingest_key,
+            "application/json",
+            r#"{"resourceMetrics":[]}"#,
+        )
+        .send()
+        .await;
+        assert_eq!(json.status, StatusCode::OK);
+        assert_eq!(json.body.as_ref(), b"{}");
+        let protobuf = post_to(
+            &app,
+            "/v1/metrics",
+            &seeded.ingest_key,
+            "application/x-protobuf",
+            Vec::new(),
+        )
+        .send()
+        .await;
+        assert_eq!(protobuf.status, StatusCode::OK);
+        assert!(protobuf.body.is_empty());
+        let wrong_type = post_to(&app, "/v1/metrics", &seeded.ingest_key, "text/plain", "x")
+            .send()
+            .await;
+        assert_eq!(wrong_type.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let no_key = app
+            .request(Method::POST, "/v1/metrics")
+            .header("content-type", "application/json")
+            .body("{}")
+            .send()
+            .await;
+        assert_eq!(no_key.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn logs_and_metrics_keep_the_body_cap() {
+        let app =
+            TestApp::with_config(|config| config.ingest.max_request_bytes = ByteSize::b(64)).await;
+        let seeded = app.seed().await;
+        let big = vec![b' '; 65];
+        for path in ["/v1/logs", "/v1/metrics"] {
+            let response = post_to(
+                &app,
+                path,
+                &seeded.ingest_key,
+                "application/json",
+                big.clone(),
+            )
+            .send()
+            .await;
+            assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        }
     }
 }

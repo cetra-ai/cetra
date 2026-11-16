@@ -24,7 +24,7 @@ use harness::{
     Harness, HarnessOptions, MODEL_PUT_SIZES, REMOTE_PUT_SIZES, memory_store, s3_tweaks,
 };
 use model::Model;
-use observe::{ALL_ROWS, observe_scores, observe_spans, observe_traces};
+use observe::{ALL_ROWS, context, observe_scores, observe_spans, observe_traces};
 use ops::{Op, apply, new_model, settle};
 use shape::{HOUR_NS, P, day, midnight, trace_id};
 use uuid::Uuid;
@@ -492,23 +492,26 @@ fn drop_keeps_project_a() {
         "project B has a deletion to check after the drop"
     );
     let storage = harness.storage();
+    let ctx = harness
+        .block_on(context(storage, P::B))
+        .expect("query context on the dropped project");
     assert!(
         harness
-            .block_on(observe_spans(storage, P::B, MAX_PAGE))
+            .block_on(observe_spans(&ctx, MAX_PAGE))
             .expect("span_list on the dropped project")
             .is_empty(),
         "dropped project B still lists spans"
     );
     assert!(
         harness
-            .block_on(observe_traces(storage, P::B, ALL_ROWS, MAX_PAGE))
+            .block_on(observe_traces(&ctx, ALL_ROWS, MAX_PAGE))
             .expect("trace_list on the dropped project")
             .is_empty(),
         "dropped project B still lists traces"
     );
     assert!(
         harness
-            .block_on(observe_scores(storage, P::B, MAX_PAGE))
+            .block_on(observe_scores(&ctx, MAX_PAGE))
             .expect("score_list on the dropped project")
             .is_empty(),
         "dropped project B still lists scores"

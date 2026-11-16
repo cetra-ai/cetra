@@ -1,6 +1,7 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { GenAiLogsHint } from "@/components/shell/genai-logs-hint";
 import { projectNav } from "@/components/shell/nav";
 import { useProject } from "@/components/shell/project-context";
 import {
@@ -102,6 +103,7 @@ export function ProjectSidebar({ children }: { children: ReactNode }) {
           <div className="flex shrink-0 items-center border-b px-2 py-1 md:hidden">
             <SidebarTrigger />
           </div>
+          <GenAiLogsHint />
           {children}
         </SidebarInset>
       </SidebarProvider>

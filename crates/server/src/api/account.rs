@@ -143,6 +143,11 @@ pub struct Project {
     /// Seconds without a new span after which a trace counts as complete for online rules (D-I-7).
     /// 10 to 3600; 60 unless set.
     pub trace_completion_timeout_s: u32,
+    /// GenAI content log records received on `/v1/logs` and dropped since the project was
+    /// created (D-G-40). Present when one project is read or updated; omitted in lists and
+    /// when the project is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genai_log_events: Option<u64>,
     /// The caller's effective role. Omitted when the caller is an API key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<OrgRole>,
@@ -434,6 +439,7 @@ mod tests {
             name: "Support bot".to_owned(),
             retention_days: Some(30),
             trace_completion_timeout_s: 60,
+            genai_log_events: None,
             role: Some(OrgRole::Owner),
             created_at: CREATED_AT,
         };

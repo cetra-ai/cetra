@@ -458,7 +458,8 @@ helm-smoke tag="cetra:dev":
 versions-check:
     tools/packaging/versions-check.sh
 
-# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0` (D-N-5)
+# Set the release version everywhere and date the changelog section, e.g. `just release-prep 0.1.0`
+# (D-N-5); a stable version also writes its golden data directory (D-R-30)
 release-prep version:
     tools/packaging/release-prep.sh {{version}}
 

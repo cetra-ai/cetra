@@ -1198,7 +1198,8 @@ it("keeps the pages a reader scrolled to when a queued refetch runs", async () =
     release?.();
     server.events.removeListener("request:start", onStart);
   }
-});
+  // It renders 5k traces and takes about 11 s alone: twice the default for a loaded machine.
+}, 30_000);
 
 function loadedCount(): number {
   const text = screen.getByText(/^\d+ loaded$/).textContent ?? "";

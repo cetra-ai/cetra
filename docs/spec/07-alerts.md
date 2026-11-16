@@ -26,13 +26,15 @@ Per-project alert rules over four metrics, evaluated in the background over slid
 - An evaluation is *insufficient* when the sample count is below `min_count`, *breaching* when it is not insufficient, has a value, and `value <comparator> threshold`, else *clear*.
 
 ```
-ok / no_data ──(breaching)──► firing ──(2 clear or insufficient in a row)──► ok (or no_data)
-      │
+ok / no_data ──(breaching)──► firing ──(2 clear in a row)──────────► ok       (resolved)
+      │                          └──(2 insufficient in a row)──► no_data  (no_data)
       ├─(clear)────────► ok          (no notification)
       └─(insufficient)─► no_data     (no notification)
+
+no_data after firing ──(breaching)──► firing (fired) · ──(clear)──► ok (resolved) · ──(insufficient)──► no_data (no event)
 ```
 
-- `ok/no_data → firing` records a `fired` event; `firing → ok/no_data` a `resolved` event. While firing, a `reminder` event is recorded every `cooldown_s` when `notify_while_firing` is on. Each event creates one pending delivery per channel, in the same transaction.
+- `ok/no_data → firing` records a `fired` event; `firing → ok` a `resolved` event; `firing → no_data` a `no_data` event (D-K-20): a rule whose data stopped is not resolved, and the notification says "No data". A `no_data` rule that was firing resolves, or fires again, on the first reading with data (it is marked by `clear_streak = 1`). While firing, a `reminder` event is recorded every `cooldown_s` when `notify_while_firing` is on. Each event creates one pending delivery per channel, in the same transaction.
 - A failed query changes no state; it sets `last_error` and is never treated as no data.
 - Changing a rule's condition, or disabling or re-enabling it, resets it to `ok` with no event (D-K-4). A write is fenced by `updated_at`, so an evaluation never overwrites a concurrent edit.
 

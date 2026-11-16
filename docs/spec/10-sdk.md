@@ -64,7 +64,7 @@ Everything in this section is identical in both SDKs; the conformance fixtures p
 | Scope version | the SDK version (`__version__` / `VERSION`) |
 | Resource attributes we add | `telemetry.distro.name = "cetra"`, `telemetry.distro.version = <SDK version>` |
 | `service.name` and other resource attributes | Python: OTel's `Resource.create`, which reads `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from `os.environ`. TypeScript: `OTEL_SERVICE_NAME` from the config's env source only (`OTEL_RESOURCE_ATTRIBUTES` is not read). This is a known difference (§ Language differences) |
-| OTLP traces URL | `<base_url>/v1/traces` |
+| OTLP traces URL | `<base_url>/v1/traces`. The server also accepts `/v1/logs` and `/v1/metrics` and drops them (spec 02, D-G-40): GenAI content that an instrumentation sends as log events is not stored, so configure it to capture message content on spans |
 | Score URL | `<base_url>/api/v1/scores` |
 | Feedback URL (browser) | `<baseUrl>/api/public/feedback` |
 | Auth header | `Authorization: Bearer <key>` |

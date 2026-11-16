@@ -23,8 +23,12 @@ pub(crate) const CONCURRENCY: usize = 4;
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// A rule is due this much early, so a 60 s tick never skips a 60 s interval (D-K-3).
 pub(crate) const DUE_SLACK_NS: i64 = 5_000_000_000;
-/// Clear or insufficient evaluations in a row that resolve a firing rule (D-K-4).
+/// Clear or insufficient evaluations in a row that end a firing rule: two clear ones resolve
+/// it, two insufficient ones move it to `no_data` (D-K-4, D-K-20).
 pub(crate) const CLEARS_TO_RESOLVE: i64 = 2;
+/// The `clear_streak` of a `no_data` rule that was firing when its data stopped (D-K-20). A
+/// `no_data` rule that was never firing has 0.
+pub(crate) const WENT_QUIET: i64 = 1;
 
 /// The state after one successful evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,13 @@ pub(crate) fn reading(condition: &AlertCondition, count: i64, value: Option<f64>
 /// The next state of `rule` after `reading` at `now` (D-K-4, the table in spec 07).
 pub(crate) fn step(rule: &RuleRow, reading: Reading, now: i64) -> Step {
     match (rule.state, reading) {
+        // A rule that went quiet while firing keeps `clear_streak` at `WENT_QUIET` (D-K-20).
+        (AlertState::NoData, Reading::Clear) if rule.clear_streak > 0 => {
+            quiet(AlertState::Ok, 0, Some(AlertEventKind::Resolved))
+        }
+        (AlertState::NoData, Reading::Insufficient) if rule.clear_streak > 0 => {
+            quiet(AlertState::NoData, WENT_QUIET, None)
+        }
         (AlertState::Ok | AlertState::NoData, Reading::Breaching) => Step {
             state: AlertState::Firing,
             clear_streak: 0,
@@ -92,13 +103,11 @@ pub(crate) fn step(rule: &RuleRow, reading: Reading, now: i64) -> Step {
             let streak = rule.clear_streak.saturating_add(1);
             if streak < CLEARS_TO_RESOLVE {
                 quiet(AlertState::Firing, streak, None)
+            } else if reading == Reading::Insufficient {
+                // No data is not a recovery (D-K-20): the rule is not resolved.
+                quiet(AlertState::NoData, WENT_QUIET, Some(AlertEventKind::NoData))
             } else {
-                let state = if reading == Reading::Insufficient {
-                    AlertState::NoData
-                } else {
-                    AlertState::Ok
-                };
-                quiet(state, 0, Some(AlertEventKind::Resolved))
+                quiet(AlertState::Ok, 0, Some(AlertEventKind::Resolved))
             }
         }
     }
@@ -415,9 +424,21 @@ mod tests {
             step(&rule(AlertState::Firing, 1), Reading::Clear, now),
             quiet(AlertState::Ok, 0, Some(AlertEventKind::Resolved))
         );
+        // Two insufficient readings are no data, never a resolution (D-K-20).
         assert_eq!(
             step(&rule(AlertState::Firing, 1), Reading::Insufficient, now),
-            quiet(AlertState::NoData, 0, Some(AlertEventKind::Resolved))
+            quiet(AlertState::NoData, WENT_QUIET, Some(AlertEventKind::NoData))
+        );
+        // A rule that went quiet while firing: data back decides.
+        let quiet_rule = rule(AlertState::NoData, WENT_QUIET);
+        assert_eq!(step(&quiet_rule, Reading::Breaching, now), fired);
+        assert_eq!(
+            step(&quiet_rule, Reading::Clear, now),
+            quiet(AlertState::Ok, 0, Some(AlertEventKind::Resolved))
+        );
+        assert_eq!(
+            step(&quiet_rule, Reading::Insufficient, now),
+            quiet(AlertState::NoData, WENT_QUIET, None)
         );
     }
 
@@ -612,7 +633,7 @@ mod tests {
         assert_eq!(row.state, AlertState::Firing);
         assert_eq!(row.clear_streak, 1);
 
-        // The second one resolves the rule.
+        // The second one moves the rule to no_data, not to resolved (D-K-20).
         app.state.clock.advance(Duration::from_secs(60));
         let now = app.state.clock.now_ns();
         assert_eq!(
@@ -625,13 +646,13 @@ mod tests {
         );
         let row = read_rule(&app, project, rule.id).await;
         assert_eq!(row.state, AlertState::NoData);
-        assert_eq!(row.clear_streak, 0);
+        assert_eq!(row.clear_streak, WENT_QUIET);
         let events = list_events(app.state.meta.reader(), rule.id, None, 10)
             .await
             .unwrap();
         assert_eq!(events.len(), 2);
         let resolved = &events[0];
-        assert_eq!(resolved.kind, AlertEventKind::Resolved);
+        assert_eq!(resolved.kind, AlertEventKind::NoData);
         assert_eq!(resolved.value, None);
         assert_eq!(resolved.count, Some(0));
         let ids: Vec<Uuid> = events.iter().map(|event| event.id).collect();

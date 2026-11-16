@@ -497,19 +497,22 @@ pub struct ChannelTestResult {
 pub enum AlertEventKind {
     /// `ok` or `no_data` → `firing`.
     Fired,
-    /// `firing` → `ok` or `no_data`.
+    /// `firing` → `ok`, or `no_data` → `ok` after a `no_data` event.
     Resolved,
+    /// `firing` → `no_data`: the data stopped, so the rule is neither firing nor resolved.
+    NoData,
     /// Still firing, sent every `cooldown_s` when `notify_while_firing` is on.
     Reminder,
 }
 
 impl AlertEventKind {
-    /// `fired`, `resolved`, `reminder`.
+    /// `fired`, `resolved`, `no_data`, `reminder`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fired => "fired",
             Self::Resolved => "resolved",
+            Self::NoData => "no_data",
             Self::Reminder => "reminder",
         }
     }
@@ -520,6 +523,7 @@ impl AlertEventKind {
         match text {
             "fired" => Some(Self::Fired),
             "resolved" => Some(Self::Resolved),
+            "no_data" => Some(Self::NoData),
             "reminder" => Some(Self::Reminder),
             _ => None,
         }

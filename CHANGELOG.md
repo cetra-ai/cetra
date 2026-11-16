@@ -32,6 +32,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
+- Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).
 - Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
 - Datasets: import items from CSV (with a column mapping) or JSONL, export a version as JSONL or CSV, and add an item from a trace or a span (track J).
 - Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
@@ -104,6 +106,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Fixed
 
+- Alerts: a firing rule whose data stops (two readings below `min_count`) no longer reports itself resolved; it moves to `no_data` and sends a no data notification, and resolves when a reading with data is clear (D-K-20).
 - A WAL record with a corrupt compressed-buffer length is rejected as corrupt instead of aborting the server at startup.
 - The WAL now rejects a batch whose decoded size exceeds 1 GiB with an invalid-batch error (previously such a record could not be replayed).
 - A Parquet decoder panic on a corrupt data file no longer drops the request, stops compaction or

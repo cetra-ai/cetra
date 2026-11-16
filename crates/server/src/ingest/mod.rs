@@ -20,7 +20,8 @@ use cetra_core::media::MediaBlob as CoreBlob;
 use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
 use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, IngestContext, IngestLimits, Normalized, PriceTable,
-    decode_json, decode_protobuf, normalize,
+    count_genai_log_records, decode_json, decode_logs_json, decode_logs_protobuf, decode_protobuf,
+    normalize,
 };
 use cetra_storage::error::{AppendError, MediaError};
 use cetra_storage::{MediaBlob, Storage};
@@ -251,7 +252,7 @@ impl Ingest {
     pub(crate) async fn accept(
         &self,
         raw: Bytes,
-        mut reservation: Reservation,
+        reservation: Reservation,
         format: BodyFormat,
         encoding: BodyEncoding,
         project: &ProjectRow,
@@ -259,7 +260,35 @@ impl Ingest {
         now_ns: i64,
     ) -> Result<Accepted, IngestError> {
         let request_bytes = raw.len();
-        self.fit(&mut reservation, request_bytes)?;
+        let (request, decompressed_bytes, reservation) = self
+            .inflate(raw, reservation, encoding, move |body| match format {
+                BodyFormat::Protobuf => decode_protobuf(body),
+                BodyFormat::Json => decode_json(body),
+            })
+            .await?;
+        self.accept_request(
+            request,
+            reservation,
+            u64::try_from(request_bytes).unwrap_or(u64::MAX),
+            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
+            project,
+            retention_cap,
+            now_ns,
+        )
+        .await
+    }
+
+    /// Fits `reservation` to `raw`, decompresses it (the output is reserved as it is produced)
+    /// and decodes it with `decode`, off the async threads. Returns the decoded value, the
+    /// decompressed size and the reservation.
+    async fn inflate<T: Send + 'static>(
+        &self,
+        raw: Bytes,
+        mut reservation: Reservation,
+        encoding: BodyEncoding,
+        decode: impl FnOnce(&[u8]) -> Result<T, DecodeError> + Send + 'static,
+    ) -> Result<(T, usize, Reservation), IngestError> {
+        self.fit(&mut reservation, raw.len())?;
         let max_bytes = self.max_request_bytes;
         let semaphore = Arc::clone(&self.budget);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
@@ -282,27 +311,35 @@ impl Ingest {
                 })?
             };
             let decompressed_bytes = decompressed.len();
-            let request = match format {
-                BodyFormat::Protobuf => decode_protobuf(&decompressed),
-                BodyFormat::Json => decode_json(&decompressed),
-            }
-            .map_err(IngestError::Decode)?;
-            Ok((request, decompressed_bytes, reservation))
+            let value = decode(&decompressed).map_err(IngestError::Decode)?;
+            Ok((value, decompressed_bytes, reservation))
         });
-        let (request, decompressed_bytes, reservation) = match work.await {
-            Ok(result) => result?,
-            Err(error) => return Err(IngestError::Join(error)),
-        };
-        self.accept_request(
-            request,
-            reservation,
-            u64::try_from(request_bytes).unwrap_or(u64::MAX),
-            u64::try_from(decompressed_bytes).unwrap_or(u64::MAX),
-            project,
-            retention_cap,
-            now_ns,
-        )
-        .await
+        match work.await {
+            Ok(result) => result,
+            Err(error) => Err(IngestError::Join(error)),
+        }
+    }
+
+    /// Decodes an OTLP logs request and returns how many of its records look like GenAI
+    /// content events (D-G-40). Nothing is stored. The body is held to the same size and
+    /// budget limits as a trace request.
+    pub(crate) async fn count_genai_logs(
+        &self,
+        raw: Bytes,
+        reservation: Reservation,
+        format: BodyFormat,
+        encoding: BodyEncoding,
+    ) -> Result<u64, IngestError> {
+        let (count, _, _reservation) = self
+            .inflate(raw, reservation, encoding, move |body| {
+                let request = match format {
+                    BodyFormat::Protobuf => decode_logs_protobuf(body),
+                    BodyFormat::Json => decode_logs_json(body),
+                }?;
+                Ok(count_genai_log_records(&request))
+            })
+            .await?;
+        Ok(count)
     }
 
     /// Counts, normalizes and rewrites a decoded request (D-G-2, D-G-7). Used by OTLP/HTTP after
