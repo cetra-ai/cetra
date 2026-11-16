@@ -49,5 +49,10 @@ rm -f Cargo.toml.bak deploy/helm/llmobs/Chart.yaml.bak deploy/compose/compose.ya
 
 cargo update --workspace --offline
 tools/packaging/versions-check.sh
+# A stable release writes its golden data directory with this build (spec 03 § 12, D-R-30);
+# a pre-release gets none.
+if [[ "$new" != *-* ]]; then
+  just golden-dir "$new"
+fi
 echo "release-prep: $old -> $new. Review the diff, commit 'Release $new', merge to main, then:"
 echo "  git tag -a v$new -m 'llmobs $new' <merged commit> && git push origin v$new"

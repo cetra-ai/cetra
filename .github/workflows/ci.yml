@@ -79,10 +79,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # check-golden diffs against origin/main from the merge base (D-R-30).
+          fetch-depth: 0
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
           cache: "false"
-      - run: just deny check-ee
+      - run: just deny check-ee check-golden
       - run: just assert-clean
 
   web:

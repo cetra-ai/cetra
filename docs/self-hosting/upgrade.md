@@ -16,10 +16,18 @@ What happens on upgrade:
   like a backup, and count against your backup retention (GDPR).
 - Parquet files are never rewritten for an upgrade; new columns are added, old files stay readable.
 - The new version replays a WAL written by the previous one.
-- Downgrading is not supported: after a new version has started on the data, the old version
-  may refuse it. To go back, restore the pre-upgrade backup, or the `*.pre-m*` copies, and run the old
-  binary. Deletions requested after the upgrade are not in that copy, and `reapply-deletions` cannot
-  read a newer database: repeat those deletions by hand after a rollback.
+- Downgrading is not supported. An older binary refuses a data directory that a newer storage
+  format has written, and it changes no file before refusing. The error names what is newer:
+  - "this data directory has format version N, which this build … does not read": the directory
+    marker in `catalog.db`;
+  - "format N is not the M this build reads": a WAL segment;
+  - "catalog.db has applied migration N, which this build does not have": a catalog migration.
+
+  Run the newer release again, or restore the pre-upgrade backup, or the `*.pre-m*` copies, and run
+  the old binary. Deletions requested after the upgrade are not in that copy, and `reapply-deletions`
+  cannot read a newer database: repeat those deletions by hand after a rollback.
+- A data directory written before format versions existed (any build older than the first public
+  release) is refused with "this data directory has no format version": create a new one.
 
 Procedure:
 
