@@ -73,7 +73,7 @@ const DAY_NS: i64 = 86_400_000_000_000;
 /// (50 years in nanoseconds, from `now`).
 const FAR_NS: i64 = 50 * 365 * DAY_NS;
 /// The replacement of every backup target in `admin_socket.jsonl` (paths differ per machine).
-const TARGET: &str = "/golden/out";
+pub(super) const TARGET: &str = "/golden/out";
 
 /// Writes the golden scenario into `out` (must not exist): a data directory filled through the
 /// store functions, served once, and backed up through the admin socket into `out`, which also
@@ -196,7 +196,7 @@ async fn send_raw(data: &Path, request: Value) -> SocketLine {
 }
 
 /// One connection: the request line, then the answer line. The server closes the connection.
-async fn exchange(data: &Path, request: &str) -> String {
+pub(super) async fn exchange(data: &Path, request: &str) -> String {
     let mut stream = UnixStream::connect(data.join(crate::admin_socket::ADMIN_SOCKET))
         .await
         .expect("connect to admin.sock");

@@ -81,7 +81,7 @@ check-golden:
     if ! git rev-parse --verify -q origin/main >/dev/null; then echo "check-golden: no origin/main, skipped"; exit 0; fi
     if [ "${LLMOBS_GOLDEN_DROP:-}" = 1 ]; then exit 0; fi
     base="$(git merge-base origin/main HEAD)" || { echo "check-golden: no merge base with origin/main (shallow clone?), skipped"; exit 0; }
-    gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden || true)"
+    gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden fixtures/server/golden || true)"
     lines="$(git diff --no-renames --text "$base" -- fixtures/storage/golden/RELEASES | grep -E '^-[^-]' || true)"
     if [ -n "$gone$lines" ]; then
         echo "check-golden: released golden directories must stay (D-R-12):" >&2

@@ -135,7 +135,7 @@ async fn rows(data_dir: &Path) -> (Value, Value) {
 }
 
 /// One cell as JSON: NULL, integer, real, text, or lowercase hex for a BLOB.
-fn cell(row: &sqlx::sqlite::SqliteRow, index: usize) -> Value {
+pub(super) fn cell(row: &sqlx::sqlite::SqliteRow, index: usize) -> Value {
     let raw = row.try_get_raw(index).expect("a cell");
     if raw.is_null() {
         return Value::Null;
@@ -1039,7 +1039,7 @@ async fn experiments_section(world: &World<'_>) -> Value {
 
 /// The plaintext of every sealed value, keyed `<table>.<column>.<natural key>`, opened with the
 /// golden key and the row's own AAD.
-async fn secret_values(data_dir: &Path, secrets: &SecretBox) -> Value {
+pub(super) async fn secret_values(data_dir: &Path, secrets: &SecretBox) -> Value {
     let mut connection = SqliteConnectOptions::new()
         .filename(data_dir.join("meta.db"))
         .connect()
