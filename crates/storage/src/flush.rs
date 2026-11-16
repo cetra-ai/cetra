@@ -1225,11 +1225,10 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(
-            std::fs::read(wal.join(crate::wal::segment_name(2)))
-                .unwrap()
-                .is_empty(),
-            "the new segment starts empty"
+        assert_eq!(
+            std::fs::read(wal.join(crate::wal::segment_name(2))).unwrap(),
+            crate::wal::segment::segment_header(),
+            "the new segment holds only its header"
         );
         for entry in std::fs::read_dir(dir.path().join("wal")).unwrap() {
             let bytes = std::fs::read(entry.unwrap().path()).unwrap_or_default();

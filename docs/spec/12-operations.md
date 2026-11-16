@@ -133,9 +133,9 @@ What to back up: `meta.db` and `catalog.db` (taken together, in the same pause),
 
 - Semantic versioning (0.x for now). Upgrade: take a backup, replace the binary, image or chart version, restart; SQLite migrations run automatically (forward-only). Release notes (`CHANGELOG.md`) start with `### Upgrade notes` when an upgrade needs action (D-N-5, D-N-12; `docs/self-hosting/upgrade.md`). Before migrating an existing `meta.db` or `catalog.db`, the server keeps a copy named `meta.db.pre-m<N>` / `catalog.db.pre-m<N>` (by `VACUUM INTO`), where N is the highest migration applied before the upgrade, and only the copy from the last upgrade (D-N-22). The copies hold the data: delete them once the upgrade is verified.
 - Parquet schema changes are additive only (03 §3); normalization changes bump `schema_version` without rewriting data.
-- From the first public release tag (D185): a storage format change bumps a format version and migrates at open (D-R-12); the WAL carries a version byte in each segment header, and a new binary reads the previous WAL version (replays it before writing the new format). Before that tag there is no format constraint.
+- From the first public release tag (D185): a storage format change bumps a format version and migrates at open (D-R-12); the WAL carries a format header in each segment (03 § 12), and a new binary reads the previous format's segments (replays them before writing the new format). Before that tag there is no format constraint.
 - `meta.db`, `secret.key`, the backup manifest and the admin socket follow 04 § Format versions (D-R-33 to D-R-38): a `meta.db` format version beside the migrations, additive migrations, golden backups restored by CI (SF7).
-- Downgrades are not supported (documented: restore the pre-upgrade backup).
+- Downgrades are not supported: a directory written by a newer format is refused by an older binary before anything is changed (03 § 12); restore the pre-upgrade backup.
 
 ## Security checklist (MVP)
 

@@ -1074,6 +1074,7 @@ mod tests {
         push_framed(&mut segment, 2, &bad);
         push_framed(&mut segment, 3, &good);
         let dir = tempfile::tempdir().unwrap();
+        let segment = crate::wal::segment::with_header(&segment);
         std::fs::write(dir.path().join(segment_name(1)), &segment).unwrap();
 
         let hooks = crate::hooks::Hooks::default();

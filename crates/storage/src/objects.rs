@@ -1864,6 +1864,24 @@ mod tests {
                 project()
             )
         );
+        // The literal layout: the id is the only part that varies.
+        assert_eq!(
+            first.replace(&first_id.to_string(), "<id>"),
+            "tables/spans/project=018f6b4e-7c1a-7c1a-8c1a-000000000001/day=2026-11-11/0-<id>.parquet",
+            "the object layout is part of the format (spec 03 § 12)"
+        );
+    }
+
+    #[test]
+    fn media_path_matches_the_layout() {
+        assert_eq!(
+            Objects::media_path(
+                project(),
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            "media/018f6b4e-7c1a-7c1a-8c1a-000000000001/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "the object layout is part of the format (spec 03 § 12)"
+        );
     }
 
     #[tokio::test]

@@ -8,8 +8,8 @@
 //!   -p llmobs-storage --test trace_bench -- --ignored --nocapture
 //! ```
 //!
-//! `LLMOBS_TRACE_BENCH_DIR` is generated once (if it holds no `catalog.db`)
-//! and reused afterwards. `LLMOBS_TRACE_BENCH_TRACES` overrides the trace
+//! `LLMOBS_TRACE_BENCH_DIR` is generated once (if it holds no `catalog.db` with
+//! a format marker) and reused afterwards. `LLMOBS_TRACE_BENCH_TRACES` overrides the trace
 //! count (default 5,000,000). The data directory is never committed.
 //!
 //! With `LLMOBS_TEST_S3_ENDPOINT` (and `LLMOBS_TEST_S3_BUCKET`, `AWS_*`) the
@@ -638,19 +638,20 @@ async fn dataset_files(backend: &Backend) -> (usize, u64) {
     }
 }
 
-/// The dataset to query: the stored one when its manifest matches the target,
-/// otherwise a generated one. With S3 a missing or foreign manifest regenerates.
-/// The dataset to query: the stored one when its manifest matches the target,
-/// the payload generator and (with S3) the endpoint and bucket; otherwise a
-/// generated one. A catalog without a matching manifest is regenerated, since
-/// its payloads are unknown.
+/// The dataset to query: the stored one when its catalog carries a format
+/// marker, its manifest matches the target, the payload generator and (with S3)
+/// the endpoint and bucket; otherwise a generated one. A catalog without a
+/// matching manifest is regenerated, since its payloads are unknown. A catalog
+/// with no format marker (`PRAGMA user_version` 0) predates format versions and
+/// is regenerated too: the storage refuses to open it (`PreFormat`).
 async fn dataset(backend: &Backend, traces: usize) -> Manifest {
     let has_catalog = backend.dir.join("catalog.db").is_file();
+    let reusable = has_catalog && catalog_marker(&backend.dir).await != 0;
     let stored = std::fs::read_to_string(manifest_path(&backend.dir))
         .ok()
         .and_then(|text| serde_json::from_str::<Manifest>(&text).ok());
     let payload = Some(payload_tag());
-    match (has_catalog, &backend.s3, stored) {
+    match (reusable, &backend.s3, stored) {
         (true, Some(s3), Some(manifest))
             if manifest.endpoint.as_deref() == Some(s3.endpoint.as_str())
                 && manifest.bucket.as_deref() == Some(s3.bucket.as_str())
@@ -661,6 +662,24 @@ async fn dataset(backend: &Backend, traces: usize) -> Manifest {
         (true, None, Some(manifest)) if manifest.payload == payload => manifest,
         _ => generate_dataset(backend, traces).await,
     }
+}
+
+/// `PRAGMA user_version` of the stored `<dir>/catalog.db`, read through a
+/// read-only connection (`0` when unset).
+async fn catalog_marker(dir: &Path) -> i64 {
+    use sqlx::{ConnectOptions, Connection};
+    let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.join("catalog.db"))
+        .read_only(true)
+        .connect()
+        .await
+        .expect("open the stored catalog.db read-only");
+    let marker = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .expect("read the stored catalog.db format marker");
+    connection.close().await.ok();
+    marker
 }
 
 // The bench reports on stdout like the rest of the file.

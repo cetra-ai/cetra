@@ -15,6 +15,7 @@ use arrow::array::RecordBatch;
 use crate::error::WalError;
 use crate::fs;
 use crate::wal::record::{Decoded, decode_next, read_batch};
+use crate::wal::segment::{HeaderState, SEGMENT_HEADER_LEN, check_header};
 use crate::wal::{Table, segment_name};
 
 /// What [`replay`] did.
@@ -131,7 +132,26 @@ fn scan_segment(
     scan: &mut Scan<'_>,
     on_batch: &mut dyn FnMut(u64, RecordBatch) -> Result<(), WalError>,
 ) -> Result<bool, WalError> {
-    let mut offset = 0;
+    let mut offset = match check_header(scan.table.name(), scan.name, bytes)? {
+        HeaderState::Valid => SEGMENT_HEADER_LEN,
+        HeaderState::Torn => {
+            // A header prefix holds no record: a crash cut the creation short.
+            // The last segment is rewritten by the `create` that follows. An
+            // earlier one can be skipped; it is not corruption, and replaying
+            // again must not see it differently.
+            if scan.is_last {
+                truncate_tail(path, 0, bytes.len(), scan)?;
+                return Ok(false);
+            }
+            tracing::warn!(
+                table = scan.table.name(),
+                segment = scan.name,
+                bytes = bytes.len(),
+                "skipping WAL segment with a torn header"
+            );
+            return Ok(true);
+        }
+    };
     while offset < bytes.len() {
         match decode_next(bytes, offset) {
             Decoded::End => break,
@@ -234,6 +254,32 @@ fn as_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
+/// Checks the header of every segment of `table` in `dir` without changing
+/// anything (spec 03 § 12). `open` calls it for both tables before it writes
+/// to the directory, so a segment this build does not read refuses the open
+/// with no file changed. A torn header passes: replay handles it. A missing
+/// directory has no segments.
+pub(crate) fn check_headers(dir: &Path, table: Table) -> Result<(), WalError> {
+    use std::io::Read;
+
+    match fs::metadata(dir) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(WalError::io("reading WAL directory", dir, source)),
+        Ok(_) => {}
+    }
+    for (first_seq, path) in list_segments(dir)? {
+        let mut file = fs::File::open(&path)
+            .map_err(|source| WalError::io("reading WAL segment", &path, source))?;
+        let mut header = Vec::with_capacity(SEGMENT_HEADER_LEN);
+        file.by_ref()
+            .take(SEGMENT_HEADER_LEN as u64)
+            .read_to_end(&mut header)
+            .map_err(|source| WalError::io("reading WAL segment", &path, source))?;
+        check_header(table.name(), &segment_name(first_seq), &header)?;
+    }
+    Ok(())
+}
+
 fn list_segments(dir: &Path) -> Result<Vec<(u64, std::path::PathBuf)>, WalError> {
     let entries =
         fs::read_dir(dir).map_err(|source| WalError::io("reading WAL directory", dir, source))?;
@@ -259,9 +305,10 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::error::HeaderProblem;
     use crate::hooks::Hooks;
     use crate::wal::record::{encode, push_framed};
-    use crate::wal::segment::SegmentWriter;
+    use crate::wal::segment::{SegmentWriter, segment_header, with_header};
     use crate::wal::{sample_span_batch, segment_name};
 
     fn write_segments(dir: &Path, segment_bytes: u64, seqs: &[u64]) {
@@ -352,7 +399,7 @@ mod tests {
     fn a_torn_tail_truncates_to_the_last_full_record() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(segment_name(1));
-        let prefix = encoded(1);
+        let prefix = with_header(&encoded(1));
         let mut tail = Vec::new();
         push_framed(&mut tail, 2, &[0; 32]);
         for cut in 0..tail.len() {
@@ -378,7 +425,7 @@ mod tests {
     fn a_checksum_error_in_the_last_segment_is_a_torn_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(segment_name(1));
-        let prefix = encoded(1);
+        let prefix = with_header(&encoded(1));
         let mut tail = encoded(2);
         let flip_at = 20;
         tail[flip_at] ^= 0x01;
@@ -399,7 +446,7 @@ mod tests {
     fn a_real_record_cut_in_the_last_segment_is_a_torn_tail() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(segment_name(1));
-        let prefix = encoded(1);
+        let prefix = with_header(&encoded(1));
         let tail = encoded(2);
         let cuts = [1, 16, tail.len() / 2, tail.len() - 1];
         for cut in cuts {
@@ -433,7 +480,7 @@ mod tests {
             } => {
                 assert_eq!(table, "spans");
                 assert_eq!(segment, segment_name(2));
-                assert_eq!(offset, 0);
+                assert_eq!(offset, SEGMENT_HEADER_LEN as u64);
             }
             other => panic!("expected corruption, got {other}"),
         }
@@ -442,7 +489,10 @@ mod tests {
         let (outcome, seqs) = collect(dir.path(), 0, true);
         assert_eq!(seqs, [1, 3]);
         assert_eq!(outcome.records, 2);
-        assert_eq!(outcome.skipped_bytes, flipped_len);
+        assert_eq!(
+            outcome.skipped_bytes,
+            flipped_len - SEGMENT_HEADER_LEN as u64
+        );
         assert_eq!(outcome.next_seq, 4);
         assert_eq!(outcome.truncated_bytes, 0);
     }
@@ -460,7 +510,7 @@ mod tests {
                 offset, segment, ..
             } => {
                 assert_eq!(segment, segment_name(4));
-                assert_eq!(offset, first.len() as u64);
+                assert_eq!(offset, (SEGMENT_HEADER_LEN + first.len()) as u64);
             }
             other => panic!("expected corruption, got {other}"),
         }
@@ -474,7 +524,7 @@ mod tests {
                 offset, segment, ..
             } => {
                 assert_eq!(segment, segment_name(6));
-                assert_eq!(offset, 0);
+                assert_eq!(offset, SEGMENT_HEADER_LEN as u64);
             }
             other => panic!("expected corruption, got {other}"),
         }
@@ -494,7 +544,7 @@ mod tests {
 
         let err = replay(dir.path(), Table::Spans, 0, false, &mut |_, _| Ok(())).unwrap_err();
         match err {
-            WalError::Corrupt { offset, .. } => assert_eq!(offset, 0),
+            WalError::Corrupt { offset, .. } => assert_eq!(offset, SEGMENT_HEADER_LEN as u64),
             other => panic!("expected corruption, got {other}"),
         }
         assert_eq!(fs::metadata(&path).unwrap().len(), before);
@@ -519,5 +569,272 @@ mod tests {
         assert_eq!(outcome.next_seq, 4);
         assert_eq!(fs::read(&notes).unwrap(), b"leave me");
         assert_eq!(fs::read(&partial).unwrap(), b"tmp");
+    }
+
+    /// Writes `bytes` as the whole file of segment `first_seq`, without a header of its own.
+    fn raw_segment(dir: &Path, first_seq: u64, bytes: &[u8]) {
+        fs::write(dir.join(segment_name(first_seq)), bytes).unwrap();
+    }
+
+    #[test]
+    fn replay_reads_records_after_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        write_bytes(dir.path(), 1, &encoded(1));
+        let bytes = fs::read(dir.path().join(segment_name(1))).unwrap();
+        assert_eq!(&bytes[..SEGMENT_HEADER_LEN], &segment_header());
+        match decode_next(&bytes, SEGMENT_HEADER_LEN) {
+            Decoded::Record { seq, .. } => assert_eq!(seq, 1),
+            other => panic!("expected the first record at offset 8, got {other:?}"),
+        }
+        let (outcome, seqs) = collect(dir.path(), 0, false);
+        assert_eq!(seqs, [1]);
+        assert_eq!(outcome.truncated_bytes, 0);
+    }
+
+    #[test]
+    fn a_segment_with_a_newer_version_is_refused_untouched() {
+        let mut header = b"LWAL".to_vec();
+        header.extend_from_slice(&2_u16.to_le_bytes());
+        header.extend_from_slice(&0_u16.to_le_bytes());
+        let mut newer = header.clone();
+        newer.extend_from_slice(&encoded(1));
+        for skip_corrupt in [false, true] {
+            // As the last segment, and as an earlier one followed by a valid segment.
+            let dir = tempfile::tempdir().unwrap();
+            raw_segment(dir.path(), 1, &newer);
+            let path = dir.path().join(segment_name(1));
+            let err = replay(
+                dir.path(),
+                Table::Spans,
+                0,
+                skip_corrupt,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WalError::Header {
+                        problem: HeaderProblem::NewerFormat {
+                            found: 2,
+                            supported: 1
+                        },
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                newer,
+                "skip_corrupt {skip_corrupt}"
+            );
+
+            let dir = tempfile::tempdir().unwrap();
+            raw_segment(dir.path(), 1, &newer);
+            write_bytes(dir.path(), 2, &encoded(2));
+            let err = replay(
+                dir.path(),
+                Table::Spans,
+                0,
+                skip_corrupt,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WalError::Header {
+                        problem: HeaderProblem::NewerFormat { .. },
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                newer,
+                "skip_corrupt {skip_corrupt}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_segment_with_other_flags_or_magic_is_refused_untouched() {
+        let mut flagged = segment_header().to_vec();
+        flagged[6] = 1;
+        flagged.extend_from_slice(&encoded(1));
+        let mut records_only = Vec::new();
+        push_framed(&mut records_only, 1, b"not ipc");
+        for skip_corrupt in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            raw_segment(dir.path(), 1, &flagged);
+            let path = dir.path().join(segment_name(1));
+            let err = replay(
+                dir.path(),
+                Table::Spans,
+                0,
+                skip_corrupt,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WalError::Header {
+                        problem: HeaderProblem::UnknownFlags,
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), flagged);
+
+            let dir = tempfile::tempdir().unwrap();
+            raw_segment(dir.path(), 1, &records_only);
+            let path = dir.path().join(segment_name(1));
+            let err = replay(
+                dir.path(),
+                Table::Spans,
+                0,
+                skip_corrupt,
+                &mut |_, _| Ok(()),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WalError::Header {
+                        problem: HeaderProblem::NotAWalSegment,
+                        ..
+                    }
+                ),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), records_only);
+        }
+    }
+
+    #[test]
+    fn a_torn_header_is_a_torn_creation() {
+        for cut in 0..SEGMENT_HEADER_LEN {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(segment_name(1));
+            raw_segment(dir.path(), 1, &segment_header()[..cut]);
+            let (outcome, seqs) = collect(dir.path(), 0, false);
+            assert!(seqs.is_empty(), "cut {cut}");
+            assert_eq!(outcome.records, 0, "cut {cut}");
+            assert_eq!(outcome.truncated_bytes, cut as u64, "cut {cut}");
+            assert_eq!(fs::metadata(&path).unwrap().len(), 0, "cut {cut}");
+            // The `create` after a replay reuses the emptied file and writes the header.
+            let writer = SegmentWriter::create(dir.path(), 1, u64::MAX, Hooks::default()).unwrap();
+            assert!(!writer.has_records(), "cut {cut}");
+            assert_eq!(fs::read(&path).unwrap(), segment_header(), "cut {cut}");
+        }
+    }
+
+    #[test]
+    fn a_complete_header_without_records_replays_empty_and_is_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_name(1));
+        raw_segment(dir.path(), 1, &segment_header());
+        let (outcome, seqs) = collect(dir.path(), 0, false);
+        assert!(seqs.is_empty());
+        assert_eq!(outcome.records, 0);
+        assert_eq!(outcome.truncated_bytes, 0);
+        assert_eq!(outcome.next_seq, 1);
+        let writer = SegmentWriter::create(dir.path(), 1, u64::MAX, Hooks::default()).unwrap();
+        assert!(!writer.has_records());
+        assert_eq!(fs::read(&path).unwrap(), segment_header());
+    }
+
+    #[test]
+    fn a_short_file_that_is_not_a_header_prefix_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_name(1));
+        raw_segment(dir.path(), 1, b"LWAX");
+        let err = replay(dir.path(), Table::Spans, 0, true, &mut |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WalError::Header {
+                    problem: HeaderProblem::NotAWalSegment,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"LWAX");
+    }
+
+    #[test]
+    fn a_torn_header_in_an_earlier_segment_is_skipped_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        raw_segment(dir.path(), 1, b"");
+        raw_segment(dir.path(), 2, &segment_header()[..4]);
+        write_bytes(dir.path(), 3, &encoded(3));
+        for skip_corrupt in [false, true] {
+            let (outcome, seqs) = collect(dir.path(), 0, skip_corrupt);
+            assert_eq!(seqs, [3], "skip_corrupt {skip_corrupt}");
+            assert_eq!(outcome.records, 1);
+            assert_eq!(outcome.skipped_bytes, 0);
+            assert_eq!(outcome.truncated_bytes, 0);
+            assert_eq!(outcome.next_seq, 4);
+            assert_eq!(
+                fs::metadata(dir.path().join(segment_name(1)))
+                    .unwrap()
+                    .len(),
+                0
+            );
+            assert_eq!(
+                fs::read(dir.path().join(segment_name(2))).unwrap(),
+                &segment_header()[..4]
+            );
+        }
+    }
+
+    #[test]
+    fn a_damaged_earlier_segment_after_a_valid_header_is_still_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = encoded(1);
+        bad[20] ^= 0x01;
+        write_bytes(dir.path(), 1, &bad);
+        write_bytes(dir.path(), 2, &encoded(2));
+        let err = replay(dir.path(), Table::Spans, 0, false, &mut |_, _| Ok(())).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WalError::Corrupt { offset, .. } if offset == SEGMENT_HEADER_LEN as u64
+            ),
+            "{err}"
+        );
+        let (outcome, seqs) = collect(dir.path(), 0, true);
+        assert_eq!(seqs, [2]);
+        assert_eq!(outcome.skipped_bytes, bad.len() as u64);
+    }
+
+    /// A torn last segment is truncated, the next segment is created after it,
+    /// and a second replay sees the same state. A stray empty segment left by a
+    /// failed rotation is skipped the same way.
+    #[test]
+    fn replay_is_idempotent_after_a_torn_last_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        raw_segment(dir.path(), 5, &segment_header()[..5]);
+        let (first, seqs) = collect(dir.path(), 9, false);
+        assert!(seqs.is_empty());
+        assert_eq!(first.truncated_bytes, 5);
+        assert_eq!(first.next_seq, 10);
+        drop(SegmentWriter::create(dir.path(), 10, u64::MAX, Hooks::default()).unwrap());
+        let (second, seqs) = collect(dir.path(), 9, false);
+        assert!(seqs.is_empty());
+        assert_eq!(second.next_seq, first.next_seq);
+        assert_eq!(second.truncated_bytes, 0);
+
+        let stray = tempfile::tempdir().unwrap();
+        raw_segment(stray.path(), 3, b"");
+        write_bytes(stray.path(), 4, &encoded(4));
+        let (outcome, seqs) = collect(stray.path(), 0, false);
+        assert_eq!(seqs, [4]);
+        assert_eq!(outcome.next_seq, 5);
     }
 }

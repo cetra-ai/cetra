@@ -225,6 +225,59 @@ None yet: the benchmark runs 8–14 and the soak runs are run by hand. See `benc
 
 None yet.
 
+## M8 — Format stability
+
+Track R, plan `docs/plans/r-hardening/08-m8-format.md`. The sub-phases make every persisted format carry a version marker that an older binary checks before it reads or changes anything, and add the golden data directories that every later release must keep opening (D-R-12, D-R-26 to D-R-32, spec 03 § 12).
+
+What M8 covers:
+
+- the one format number of the data directory, in `catalog.db` (R8.2), refused before a migration, a stamp or a write;
+- a format header in every WAL segment (R8.3), and the Parquet files' format key (R8.4);
+- catalog migration tests and pinned object and cache layouts (R8.5);
+- the golden directory generator and its check (R8.6, R8.7), and the release rule with `just check-golden` (R8.8).
+
+### What exists today
+
+Checked on `main` 30bed18 and `claude/r-m3-fuzzing`, before M8. Every persisted format, its version marker, and what a reader does with a version it does not know.
+
+| Format | Where | Marker today | Unknown or newer input today |
+|---|---|---|---|
+| **WAL segment** | `wal/<table>/<first seq, 20 digits>.wal` (`wal/mod.rs::segment_name`) | **None.** No segment header: a segment is records only (`wal/segment.rs::SegmentWriter::create` writes nothing). The spec 12 sentence "the WAL carries a version byte in each segment header" is not true. | A record with `kind != 1` is `Decoded::Invalid` (`wal/record.rs`). In the **last** segment `replay.rs::scan_segment` treats that as a torn tail and **truncates it** (`truncate_tail`): an older binary erases a newer binary's records. Earlier segments: `WalError::Corrupt` (the open fails), or a skip with `--wal-skip-corrupt`. A payload that is not one batch of the table's current schema is `Corrupt` too (`read_batch`). |
+| **WAL record** | inside a segment, `wal/record.rs` | `kind` byte (1 = row batch, 2 reserved). Header 17 bytes (`HEADER_LEN`): `u32 payload_len`, `u32 crc32c`, `u64 seq`, `u8 kind`. Payload: an Arrow IPC stream, LZ4-frame compressed, one batch. Cap: `MAX_PAYLOAD` 256 MiB. | As above. On `claude/r-m3-fuzzing` (to merge before M8): `MAX_DECODED_BYTES` 1 GiB declared decompressed bytes per record, LZ4 ratio bound 256 plus 64 bytes of slack per buffer, **LZ4_FRAME only** (D-R-25 there). These are part of what a v1 record is. |
+| **Parquet file** | `objects/tables/<table>/project=<id>/day=<YYYY-MM-DD>/<level>-<uuidv7>.parquet` (`objects.rs::table_file_path`) | KV metadata written by `parquet.rs::file_metadata`: `llmobs.table`, `llmobs.schema_version` (`"1"`), `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`. **`llmobs.schema_version` is the row normalization version (spec 01), not a file-format version.** | **No code reads any of these keys** (the catalog holds the same bounds). Extra columns are ignored by DataFusion's schema adapter (spec 03 §3). A changed column type or a missing required column is a read error, which makes the file a suspect (`verify.rs::may_be_corrupt`); `verify_file` then finds it corrupt and **quarantines it**: a newer file that is not corrupt would be hidden from queries. |
+| **`catalog.db`** | `<data_dir>/catalog.db`, SQLite WAL mode, `synchronous=FULL` | `sqlx` migrations `0001`–`0007` in `crates/storage/migrations/catalog/`, tracked in `_sqlx_migrations` (version, checksum). Copies keep their number: `catalog.db.pre-m<N>` (`catalog/db.rs::pre_migration_copy`, D-N-22). | An applied migration the binary does not know: `sqlx` `MigrateError::VersionMissing`, so the open fails with `CatalogError::Migrate` and a message about a missing migration, before any write (no pre-migration copy: `applied >= expected`). An edited migration file: `VersionMismatch` (checksum). A TEXT value the binary does not know (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`): `CatalogError::Corrupt` while loading. **No marker for a change that adds no migration**, such as a new meaning for a column. |
+| **Catalog snapshot** | `Storage::snapshot_catalog` (`snapshot.rs`), `VACUUM INTO` | Same as `catalog.db`. | Same. The backup `manifest.json` is track N's, not storage's. |
+| **Object paths** | `data_files.path` (relative path, never parsed), `media/<project>/<sha256 hex>` (`objects.rs::media_path`) | None. | A path is opaque to readers; a *new layout* only applies to new files. |
+| **Media blob** | `objects/media/...`, the raw bytes; `media` table holds mime, size, times | None. | None needed: the blob is the bytes. |
+| **S3 read cache** | `cache/<file name>/size` (8 bytes LE size, then CRC-32C: `SIZE_FILE_LEN` 12, D-R-21) and `cache/<file name>/<block index>` (block bytes then CRC-32C) (`read_cache.rs`) | None. Block size `BLOCK` = 1 MiB is implicit. | A `size` file that does not parse drops the whole directory, a bad block CRC drops the block: the cache heals itself. **A changed `BLOCK` would not be detected**: old blocks keep valid CRCs and would be served at the wrong offsets. |
+| **`LOCK`, `tmp/`, `admin.sock`** | | no content that survives a restart | not formats |
+| **`meta.db`, `secret.key`, backup `manifest.json`** | server and track N | their own | out of M8 (§ Requests) |
+
+Two consequences drove the design: an older binary could destroy newer data in two places (the WAL tail truncation and the quarantine of a newer Parquet file), so the refusal must come before either, from a marker in `catalog.db`, which `Storage::open` reads first.
+
+### Findings
+
+**M8-1, an older binary truncated a newer WAL tail.** A record whose `kind` it does not know is a torn tail in the last segment, and `replay.rs` truncated it. Fixed in R8.3 (commit fae9f25a): every segment starts with a format header, and an open refuses a newer segment before replay, so nothing is truncated. The tests are in `wal/segment.rs` and `wal/replay.rs`.
+
+**M8-2, an older binary quarantined a newer Parquet file.** A file the old reader cannot read is a suspect, and `verify_file` quarantined it, so a newer file that was not corrupt was hidden from queries. Fixed in R8.2 (commit 26a9b1e3): the directory's format marker in `catalog.db` refuses a newer directory before anything is verified, migrated, stamped or written.
+
+**Review follow-ups.** Commit e51bbae9 (R8 review) syncs a reused WAL segment header. Commit 2d9872fe (R8 review) makes the refusals read-only and runs them before anything is written: the catalog check, then every WAL segment header. A refused open changes no existing file's content (spec 03 § 12).
+
+**Golden directory size.** The scenario of `golden_tests/build.rs` writes 21 files, 363,850 bytes, measured after the error and payload checks were added (R8.6 review fixes; 359,268 bytes before). The limit is 1 MiB (`golden_directories_stay_small`); each release adds its directory to the repository.
+
+### Commands and tests
+
+- `just golden-dir <name>`: writes `fixtures/storage/golden/<name>` from the current build and appends it to `RELEASES`, unless the name starts with `scratch` (not appended). A name is `scratch...` (letters, digits, `-`, `_`) or `X.Y.Z` with digits only; the recipe refuses any other name (a `/`, a `..`, an rc tag) before anything is written. The name must be the workspace version (`CARGO_PKG_VERSION`), which `release-prep` sets; the test refuses another name before anything is written.
+- `just check-golden`: fails a branch that deletes a released directory or removes a `RELEASES` line, against `origin/main`'s merge base. Skipped without `origin/main`; `just check-rust` runs it. CI does not run it yet (the ci.yml request is open).
+- `golden_tests::` (`crates/storage/src/golden_tests/`): `build_is_deterministic`, `build_leaves_the_expected_shape`, `a_fresh_golden_directory_opens` (the check runs while no directory is committed), `the_committed_golden_directories_open`, `golden_directories_stay_small`, `a_newer_golden_directory_is_refused`, `every_released_version_has_a_golden_directory`, `every_golden_directory_is_released`, and the ignored `write_golden_dir`.
+
+### Pending
+
+- No golden directory is committed yet: the first one is written at the first stable release, with `release-prep` and `release-verify` (requests in the plan).
+- `check-golden` is not in CI until a workflow step fetches `origin/main`.
+
+---
+
 ## Gaps toward deterministic simulation
 
 Counts from the plan's commands (D-R-13), run from the repository root. Each filter drops only lines that contain `test`, so some test code in production files is still counted; the counts are an upper bound for production code.
