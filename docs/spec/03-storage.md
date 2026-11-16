@@ -567,6 +567,13 @@ A released migration file is never edited; the golden catalogs enforce it.
 
 **Opening.** `catalog.db` is opened first. Its `user_version`: above `FORMAT_VERSION` is refused; `0` with an empty catalog is a new directory and is stamped; `0` with data is a pre-release directory and is refused (`PreFormat`). A migration the binary does not know (`_sqlx_migrations` has a version it lacks) is refused (`SchemaTooNew`). These checks run on a read-only connection, followed by a read of every WAL segment's header (§ 1), before anything is migrated, stamped, replayed or written: a refused open changes no existing file's content (`open` may create missing directories and `LOCK`). Downgrading is not supported: the way back is the backup taken before the upgrade (12 § Upgrades).
 
-**Golden directories.** `fixtures/storage/golden/<version>/` is a small data directory written by the release's own build (`just golden-dir <version>`), with `expected.json`: the answers of the public reads. A test opens a copy of every one with the current code and compares; none is committed before the first stable release, and until then the same test generates a directory into a temp dir and checks it. `fixtures/storage/golden/RELEASES` lists the released versions. Each stable release adds its directory and keeps the old ones: every 0.x directory until 1.0, every release's directory from 1.0 on (D-R-12).
+**Golden directories.** `fixtures/storage/golden/<version>/` is a small data directory written by the release's own build (`just golden-dir <version>`), with `expected.json`: the answers of the public reads. A test opens a copy of every one with the current code and compares; none is committed before the first stable release, and until then the same test generates a directory into a temp dir and checks it. `fixtures/storage/golden/RELEASES` lists the released versions. Each stable release adds its directory and keeps the old ones: every 0.x directory until 1.0, every release's directory from 1.0 on (D-R-12). `just check-golden` fails a change that deletes a released directory.
+
+**At a release.**
+- `just release-prep X.Y.Z`, then `just golden-dir X.Y.Z` (writes `fixtures/storage/golden/X.Y.Z/` and appends to `RELEASES`).
+- Commit both with `Release X.Y.Z`.
+- A pre-release (`X.Y.Z-rc.N`) has no directory.
+
+**Amending a released `expected.json`.** A released directory and its `expected.json` are never rewritten, with one exception: a released build's answer is proven wrong (a bug in a read), so the recorded value was wrong. The amendment is its own commit, explains the bug, and adds a line under `### Upgrade notes` in `CHANGELOG.md` when the answer a user sees changes.
 
 **Not covered here:** `meta.db`, `secret.key`, `admin.sock` and the backup `manifest.json`. They belong to the server (04) and to online backups (12).

@@ -267,7 +267,17 @@ fn write_golden_dir() {
     );
     assert!(out.is_absolute(), "LLMOBS_GOLDEN_OUT is an absolute path");
     assert!(!out.exists(), "LLMOBS_GOLDEN_OUT must not exist yet");
-    // `fixtures/storage/golden/` may not exist yet (it is first created here, before R8.7's RELEASES).
+    // A golden directory is written by the build it is named after (`release-prep` has set the
+    // version already); `scratch*` is for a look and is never released (R8.8).
+    let name = out
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("LLMOBS_GOLDEN_OUT ends in a UTF-8 directory name");
+    assert!(
+        name.starts_with("scratch") || name == env!("CARGO_PKG_VERSION"),
+        "{name}: the workspace is {}; a golden directory is named after the version it is written by (or scratch*)",
+        env!("CARGO_PKG_VERSION")
+    );
     fs::create_dir_all(out.parent().expect("LLMOBS_GOLDEN_OUT has a parent"))
         .expect("create the parent of LLMOBS_GOLDEN_OUT");
     generate(&out);
@@ -305,7 +315,7 @@ const GOLDEN_MAX_BYTES: u64 = 1 << 20;
 /// The golden directories committed under `fixtures/storage/golden/`, sorted. Plain files such as
 /// `RELEASES` are skipped.
 pub(crate) fn committed_dirs() -> Vec<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/storage/golden");
+    let root = golden_root();
     let mut dirs: Vec<PathBuf> = fs::read_dir(&root)
         .unwrap_or_else(|error| panic!("list {}: {error}", root.display()))
         .map(|entry| entry.expect("read a golden directory entry").path())
@@ -313,6 +323,53 @@ pub(crate) fn committed_dirs() -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     dirs
+}
+
+/// `fixtures/storage/golden/`, the committed golden directories and `RELEASES`.
+fn golden_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/storage/golden")
+}
+
+/// The versions listed in `RELEASES`, oldest first. Comment (`#`) and blank lines are skipped.
+fn released_versions() -> Vec<String> {
+    let path = golden_root().join("RELEASES");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn every_released_version_has_a_golden_directory() {
+    for version in released_versions() {
+        let dir = golden_root().join(&version);
+        assert!(
+            dir.is_dir(),
+            "RELEASES lists {version}, which has no golden directory {}",
+            dir.display()
+        );
+        let expected = read_expected(&dir);
+        assert_eq!(
+            expected["workspace_version"].as_str(),
+            Some(version.as_str()),
+            "{version}: expected.json names a different workspace_version"
+        );
+    }
+}
+
+#[test]
+fn every_golden_directory_is_released() {
+    let released = released_versions();
+    for dir in committed_dirs() {
+        let name = name_of(&dir);
+        assert!(
+            released.contains(&name),
+            "{name}: a golden directory that RELEASES does not list (a scratch* directory: delete it)"
+        );
+    }
 }
 
 /// The basename of a golden directory, for assertion messages.
@@ -598,9 +655,10 @@ async fn check_dir(dir: &Path) {
     want["projects"][P1]["kpis"] =
         dump::kpis_with_probe(&expected["projects"][P1]["kpis"], &probe_row);
     let mut got = without_probe(second.clone(), &probe_trace);
-    got.as_object_mut()
-        .expect("the dump is an object")
-        .remove("format_version");
+    let got_map = got.as_object_mut().expect("the dump is an object");
+    for key in ["format_version", "workspace_version"] {
+        got_map.remove(key);
+    }
     assert_eq!(
         got, want,
         "{name}: step 8: the second dump is not expected.json plus exactly the probe trace, with the u-2 deletion applied"

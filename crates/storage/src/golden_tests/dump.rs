@@ -167,6 +167,7 @@ pub(super) async fn dump(storage: &Storage) -> Value {
 
     json!({
         "format_version": FORMAT_VERSION,
+        "workspace_version": env!("CARGO_PKG_VERSION"),
         "generator": GENERATOR,
         "windows": { "from": window().0, "to": window().1 },
         "write_probe": { "project": P1, "day": "2026-02-11", "start_time": ns_at("2026-02-11", 3600) },

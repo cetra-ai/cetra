@@ -51,9 +51,31 @@ stress secs="300":
 golden-dir name:
     #!/usr/bin/env bash
     set -euo pipefail
-    out="{{justfile_directory()}}/fixtures/storage/golden/{{name}}"
-    if [ -e "$out" ]; then echo "golden-dir: $out exists" >&2; exit 1; fi
+    root="{{justfile_directory()}}"
+    out="$root/fixtures/storage/golden/{{name}}"
+    if [ -e "$out" ]; then
+        echo "golden-dir: $out exists; a released directory is never rewritten" >&2; exit 1
+    fi
     LLMOBS_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
+    case "{{name}}" in
+        scratch*) ;;
+        *) echo "{{name}}" >> "$root/fixtures/storage/golden/RELEASES" ;;
+    esac
+
+# Released golden directories and RELEASES lines are never removed (spec 03 § 12, D-R-30).
+# Skipped without origin/main. LLMOBS_GOLDEN_DROP=1 allows the clean-up at 1.0 (D-R-12).
+check-golden:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git rev-parse --verify -q origin/main >/dev/null; then echo "check-golden: no origin/main, skipped"; exit 0; fi
+    if [ "${LLMOBS_GOLDEN_DROP:-}" = 1 ]; then exit 0; fi
+    base="$(git merge-base origin/main HEAD)"
+    gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden || true)"
+    lines="$(git diff --no-renames --text "$base" -- fixtures/storage/golden/RELEASES | grep -E '^-[^-]' || true)"
+    if [ -n "$gone$lines" ]; then
+        echo "check-golden: released golden directories must stay (D-R-12):" >&2
+        echo "$gone$lines" >&2; exit 1
+    fi
 
 # Resource exhaustion (track R M5, D-R-9): a full disk, a memory limit and few file descriptors.
 # Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
@@ -223,7 +245,7 @@ run *args:
     cargo run -p llmobs-cli -- {{args}}
 
 # Rust checks: format, lint, tests, supply chain
-check-rust: fmt-check lint test deny check-ee
+check-rust: fmt-check lint test deny check-ee check-golden
 
 # Install JS dependencies from the lockfile
 js-install:
