@@ -116,8 +116,9 @@ fixtures/api/                example API responses (UI mocks), checked against t
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)
-tools/e2e/                   run.sh for just e2e: a real llmobs serve and both SDK suites (D-G-20)
-tools/demo/                  demo seed script, mock LLM judge, and an enterprise setup (Keycloak, DNS) for trying llmobs by hand (docs/testing-locally.md)
+tools/e2e/                   run.sh for just e2e: a real cetra serve and both SDK suites (D-G-20)
+tools/demo/                  demo seed script, mock LLM judge, and an enterprise setup (Keycloak, DNS) for trying cetra by hand (docs/testing-locally.md)
+fuzz/                        cargo-fuzz targets (nightly only), committed corpus and regressions (track R M3)
 docs/                        decisions, specs, plans, research
 ```
 

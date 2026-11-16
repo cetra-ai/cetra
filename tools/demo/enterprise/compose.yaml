@@ -1,6 +1,6 @@
-# Keycloak, a DNS server for org domain verification, and llmobs with an enterprise licence
+# Keycloak, a DNS server for org domain verification, and cetra with an enterprise licence
 # (docs/testing-locally.md § Enterprise features). Every service uses the host network, so
-# the browser and llmobs both reach Keycloak at http://localhost:8180, and llmobs listens on
+# the browser and cetra both reach Keycloak at http://localhost:8180, and cetra listens on
 # http://localhost:8081.
 services:
   keycloak:
@@ -23,18 +23,18 @@ services:
     volumes:
       - ./dns:/etc/demo:ro
 
-  llmobs:
+  cetra:
     # The binary is the host's, so the image's glibc must be at least the build host's.
-    image: ${LLMOBS_IMAGE:-ubuntu:26.04}
+    image: ${CETRA_IMAGE:-ubuntu:26.04}
     network_mode: host
     depends_on: [keycloak, dns]
-    command: ["/opt/llmobs/llmobs", "serve"]
+    command: ["/opt/cetra/cetra", "serve"]
     environment:
-      LLMOBS_CONFIG: /etc/llmobs.toml
-      LLMOBS_LICENSE_KEY: ${LLMOBS_LICENSE_KEY:?set LLMOBS_LICENSE_KEY (just demo-license)}
+      CETRA_CONFIG: /etc/cetra.toml
+      CETRA_LICENSE_KEY: ${CETRA_LICENSE_KEY:?set CETRA_LICENSE_KEY (just demo-license)}
     volumes:
-      - ../../../target/release/llmobs:/opt/llmobs/llmobs:ro
+      - ../../../target/release/cetra:/opt/cetra/cetra:ro
       - ../../../target/demo-ee:/data
-      - ./llmobs.toml:/etc/llmobs.toml:ro
-      # Only llmobs asks 127.0.0.1 (the dns service), so the host's resolver is untouched.
+      - ./cetra.toml:/etc/cetra.toml:ro
+      # Only cetra asks 127.0.0.1 (the dns service), so the host's resolver is untouched.
       - ./dns/resolv.conf:/etc/resolv.conf:ro

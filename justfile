@@ -248,19 +248,19 @@ check-release: build-release
 
 # Local demo (docs/testing-locally.md): the release binary on target/demo, with a known admin,
 # org `demo`, project `demo` and ingest key. The mock LLM on 127.0.0.1 needs private egress.
-demo_key := "sk-llmobs-demo0000000000000000000000000000"
+demo_key := "sk-cetra-demo0000000000000000000000000000"
 
 # Start the release binary (`just build-release` first) on target/demo with a known admin
 demo-serve:
-    test -x target/release/llmobs || { echo "run 'just build-release' first"; exit 1; }
-    LLMOBS_DATA_DIR=target/demo/data \
-    LLMOBS_INIT_ADMIN_EMAIL=admin@demo.test \
-    LLMOBS_INIT_ADMIN_PASSWORD=demo-password \
-    LLMOBS_INIT_ORG=demo \
-    LLMOBS_INIT_PROJECT=demo \
-    LLMOBS_INIT_SECRET_KEY={{demo_key}} \
-    LLMOBS_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true \
-    ./target/release/llmobs serve
+    test -x target/release/cetra || { echo "run 'just build-release' first"; exit 1; }
+    CETRA_DATA_DIR=target/demo/data \
+    CETRA_INIT_ADMIN_EMAIL=admin@demo.test \
+    CETRA_INIT_ADMIN_PASSWORD=demo-password \
+    CETRA_INIT_ORG=demo \
+    CETRA_INIT_PROJECT=demo \
+    CETRA_INIT_SECRET_KEY={{demo_key}} \
+    CETRA_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true \
+    ./target/release/cetra serve
 
 # Send demo traces and scores to the server started by `just demo-serve` (or the enterprise demo on 8081)
 demo-seed traces="300" url="http://localhost:8080":
@@ -273,11 +273,11 @@ demo-llm:
 # The release binary, trusting the development licence key like a debug build (enterprise demo)
 build-release-dev-license: js-install
     pnpm --dir web run build
-    cargo build --release -p llmobs-cli --config 'profile.release.package.llmobs-token.debug-assertions=true'
+    cargo build --release -p cetra-cli --config 'profile.release.package.cetra-token.debug-assertions=true'
 
 # Print an enterprise licence for the demo, signed with the development key
 demo-license:
-    @cargo run -q -p llmobs-license-tool -- sign --key fixtures/license/dev-1.key --kid dev-1 --payload tools/demo/enterprise/license.json
+    @cargo run -q -p cetra-license-tool -- sign --key fixtures/license/dev-1.key --kid dev-1 --payload tools/demo/enterprise/license.json
 
 # Run the binary with arguments, e.g. `just run --version`
 run *args:

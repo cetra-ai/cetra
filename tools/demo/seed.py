@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Seed a running llmobs server with demo traces, sessions, end users and scores.
+"""Seed a running cetra server with demo traces, sessions, end users and scores.
 
 It replays the OTLP fixtures in `fixtures/otlp/` over OTLP/HTTP JSON with fresh trace and span
 IDs, timestamps spread over the last days, and added session, user, environment and tag
 attributes. Then it writes scores through `POST /api/v1/scores`. Standard library only.
 
-    python3 tools/demo/seed.py --key sk-llmobs-... [--url http://localhost:8080] [--traces 300]
+    python3 tools/demo/seed.py --key sk-cetra-... [--url http://localhost:8080] [--traces 300]
 """
 
 from __future__ import annotations
@@ -120,9 +120,9 @@ def make_trace(
         for event in span.get("events", []):
             if int(event.get("timeUnixNano", "0")) > 0:
                 event["timeUnixNano"] = str(int(event["timeUnixNano"]) + shift)
-        extra = [attr("llmobs.user.id", ctx["user"]), attr("llmobs.tags", ctx["tags"])]
+        extra = [attr("cetra.user.id", ctx["user"]), attr("cetra.tags", ctx["tags"])]
         if ctx.get("session"):
-            extra.append(attr("llmobs.session.id", ctx["session"]))
+            extra.append(attr("cetra.session.id", ctx["session"]))
         span["attributes"] = extra + span.get("attributes", [])
         if error_root and not parent:
             span["status"] = {"code": 2, "message": error_root}
@@ -161,7 +161,7 @@ def post(url: str, key: str, body: dict) -> dict:
     except urllib.error.HTTPError as error:
         sys.exit(f"POST {url} failed: {error.code} {error.read().decode(errors='replace')[:500]}")
     except urllib.error.URLError as error:
-        sys.exit(f"POST {url} failed: {error.reason} (is `llmobs serve` running?)")
+        sys.exit(f"POST {url} failed: {error.reason} (is `cetra serve` running?)")
     return json.loads(raw) if raw else {}
 
 
@@ -219,8 +219,8 @@ def define_scores(url: str, project: str, email: str, password: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--url", default="http://localhost:8080", help="llmobs base URL")
-    parser.add_argument("--key", required=True, help="project secret key (sk-llmobs-...)")
+    parser.add_argument("--url", default="http://localhost:8080", help="cetra base URL")
+    parser.add_argument("--key", required=True, help="project secret key (sk-cetra-...)")
     parser.add_argument("--traces", type=int, default=300, help="number of traces to send")
     parser.add_argument(
         "--days", type=float, default=7, help="spread traces over this many past days"

@@ -36,8 +36,8 @@
   ],
   "clients": [
     {
-      "clientId": "llmobs",
-      "name": "llmobs",
+      "clientId": "cetra",
+      "name": "cetra",
       "enabled": true,
       "publicClient": false,
       "clientAuthenticatorType": "client-secret",

@@ -1,6 +1,6 @@
-# Testing llmobs locally
+# Testing cetra locally
 
-How to build llmobs from this repository, run it on your machine with demo data, and try every
+How to build cetra from this repository, run it on your machine with demo data, and try every
 area by hand. No LLM API key, SMTP server or cloud account is needed. Checked on Linux x86_64 on
 2026-11-15 (`main` at f60b816).
 
@@ -16,10 +16,10 @@ and 8090 must be free.
 just build-release
 ```
 
-Builds the web UI, then the release binary with the UI embedded (`target/release/llmobs`, about
-10 minutes from a cold cache). `./target/release/llmobs version` prints `ui: embedded`. If rustc
+Builds the web UI, then the release binary with the UI embedded (`target/release/cetra`, about
+10 minutes from a cold cache). `./target/release/cetra version` prints `ui: embedded`. If rustc
 crashes with `SIGSEGV` during the final link (thin LTO), run it again with a bigger stack:
-`RUST_MIN_STACK=33554432 cargo build --release -p llmobs-cli`.
+`RUST_MIN_STACK=33554432 cargo build --release -p cetra-cli`.
 
 In a first terminal:
 
@@ -27,9 +27,9 @@ In a first terminal:
 just demo-serve
 ```
 
-Starts `llmobs serve` on `target/demo/data` with a known first admin (no setup page), org `demo`,
-project `demo`, the ingest key `sk-llmobs-demo0000000000000000000000000000`, and private network
-egress allowed (so the judge and webhooks can reach the mock on 127.0.0.1). The `LLMOBS_INIT_*`
+Starts `cetra serve` on `target/demo/data` with a known first admin (no setup page), org `demo`,
+project `demo`, the ingest key `sk-cetra-demo0000000000000000000000000000`, and private network
+egress allowed (so the judge and webhooks can reach the mock on 127.0.0.1). The `CETRA_INIT_*`
 variables apply only to an empty data directory; later starts reuse the data. Logs are JSON when
 the output is not a terminal.
 
@@ -83,7 +83,7 @@ Each item was checked by hand on the demo data. Paths are under
 - [ ] **Saved views**: with a filter set, `Default view` → `Save as…` → name → `Save view`
   (Enter does not submit). The view's name replaces `Default view`.
 - [ ] **Live mode**: turn on `Live`, then send a few traces from the last minute:
-  `python3 tools/demo/seed.py --key sk-llmobs-demo0000000000000000000000000000 --traces 5 --days 0.001`.
+  `python3 tools/demo/seed.py --key sk-cetra-demo0000000000000000000000000000 --traces 5 --days 0.001`.
   They appear at the top within a few seconds.
 - [ ] **Spans**, **Sessions** (one row per session; open one for its turns as a conversation),
   **Users** (one row per end user with traces, sessions, tokens, cost and errors).
@@ -94,25 +94,25 @@ Each item was checked by hand on the demo data. Paths are under
 
 - [ ] **SQL console** (`sql`): the schema browser lists `traces`, `spans`, `sessions`, `scores`;
   `Run` the example query. Judge traces of online evaluation are rows of `traces` too (environment
-  `llmobs-eval`).
+  `cetra-eval`).
 - [ ] **API with a personal access token**: `/account` → Personal access tokens → `New token`, or
   `POST /api/v1/me/tokens`. Then for example
-  `curl -H "Authorization: Bearer pat-llmobs-…" -H 'Content-Type: application/json' -H 'Accept: text/csv' -d '{"query":"SELECT trace_id, name FROM traces LIMIT 3"}' 'http://localhost:8080/api/v1/projects/demo%2Fdemo/sql'`
+  `curl -H "Authorization: Bearer pat-cetra-…" -H 'Content-Type: application/json' -H 'Accept: text/csv' -d '{"query":"SELECT trace_id, name FROM traces LIMIT 3"}' 'http://localhost:8080/api/v1/projects/demo%2Fdemo/sql'`
   returns CSV (JSON without the `Accept` header).
-- [ ] **CLI**: `./target/release/llmobs login --url http://localhost:8080` opens the browser on an
-  `Authorize` page and saves a token (in `~/.config/llmobs`; set `XDG_CONFIG_HOME` to keep it
-  elsewhere). Or skip the login with `LLMOBS_URL`, `LLMOBS_TOKEN=pat-llmobs-…` and
-  `LLMOBS_PROJECT=demo/demo`. Then:
-  `llmobs projects list`,
-  `llmobs traces list --limit 5`,
-  `llmobs traces get <trace_id>` (span tree),
-  `llmobs query --since 24h "SELECT user_id, count(*) n FROM traces GROUP BY user_id ORDER BY n DESC"`
+- [ ] **CLI**: `./target/release/cetra login --url http://localhost:8080` opens the browser on an
+  `Authorize` page and saves a token (in `~/.config/cetra`; set `XDG_CONFIG_HOME` to keep it
+  elsewhere). Or skip the login with `CETRA_URL`, `CETRA_TOKEN=pat-cetra-…` and
+  `CETRA_PROJECT=demo/demo`. Then:
+  `cetra projects list`,
+  `cetra traces list --limit 5`,
+  `cetra traces get <trace_id>` (span tree),
+  `cetra query --since 24h "SELECT user_id, count(*) n FROM traces GROUP BY user_id ORDER BY n DESC"`
   (`--format csv`, `-o file`).
-- [ ] **MCP**: `POST /mcp` with `Authorization: Bearer pat-llmobs-…` and
+- [ ] **MCP**: `POST /mcp` with `Authorization: Bearer pat-cetra-…` and
   `Accept: application/json, text/event-stream`. `tools/list` returns `list_projects`,
   `get_schema`, `query_sql`, `list_saved_views`, `search_traces`, `get_trace`, `get_span`.
   `query_sql` takes `project`, `query`, `from`, `to` (required, at most 30 days apart). To use it
-  from Claude Code: `claude mcp add --transport http llmobs http://localhost:8080/mcp --header "Authorization: Bearer pat-llmobs-…"`.
+  from Claude Code: `claude mcp add --transport http cetra http://localhost:8080/mcp --header "Authorization: Bearer pat-cetra-…"`.
 
 ### Evaluate (with `just demo-llm` running)
 
@@ -142,7 +142,7 @@ Each item was checked by hand on the demo data. Paths are under
   `Send test`: the `demo-llm` terminal prints the payload.
 - [ ] **Rule** (`alerts/new`): metric Error rate, window 5 minutes, above `1` %, minimum samples
   `1`, tick the channel, `Create rule`. Send traffic (`python3 tools/demo/seed.py --key
-  sk-llmobs-demo0000000000000000000000000000 --traces 60 --days 0.002`); within about two minutes
+  sk-cetra-demo0000000000000000000000000000 --traces 60 --days 0.002`); within about two minutes
   the rule turns `Firing` and the webhook prints the alert. Email channels need SMTP.
 
 ### Data management
@@ -167,11 +167,11 @@ Each item was checked by hand on the demo data. Paths are under
 - [ ] **Instance admin** (`/admin/users`, `/admin/settings`): users, `Add user`, reset links
   (instead of emails), instance settings.
 - [ ] **Backup and restore**, while the server runs:
-  `LLMOBS_DATA_DIR=target/demo/data ./target/release/llmobs admin backup --to $PWD/target/demo/backup-1`.
+  `CETRA_DATA_DIR=target/demo/data ./target/release/cetra admin backup --to $PWD/target/demo/backup-1`.
   To check it, copy `meta.db`, `catalog.db`, `secret.key` and `objects/` into an empty directory,
-  then with `LLMOBS_DATA_DIR` set to it run `llmobs admin gc-orphans --dry-run` (`missing objects:
-  0`), `llmobs admin reapply-deletions --from target/demo/data`, and
-  `LLMOBS_HTTP_ADDR=127.0.0.1:8081 LLMOBS_GRPC_ADDR= LLMOBS_OTLP_HTTP_ADDR= llmobs serve`: the
+  then with `CETRA_DATA_DIR` set to it run `cetra admin gc-orphans --dry-run` (`missing objects:
+  0`), `cetra admin reapply-deletions --from target/demo/data`, and
+  `CETRA_HTTP_ADDR=127.0.0.1:8081 CETRA_GRPC_ADDR= CETRA_OTLP_HTTP_ADDR= cetra serve`: the
   copy on port 8081 has the same traces. Full procedure: [self-hosting/backup.md](self-hosting/backup.md).
 - [ ] **Restart**: stop `just demo-serve` (Ctrl+C) and start it again: the data is still there.
 
@@ -179,7 +179,7 @@ Each item was checked by hand on the demo data. Paths are under
 
 Point any OpenTelemetry exporter at the server:
 `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`,
-`OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-llmobs-demo0000000000000000000000000000"`,
+`OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer sk-cetra-demo0000000000000000000000000000"`,
 or use the Python and TypeScript SDKs in `sdks/` (spec 10). `just e2e` runs both SDK suites
 against a real server.
 
@@ -195,7 +195,7 @@ just build-release-dev-license
 
 `just demo-license` prints a licence with `project_roles`, `sso_enforcement` and `org_sso`
 (`tools/demo/enterprise/license.json`). With only the licence, `just demo-serve` covers project
-roles: `LLMOBS_LICENSE_KEY=$(just demo-license) just demo-serve`.
+roles: `CETRA_LICENSE_KEY=$(just demo-license) just demo-serve`.
 
 The SSO features need an OpenID Connect provider, and an org's domain is proven by a DNS TXT
 record. `tools/demo/enterprise/compose.yaml` runs them with Docker on the host network:
@@ -203,20 +203,20 @@ record. `tools/demo/enterprise/compose.yaml` runs them with Docker on the host n
 - **keycloak** on <http://localhost:8180> (console `admin` / `admin`): realm `corp` with
   `alice@corp.test` and `dave@corp.test`, realm `acme` with `bob@acme.test` and `carol@acme.test`.
   Usernames are the part before the `@` and passwords `<name>-password` (`alice-password`).
-  Client `llmobs`, secret `corp-demo-secret` or `acme-demo-secret`.
+  Client `cetra`, secret `corp-demo-secret` or `acme-demo-secret`.
 - **dns**: dnsmasq on 127.0.0.1:53, serving the TXT records in `dns/records.conf` and forwarding
   everything else to the host's resolver (`127.0.0.53`, systemd-resolved).
-- **llmobs**: the host's `target/release/llmobs` in an `ubuntu:26.04` container whose
+- **cetra**: the host's `target/release/cetra` in an `ubuntu:26.04` container whose
   `/etc/resolv.conf` points at the dns service, so the host's DNS is untouched. It listens on
   <http://localhost:8081> (beside `just demo-serve`), with data in `target/demo-ee`, the same
-  admin, org, project and key as the demo, and `llmobs.toml`: an `[[auth.oidc]]` provider
+  admin, org, project and key as the demo, and `cetra.toml`: an `[[auth.oidc]]` provider
   `corp` (auto-provisioned as `member` of `demo`) and `enforce_sso_domains = ["corp.test"]`.
   The binary links against the host's glibc, so the image's must be the same or newer
-  (`LLMOBS_IMAGE=…` to change it).
+  (`CETRA_IMAGE=…` to change it).
 
 ```bash
 cd tools/demo/enterprise
-echo "LLMOBS_LICENSE_KEY=$(just demo-license)" > .env
+echo "CETRA_LICENSE_KEY=$(just demo-license)" > .env
 docker compose up -d
 just demo-seed 100 http://localhost:8081
 ```
@@ -225,12 +225,12 @@ Keycloak takes about 30 seconds to start. Without Docker on your machine, copy
 `tools/demo/enterprise`, `.env` and the binary (`strip` it first: 630 MB with debug info, 125 MB
 without) to the same paths on a Linux host that has Docker, run `docker compose up -d` there, and
 forward the two ports: `ssh -N -L 8081:127.0.0.1:8081 -L 8180:127.0.0.1:8180 <host>`. Keycloak
-and llmobs must be at the same `localhost` URLs for the browser and for llmobs, since the issuer
+and cetra must be at the same `localhost` URLs for the browser and for cetra, since the issuer
 is `http://localhost:8180/realms/…` (http issuers must be on a loopback host).
 
 Checked with Keycloak 26.8.1 on Ubuntu 26.04 (`main` at 30bed18):
 
-- [ ] **Licence**: the llmobs log shows `licence active` with `kid` `dev-1`; `/demo/settings/plan`
+- [ ] **Licence**: the cetra log shows `licence active` with `kid` `dev-1`; `/demo/settings/plan`
   lists Project roles, SSO enforcement and Single sign-on as Included.
 - [ ] **Instance SSO**: on <http://localhost:8081/login>, `Continue with Corp Keycloak`, sign in as
   `alice`: alice lands in org `demo` as a Member.
@@ -240,9 +240,9 @@ Checked with Keycloak 26.8.1 on Ubuntu 26.04 (`main` at 30bed18):
 - [ ] **Project roles** (`/demo/demo/settings/members`, as admin): set alice's project access to
   `Viewer`. Signed in as alice, `New evaluator` is disabled and writes answer 403.
 - [ ] **Per-org SSO** (`/demo/settings/sso`, as admin): provider `Acme Keycloak`, issuer
-  `http://localhost:8180/realms/acme`, client `llmobs`, secret `acme-demo-secret`, `Save`. Add
+  `http://localhost:8180/realms/acme`, client `cetra`, secret `acme-demo-secret`, `Save`. Add
   domain `acme.test`; copy its token into `dns/records.conf`
-  (`txt-record=_llmobs-verify.acme.test,"llmobs-verify=<token>"`), `docker compose restart dns`,
+  (`txt-record=_cetra-verify.acme.test,"cetra-verify=<token>"`), `docker compose restart dns`,
   then `Verify`: Verified. Turn on `Enabled`.
 - [ ] **Email-first sign-in**: sign out. The login page now asks for the email only; `bob@acme.test`
   → `Continue` goes to the acme realm, and bob joins `demo` with the role for new members
@@ -261,7 +261,7 @@ user); remove it with `sudo rm -rf target/demo-ee` to start over.
 - **Teams add-on and org tokens**: the plans of the cloud control plane (`PUT
   /api/internal/v1/orgs/{org_id}/entitlements`) are not covered here.
 - **Email** (invites, password resets, email alert channels, email verification) needs
-  `LLMOBS_SMTP_URL`; without it, links show in the UI and `llmobs admin reset-password` prints a
+  `CETRA_SMTP_URL`; without it, links show in the UI and `cetra admin reset-password` prints a
   reset URL.
 - **Datasets and experiments** (track J), **cloud auth** (track S) and **model price management**
   (track T) are not built yet; the `Experiments` toggle on lists has nothing to show.

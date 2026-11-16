@@ -10,8 +10,8 @@ back). Standard library only; for local demos, never production.
     python3 tools/demo/mock_llm.py [--port 8090]
 
 Use it as an LLM connection with adapter `openai`, base URL `http://127.0.0.1:8090/v1`, any API
-key, and model `mock-judge`. llmobs must run with
-`LLMOBS_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true` to reach a loopback address.
+key, and model `mock-judge`. cetra must run with
+`CETRA_SECURITY__ALLOW_PRIVATE_NETWORK_EGRESS=true` to reach a loopback address.
 """
 
 from __future__ import annotations
