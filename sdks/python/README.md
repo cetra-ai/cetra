@@ -5,6 +5,10 @@ server. It is a thin layer over OpenTelemetry: spans go out as OTLP/HTTP
 protobuf to `<base_url>/v1/traces`, and scores go to
 `<base_url>/api/v1/scores`. Python >= 3.11. MIT.
 
+The server stores traces only. If another OpenTelemetry GenAI instrumentation sends prompts
+and completions as log events, they reach `/v1/logs` and are dropped; the project shows a hint
+in the UI. Set that instrumentation to capture message content on spans.
+
 ## Install
 
 ```bash

@@ -17,6 +17,7 @@ use crate::email::Email;
 pub(crate) enum MessageKind {
     Fired,
     Resolved,
+    NoData,
     Reminder,
     Test,
 }
@@ -105,6 +106,7 @@ fn title(kind: MessageKind, rule_name: &str) -> String {
     match kind {
         MessageKind::Fired => format!("Firing: {name}"),
         MessageKind::Resolved => format!("Resolved: {name}"),
+        MessageKind::NoData => format!("No data: {name}"),
         MessageKind::Reminder => format!("Still firing: {name}"),
         MessageKind::Test => format!("Test notification from {PRODUCT}"),
     }
@@ -115,6 +117,7 @@ fn state_word(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::Fired => "Firing",
         MessageKind::Resolved => "Resolved",
+        MessageKind::NoData => "No data",
         MessageKind::Reminder => "Still firing",
         MessageKind::Test => "Test",
     }
@@ -231,6 +234,7 @@ pub(crate) fn webhook_body(notice: &Notice) -> Vec<u8> {
     let kind = match notice.kind {
         MessageKind::Fired => "alert.fired",
         MessageKind::Resolved => "alert.resolved",
+        MessageKind::NoData => "alert.no_data",
         MessageKind::Reminder => "alert.reminder",
         MessageKind::Test => "alert.test",
     };
@@ -413,6 +417,25 @@ mod tests {
             body["blocks"][2]["elements"][1]["url"],
             notice.traces_url.as_str()
         );
+    }
+
+    #[test]
+    fn no_data_message() {
+        let mut notice = sample_notice(MessageKind::NoData, 1_000_000_000_000);
+        notice.value = None;
+        notice.count = Some(0);
+        let body = slack_body(&notice);
+        assert_eq!(body["blocks"][0]["text"]["text"], "No data: High errors");
+        assert_eq!(
+            body["text"],
+            "No data: High errors — no data (&gt; 5.0%) over 5m in Support bot"
+        );
+        let webhook: Value = serde_json::from_slice(&webhook_body(&notice)).expect("json");
+        assert_eq!(webhook["type"], "alert.no_data");
+        let Email::Alert { state, value, .. } = email(&notice) else {
+            panic!("an alert email");
+        };
+        assert_eq!((state, value.as_str()), ("No data", "no data"));
     }
 
     #[test]

@@ -387,6 +387,8 @@ function EventBadge({ kind }: { kind: Schema<"AlertEventKind"> }) {
       return <Badge variant="destructive">Fired</Badge>;
     case "resolved":
       return <Badge variant="secondary">Resolved</Badge>;
+    case "no_data":
+      return <Badge variant="outline">No data</Badge>;
     case "reminder":
       return <Badge variant="outline">Reminder</Badge>;
   }

@@ -205,6 +205,7 @@ async fn setup(
             name: created.created.project.name,
             retention_days: created.created.project.retention_days,
             trace_completion_timeout_s,
+            genai_log_events: None,
             role: Some(OrgRole::Owner),
             created_at: created.created.project.created_at,
         },

@@ -20,6 +20,7 @@ use crate::meta::orgs::{self, SlugError};
 use crate::meta::projects::{
     self, COMPLETION_TIMEOUT_MAX_S, COMPLETION_TIMEOUT_MIN_S, ProjectPatch, ProjectRow,
 };
+use crate::meta::usage::genai_log_events;
 
 use super::orgs::page_named;
 
@@ -163,8 +164,14 @@ async fn create_project(
         .into_response())
 }
 
-async fn get_project(Extension(access): Extension<ProjectAccess>) -> error::Json<Project> {
-    error::Json(project_json(&access.project, access.role))
+async fn get_project(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<Project>, ApiError> {
+    let mut project = project_json(&access.project, access.role);
+    project.genai_log_events =
+        Some(genai_log_events(state.meta.reader(), access.project.id).await?);
+    Ok(error::Json(project))
 }
 
 async fn update_project(
@@ -229,7 +236,9 @@ async fn update_project(
     let Some(project) = projects::project_by_id(state.meta.reader(), id).await? else {
         return Err(ApiError::NotFound);
     };
-    Ok(error::Json(project_json(&project, role)))
+    let mut json = project_json(&project, role);
+    json.genai_log_events = Some(genai_log_events(state.meta.reader(), id).await?);
+    Ok(error::Json(json))
 }
 
 fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
@@ -240,6 +249,7 @@ fn project_json(project: &ProjectRow, role: Option<Role>) -> Project {
         name: project.name.clone(),
         retention_days: project.retention_days,
         trace_completion_timeout_s: project.completion_timeout_s(),
+        genai_log_events: None,
         role: role.map(api_role),
         created_at: project.created_at,
     }
@@ -771,6 +781,35 @@ mod tests {
             .await;
         let fetched: Project = fetched.json();
         assert_eq!(fetched.trace_completion_timeout_s, 60);
+    }
+
+    #[tokio::test]
+    async fn a_project_reports_the_genai_log_events_it_dropped() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created = support_bot(&app, &ada).await;
+        assert_eq!(created.genai_log_events, None, "not in a create answer");
+        let path = format!("/api/v1/projects/{}", created.id);
+        let read = |method| {
+            app.request(method, &path)
+                .header(header::COOKIE.as_str(), &ada)
+        };
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(0));
+
+        let org = created.org_id;
+        app.state
+            .usage
+            .add_log_events(org, created.id, app.state.clock.now_ns(), 5);
+        app.state.usage.flush(&app.state.meta).await.unwrap();
+        let fetched: Project = read(Method::GET).send().await.json();
+        assert_eq!(fetched.genai_log_events, Some(5));
+        let patched: Project = read(Method::PATCH)
+            .json(&serde_json::json!({ "name": "Renamed" }))
+            .send()
+            .await
+            .json();
+        assert_eq!(patched.genai_log_events, Some(5));
     }
 
     #[tokio::test]

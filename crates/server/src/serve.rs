@@ -66,7 +66,9 @@ fn grpc_router(state: AppState, timeout: Duration) -> tonic::transport::server::
         .timeout(timeout)
         .max_concurrent_streams(Some(GRPC_MAX_STREAMS))
         .concurrency_limit_per_connection(GRPC_CONCURRENCY_PER_CONNECTION)
-        .add_service(grpc::service(state))
+        .add_service(grpc::service(state.clone()))
+        .add_service(grpc::logs_service(state.clone()))
+        .add_service(grpc::metrics_service(state))
 }
 
 /// The Prometheus listener's router: `GET /metrics` and nothing else (N M3, D-N-28). Any other
