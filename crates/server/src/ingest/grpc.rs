@@ -710,7 +710,7 @@ mod tests {
         message: &M,
     ) -> Result<(), tonic::Status>
     where
-        S: tower::Service<
+        S: Service<
                 axum::http::Request<tonic::body::Body>,
                 Response = axum::http::Response<tonic::body::Body>,
                 Error = Infallible,
