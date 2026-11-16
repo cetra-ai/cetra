@@ -3282,9 +3282,10 @@ mod tests {
         (format!("multipart/form-data; boundary={BOUNDARY}"), body)
     }
 
-    /// The import tests share [`IMPORTS`]. Each import holds a read guard while it runs, so the
-    /// permit test can hold every permit under the write guard without a 503 in another test.
-    static IMPORT_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+    /// The import tests share [`IMPORTS`], which has only [`IMPORTS_AT_ONCE`] permits, so they run
+    /// one at a time under this lock: more concurrent imports would see a 503, and the permit
+    /// tests can hold every permit without a 503 in another test.
+    static IMPORT_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// `POST …/import?format=` with a `file` part named `file_name`.
     async fn import(
@@ -3296,7 +3297,7 @@ mod tests {
         file: &[u8],
         mapping: Option<&str>,
     ) -> TestResponse {
-        let _gate = IMPORT_GATE.read().await;
+        let _gate = IMPORT_GATE.lock().await;
         let (content_type, body) = multipart(file_name, file, mapping);
         app.request(
             Method::POST,
@@ -3850,7 +3851,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn import_permit_is_refused_when_busy() {
-        let _gate = IMPORT_GATE.write().await;
+        let _gate = IMPORT_GATE.lock().await;
         assert_eq!(IMPORTS.available_permits(), IMPORTS_AT_ONCE);
         let first = import_permit(&IMPORTS).expect("first permit");
         let second = import_permit(&IMPORTS).expect("second permit");
@@ -3869,7 +3870,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         create_ok(&app, &seeded, "faq").await;
-        let _gate = IMPORT_GATE.write().await;
+        let _gate = IMPORT_GATE.lock().await;
         let held = (
             import_permit(&IMPORTS).expect("first permit"),
             import_permit(&IMPORTS).expect("second permit"),
