@@ -46,8 +46,9 @@ model cases="500":
 stress secs="300":
     LLMOBS_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 
-# Write a golden data directory from the current build (track R M8, D-R-29):
-# `just golden-dir 0.1.0` at a release; `just golden-dir scratch` to look at one.
+# Write a golden data directory from the current build (track R M8, D-R-29) and a golden server
+# backup directory (track SF6, D-R-38): `just golden-dir 0.1.0` at a release; `just golden-dir
+# scratch` to look at both.
 golden-dir name:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -59,10 +60,14 @@ golden-dir name:
         echo "golden-dir: $name is not a golden directory name: use scratch (or scratch-<suffix>) for a look, or a release version X.Y.Z with digits only (no pre-release suffix, no / or ..)" >&2; exit 1
     fi
     out="$root/fixtures/storage/golden/$name"
-    if [ -e "$out" ]; then
-        echo "golden-dir: $out exists; a released directory is never rewritten. If it is a partial write that is not in RELEASES, delete it and run again." >&2; exit 1
-    fi
+    server_out="$root/fixtures/server/golden/$name"
+    for dir in "$out" "$server_out"; do
+        if [ -e "$dir" ]; then
+            echo "golden-dir: $dir exists; a released directory is never rewritten. If it is a partial write that is not in RELEASES, delete it and run again." >&2; exit 1
+        fi
+    done
     LLMOBS_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
+    LLMOBS_SERVER_GOLDEN_OUT="$server_out" cargo test -p llmobs-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
     case "$name" in
         scratch*) ;;
         *) echo "$name" >> "$root/fixtures/storage/golden/RELEASES" ;;
