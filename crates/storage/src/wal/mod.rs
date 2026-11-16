@@ -8,7 +8,7 @@ mod replay;
 pub(crate) mod segment;
 pub(crate) mod writer;
 
-pub(crate) use replay::replay;
+pub(crate) use replay::{check_headers, replay};
 pub(crate) use segment::SegmentWriter;
 
 #[cfg(test)]

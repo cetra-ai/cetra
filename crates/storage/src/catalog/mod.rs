@@ -11,6 +11,8 @@ mod db;
 pub(crate) use committer::{
     CatalogEdit, Committer, ObsoleteRemoval, Registered, StagedRemoval, now_ns,
 };
+/// The read-only refusal `Storage::open` runs before it writes (spec 03 § 12).
+pub(crate) use db::check_catalog;
 /// The loaders `Committer::open` and `Storage::open` run, for the catalog fuzz entry (track R M3).
 #[cfg(any(test, fuzzing))]
 pub(crate) use db::{check_file_sources, load, load_project_states, load_tombstones};

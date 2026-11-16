@@ -254,6 +254,32 @@ fn as_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
 
+/// Checks the header of every segment of `table` in `dir` without changing
+/// anything (spec 03 § 12). `open` calls it for both tables before it writes
+/// to the directory, so a segment this build does not read refuses the open
+/// with no file changed. A torn header passes: replay handles it. A missing
+/// directory has no segments.
+pub(crate) fn check_headers(dir: &Path, table: Table) -> Result<(), WalError> {
+    use std::io::Read;
+
+    match fs::metadata(dir) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(WalError::io("reading WAL directory", dir, source)),
+        Ok(_) => {}
+    }
+    for (first_seq, path) in list_segments(dir)? {
+        let mut file = fs::File::open(&path)
+            .map_err(|source| WalError::io("reading WAL segment", &path, source))?;
+        let mut header = Vec::with_capacity(SEGMENT_HEADER_LEN);
+        file.by_ref()
+            .take(SEGMENT_HEADER_LEN as u64)
+            .read_to_end(&mut header)
+            .map_err(|source| WalError::io("reading WAL segment", &path, source))?;
+        check_header(table.name(), &segment_name(first_seq), &header)?;
+    }
+    Ok(())
+}
+
 fn list_segments(dir: &Path) -> Result<Vec<(u64, std::path::PathBuf)>, WalError> {
     let entries =
         fs::read_dir(dir).map_err(|source| WalError::io("reading WAL directory", dir, source))?;

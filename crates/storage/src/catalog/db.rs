@@ -39,23 +39,8 @@ pub(crate) struct TableState {
 /// The format marker (`PRAGMA user_version`, spec 03 § 12) is checked before
 /// anything is copied or migrated, and stamped once the catalog is current.
 pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection, CatalogError> {
+    check_catalog(data_dir).await?;
     let path = data_dir.join("catalog.db");
-    // The refusals are decided on a read-only connection. Connecting for writing
-    // with `journal_mode=WAL` rewrites the header of a rollback-journal file, and
-    // a refused directory must come back unchanged.
-    if path.is_file() {
-        let mut reader = SqliteConnectOptions::new()
-            .filename(&path)
-            .read_only(true)
-            .connect()
-            .await
-            .map_err(|source| CatalogError::Open {
-                path: path.clone(),
-                source,
-            })?;
-        check_format(&mut reader).await?;
-        reader.close().await.map_err(CatalogError::db)?;
-    }
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(true)
@@ -99,6 +84,31 @@ pub(crate) async fn open_catalog_db(data_dir: &Path) -> Result<SqliteConnection,
     Ok(connection)
 }
 
+/// Refuses a `catalog.db` this build does not read (spec 03 § 12) on a
+/// read-only connection, so a refused directory comes back unchanged:
+/// connecting for writing with `journal_mode=WAL` rewrites the header of a
+/// rollback-journal file, and closing a writing connection checkpoints.
+/// `Storage::open` calls it before anything in the directory is written; a
+/// missing `catalog.db` is a new directory.
+pub(crate) async fn check_catalog(data_dir: &Path) -> Result<(), CatalogError> {
+    let path = data_dir.join("catalog.db");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut reader = SqliteConnectOptions::new()
+        .filename(&path)
+        .read_only(true)
+        .connect()
+        .await
+        .map_err(|source| CatalogError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    let checked = check_format(&mut reader).await;
+    reader.close().await.map_err(CatalogError::db)?;
+    checked
+}
+
 /// Refuses a directory this build does not read (spec 03 § 12). Nothing is
 /// copied, migrated or stamped before this check passes.
 async fn check_format(connection: &mut SqliteConnection) -> Result<(), CatalogError> {
@@ -114,6 +124,9 @@ async fn check_format(connection: &mut SqliteConnection) -> Result<(), CatalogEr
     let applied = applied_version(connection).await?;
     if marker == 0 && applied > 0 && catalog_has_data(connection).await? {
         return Err(CatalogError::PreFormat);
+    }
+    if let Some(version) = unknown_migration(connection).await? {
+        return Err(CatalogError::SchemaTooNew { version });
     }
     Ok(())
 }
@@ -165,6 +178,29 @@ async fn catalog_has_data(connection: &mut SqliteConnection) -> Result<bool, Cat
         return Ok(found);
     }
     Ok(false)
+}
+
+/// The first applied migration this build does not have, read without
+/// running the migrator (which would write).
+async fn unknown_migration(connection: &mut SqliteConnection) -> Result<Option<i64>, CatalogError> {
+    let present: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(CatalogError::db)?;
+    if present.is_none() {
+        return Ok(None);
+    }
+    let applied: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(CatalogError::db)?;
+    let known = sqlx::migrate!("./migrations/catalog").migrations;
+    Ok(applied
+        .into_iter()
+        .find(|version| !known.iter().any(|migration| migration.version == *version)))
 }
 
 /// The highest applied migration version, or `0` when the database has none.
