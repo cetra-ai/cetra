@@ -1475,7 +1475,8 @@ mod tests {
             text.contains("the server is running: stop it first"),
             "{text}"
         );
-        // The lock is taken before meta.db is opened, so a refused migrate writes nothing.
+        // The preflight only reads meta.db, and the lock is taken before it is written, so a
+        // refused migrate writes nothing.
         assert_eq!(std::fs::read(&meta).unwrap(), meta_before);
         server.stop().await;
     }

@@ -88,7 +88,9 @@ pub enum AdminError {
     /// `meta.db` does not exist yet.
     #[error("run `llmobs serve` once to create the database")]
     NotInitialized,
-    /// The file's schema is not this binary's.
+    /// The file's schema is older than this binary's. A newer schema is refused as
+    /// [`AdminError::Database`], with its own text (`meta.db` has applied migration N, which
+    /// this build does not have; D-R-33), so this variant is reached for older schemas only.
     #[error("this binary expects schema {expected}, found {found}")]
     Schema {
         /// Migration version embedded in this binary.
@@ -491,6 +493,9 @@ pub async fn gc_orphans(
     if s3 && !dry_run && !rollback_bucket {
         return Err(AdminError::RollbackNeedsConfirmation);
     }
+    crate::meta::preflight(&config.data_dir)
+        .await
+        .map_err(map_meta)?;
     let maintenance = Maintenance::open(config.storage_config())
         .await
         .map_err(map_open)?;
@@ -513,8 +518,8 @@ pub async fn gc_orphans(
 /// older backup runs it before `reapply_deletions`.
 ///
 /// Both files must already exist, so a wrong data directory never creates an empty instance.
-/// The maintenance open comes next: its `LOCK` refuses a running server before `meta.db` is
-/// touched.
+/// The `meta.db` preflight comes first (it reads only), then the maintenance open, whose `LOCK`
+/// refuses a running server before `meta.db` is written.
 ///
 /// # Errors
 ///
@@ -528,6 +533,9 @@ pub async fn migrate(config: &ServerConfig) -> Result<(), AdminError> {
     if !config.data_dir.join("meta.db").is_file() {
         return Err(AdminError::NoMetaDb);
     }
+    crate::meta::preflight(&config.data_dir)
+        .await
+        .map_err(map_meta)?;
     let maintenance = Maintenance::open(config.storage_config())
         .await
         .map_err(map_open)?;
@@ -988,11 +996,71 @@ mod tests {
         .await
         .unwrap();
         db.close().await;
+        // A newer schema is refused by the preflight check, with its own text (D-R-33).
         let error = list_users(&config).await.unwrap_err();
+        assert!(matches!(error, AdminError::Database(_)), "{error}");
         assert_eq!(
             error.to_string(),
-            format!("this binary expects schema {expected}, found {future}")
+            format!(
+                "meta.db has applied migration {future}, which this build does not have; run the newer release, or restore the backup taken before the upgrade"
+            )
         );
+    }
+
+    #[tokio::test]
+    async fn an_older_schema_is_schema_mismatch() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open(&config.data_dir).await.unwrap();
+        let expected = crate::meta::expected_version();
+        let older = expected - 1;
+        set_schema(&db, older).await;
+        db.close().await;
+        let error = list_users(&config).await.unwrap_err();
+        assert!(
+            matches!(error, AdminError::Schema { expected: e, found } if e == expected && found == older),
+            "{error}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("this binary expects schema {expected}, found {older}")
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_and_gc_orphans_refuse_a_newer_meta_db_first() {
+        use sqlx::ConnectOptions as _;
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::test_support::config(dir.path());
+        let running = crate::serve::bind(crate::test_support::config(dir.path()), None)
+            .await
+            .unwrap();
+        running.shutdown().await.unwrap();
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("meta.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        sqlx::Connection::close(connection).await.unwrap();
+        let before = crate::meta::test_digest::dir_digest(dir.path());
+
+        let migrate_error = migrate(&config).await.unwrap_err();
+        assert!(
+            matches!(&migrate_error, AdminError::Database(text) if text.contains("format version 2")),
+            "{migrate_error}"
+        );
+        let gc_error = gc_orphans(&config, Duration::ZERO, true, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&gc_error, AdminError::Database(text) if text.contains("format version 2")),
+            "{gc_error}"
+        );
+        // Neither command opened the catalog: no pre-migration copy, no new WAL segment.
+        assert_eq!(crate::meta::test_digest::dir_digest(dir.path()), before);
     }
 
     #[tokio::test]
