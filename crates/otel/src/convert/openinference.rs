@@ -164,7 +164,7 @@ mod tests {
     use crate::bag::AttrBag;
     use crate::convert::openai_messages;
     use crate::warn::Warnings;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
 
     fn string_attr(key: &str, text: &str) -> KeyValue {
         KeyValue {

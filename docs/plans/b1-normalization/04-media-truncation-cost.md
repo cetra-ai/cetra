@@ -8,7 +8,7 @@ See [README.md](README.md). These run in the pipeline order of spec 02: payloads
 
 **Commit:** `otel: extract media blobs from payloads`
 
-**Uses** C2 (`llmobs_core::media::MediaBlob`), already on `main`.
+**Uses** C2 (`cetra_core::media::MediaBlob`), already on `main`.
 
 `media.rs`:
 
@@ -35,7 +35,7 @@ pub(crate) fn extract_json(v: &mut serde_json::Value, sink: &mut MediaSink); // 
 **Decoding and limits:**
 - Base64 is the standard alphabet, with or without padding. Whitespace is not allowed. Anything else is not a candidate and stays inline.
 - The decoded size must be at least `media_min_bytes`. Anything smaller stays inline.
-- Above `media_max_bytes`: a part becomes `{"type":"uri","uri":"llmobs:dropped","reason":"too_large","size":N}` (core `marker` constant), and a raw string becomes `llmobs:dropped`. No blob is created.
+- Above `media_max_bytes`: a part becomes `{"type":"uri","uri":"cetra:dropped","reason":"too_large","size":N}` (core `marker` constant), and a raw string becomes `cetra:dropped`. No blob is created.
 - Check the size from the base64 length **before** decoding: `len * 3 / 4` minus padding. A 32 MiB+ blob is never decoded.
 
 **MIME type:** the declared type wins when it's present and syntactically `type/subtype`. Otherwise the magic-byte table is used:
@@ -97,10 +97,10 @@ This applies after media extraction (rule 14), with `limit = max_attribute_bytes
 
 `truncated` gets the column name (`input`, `output`, …, `name`, `status_message`, `session_id`, …), the attribute key, `metadata.<key>`, `tags`, `events[<i>].name`, `events[<i>].attributes` or `links[<i>].attributes`. It's sorted and unique.
 
-**Strings** (rule 14): cut at the largest char boundary ≤ `limit`, then append `…[llmobs: truncated, original N bytes]` (core marker prefix + `N bytes]`).
+**Strings** (rule 14): cut at the largest char boundary ≤ `limit`, then append `…[cetra: truncated, original N bytes]` (core marker prefix + `N bytes]`).
 
 **Messages** (spec 02 § Truncation):
-1. Keep every `system` message, the first `user` message, and as many of the last messages as fit, counting from the end. Insert the placeholder message `[llmobs: K messages truncated]` (core marker) where messages were removed. Each candidate is measured by its serialized length.
+1. Keep every `system` message, the first `user` message, and as many of the last messages as fit, counting from the end. Insert the placeholder message `[cetra: K messages truncated]` (core marker) where messages were removed. Each candidate is measured by its serialized length.
 2. If the kept list still exceeds the limit, cut the longest string leaf in the list (text or reasoning `content`, a string tool `arguments`/`response`) with the string rule. Cut it to the length that makes the list fit, or to 1 KiB if that's not enough. Repeat, longest first, until it fits or no leaf is longer than 1 KiB.
 3. If it still doesn't fit, store the serialized messages cut with the string rule as `Text`, change the format to `text`, and record `normalize_error` code `truncate:<field>`.
 
@@ -145,7 +145,7 @@ pub struct PriceRow {
     pub model_name: String,
     pub match_pattern: String,
     pub provider: Option<String>,
-    #[serde(with = "llmobs_core::time_serde")] pub valid_from: i64,
+    #[serde(with = "cetra_core::time_serde")] pub valid_from: i64,
     pub price_input: Option<f64>, pub price_output: Option<f64>,
     pub price_cache_read: Option<f64>, pub price_cache_write: Option<f64>, pub price_reasoning: Option<f64>,
     pub tiers: Option<Vec<PriceTier>>,
@@ -218,7 +218,7 @@ Unit tests:
   - patterns are anchored-safe, with no `^`/`$` inside since we add them;
   - the file is canonical JSON (2-space indent, trailing newline);
   - at least these models match: `gpt-4o`, `gpt-4o-mini`, `claude-sonnet-4-5`, `gemini-2.5-pro`, `text-embedding-3-small`.
-- `refresh` (env-gated, like `fixtures-fmt`). When `LLMOBS_LITELLM_JSON=<path>` is set, it reads LiteLLM's `model_prices_and_context_window.json`, converts it, and writes `crates/otel/prices/builtin.json`. Otherwise it returns immediately. The conversion code lives in the test file, since it isn't shipped.
+- `refresh` (env-gated, like `fixtures-fmt`). When `CETRA_LITELLM_JSON=<path>` is set, it reads LiteLLM's `model_prices_and_context_window.json`, converts it, and writes `crates/otel/prices/builtin.json`. Otherwise it returns immediately. The conversion code lives in the test file, since it isn't shipped.
 
 Conversion rules (also written as a comment at the top of the test):
 - Keep entries whose `mode` is `chat`, `completion`, `responses` or `embedding`, with at least one of `input_cost_per_token` / `output_cost_per_token`.
@@ -235,7 +235,7 @@ Conversion rules (also written as a comment at the top of the test):
 ```
 # Regenerate the built-in price snapshot from a downloaded LiteLLM JSON (D104)
 prices-update litellm_json:
-    LLMOBS_LITELLM_JSON={{litellm_json}} cargo test -p llmobs-otel --test prices -- refresh
+    CETRA_LITELLM_JSON={{litellm_json}} cargo test -p cetra-otel --test prices -- refresh
 ```
 
 The download is manual (the URL goes in the recipe comment); the recipe itself never fetches.

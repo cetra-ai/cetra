@@ -241,7 +241,7 @@ mod fault {
                 };
                 // The hook-crash child of the model test checks for this line in its stderr,
                 // so the abort is known to come from this point (R2.11).
-                if std::env::var_os("LLMOBS_ABORT_MARKER").is_some() {
+                if std::env::var_os("CETRA_ABORT_MARKER").is_some() {
                     eprintln!("aborting at {point:?}");
                 }
                 #[allow(clippy::exit)]

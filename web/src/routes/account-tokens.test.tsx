@@ -13,11 +13,11 @@ const createdBody = (name: string) =>
       token: {
         id: "01900000-0000-7000-8000-000000000202",
         name,
-        prefix: "pat-llmobs-NEWTOK",
+        prefix: "pat-cetra-NEWTOK",
         scopes: ["read"],
         created_at: "2026-01-05T00:00:00.000000000Z",
       },
-      secret: "pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
+      secret: "pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
     },
     { status: 201 },
   );
@@ -27,7 +27,7 @@ it("lists the user's tokens", async () => {
 
   const table = await screen.findByRole("table", { name: "Personal access tokens" });
   const row = within(table).getByRole("row", { name: /CLI/ });
-  expect(within(row).getByText("pat-llmobs-EXAMPL")).toBeInTheDocument();
+  expect(within(row).getByText("pat-cetra-EXAMPL")).toBeInTheDocument();
   expect(within(row).getByText("Read and write")).toBeInTheDocument();
   expect(within(row).getAllByText("Never")).toHaveLength(2);
 });
@@ -52,7 +52,7 @@ it("loads the next page", async () => {
             {
               id: "01900000-0000-7000-8000-000000000210",
               name: "CI",
-              prefix: "pat-llmobs-CI0000",
+              prefix: "pat-cetra-CI0000",
               scopes: ["read"],
               created_at: "2026-01-02T00:00:00.000000000Z",
             },
@@ -101,14 +101,14 @@ it("creates a read-only token and shows the secret once", async () => {
   const dialog = await screen.findByRole("dialog", { name: "Personal access token created" });
   expect(body).toEqual({ name: "Laptop", scopes: ["read"] });
   expect(within(dialog).getByLabelText("Secret")).toHaveValue(
-    "pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
+    "pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
   );
   expect(dialog).toHaveTextContent("Copy it now. You won't see it again.");
   await waitFor(() => expect(listCalls).toBeGreaterThan(callsAfterLoad));
 
   await user.click(within(dialog).getByRole("button", { name: "Done" }));
   expect(screen.queryByRole("dialog", { name: "Personal access token created" })).toBeNull();
-  expect(screen.queryByDisplayValue("pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")).toBeNull();
+  expect(screen.queryByDisplayValue("pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT")).toBeNull();
   await waitFor(() =>
     expect(
       JSON.stringify(
@@ -117,7 +117,7 @@ it("creates a read-only token and shows the secret once", async () => {
           .getAll()
           .map((mutation) => mutation.state.data ?? null),
       ),
-    ).not.toContain("pat-llmobs-NEWTOKEN0"),
+    ).not.toContain("pat-cetra-NEWTOKEN0"),
   );
 });
 
@@ -348,7 +348,7 @@ it("keeps the secret reachable when the dialog is closed while creating", async 
   answer?.(createdBody("Laptop"));
   const dialog = await screen.findByRole("dialog", { name: "Personal access token created" });
   expect(within(dialog).getByLabelText("Secret")).toHaveValue(
-    "pat-llmobs-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
+    "pat-cetra-NEWTOKEN0NEWTOKEN0NEWTOKEN0NEWT",
   );
 });
 

@@ -53,10 +53,10 @@ Re-export both from `lib.rs`. The Wave 2 server serves them at `GET /evaluator-t
 
 **Edit only:** `crates/eval/tests/live.rs`, `justfile`, `AGENTS.md` § Commands.
 
-- `tests/live.rs`: every test is `#[ignore]` with a reason string ("needs provider API keys; run with `just eval-live`"). For each provider whose `LLMOBS_LIVE_<PROVIDER>_API_KEY` is set (`OPENAI`, `ANTHROPIC`, `GEMINI`), and each `structured_output` mode, run the Correctness template (categorical) and the Toxicity template (boolean) on tiny synthetic inputs through `EvalRunner` with `EgressPolicy { allow_private_network: false }`. Assert the outcome is `Ok`, the usage is non-zero, and the judge trace has an `llm` span. A provider without a key prints `skipped: <provider> (no key)` and passes.
-- Models: `LLMOBS_LIVE_<PROVIDER>_MODEL`, defaulting to each provider's current small, cheap model. Look the names up in the providers' model lists when writing this sub-phase and report them.
+- `tests/live.rs`: every test is `#[ignore]` with a reason string ("needs provider API keys; run with `just eval-live`"). For each provider whose `CETRA_LIVE_<PROVIDER>_API_KEY` is set (`OPENAI`, `ANTHROPIC`, `GEMINI`), and each `structured_output` mode, run the Correctness template (categorical) and the Toxicity template (boolean) on tiny synthetic inputs through `EvalRunner` with `EgressPolicy { allow_private_network: false }`. Assert the outcome is `Ok`, the usage is non-zero, and the judge trace has an `llm` span. A provider without a key prints `skipped: <provider> (no key)` and passes.
+- Models: `CETRA_LIVE_<PROVIDER>_MODEL`, defaulting to each provider's current small, cheap model. Look the names up in the providers' model lists when writing this sub-phase and report them.
 - A mode a model rejects is reported, not hidden: the test fails with the `Provider` error and its hint. If a provider's default small model rejects `native`, say so in the report: it may change D157's default for that adapter.
-- `justfile`: `eval-live` → `cargo test -p llmobs-eval --test live -- --ignored --test-threads 1`. It is not part of `check`.
+- `justfile`: `eval-live` → `cargo test -p cetra-eval --test live -- --ignored --test-threads 1`. It is not part of `check`.
 - `AGENTS.md` § Commands: the `just eval-live` row (D167).
 
 **Checks:** `just check` (the live tests are ignored there). Run `just eval-live` only if the user gives you keys; otherwise report that it was not run.

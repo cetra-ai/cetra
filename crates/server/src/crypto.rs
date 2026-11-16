@@ -19,18 +19,18 @@ use crate::auth::secret::{constant_time_eq, random_bytes};
 use crate::meta::instance_settings;
 
 /// The `origin` of a key that came from the environment.
-const ENV_ORIGIN: &str = "LLMOBS_ENCRYPTION_KEY";
+const ENV_ORIGIN: &str = "CETRA_ENCRYPTION_KEY";
 
 /// Label of the key id HMAC (D-I-2).
-const KEY_ID_LABEL: &[u8] = b"llmobs.key-id.v1";
+const KEY_ID_LABEL: &[u8] = b"cetra.key-id.v1";
 
 /// Label of the check value HMAC (D-I-2).
-const CHECK_LABEL: &[u8] = b"llmobs.encryption-check.v1";
+const CHECK_LABEL: &[u8] = b"cetra.encryption-check.v1";
 
 /// Where the key came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeySource {
-    /// `LLMOBS_ENCRYPTION_KEY` or `encryption_key`.
+    /// `CETRA_ENCRYPTION_KEY` or `encryption_key`.
     Env,
     /// `<data_dir>/secret.key`, read.
     File,
@@ -74,7 +74,7 @@ pub enum CryptoError {
     /// The value is not 32 bytes of standard base64.
     #[error("encryption key from {origin} must be 32 bytes in standard base64")]
     BadKey {
-        /// `LLMOBS_ENCRYPTION_KEY`, the key file's path, or the rotation input's name.
+        /// `CETRA_ENCRYPTION_KEY`, the key file's path, or the rotation input's name.
         origin: String,
     },
     /// A file could not be read or written.
@@ -86,10 +86,10 @@ pub enum CryptoError {
         error: std::io::Error,
     },
     /// The key does not match the check value.
-    #[error("the encryption key does not match this data directory (check LLMOBS_ENCRYPTION_KEY or {})", .path.display())]
+    #[error("the encryption key does not match this data directory (check CETRA_ENCRYPTION_KEY or {})", .path.display())]
     Mismatch { path: PathBuf },
     /// `meta.db` has a check value and no key is available.
-    #[error("no encryption key: set LLMOBS_ENCRYPTION_KEY or restore {} from the backup", .path.display())]
+    #[error("no encryption key: set CETRA_ENCRYPTION_KEY or restore {} from the backup", .path.display())]
     Missing { path: PathBuf },
     /// A sealed value was written with another key.
     #[error("a sealed value was written with another key")]
@@ -128,7 +128,7 @@ impl SecretBox {
         }
     }
 
-    /// Lowercase hex HMAC-SHA256(key, "llmobs.encryption-check.v1").
+    /// Lowercase hex HMAC-SHA256(key, "cetra.encryption-check.v1").
     pub(crate) fn check_value(&self) -> &str {
         &self.check
     }
@@ -207,7 +207,7 @@ fn mac(key: &[u8; 32], label: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-/// HMAC-SHA256(key, "llmobs.key-id.v1")[0..4].
+/// HMAC-SHA256(key, "cetra.key-id.v1")[0..4].
 fn key_id_of(key: &[u8; 32]) -> [u8; 4] {
     let tag = mac(key, KEY_ID_LABEL);
     [tag[0], tag[1], tag[2], tag[3]]

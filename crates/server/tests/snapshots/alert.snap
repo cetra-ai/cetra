@@ -2,7 +2,7 @@
 source: crates/server/src/email/mod.rs
 expression: "rendered(&mailer, &Email::Alert\n{\n    state: \"Firing\", rule_name: \"High errors\".to_owned(), project_name:\n    \"Support bot\".to_owned(), value: \"12.5%\".to_owned(), threshold:\n    \"5.0%\".to_owned(), window: \"5m\", rule_url:\n    \"https://example.com/acme/support-bot/alerts/r\".to_owned(), traces_url:\n    \"https://example.com/acme/support-bot/traces?from=a&to=b\".to_owned(),\n},)"
 ---
-Subject: [llmobs] Firing: High errors
+Subject: [cetra] Firing: High errors
 
 Firing: High errors in Support bot
 Value: 12.5% (threshold 5.0%) over 5m

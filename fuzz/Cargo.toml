@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-fuzz"
+name = "cetra-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -14,8 +14,8 @@ cargo-fuzz = true
 [dependencies]
 # Exact pin: `just fuzz-lock` resolves it on top of the root lock, and Dependabot bumps it here.
 libfuzzer-sys = "=0.4.13"
-llmobs-otel = { path = "../crates/otel" }
-llmobs-storage = { path = "../crates/storage" }
+cetra-otel = { path = "../crates/otel" }
+cetra-storage = { path = "../crates/storage" }
 
 [[bin]]
 name = "wal_record"

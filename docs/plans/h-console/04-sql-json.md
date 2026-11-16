@@ -131,7 +131,7 @@ Add `#[tokio::test]` unit tests in `error.rs`'s existing test module (`mod tests
 
 Module doc: `//! SQL console (spec 05 § SQL console, spec 09, D-H-8).`
 
-Imports: `std::time::{Duration, Instant}`, `axum::extract::{DefaultBodyLimit, Extension, State}`, `axum::http::Method`, `axum::routing::post`, `llmobs_core::ids::ProjectId`, `llmobs_core::time_serde::parse_rfc3339`, `llmobs_storage::{SQL_MAX_ROWS, SqlRequest, TimeWindow}`, `serde_json::{Map, Value}`, `crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult}`, `crate::auth::roles::ProjectPerm`, `crate::http::AppState`, `crate::http::access::{Access, ProjectAccess, RouteDef}`, `crate::http::error::{self, ApiError, field_error}`, `crate::routes::read::open_query_windowed`. Write `Instant::now()`, not `std::time::Instant::now()` (lint `unused_qualifications`). Drop any the compiler reports unused.
+Imports: `std::time::{Duration, Instant}`, `axum::extract::{DefaultBodyLimit, Extension, State}`, `axum::http::Method`, `axum::routing::post`, `cetra_core::ids::ProjectId`, `cetra_core::time_serde::parse_rfc3339`, `cetra_storage::{SQL_MAX_ROWS, SqlRequest, TimeWindow}`, `serde_json::{Map, Value}`, `crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult}`, `crate::auth::roles::ProjectPerm`, `crate::http::AppState`, `crate::http::access::{Access, ProjectAccess, RouteDef}`, `crate::http::error::{self, ApiError, field_error}`, `crate::routes::read::open_query_windowed`. Write `Instant::now()`, not `std::time::Instant::now()` (lint `unused_qualifications`). Drop any the compiler reports unused.
 
 ```rust
 /// Request bodies are at most 256 KiB (the statement itself is capped at 64 KiB by A2).
@@ -155,7 +155,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 }
 ```
 
-The default and largest JSON row count is `llmobs_storage::SQL_MAX_ROWS` (10,000, D98); use that constant, not a copy.
+The default and largest JSON row count is `cetra_storage::SQL_MAX_ROWS` (10,000, D98); use that constant, not a copy.
 
 ### Request checks
 
@@ -180,7 +180,7 @@ fn check_request(body: SqlQueryRequest) -> Result<CheckedSql, ApiError>
 | `query.trim().is_empty()` | `query` | `query must not be empty` |
 | `from` given, `to` missing | `to` | `from and to must be given together` |
 | `to` given, `from` missing | `from` | `from and to must be given together` |
-| `from` does not parse with `llmobs_core::time_serde::parse_rfc3339` | `from` | `expected an RFC 3339 timestamp` |
+| `from` does not parse with `cetra_core::time_serde::parse_rfc3339` | `from` | `expected an RFC 3339 timestamp` |
 | same for `to` | `to` | `expected an RFC 3339 timestamp` |
 | `from >= to` (nanoseconds) | `from` | `from must be before to` |
 | `limit` outside 1–10,000 | `limit` | `limit must be between 1 and 10000` |
@@ -251,7 +251,7 @@ async fn run_json(state: &AppState, access: &ProjectAccess, body: SqlQueryReques
 
 1. `let checked = check_request(body)?;`
 2. `let ctx = open_query_windowed(state, access.project.id, checked.window).await?;`
-3. `let json = ctx.sql_json(llmobs_storage::SqlRequest { query: &checked.query, params: &checked.params, limit: checked.limit, timeout: checked.timeout }).await.map_err(ApiError::Sql)?;` If clippy reports `large_futures`, wrap the future in `Box::pin(...)`; add no `#[allow]`.
+3. `let json = ctx.sql_json(cetra_storage::SqlRequest { query: &checked.query, params: &checked.params, limit: checked.limit, timeout: checked.timeout }).await.map_err(ApiError::Sql)?;` If clippy reports `large_futures`, wrap the future in `Box::pin(...)`; add no `#[allow]`.
 4. Return `SqlQueryResult { columns: json.columns.into_iter().map(|column| SqlColumnInfo { name: column.name, data_type: column.data_type }).collect(), rows: json.rows, truncated: json.truncated }`.
 
 ```rust
@@ -355,7 +355,7 @@ The file lives in `static/` (README § Contracts) although it is generated: the 
 
 ### Checks (`tests/api_examples.rs`)
 
-1. Import `llmobs_server::api::sql::{SqlQueryRequest, SqlQueryResult}`.
+1. Import `cetra_server::api::sql::{SqlQueryRequest, SqlQueryResult}`.
 2. `static_files_match_their_types`: add `roundtrip::<SqlQueryResult>("static/sql-result.json");`.
 3. `request_examples_match_their_types_and_the_openapi_document`: add `roundtrip::<SqlQueryRequest>("requests/sql-query.json");` and the pair `("run_sql", "requests/sql-query.json")` to `requests`.
 4. `generated_files_roundtrip`: add the arm `"run_sql" => roundtrip::<SqlQueryResult>(&example.file),`.
@@ -398,13 +398,13 @@ The authorization suite runs `POST …/sql` against every caller by itself; afte
 
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
-cargo test -p llmobs-server routes::sql
-cargo test -p llmobs-server http::error
-cargo test -p llmobs-server --test openapi
+cargo test -p cetra-server routes::sql
+cargo test -p cetra-server http::error
+cargo test -p cetra-server --test openapi
 just openapi
 just api-examples
 git status --short fixtures/api   # new: requests/sql-query.json, static/sql-result.json; changed: manifest.json
-cargo test -p llmobs-server --test api_examples
+cargo test -p cetra-server --test api_examples
 just check
 ```
 

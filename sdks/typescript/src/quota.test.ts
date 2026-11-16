@@ -82,7 +82,7 @@ describe("QuotaState", () => {
       quota.on402("60");
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "llmobs: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T21:01:00Z (retrying at most every hour)",
+        "cetra: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T21:01:00Z (retrying at most every hour)",
       );
     } finally {
       warn.mockRestore();
@@ -98,7 +98,7 @@ describe("QuotaState", () => {
       expect(() => quota.on402("9999999999999999999999")).not.toThrow();
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        "llmobs: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T22:00:00Z (retrying at most every hour)",
+        "cetra: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T22:00:00Z (retrying at most every hour)",
       );
       clock.advance(3_599_999);
       expect(quota.paused()).toBe(true);
@@ -119,7 +119,7 @@ describe("QuotaState", () => {
       quota.on402("120");
       expect(warn).toHaveBeenCalledTimes(2);
       expect(warn).toHaveBeenLastCalledWith(
-        "llmobs: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T21:03:00Z (retrying at most every hour)",
+        "cetra: the organization reached its monthly units cap; telemetry is dropped until 2026-11-14T21:03:00Z (retrying at most every hour)",
       );
     } finally {
       warn.mockRestore();

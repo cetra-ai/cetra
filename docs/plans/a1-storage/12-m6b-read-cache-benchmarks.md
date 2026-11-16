@@ -7,7 +7,7 @@ Second half of milestone M6, **Resources and hardening**. It needs `11-m6a-resou
 Decisions: D-A1-11 (read cache), D-A1-12 (benchmarks). Spec: `docs/spec/03-storage.md` § Layout, §6 S3 read cache, § Capacity sanity check.
 
 The conventions of `11-m6a-resources-hardening.md` § Conventions apply unchanged, with these differences:
-- **Dependencies:** none. `crc32c` is already a dependency of `llmobs-storage`; `object_store`, `futures`, `bytes`, `chrono` too.
+- **Dependencies:** none. `crc32c` is already a dependency of `cetra-storage`; `object_store`, `futures`, `bytes`, `chrono` too.
 - **Allowed edits outside `crates/storage/` and `docs/`:** none. M6.5 adds a field to `QueryConfig`, whose literals all use `QueryConfig::default()`.
 
 **M6 exit criteria** (`00-design.md` § Milestones):
@@ -243,17 +243,17 @@ The benchmarks are `#[ignore]` integration tests, like `crates/storage/tests/tra
 ### Ingest benchmark (`crates/storage/tests/ingest_bench.rs`, new)
 
 ```bash
-LLMOBS_INGEST_BENCH_DIR=/path/to/empty/dir cargo test --release \
-    -p llmobs-storage --test ingest_bench -- --ignored --nocapture
+CETRA_INGEST_BENCH_DIR=/path/to/empty/dir cargo test --release \
+    -p cetra-storage --test ingest_bench -- --ignored --nocapture
 ```
 
 Environment:
-- `LLMOBS_INGEST_BENCH_DIR` (required): a directory it empties first.
-- `LLMOBS_INGEST_BENCH_SECS` (default 60): how long to ingest.
-- `LLMOBS_INGEST_BENCH_WRITERS` (default 8): concurrent appending tasks.
-- `LLMOBS_TEST_S3_ENDPOINT` (+ `LLMOBS_TEST_S3_BUCKET` and the `AWS_*` variables), as `tests/s3.rs` reads them: when set, the object store is `s3://<bucket>/ingest-bench-<uuidv7>`, with the S3 settings exactly as `tests/s3.rs` builds them (copy that code, including `allow_http = endpoint.starts_with("http://")`). At the end, delete the prefix with a copy of `delete_prefix` from `tests/s3.rs`.
+- `CETRA_INGEST_BENCH_DIR` (required): a directory it empties first.
+- `CETRA_INGEST_BENCH_SECS` (default 60): how long to ingest.
+- `CETRA_INGEST_BENCH_WRITERS` (default 8): concurrent appending tasks.
+- `CETRA_TEST_S3_ENDPOINT` (+ `CETRA_TEST_S3_BUCKET` and the `AWS_*` variables), as `tests/s3.rs` reads them: when set, the object store is `s3://<bucket>/ingest-bench-<uuidv7>`, with the S3 settings exactly as `tests/s3.rs` builds them (copy that code, including `allow_http = endpoint.starts_with("http://")`). At the end, delete the prefix with a copy of `delete_prefix` from `tests/s3.rs`.
 
-Data: spans built with `llmobs_core::span::Span` and `llmobs_core::batch::spans_to_record_batch`, as `trace_bench.rs` does. A seeded xorshift (copy `Rng` from `trace_bench.rs`). Batches of 1,000 spans, 10 spans per trace, `ingest_time` and `start_time` = now. Span sizes follow spec 03's mix: 10% "LLM" spans whose input and output are 10 KiB each of ASCII text, 90% spans with 300-byte attributes and no input/output (about 3 KiB average once normalized). Print the measured average `get_array_memory_size()` per span.
+Data: spans built with `cetra_core::span::Span` and `cetra_core::batch::spans_to_record_batch`, as `trace_bench.rs` does. A seeded xorshift (copy `Rng` from `trace_bench.rs`). Batches of 1,000 spans, 10 spans per trace, `ingest_time` and `start_time` = now. Span sizes follow spec 03's mix: 10% "LLM" spans whose input and output are 10 KiB each of ASCII text, 90% spans with 300-byte attributes and no input/output (about 3 KiB average once normalized). Print the measured average `get_array_memory_size()` per span.
 
 Config: defaults, except `min_free_bytes = 0`, `flush.max_bytes = 256MiB`, `memtable.hard_limit = 1GiB`.
 
@@ -266,8 +266,8 @@ Steps and printed results:
 ### Query benchmark on S3 (`crates/storage/tests/trace_bench.rs`)
 
 Add S3 support to the existing harness:
-- When `LLMOBS_TEST_S3_ENDPOINT` is set, the object store is `s3://<bucket>/trace-bench` (fixed prefix, so the generated dataset is reused across runs, like the local directory), with the S3 settings copied from `tests/s3.rs`. The manifest records the endpoint and bucket; a mismatch, or no manifest, regenerates: it first deletes everything under the `trace-bench` prefix (a copy of `delete_prefix` from `tests/s3.rs`) and empties the local directory.
-- `LLMOBS_TRACE_BENCH_CACHE` = `cold` (default with S3), `warm` or `off`:
+- When `CETRA_TEST_S3_ENDPOINT` is set, the object store is `s3://<bucket>/trace-bench` (fixed prefix, so the generated dataset is reused across runs, like the local directory), with the S3 settings copied from `tests/s3.rs`. The manifest records the endpoint and bucket; a mismatch, or no manifest, regenerates: it first deletes everything under the `trace-bench` prefix (a copy of `delete_prefix` from `tests/s3.rs`) and empties the local directory.
+- `CETRA_TRACE_BENCH_CACHE` = `cold` (default with S3), `warm` or `off`:
   - `cold`: delete `<dir>/cache` before opening; the first run of each query is the cold sample (S3 and empty cache), the 20 later runs are warm;
   - `warm`: keep `<dir>/cache`; first run the whole query set once untimed, then measure;
   - `off`: `query.read_cache_bytes = 0`: every run reads S3.
@@ -279,13 +279,13 @@ Add S3 support to the existing harness:
 Record, for each run: the command, the machine, the dataset size, and the tables printed. Runs:
 1. ingest, local disk;
 2. ingest, S3 (Versity Gateway, below);
-3. trace_bench, local disk (`LLMOBS_TRACE_BENCH_TRACES=1000000`, or the default 5,000,000 if the machine generates it within an hour);
+3. trace_bench, local disk (`CETRA_TRACE_BENCH_TRACES=1000000`, or the default 5,000,000 if the machine generates it within an hour);
 4. trace_bench, S3, `cold`;
 5. trace_bench, S3, `warm`;
 6. trace_bench, S3, `off`.
 
 Then a section **"Against the capacity check"** comparing with spec 03 § Capacity sanity check, number by number: ingest at 50k spans/s of ~3 KiB, the flush cadence at 256 MiB, compressed output of 20–30 MiB/s. State each as measured / not reached / not measured. Don't tune the engine in this sub-phase: report what was measured.
 
-**S3 server.** The user starts it; the implementing agent does not run docker. Before runs 2, 4, 5 and 6, stop and ask the user to start Versity Gateway with the command in `crates/storage/tests/s3.rs` (with a larger `--tmpfs` size: `size=20g`, or a directory volume) and to give the `LLMOBS_TEST_S3_*` and `AWS_*` values. Do the local runs first.
+**S3 server.** The user starts it; the implementing agent does not run docker. Before runs 2, 4, 5 and 6, stop and ask the user to start Versity Gateway with the command in `crates/storage/tests/s3.rs` (with a larger `--tmpfs` size: `size=20g`, or a directory volume) and to give the `CETRA_TEST_S3_*` and `AWS_*` values. Do the local runs first.
 
 A cold-cache number against a local S3 server understates real S3 latency: say so in the results.

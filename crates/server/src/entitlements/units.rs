@@ -1,7 +1,7 @@
 //! The monthly units cap (D-P-17, D-P-37).
 
+use cetra_core::ids::OrgId;
 use chrono::NaiveTime;
-use llmobs_core::ids::OrgId;
 
 use crate::api::entitlements::UsageNotice;
 use crate::http::AppState;

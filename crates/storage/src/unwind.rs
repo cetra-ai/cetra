@@ -321,9 +321,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    use cetra_core::schema::{scores, spans};
     use datafusion::physical_plan::displayable;
     use futures::stream::BoxStream;
-    use llmobs_core::schema::{scores, spans};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{

@@ -221,7 +221,7 @@ pub struct OrgMonthUsage {
     /// Units so far this month, flushed or not.
     pub units: u64,
     /// 00:00 UTC on the 1st of the next month.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub resets_at: i64,
     pub notice: UsageNotice,

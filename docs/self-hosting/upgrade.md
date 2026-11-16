@@ -1,6 +1,6 @@
 # Upgrade
 
-llmobs follows [Semantic Versioning](https://semver.org/). Before 1.0, a minor release (0.x → 0.y)
+cetra follows [Semantic Versioning](https://semver.org/). Before 1.0, a minor release (0.x → 0.y)
 may need action; the release notes ([CHANGELOG.md](../../CHANGELOG.md), and each GitHub release)
 start with `### Upgrade notes` when it does.
 
@@ -32,24 +32,24 @@ What happens on upgrade:
 Procedure:
 
 1. Read the release notes of every version between yours and the new one.
-2. Take a backup: `llmobs admin backup` ([backup.md](backup.md)).
+2. Take a backup: `cetra admin backup` ([backup.md](backup.md)).
 3. Replace the binary, image or chart version (below) and start it.
 4. Check `/readyz` and the UI.
 
 ## Binary
 
 ```bash
-sudo systemctl stop llmobs
-curl -fsSL https://github.com/sebastiencs/llmobs/releases/latest/download/install.sh | LLMOBS_INSTALL_DIR=/usr/local/bin sudo -E sh
-sudo systemctl start llmobs
+sudo systemctl stop cetra
+curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | CETRA_INSTALL_DIR=/usr/local/bin sudo -E sh
+sudo systemctl start cetra
 ```
 
 ## docker-compose
 
-Set the new version in `.env` (`LLMOBS_IMAGE=ghcr.io/sebastiencs/llmobs:<version>`), then:
+Set the new version in `.env` (`CETRA_IMAGE=ghcr.io/cetra-ai/cetra:<version>`), then:
 
 ```bash
-docker compose pull llmobs
+docker compose pull cetra
 docker compose up -d
 ```
 
@@ -58,7 +58,7 @@ Also replace the compose files with those of the new release when its notes say 
 ## Kubernetes
 
 ```bash
-helm upgrade llmobs oci://ghcr.io/sebastiencs/charts/llmobs --version <version> -n llmobs --reuse-values
+helm upgrade cetra oci://ghcr.io/cetra-ai/charts/cetra --version <version> -n cetra --reuse-values
 ```
 
 The StatefulSet replaces its one pod: the old pod stops (up to 60 s) before the new one starts on

@@ -62,9 +62,9 @@ it("shows the provider, the callback URL, the domains and the switches to an own
   expect(within(table).getByText("Verified")).toBeInTheDocument();
   expect(within(table).getByText("acme.io")).toBeInTheDocument();
   expect(within(table).getByText("Pending")).toBeInTheDocument();
-  expect(within(table).getByText("_llmobs-verify.acme.io")).toBeInTheDocument();
+  expect(within(table).getByText("_cetra-verify.acme.io")).toBeInTheDocument();
   expect(
-    within(table).getByText("llmobs-verify=fedcba9876543210fedcba9876543210"),
+    within(table).getByText("cetra-verify=fedcba9876543210fedcba9876543210"),
   ).toBeInTheDocument();
 
   expect(screen.getByRole("switch", { name: "Enabled" })).toBeChecked();

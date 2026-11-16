@@ -9,7 +9,7 @@ use super::{
     DURATION_MS, DURATION_NS, TimeWindow, duration_ms, duration_ns_from_bounds, map_plan, view_plan,
 };
 use crate::query_error::RunError;
-use llmobs_core::schema::{traces, traces_schema};
+use cetra_core::schema::{traces, traces_schema};
 
 pub(crate) fn traces_view(
     raw: Arc<dyn TableProvider>,

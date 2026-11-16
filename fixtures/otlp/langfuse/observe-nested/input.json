@@ -48,15 +48,15 @@
           },
           "spans": [
             {
-              "traceId": "85446f9941e1bb6472c9dad0324f60af",
-              "spanId": "a48745a3c7fba400",
+              "traceId": "a3e304731c70a93c28f2fc7d83a3b206",
+              "spanId": "d6d25f19c66b211e",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "answer-weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590055000000",
+              "endTimeUnixNano": "1767225590052000000",
               "attributes": [
                 {
                   "key": "langfuse.internal.is_app_root",
@@ -91,15 +91,15 @@
               "status": null
             },
             {
-              "traceId": "85446f9941e1bb6472c9dad0324f60af",
-              "spanId": "cda5732d19463795",
+              "traceId": "a3e304731c70a93c28f2fc7d83a3b206",
+              "spanId": "678d411d83da939e",
               "traceState": "",
-              "parentSpanId": "a48745a3c7fba400",
+              "parentSpanId": "d6d25f19c66b211e",
               "flags": 256,
               "name": "lookup_weather",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590054000000",
+              "endTimeUnixNano": "1767225590052000000",
               "attributes": [
                 {
                   "key": "langfuse.observation.input",
@@ -128,15 +128,15 @@
               "status": null
             },
             {
-              "traceId": "85446f9941e1bb6472c9dad0324f60af",
-              "spanId": "061fb3d5302c8495",
+              "traceId": "a3e304731c70a93c28f2fc7d83a3b206",
+              "spanId": "3a0b250ce3fcf3b9",
               "traceState": "",
-              "parentSpanId": "cda5732d19463795",
+              "parentSpanId": "678d411d83da939e",
               "flags": 256,
               "name": "OpenAI-generation",
               "kind": 1,
-              "startTimeUnixNano": "1767225590015000000",
-              "endTimeUnixNano": "1767225590054000000",
+              "startTimeUnixNano": "1767225590013000000",
+              "endTimeUnixNano": "1767225590052000000",
               "attributes": [
                 {
                   "key": "langfuse.observation.input",

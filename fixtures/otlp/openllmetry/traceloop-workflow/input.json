@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "2d70096e9aac5acdec01e9229ccb8623",
-              "spanId": "a94fbcaab03c901f",
+              "traceId": "23cb4c89885e5eb6e7eb37cb10d1faab",
+              "spanId": "db2901e3c8b36290",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "weather_report.workflow",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590063000000",
+              "endTimeUnixNano": "1767225590060000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -108,15 +108,15 @@
               "status": null
             },
             {
-              "traceId": "2d70096e9aac5acdec01e9229ccb8623",
-              "spanId": "5cb49bfec44dfdd2",
+              "traceId": "23cb4c89885e5eb6e7eb37cb10d1faab",
+              "spanId": "012b0bba7b635cc5",
               "traceState": "",
-              "parentSpanId": "a94fbcaab03c901f",
+              "parentSpanId": "db2901e3c8b36290",
               "flags": 256,
               "name": "lookup_weather.task",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590063000000",
+              "endTimeUnixNano": "1767225590059000000",
               "attributes": [
                 {
                   "key": "traceloop.workflow.name",
@@ -186,15 +186,15 @@
           },
           "spans": [
             {
-              "traceId": "2d70096e9aac5acdec01e9229ccb8623",
-              "spanId": "1d7adc34bb087a2f",
+              "traceId": "23cb4c89885e5eb6e7eb37cb10d1faab",
+              "spanId": "f4885c8ded723dec",
               "traceState": "",
-              "parentSpanId": "5cb49bfec44dfdd2",
+              "parentSpanId": "012b0bba7b635cc5",
               "flags": 256,
               "name": "openai.chat",
               "kind": 3,
-              "startTimeUnixNano": "1767225590021000000",
-              "endTimeUnixNano": "1767225590061000000",
+              "startTimeUnixNano": "1767225590018000000",
+              "endTimeUnixNano": "1767225590058000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

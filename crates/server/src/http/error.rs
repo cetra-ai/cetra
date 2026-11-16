@@ -19,8 +19,8 @@ use serde::de::DeserializeOwned;
 
 use crate::api::common::{FieldError, Problem, ProblemCode, TextPosition};
 use crate::meta::MetaError;
-use llmobs_storage::RunError;
-use llmobs_storage::error::QueryError;
+use cetra_storage::RunError;
+use cetra_storage::error::QueryError;
 
 const PROBLEM_JSON: HeaderValue = HeaderValue::from_static("application/problem+json");
 
@@ -545,8 +545,8 @@ impl StdError for UnsupportedPathType {}
 mod tests {
     use axum::http::StatusCode;
     use axum::http::header::RETRY_AFTER;
+    use cetra_storage::{InvalidQuery, Position};
     use datafusion::error::DataFusionError;
-    use llmobs_storage::{InvalidQuery, Position};
 
     use super::*;
 

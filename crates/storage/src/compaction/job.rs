@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arrow::array::RecordBatch;
-use llmobs_core::schema::{scores_schema, spans_schema};
+use cetra_core::schema::{scores_schema, spans_schema};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -686,10 +686,10 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
 
     use arrow::array::{AsArray, RecordBatch};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::ids::ProjectId;
     use chrono::{Datelike, NaiveDate};
     use datafusion::execution::context::{SessionConfig, SessionContext};
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::ids::ProjectId;
     use uuid::Uuid;
 
     use crate::Storage;
@@ -903,11 +903,11 @@ pub(crate) mod tests {
                 .collect();
             let combined = arrow::compute::concat_batches(&schema, &batches).unwrap();
             let ids = combined
-                .column_by_name(llmobs_core::schema::scores::SCORE_ID)
+                .column_by_name(cetra_core::schema::scores::SCORE_ID)
                 .unwrap()
                 .as_string::<i32>();
             let deleted = combined
-                .column_by_name(llmobs_core::schema::scores::DELETED)
+                .column_by_name(cetra_core::schema::scores::DELETED)
                 .unwrap()
                 .as_boolean();
             for row in 0..combined.num_rows() {

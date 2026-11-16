@@ -1,5 +1,5 @@
 [package]
-name = "llmobs-token"
+name = "cetra-token"
 description = "Signed licence, org and control-plane tokens (D-P-5, D-P-26)"
 version.workspace = true
 edition.workspace = true

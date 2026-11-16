@@ -438,29 +438,29 @@ async fn test_connection(
         .connections
         .get(&state.secrets, &row)
         .map_err(internal)?;
-    let evaluator = llmobs_eval::Evaluator {
+    let evaluator = cetra_eval::Evaluator {
         id: row.id,
         name: "connection test".to_owned(),
-        config: llmobs_eval::EvaluatorConfig::LlmJudge(llmobs_eval::JudgeConfig {
+        config: cetra_eval::EvaluatorConfig::LlmJudge(cetra_eval::JudgeConfig {
             connection_id: row.id,
             model: model.clone(),
             prompt: TEST_PROMPT.to_owned(),
-            output: llmobs_eval::JudgeOutput::Boolean,
+            output: cetra_eval::JudgeOutput::Boolean,
             include_reason: false,
             temperature: None,
             // Reasoning models spend tokens before answering; 1024 can truncate a working call.
             max_output_tokens: 4096,
             timeout_ms: 30_000,
         }),
-        output: llmobs_eval::OutputScore {
+        output: cetra_eval::OutputScore {
             name: "connection_test".to_owned(),
-            data_type: llmobs_core::enums::ScoreDataType::Boolean,
+            data_type: cetra_core::enums::ScoreDataType::Boolean,
             categories: None,
         },
     };
-    let ingest = llmobs_otel::IngestContext {
+    let ingest = cetra_otel::IngestContext {
         // A connection belongs to no project, and the judge trace is discarded.
-        project_id: llmobs_core::ids::ProjectId::from_uuid(Uuid::nil()),
+        project_id: cetra_core::ids::ProjectId::from_uuid(Uuid::nil()),
         ingest_time: state.clock.now_ns(),
         retention_days: None,
         limits: state.config.ingest.limits(&state.config.media),
@@ -468,20 +468,20 @@ async fn test_connection(
     let prices = state.ingest.prices().for_org(access.org.id);
     let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
     let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
-    let judge_trace_id = llmobs_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only
+    let judge_trace_id = cetra_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only
     let started = std::time::Instant::now();
     let run = state
         .eval_runner
-        .run(llmobs_eval::RunInput {
+        .run(cetra_eval::RunInput {
             evaluator: &evaluator,
-            variables: &llmobs_eval::Variables::from_map(BTreeMap::new()),
+            variables: &cetra_eval::Variables::from_map(BTreeMap::new()),
             connection: Some(connection.as_ref()),
             webhook_secret: None,
-            target: llmobs_eval::EvalTarget {
+            target: cetra_eval::EvalTarget {
                 trace_id: None,
                 span_id: None,
             },
-            origin: llmobs_eval::EvalOrigin::Test,
+            origin: cetra_eval::EvalOrigin::Test,
             judge_trace_id,
             ingest: &ingest,
             prices: &prices,
@@ -497,13 +497,13 @@ async fn test_connection(
     // A pause-class failure says the key, quota or model access was refused.
     let mut pause_class = false;
     if let Err(error) = run.outcome {
-        pause_class = error.class() == llmobs_eval::ErrorClass::Pause;
+        pause_class = error.class() == cetra_eval::ErrorClass::Pause;
         result.ok = false;
         result.error = Some(LlmConnectionTestError {
             class: match error.class() {
-                llmobs_eval::ErrorClass::Retryable => TestErrorClass::Retryable,
-                llmobs_eval::ErrorClass::Pause => TestErrorClass::Pause,
-                llmobs_eval::ErrorClass::Permanent => TestErrorClass::Permanent,
+                cetra_eval::ErrorClass::Retryable => TestErrorClass::Retryable,
+                cetra_eval::ErrorClass::Pause => TestErrorClass::Pause,
+                cetra_eval::ErrorClass::Permanent => TestErrorClass::Permanent,
             },
             // The display quotes no payload (D160).
             message: error.to_string(),
@@ -911,7 +911,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::{HeaderMap, Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use serde_json::{Value, json};
     use uuid::Uuid;
 

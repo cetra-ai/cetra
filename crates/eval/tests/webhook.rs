@@ -10,9 +10,9 @@ use crate::mapping::resolve::Variables;
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
 use crate::webhook::{WebhookCall, WebhookReply, exchange};
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::score::ScoreValue;
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::score::ScoreValue;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -117,7 +117,7 @@ async fn signs_the_exact_body_and_sends_the_headers() {
         webhook_url(&mock),
         vec![
             ("X-Extra", "keep"),
-            ("x-llmobs-signature", "forged"),
+            ("x-cetra-signature", "forged"),
             ("Content-Type", "text/plain"),
         ],
     );
@@ -162,7 +162,7 @@ async fn signs_the_exact_body_and_sends_the_headers() {
     );
     assert_eq!(seen[0].header("content-type"), Some("application/json"));
     assert_eq!(seen[0].header("x-extra"), Some("keep"));
-    assert_eq!(seen[0].header("x-llmobs-signature"), Some(SIGNATURE));
+    assert_eq!(seen[0].header("x-cetra-signature"), Some(SIGNATURE));
     assert_clean(&format!("{:?}", seen[0].headers));
 }
 

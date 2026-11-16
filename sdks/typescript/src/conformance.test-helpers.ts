@@ -3,7 +3,7 @@
  * § Conformance, rules 1-7). Both SDK suites and the Rust golden test agree
  * on this form: what the SDK exported goes through `JsonTraceSerializer`,
  * then the rewrites below, and the result is compared with
- * `fixtures/otlp/llmobs/sdk-<case>/input.json` as parsed JSON.
+ * `fixtures/otlp/cetra/sdk-<case>/input.json` as parsed JSON.
  *
  * Not part of the build (no entry imports this file); type-checked by
  * tsconfig.test.json only.
@@ -13,7 +13,7 @@ import { JsonTraceSerializer } from "@opentelemetry/otlp-transformer";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace";
 import { expect } from "vitest";
 
-import type { LlmobsOptions } from "./config.js";
+import type { CetraOptions } from "./config.js";
 import { withContext } from "./context.js";
 import { withLlmSpan } from "./llm.js";
 import { observe, withSpan } from "./span.js";
@@ -87,7 +87,7 @@ function canonicalDocument(document: unknown): JsonObject {
     resourceSpans: [
       {
         resource: { attributes: canonicalResourceAttributes(document) },
-        scopeSpans: [{ scope: { name: "llmobs", version: "0.0.0" }, spans: canonicalSpans }],
+        scopeSpans: [{ scope: { name: "cetra", version: "0.0.0" }, spans: canonicalSpans }],
       },
     ],
   };
@@ -266,7 +266,7 @@ export interface Scenario {
   /** The fixture directory name, `sdk-…`. */
   readonly name: string;
   /** This scenario's `init` options, on top of the shared defaults. */
-  readonly options?: Partial<LlmobsOptions>;
+  readonly options?: Partial<CetraOptions>;
   readonly run: () => unknown;
 }
 

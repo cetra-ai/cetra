@@ -1,7 +1,7 @@
 """Execute the README's tested code blocks (plan F § P12).
 
 Every ```python block preceded by a `<!-- test -->` line runs through the
-`memory` pipeline: `llmobs.init` installs the in-memory runtime with the test
+`memory` pipeline: `cetra.init` installs the in-memory runtime with the test
 API key and the score queue pointed at the `http_recorder` fixture, so the
 documented examples (score included) never reach the network. Everything
 except `init` is the real SDK, so the examples keep working as the code moves.
@@ -17,8 +17,8 @@ from typing import Protocol
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-import llmobs
-from llmobs._runtime import Runtime
+import cetra
+from cetra._runtime import Runtime
 
 README = Path(__file__).resolve().parents[1] / "README.md"
 MARKER = "<!-- test -->"
@@ -55,10 +55,10 @@ class Recorder(Protocol):
 
 
 class _ReadmeSdk(ModuleType):
-    """The real ``llmobs`` module with ``init`` bound to the test pipeline."""
+    """The real ``cetra`` module with ``init`` bound to the test pipeline."""
 
     def __init__(self, real: ModuleType, start: Callable[..., Runtime], url: str) -> None:
-        super().__init__("llmobs")
+        super().__init__("cetra")
         # ``init`` is skipped: the override below must not be shadowed by a
         # setattr on the instance.
         for name in real.__all__:
@@ -72,7 +72,7 @@ class _ReadmeSdk(ModuleType):
         """Install the in-memory runtime, replacing the example's endpoints."""
         options.pop("api_key", None)
         options.pop("base_url", None)
-        self._start(api_key="sk-llmobs-test", base_url=self._url, **options)
+        self._start(api_key="sk-cetra-test", base_url=self._url, **options)
 
 
 @pytest.mark.parametrize(("slug", "code"), BLOCKS, ids=[slug for slug, _ in BLOCKS])
@@ -84,11 +84,11 @@ def test_readme_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     exporter, start = memory
-    sdk = _ReadmeSdk(llmobs, start, http_recorder.url)
-    monkeypatch.setitem(sys.modules, "llmobs", sdk)
+    sdk = _ReadmeSdk(cetra, start, http_recorder.url)
+    monkeypatch.setitem(sys.modules, "cetra", sdk)
     exec(  # noqa: S102  # executing the documented example is the test
         compile(code, f"README.md [{slug}]", "exec"),
-        {"llmobs": sdk, "__name__": f"readme_{slug.replace('-', '_')}"},
+        {"cetra": sdk, "__name__": f"readme_{slug.replace('-', '_')}"},
     )
     assert exporter.get_finished_spans(), "the example exported no spans"
     if slug == "scores":

@@ -188,7 +188,7 @@ it("shows the from address and lists", async () => {
   server.use(
     withSettings({
       smtp_enabled: true,
-      email_from: "llmobs <noreply@example.com>",
+      email_from: "cetra <noreply@example.com>",
       signup: "open",
       signup_domains: ["example.com"],
       enforce_sso_domains: ["corp.example.com"],
@@ -201,7 +201,7 @@ it("shows the from address and lists", async () => {
   await screen.findByRole("heading", { name: "Settings", level: 2 });
 
   expect(settingValue("Email (SMTP)")).toHaveTextContent("Configured");
-  expect(settingValue("From address")).toHaveTextContent("llmobs <noreply@example.com>");
+  expect(settingValue("From address")).toHaveTextContent("cetra <noreply@example.com>");
   expect(settingValue("Sign-up")).toHaveTextContent("Open to anyone");
   expect(settingValue("Sign-up domains")).toHaveTextContent("example.com");
   expect(settingValue("Single sign-on required for")).toHaveTextContent("corp.example.com");
@@ -216,7 +216,7 @@ it("disables the test email without SMTP", async () => {
   const button = screen.getByRole("button", { name: "Send test email" });
   expect(button).toBeDisabled();
   expect(button.parentElement).toHaveAccessibleDescription(
-    "Email is not configured. Set LLMOBS_SMTP_URL and restart the server.",
+    "Email is not configured. Set CETRA_SMTP_URL and restart the server.",
   );
 });
 

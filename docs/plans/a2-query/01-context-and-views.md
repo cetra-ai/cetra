@@ -22,7 +22,7 @@ Append D91–D101 from the README's decision table, in the log's style: `| D91 |
 
 Keep the existing structure. Change or add the following.
 
-**Intro.** After the sentence about D89, add: "`QueryContext::new` (in `llmobs-storage`) builds the DataFusion session from the `ProjectQuery` that `Storage::query` returns (D91): the raw providers, the per-query runtime (memory pool, spill directory) and `target_partitions`."
+**Intro.** After the sentence about D89, add: "`QueryContext::new` (in `cetra-storage`) builds the DataFusion session from the `ProjectQuery` that `Storage::query` returns (D91): the raw providers, the per-query runtime (memory pool, spill directory) and `target_partitions`."
 
 **§ Logical views.** Add a column-rules paragraph under the table:
 - Each view exposes the stored columns of its table in spec 01 order, without `project_id`. `traces` also drops `last_ingest_time` and `partial_count`.
@@ -43,7 +43,7 @@ Keep the existing structure. Change or add the following.
 - Joins between two views on an ID compare the hex strings: correct, but not pruned.
 
 **§ Default exclusions.**
-- "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `llmobs-eval` exclusion is not added; the experiment exclusion still is.
+- "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `cetra-eval` exclusion is not added; the experiment exclusion still is.
 - The exclusions apply to the view the request reads:
   - `traces` and `spans` directly;
   - session and user lists through the traces they aggregate;
@@ -100,7 +100,7 @@ Messages go to the caller and are never logged.
 - KPIs cover `[from, to)` and the previous range of the same length; every KPI value is absent when its range has no traces.
 - `top_models`: `llm` spans with a non-null model, at most 10, by `cost_total` descending (nulls last), then model ascending.
 
-**§ Trace and span APIs.** Add a line: these queries are `llmobs_storage::reads` (D92). List the sort tie-breakers:
+**§ Trace and span APIs.** Add a line: these queries are `cetra_storage::reads` (D92). List the sort tie-breakers:
 - traces: `trace_id`;
 - spans: `(span_id, trace_id)`;
 - sessions: `session_id`;
@@ -228,7 +228,7 @@ No table functions, no higher-order functions, no file formats, no table factori
 
 The raw names are never registered, so SQL cannot name them.
 
-Projection rules (spec 05 as updated by Q1; names from `llmobs_core::schema::{spans, traces, scores}`):
+Projection rules (spec 05 as updated by Q1; names from `cetra_core::schema::{spans, traces, scores}`):
 
 | View | Columns |
 |---|---|
@@ -252,7 +252,7 @@ The names come from `ViewName::as_str()` (`"spans"`, `"traces"`, `"sessions"`, `
 ### Test support (`test_support.rs`, `#[cfg(test)]`)
 
 - `pub(crate) fn dataset_spans() -> Vec<Span>` and `dataset_scores() -> Vec<Score>`: read `fixtures/api/dataset/{spans,scores}.json` (path from `env!("CARGO_MANIFEST_DIR")`).
-- `pub(crate) fn spans_table(spans: &[Span]) -> Arc<MemTable>`: `llmobs_core::batch::spans_to_record_batch`.
+- `pub(crate) fn spans_table(spans: &[Span]) -> Arc<MemTable>`: `cetra_core::batch::spans_to_record_batch`.
 - `pub(crate) fn live_scores_table(scores: &[Score]) -> Arc<MemTable>`. What A1's `ScoresProvider` returns:
   - last writer wins per `score_id` by `(updated_at, ingest_time)`;
   - deleted scores dropped;

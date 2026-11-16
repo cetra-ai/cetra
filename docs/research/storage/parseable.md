@@ -1,4 +1,4 @@
-# Parseable storage layer — research notes for llmobs spec 03
+# Parseable storage layer — research notes for cetra spec 03
 
 Repo: `/home/sebastien/travaux/parseable`, HEAD `503fa56` (v3.2.1), last commit **2026-09-18**. Same dependency family as ours: DataFusion 55, arrow/parquet 59.2, object_store 0.13.2 (`Cargo.toml` lines 12-30). All paths below are relative to `src/`.
 
@@ -99,7 +99,7 @@ Unit tests only (54 files with tests): truncated-tail IPC recovery (`staging/rea
 | `5ce9d2b` deprecate caching → hot tier | 2024-12 | Two caches replaced by one size-budgeted tier | One cache with a byte budget; eviction by age. |
 | `e8323ad`, `d9204c2`, `f240dde` schema conflicts | 2025–2026 | Dynamic per-attribute columns hit type conflicts (renamed `x_utf8`, `x_bool`) and a 250→1000 column cap | Don't promote arbitrary attributes to columns. |
 
-## 13. Recommendations for llmobs (mapped to spec 03)
+## 13. Recommendations for cetra (mapped to spec 03)
 
 **§1 WAL — keep our design; Parseable shows the cost of skipping it.** No CRC, no fsync, whole-file deletion on corruption, and data invisible during conversion are all things our WAL + CRC + group-commit + `flushed_seq` design avoids. Adopt: the *truncated-tail detection by declared length vs file length* (`staging/reader.rs:483-538`) is the same idea as our "short read at the tail = torn write" rule — keep a unit test for "complete records before a torn tail are recovered". Adopt: replay oldest-first and bounded.
 

@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "91336fdef7025d73d851baddf3d91576",
-      "span_id": "51044139040821e0",
+      "trace_id": "0d1e99ca0b37b22d920fc709e9d6c9f6",
+      "span_id": "f6ec364ab8ea4474",
       "name": "ai.generateText",
       "span_kind": "chain",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.064000000Z",
+      "end_time": "2025-12-31T23:59:50.065000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {
@@ -55,13 +55,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "91336fdef7025d73d851baddf3d91576",
-      "span_id": "bbe925d3c8ab742b",
-      "parent_span_id": "51044139040821e0",
+      "trace_id": "0d1e99ca0b37b22d920fc709e9d6c9f6",
+      "span_id": "ca72a64f5aa244c0",
+      "parent_span_id": "f6ec364ab8ea4474",
       "name": "ai.generateText.doGenerate",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.002000000Z",
-      "end_time": "2025-12-31T23:59:50.059000000Z",
+      "end_time": "2025-12-31T23:59:50.060000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {
@@ -95,7 +95,7 @@
         "ai.response.id": "msg_capture_1",
         "ai.response.model": "claude-sonnet-4-5",
         "ai.response.providerMetadata": "{\"anthropic\":{\"usage\":{\"input_tokens\":100,\"output_tokens\":40,\"cache_creation_input_tokens\":200,\"cache_read_input_tokens\":1800},\"cacheCreationInputTokens\":200,\"stopSequence\":null,\"iterations\":null,\"container\":null,\"contextManagement\":null}}",
-        "ai.response.timestamp": "2025-12-31T23:59:50.058Z",
+        "ai.response.timestamp": "2025-12-31T23:59:50.060Z",
         "ai.settings.maxRetries": "0",
         "ai.telemetry.functionId": "v6-anthropic-cache",
         "ai.usage.cachedInputTokens": "1800",

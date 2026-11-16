@@ -16,11 +16,11 @@ use std::time::Duration;
 use arrow::array::{Array, FixedSizeBinaryArray};
 use bytes::Bytes;
 use bytesize::ByteSize;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
 use datafusion::execution::context::{SessionConfig, SessionContext};
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
 use sha2::{Digest, Sha256};
 
 use crate::catalog::FileTable;
@@ -284,11 +284,11 @@ fn objects_match_catalog(storage: &crate::Storage, dir: &Path) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_flush_hook_aborts_safely"]
 async fn child() {
-    let Ok(dir) = std::env::var("LLMOBS_FLUSH_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_FLUSH_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let name = std::env::var("LLMOBS_FLUSH_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_FLUSH_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
     let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
@@ -302,26 +302,26 @@ async fn child() {
     panic!("shutdown finished without reaching {name}");
 }
 
-/// Lossy seeds per crash point: `LLMOBS_LOSSY_SEEDS`, default 1 (R2.10).
+/// Lossy seeds per crash point: `CETRA_LOSSY_SEEDS`, default 1 (R2.10).
 pub(crate) fn seeds() -> u64 {
-    std::env::var("LLMOBS_LOSSY_SEEDS")
+    std::env::var("CETRA_LOSSY_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())
         .filter(|count| *count > 0)
         .unwrap_or(1)
 }
 
-/// With `LLMOBS_LOSSY_SHADOW` and `LLMOBS_LOSSY_SEED` set: registers `dir` in
+/// With `CETRA_LOSSY_SHADOW` and `CETRA_LOSSY_SEED` set: registers `dir` in
 /// lossy mode and arms the crash before the hook abort (R2.2, R2.10). The
-/// registration lives until the abort. Once `LLMOBS_LOSSY_SHADOW` is set, the
+/// registration lives until the abort. Once `CETRA_LOSSY_SHADOW` is set, the
 /// seed must be too: a child that lost it would abort without its crash.
 fn lossy_from_env(dir: &Path) -> Option<crate::fs::lossy::Lossy> {
-    let shadow = std::env::var_os("LLMOBS_LOSSY_SHADOW")?;
-    let seed = std::env::var("LLMOBS_LOSSY_SEED")
-        .expect("LLMOBS_LOSSY_SEED is set whenever LLMOBS_LOSSY_SHADOW is");
+    let shadow = std::env::var_os("CETRA_LOSSY_SHADOW")?;
+    let seed = std::env::var("CETRA_LOSSY_SEED")
+        .expect("CETRA_LOSSY_SEED is set whenever CETRA_LOSSY_SHADOW is");
     let seed: u64 = seed
         .parse()
-        .expect("LLMOBS_LOSSY_SEED is a u64, set by run_lossy_child");
+        .expect("CETRA_LOSSY_SEED is a u64, set by run_lossy_child");
     let lossy = crate::fs::lossy::Lossy::enable(dir, Path::new(&shadow));
     lossy.crash_on_abort(seed);
     Some(lossy)
@@ -345,8 +345,8 @@ fn run_lossy_child(
         name,
         dir,
         &[
-            ("LLMOBS_LOSSY_SHADOW", shadow.as_os_str()),
-            ("LLMOBS_LOSSY_SEED", OsStr::new(&seed)),
+            ("CETRA_LOSSY_SHADOW", shadow.as_os_str()),
+            ("CETRA_LOSSY_SEED", OsStr::new(&seed)),
         ],
     );
 }
@@ -428,8 +428,8 @@ async fn every_flush_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::child",
-            "LLMOBS_FLUSH_CRASH_DIR",
-            "LLMOBS_FLUSH_CRASH_POINT",
+            "CETRA_FLUSH_CRASH_DIR",
+            "CETRA_FLUSH_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -470,11 +470,11 @@ fn crash_at(hour: i64, minute: i64) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_compaction_hook_aborts_safely"]
 async fn compaction_child() {
-    let Ok(dir) = std::env::var("LLMOBS_COMPACTION_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_COMPACTION_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let name = std::env::var("LLMOBS_COMPACTION_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_COMPACTION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
 
@@ -518,8 +518,8 @@ async fn every_compaction_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::compaction_child",
-            "LLMOBS_COMPACTION_CRASH_DIR",
-            "LLMOBS_COMPACTION_CRASH_POINT",
+            "CETRA_COMPACTION_CRASH_DIR",
+            "CETRA_COMPACTION_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -580,11 +580,11 @@ async fn check_compaction(dir: &Path, name: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_deletion_hook_aborts_safely"]
 async fn deletion_child() {
-    let Ok(dir) = std::env::var("LLMOBS_DELETION_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_DELETION_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let name = std::env::var("LLMOBS_DELETION_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_DELETION_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
 
@@ -625,8 +625,8 @@ async fn every_deletion_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::deletion_child",
-            "LLMOBS_DELETION_CRASH_DIR",
-            "LLMOBS_DELETION_CRASH_POINT",
+            "CETRA_DELETION_CRASH_DIR",
+            "CETRA_DELETION_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -720,11 +720,11 @@ async fn deletion_applied(storage: &crate::Storage, name: &str) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_media_hook_aborts_safely"]
 async fn media_child() {
-    let Ok(dir) = std::env::var("LLMOBS_MEDIA_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_MEDIA_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let name = std::env::var("LLMOBS_MEDIA_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_MEDIA_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
     let storage = crate::Storage::open(quiet_config(Path::new(&dir)))
@@ -744,8 +744,8 @@ async fn every_media_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::media_child",
-            "LLMOBS_MEDIA_CRASH_DIR",
-            "LLMOBS_MEDIA_CRASH_POINT",
+            "CETRA_MEDIA_CRASH_DIR",
+            "CETRA_MEDIA_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -802,11 +802,11 @@ async fn check_media(dir: &Path, name: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_drop_hook_aborts_safely"]
 async fn drop_child() {
-    let Ok(dir) = std::env::var("LLMOBS_DROP_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_DROP_CRASH_DIR") else {
         return;
     };
     crate::test_support::no_core_dumps();
-    let name = std::env::var("LLMOBS_DROP_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_DROP_CRASH_POINT").unwrap();
     let point = parse_point(&name).unwrap_or_else(|| panic!("unknown crash point {name}"));
     let _lossy = lossy_from_env(Path::new(&dir));
 
@@ -845,8 +845,8 @@ async fn every_drop_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::drop_child",
-            "LLMOBS_DROP_CRASH_DIR",
-            "LLMOBS_DROP_CRASH_POINT",
+            "CETRA_DROP_CRASH_DIR",
+            "CETRA_DROP_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -911,7 +911,7 @@ async fn check_drop(dir: &Path, name: &str) {
 
 /// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
 /// crashes its directory with a seeded lossy crash before it aborts (R2.10):
-/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+/// `CETRA_LOSSY_SEEDS` seeds per point, default 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns processes; `just test` runs it in its own test process"]
 async fn every_flush_hook_survives_a_lossy_crash() {
@@ -924,8 +924,8 @@ async fn every_flush_hook_survives_a_lossy_crash() {
             let shadow = t.path().join("shadow");
             run_lossy_child(
                 "crash_tests::child",
-                "LLMOBS_FLUSH_CRASH_DIR",
-                "LLMOBS_FLUSH_CRASH_POINT",
+                "CETRA_FLUSH_CRASH_DIR",
+                "CETRA_FLUSH_CRASH_POINT",
                 name,
                 &dir,
                 &shadow,
@@ -938,7 +938,7 @@ async fn every_flush_hook_survives_a_lossy_crash() {
 
 /// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
 /// crashes its directory with a seeded lossy crash before it aborts (R2.10):
-/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+/// `CETRA_LOSSY_SEEDS` seeds per point, default 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns processes; `just test` runs it in its own test process"]
 async fn every_compaction_hook_survives_a_lossy_crash() {
@@ -951,8 +951,8 @@ async fn every_compaction_hook_survives_a_lossy_crash() {
             let shadow = t.path().join("shadow");
             run_lossy_child(
                 "crash_tests::compaction_child",
-                "LLMOBS_COMPACTION_CRASH_DIR",
-                "LLMOBS_COMPACTION_CRASH_POINT",
+                "CETRA_COMPACTION_CRASH_DIR",
+                "CETRA_COMPACTION_CRASH_POINT",
                 name,
                 &dir,
                 &shadow,
@@ -965,7 +965,7 @@ async fn every_compaction_hook_survives_a_lossy_crash() {
 
 /// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
 /// crashes its directory with a seeded lossy crash before it aborts (R2.10):
-/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+/// `CETRA_LOSSY_SEEDS` seeds per point, default 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns processes; `just test` runs it in its own test process"]
 async fn every_deletion_hook_survives_a_lossy_crash() {
@@ -978,8 +978,8 @@ async fn every_deletion_hook_survives_a_lossy_crash() {
             let shadow = t.path().join("shadow");
             run_lossy_child(
                 "crash_tests::deletion_child",
-                "LLMOBS_DELETION_CRASH_DIR",
-                "LLMOBS_DELETION_CRASH_POINT",
+                "CETRA_DELETION_CRASH_DIR",
+                "CETRA_DELETION_CRASH_POINT",
                 name,
                 &dir,
                 &shadow,
@@ -992,7 +992,7 @@ async fn every_deletion_hook_survives_a_lossy_crash() {
 
 /// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
 /// crashes its directory with a seeded lossy crash before it aborts (R2.10):
-/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+/// `CETRA_LOSSY_SEEDS` seeds per point, default 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns processes; `just test` runs it in its own test process"]
 async fn every_media_hook_survives_a_lossy_crash() {
@@ -1005,8 +1005,8 @@ async fn every_media_hook_survives_a_lossy_crash() {
             let shadow = t.path().join("shadow");
             run_lossy_child(
                 "crash_tests::media_child",
-                "LLMOBS_MEDIA_CRASH_DIR",
-                "LLMOBS_MEDIA_CRASH_POINT",
+                "CETRA_MEDIA_CRASH_DIR",
+                "CETRA_MEDIA_CRASH_POINT",
                 name,
                 &dir,
                 &shadow,
@@ -1019,7 +1019,7 @@ async fn every_media_hook_survives_a_lossy_crash() {
 
 /// Run alone by `just test`, like [`every_flush_hook_aborts_safely`]. The child
 /// crashes its directory with a seeded lossy crash before it aborts (R2.10):
-/// `LLMOBS_LOSSY_SEEDS` seeds per point, default 1.
+/// `CETRA_LOSSY_SEEDS` seeds per point, default 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "spawns processes; `just test` runs it in its own test process"]
 async fn every_drop_hook_survives_a_lossy_crash() {
@@ -1034,8 +1034,8 @@ async fn every_drop_hook_survives_a_lossy_crash() {
             let shadow = t.path().join("shadow");
             run_lossy_child(
                 "crash_tests::drop_child",
-                "LLMOBS_DROP_CRASH_DIR",
-                "LLMOBS_DROP_CRASH_POINT",
+                "CETRA_DROP_CRASH_DIR",
+                "CETRA_DROP_CRASH_POINT",
                 name,
                 &dir,
                 &shadow,
@@ -1048,16 +1048,16 @@ async fn every_drop_hook_survives_a_lossy_crash() {
 
 /// Run alone by `just lazyfs` (R2.12), never by `just test`. Every child of the five groups
 /// runs on a LazyFS mount, and after each child exits LazyFS drops its unsynced writes, so the
-/// checks see what a power loss on the real binary leaves. Needs `LLMOBS_LAZYFS_DIR` (a
-/// directory on the mount), `LLMOBS_LAZYFS_FIFO` and `LLMOBS_LAZYFS_DONE`; without them it
+/// checks see what a power loss on the real binary leaves. Needs `CETRA_LAZYFS_DIR` (a
+/// directory on the mount), `CETRA_LAZYFS_FIFO` and `CETRA_LAZYFS_DONE`; without them it
 /// returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a LazyFS mount: `just lazyfs`"]
 async fn every_hook_survives_lazyfs() {
     let (Some(root), Some(fifo), Some(done)) = (
-        std::env::var_os("LLMOBS_LAZYFS_DIR"),
-        std::env::var_os("LLMOBS_LAZYFS_FIFO"),
-        std::env::var_os("LLMOBS_LAZYFS_DONE"),
+        std::env::var_os("CETRA_LAZYFS_DIR"),
+        std::env::var_os("CETRA_LAZYFS_FIFO"),
+        std::env::var_os("CETRA_LAZYFS_DONE"),
     ) else {
         return;
     };
@@ -1066,8 +1066,8 @@ async fn every_hook_survives_lazyfs() {
         let dir = tempfile::tempdir_in(&root).unwrap();
         run_child(
             "crash_tests::child",
-            "LLMOBS_FLUSH_CRASH_DIR",
-            "LLMOBS_FLUSH_CRASH_POINT",
+            "CETRA_FLUSH_CRASH_DIR",
+            "CETRA_FLUSH_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1079,8 +1079,8 @@ async fn every_hook_survives_lazyfs() {
         let dir = tempfile::tempdir_in(&root).unwrap();
         run_child(
             "crash_tests::compaction_child",
-            "LLMOBS_COMPACTION_CRASH_DIR",
-            "LLMOBS_COMPACTION_CRASH_POINT",
+            "CETRA_COMPACTION_CRASH_DIR",
+            "CETRA_COMPACTION_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1092,8 +1092,8 @@ async fn every_hook_survives_lazyfs() {
         let dir = tempfile::tempdir_in(&root).unwrap();
         run_child(
             "crash_tests::deletion_child",
-            "LLMOBS_DELETION_CRASH_DIR",
-            "LLMOBS_DELETION_CRASH_POINT",
+            "CETRA_DELETION_CRASH_DIR",
+            "CETRA_DELETION_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1105,8 +1105,8 @@ async fn every_hook_survives_lazyfs() {
         let dir = tempfile::tempdir_in(&root).unwrap();
         run_child(
             "crash_tests::media_child",
-            "LLMOBS_MEDIA_CRASH_DIR",
-            "LLMOBS_MEDIA_CRASH_POINT",
+            "CETRA_MEDIA_CRASH_DIR",
+            "CETRA_MEDIA_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1118,8 +1118,8 @@ async fn every_hook_survives_lazyfs() {
         let dir = tempfile::tempdir_in(&root).unwrap();
         run_child(
             "crash_tests::drop_child",
-            "LLMOBS_DROP_CRASH_DIR",
-            "LLMOBS_DROP_CRASH_POINT",
+            "CETRA_DROP_CRASH_DIR",
+            "CETRA_DROP_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1449,10 +1449,10 @@ fn old_day_rows(index: u8) -> arrow::array::RecordBatch {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by every_retention_hook_aborts_safely"]
 async fn retention_child() {
-    let Ok(dir) = std::env::var("LLMOBS_RETENTION_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_RETENTION_CRASH_DIR") else {
         return;
     };
-    let name = std::env::var("LLMOBS_RETENTION_CRASH_POINT").unwrap();
+    let name = std::env::var("CETRA_RETENTION_CRASH_POINT").unwrap();
     let point = if name == AFTER_RETENTION {
         None
     } else {
@@ -1521,8 +1521,8 @@ async fn every_retention_hook_aborts_safely() {
         let dir = tempfile::tempdir().unwrap();
         run_child(
             "crash_tests::retention_child",
-            "LLMOBS_RETENTION_CRASH_DIR",
-            "LLMOBS_RETENTION_CRASH_POINT",
+            "CETRA_RETENTION_CRASH_DIR",
+            "CETRA_RETENTION_CRASH_POINT",
             name,
             dir.path(),
             &[],
@@ -1654,7 +1654,7 @@ async fn a_compaction_syncs_each_output_before_the_catalog_commit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "run by a_rotation_crash_reopens_with_the_acknowledged_rows"]
 async fn rotation_child() {
-    let Ok(dir) = std::env::var("LLMOBS_ROTATE_CRASH_DIR") else {
+    let Ok(dir) = std::env::var("CETRA_ROTATE_CRASH_DIR") else {
         return;
     };
     let mut config = quiet_config(Path::new(&dir));
@@ -1679,8 +1679,8 @@ async fn a_rotation_crash_reopens_with_the_acknowledged_rows() {
     let dir = tempfile::tempdir().unwrap();
     run_child(
         "crash_tests::rotation_child",
-        "LLMOBS_ROTATE_CRASH_DIR",
-        "LLMOBS_ROTATE_CRASH_POINT",
+        "CETRA_ROTATE_CRASH_DIR",
+        "CETRA_ROTATE_CRASH_POINT",
         "FlushAfterRotate",
         dir.path(),
         &[],

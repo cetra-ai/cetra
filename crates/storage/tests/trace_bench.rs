@@ -4,21 +4,21 @@
 //! engine and A2's reads. Run by hand on the same server as S1b:
 //!
 //! ```bash
-//! LLMOBS_TRACE_BENCH_DIR=/path/to/data cargo test --release \
-//!   -p llmobs-storage --test trace_bench -- --ignored --nocapture
+//! CETRA_TRACE_BENCH_DIR=/path/to/data cargo test --release \
+//!   -p cetra-storage --test trace_bench -- --ignored --nocapture
 //! ```
 //!
-//! `LLMOBS_TRACE_BENCH_DIR` is generated once (if it holds no `catalog.db` with
-//! a format marker) and reused afterwards. `LLMOBS_TRACE_BENCH_TRACES` overrides the trace
+//! `CETRA_TRACE_BENCH_DIR` is generated once (if it holds no `catalog.db` with
+//! a format marker) and reused afterwards. `CETRA_TRACE_BENCH_TRACES` overrides the trace
 //! count (default 5,000,000). The data directory is never committed.
 //!
-//! With `LLMOBS_TEST_S3_ENDPOINT` (and `LLMOBS_TEST_S3_BUCKET`, `AWS_*`) the
+//! With `CETRA_TEST_S3_ENDPOINT` (and `CETRA_TEST_S3_BUCKET`, `AWS_*`) the
 //! data files go to `s3://<bucket>/trace-bench` and the catalog stays in the
-//! directory. `LLMOBS_TRACE_BENCH_CACHE` is `cold` (default), `warm` or `off`:
+//! directory. `CETRA_TRACE_BENCH_CACHE` is `cold` (default), `warm` or `off`:
 //! `cold` empties `<dir>/cache` before the open, `warm` runs the whole query
 //! set once untimed first, `off` sets `query.read_cache_bytes = 0`.
 //! Spans carry the realistic payloads of `common::payload` (track R M7). The
-//! corpus comes from `just fetch-corpus`. `LLMOBS_TRACE_BENCH_MAX_BYTES` (for
+//! corpus comes from `just fetch-corpus`. `CETRA_TRACE_BENCH_MAX_BYTES` (for
 //! example `384MiB`) replaces the first attempt's 128 MiB flush size, which a
 //! trace of tens of KiB of Arrow needs larger.
 
@@ -38,6 +38,19 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
 use bytesize::ByteSize;
+use cetra_core::batch::spans_to_record_batch;
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
+use cetra_storage::config::{
+    AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
+    WalSync,
+};
+use cetra_storage::{
+    Bucket, BucketWidth, ListScope, MetricsRequest, Page, ProjectQuery, QueryContext, QueryOptions,
+    SortOrder, TimeWindow, TraceListRequest, TraceSort, metrics, trace_detail, trace_list,
+    trace_list_plan,
+};
 use chrono::{TimeZone, Utc};
 use common::corpus::{CORPUS_SHA256, Corpus};
 use common::machine::{dir_bytes, machine};
@@ -45,19 +58,6 @@ use common::payload::{Payloads, span_payload_bytes};
 use common::rng::{Rng, mix};
 use common::s3::S3Env;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use llmobs_core::batch::spans_to_record_batch;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
-use llmobs_storage::config::{
-    AnchorConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,
-    WalSync,
-};
-use llmobs_storage::{
-    Bucket, BucketWidth, ListScope, MetricsRequest, Page, ProjectQuery, QueryContext, QueryOptions,
-    SortOrder, TimeWindow, TraceListRequest, TraceSort, metrics, trace_detail, trace_list,
-    trace_list_plan,
-};
 
 // ---------------------------------------------------------------- constants
 
@@ -122,7 +122,7 @@ const MODELS: [&str; 6] = [
     "llama-3-70b",
     "mistral-large",
 ];
-const ENVIRONMENTS: [&str; 3] = ["production", "staging", "llmobs-eval"];
+const ENVIRONMENTS: [&str; 3] = ["production", "staging", "cetra-eval"];
 
 fn trace_id(index: usize) -> TraceId {
     let mut bytes = [0_u8; 16];
@@ -577,7 +577,7 @@ fn payload_tag() -> String {
 }
 
 /// Where the dataset lives: the local directory, and an S3 prefix when
-/// `LLMOBS_TEST_S3_ENDPOINT` is set (D119).
+/// `CETRA_TEST_S3_ENDPOINT` is set (D119).
 struct Backend {
     dir: PathBuf,
     s3: Option<S3Env>,
@@ -602,11 +602,11 @@ enum CacheMode {
 
 impl CacheMode {
     fn from_env() -> Self {
-        match std::env::var("LLMOBS_TRACE_BENCH_CACHE").as_deref() {
+        match std::env::var("CETRA_TRACE_BENCH_CACHE").as_deref() {
             Ok("warm") => Self::Warm,
             Ok("off") => Self::Off,
             Ok("cold") | Err(_) => Self::Cold,
-            Ok(other) => panic!("LLMOBS_TRACE_BENCH_CACHE must be cold, warm or off, not {other}"),
+            Ok(other) => panic!("CETRA_TRACE_BENCH_CACHE must be cold, warm or off, not {other}"),
         }
     }
 
@@ -685,10 +685,10 @@ async fn catalog_marker(dir: &Path) -> i64 {
 // The bench reports on stdout like the rest of the file.
 #[allow(clippy::print_stdout)]
 async fn generate_dataset(backend: &Backend, traces: usize) -> Manifest {
-    let max_bytes = match std::env::var("LLMOBS_TRACE_BENCH_MAX_BYTES") {
+    let max_bytes = match std::env::var("CETRA_TRACE_BENCH_MAX_BYTES") {
         Ok(value) => value
             .parse::<ByteSize>()
-            .expect("LLMOBS_TRACE_BENCH_MAX_BYTES is a size such as 384MiB"),
+            .expect("CETRA_TRACE_BENCH_MAX_BYTES is a size such as 384MiB"),
         Err(_) => ByteSize::mib(128),
     };
     let (count, _, generated) = generate(backend, traces, max_bytes).await;
@@ -740,11 +740,11 @@ fn q4_sample(plans: &[TracePlan]) -> Vec<(String, i64)> {
 
 /// Appends a generated batch, waiting out `Backpressure` (the memtable is full
 /// until a flush makes room). Other errors fail the run.
-async fn append_retry(storage: &llmobs_storage::Storage, batch: RecordBatch) {
+async fn append_retry(storage: &cetra_storage::Storage, batch: RecordBatch) {
     loop {
         match storage.append_spans(project(), batch.clone()).await {
             Ok(_) => return,
-            Err(llmobs_storage::error::AppendError::Backpressure) => {
+            Err(cetra_storage::error::AppendError::Backpressure) => {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Err(error) => panic!("append failed: {error}"),
@@ -759,7 +759,7 @@ struct Written {
     payload_bytes: u64,
 }
 
-async fn append_batch(storage: &llmobs_storage::Storage, batch: &[Span], written: &mut Written) {
+async fn append_batch(storage: &cetra_storage::Storage, batch: &[Span], written: &mut Written) {
     let rb = spans_to_record_batch(batch).unwrap();
     written.arrow_bytes += rb.get_array_memory_size() as u64;
     append_retry(storage, rb).await;
@@ -768,7 +768,7 @@ async fn append_batch(storage: &llmobs_storage::Storage, batch: &[Span], written
 /// Builds the spans of `groups` in order and appends them in batches of about
 /// `BATCH_SPANS` spans.
 async fn append_groups(
-    storage: &llmobs_storage::Storage,
+    storage: &cetra_storage::Storage,
     plans: &[TracePlan],
     payloads: &Payloads,
     groups: &[Pending],
@@ -854,7 +854,7 @@ async fn generate(
 
     let mut written = Written::default();
     let files = {
-        let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
+        let storage = cetra_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
         let early: Vec<Pending> = pending
@@ -867,7 +867,7 @@ async fn generate(
         drop(storage);
         let files = dataset_files(backend).await.0;
 
-        let storage = llmobs_storage::Storage::open(config(backend, max_bytes, None))
+        let storage = cetra_storage::Storage::open(config(backend, max_bytes, None))
             .await
             .unwrap();
         let late: Vec<Pending> = pending
@@ -1087,7 +1087,7 @@ async fn plan_info(
 /// excludes eval rows, so keep that environment clause in the analysed plan.
 fn list_sql(filter: Option<&str>, window: Option<TimeWindow>) -> String {
     let mut sql =
-        String::from("SELECT * FROM traces WHERE environment IS DISTINCT FROM 'llmobs-eval'");
+        String::from("SELECT * FROM traces WHERE environment IS DISTINCT FROM 'cetra-eval'");
     if let Some(w) = window {
         sql.push_str(&format!(
             " AND start_time >= TIMESTAMP '{}' AND start_time < TIMESTAMP '{}'",
@@ -1129,14 +1129,14 @@ const Q5_SQL: &str = "SELECT date_bin(INTERVAL '1 hour', start_time, TIMESTAMP '
 // ---------------------------------------------------------------- main
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "run by hand on the S1b server with LLMOBS_TRACE_BENCH_DIR set"]
+#[ignore = "run by hand on the S1b server with CETRA_TRACE_BENCH_DIR set"]
 async fn trace_benchmark() {
-    let traces: usize = std::env::var("LLMOBS_TRACE_BENCH_TRACES")
+    let traces: usize = std::env::var("CETRA_TRACE_BENCH_TRACES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_TRACES);
     let tmp = tempfile::tempdir().unwrap();
-    let dir: PathBuf = std::env::var("LLMOBS_TRACE_BENCH_DIR")
+    let dir: PathBuf = std::env::var("CETRA_TRACE_BENCH_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| tmp.path().to_path_buf());
     let backend = Backend::from_env(dir);
@@ -1155,7 +1155,7 @@ async fn trace_benchmark() {
     let passes = if cache == Some(CacheMode::Warm) { 2 } else { 1 };
 
     // Open for queries: the WAL tail replays into the memtable.
-    let storage = llmobs_storage::Storage::open(config(&backend, max_bytes, read_cache))
+    let storage = cetra_storage::Storage::open(config(&backend, max_bytes, read_cache))
         .await
         .unwrap();
     let ctx = QueryContext::new(

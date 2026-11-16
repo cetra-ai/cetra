@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use axum::http::{Method, StatusCode};
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::Score;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::Score;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -922,11 +922,11 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 }
 
 fn examples_write_requested() -> bool {
-    match std::env::var("LLMOBS_API_EXAMPLES_WRITE") {
+    match std::env::var("CETRA_API_EXAMPLES_WRITE") {
         Err(std::env::VarError::NotPresent) => false,
         Ok(value) if value == "1" => true,
         Ok(value) if value.is_empty() => false,
-        Ok(_) | Err(_) => panic!("set LLMOBS_API_EXAMPLES_WRITE=1 to write, or unset it"),
+        Ok(_) | Err(_) => panic!("set CETRA_API_EXAMPLES_WRITE=1 to write, or unset it"),
     }
 }
 

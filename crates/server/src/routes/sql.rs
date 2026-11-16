@@ -11,11 +11,11 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use bytes::Bytes;
+use cetra_core::ids::ProjectId;
+use cetra_core::time_serde::parse_rfc3339;
+use cetra_storage::{ExportFormat, RunError, SQL_MAX_ROWS, SqlRequest, TimeWindow};
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use llmobs_core::ids::ProjectId;
-use llmobs_core::time_serde::parse_rfc3339;
-use llmobs_storage::{ExportFormat, RunError, SQL_MAX_ROWS, SqlRequest, TimeWindow};
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 
@@ -1818,8 +1818,8 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let now = app.state.clock.now_ns();
-        let old: llmobs_core::ids::TraceId = "a5000000000000000000000000000001".parse().unwrap();
-        let new: llmobs_core::ids::TraceId = "a5000000000000000000000000000002".parse().unwrap();
+        let old: cetra_core::ids::TraceId = "a5000000000000000000000000000001".parse().unwrap();
+        let new: cetra_core::ids::TraceId = "a5000000000000000000000000000002".parse().unwrap();
         app.commit_trace_at(&seeded.project, old, 1, now - 40 * DAY)
             .await;
         app.commit_trace_at(&seeded.project, new, 2, now - DAY)

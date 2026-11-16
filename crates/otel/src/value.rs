@@ -5,7 +5,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use llmobs_core::names::marker::MAX_DEPTH as DEPTH_MARKER;
+use cetra_core::names::marker::MAX_DEPTH as DEPTH_MARKER;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValueList};
 use serde_json::{Map, Number, Value as Json};

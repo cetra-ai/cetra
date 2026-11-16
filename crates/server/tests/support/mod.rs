@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use llmobs_core::span::Span;
+use cetra_core::span::Span;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

@@ -8,6 +8,8 @@
 use std::sync::{Arc, PoisonError};
 
 use arrow::datatypes::SchemaRef;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores_schema, spans_schema};
 use chrono::NaiveDate;
 use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::execution::TaskContext;
@@ -17,8 +19,6 @@ use datafusion::physical_plan::execute_stream;
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 use futures::StreamExt;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{scores_schema, spans_schema};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -531,9 +531,9 @@ mod tests {
 
     use arrow::array::{Array, AsArray, RecordBatch};
     use arrow::datatypes::Int64Type;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::schema::traces;
-    use llmobs_core::score::ScoreTarget;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::schema::traces;
+    use cetra_core::score::ScoreTarget;
     use uuid::Uuid;
 
     use crate::QueryOptions;
@@ -647,7 +647,7 @@ mod tests {
     }
 
     fn spans_trace_ids(dir: &Path, file: &FileMeta) -> Vec<[u8; 16]> {
-        object_trace_ids(dir, file, llmobs_core::schema::spans::TRACE_ID)
+        object_trace_ids(dir, file, cetra_core::schema::spans::TRACE_ID)
     }
 
     fn traces_trace_ids(dir: &Path, file: &FileMeta) -> Vec<[u8; 16]> {

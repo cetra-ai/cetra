@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use llmobs_storage::error::{AppendError, MediaError};
+use cetra_storage::error::{AppendError, MediaError};
 use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::{
     LogsService, LogsServiceServer,
 };
@@ -115,7 +115,7 @@ impl LogsService for GrpcLogs {
         let message = request.into_inner();
         let size = message.encoded_len();
         self.state.ingest.fit(&mut reservation, size)?;
-        let genai = llmobs_otel::count_genai_log_records(&message);
+        let genai = cetra_otel::count_genai_log_records(&message);
         self.state.usage.add_log_events(
             project.org_id,
             project.id,
@@ -514,9 +514,9 @@ fn elapsed_ms(started: Instant) -> u64 {
 mod tests {
     use crate::test_support::raw_query;
     use bytes::Bytes;
+    use cetra_otel::decode_json;
     use datafusion::prelude::SessionContext;
     use http_body_util::{BodyExt, Full};
-    use llmobs_otel::decode_json;
     use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceService;
     use tonic::Code;
     use tower::ServiceExt;
@@ -586,7 +586,7 @@ mod tests {
     }
 
     /// Spans in the project, read through the storage query provider.
-    async fn stored_spans(app: &TestApp, project: llmobs_core::ids::ProjectId) -> usize {
+    async fn stored_spans(app: &TestApp, project: cetra_core::ids::ProjectId) -> usize {
         let query = raw_query(&app.state.storage, project).await;
         let ctx = SessionContext::new();
         ctx.register_table("raw_spans", query.spans)
@@ -753,9 +753,9 @@ mod tests {
             .await
             .expect("metrics render");
         let expected = [
-            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
-            format!("llmobs_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
-            format!("llmobs_ingest_bytes_total{{protocol=\"otlp_grpc\"}} {bytes}"),
+            "cetra_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"ok\"} 1".to_owned(),
+            format!("cetra_ingest_spans_total{{protocol=\"otlp_grpc\"}} {spans}"),
+            format!("cetra_ingest_bytes_total{{protocol=\"otlp_grpc\"}} {bytes}"),
         ];
         for line in expected {
             assert!(
@@ -777,8 +777,7 @@ mod tests {
             .render(&app.state)
             .await
             .expect("metrics render");
-        let line =
-            "llmobs_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
+        let line = "cetra_ingest_requests_total{protocol=\"otlp_grpc\",outcome=\"unauthorized\"} 1";
         assert!(text.lines().any(|candidate| candidate == line), "{text}");
     }
 
@@ -831,7 +830,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn logs_are_dropped_and_genai_records_counted() {
-        use llmobs_otel::decode_logs_json;
+        use cetra_otel::decode_logs_json;
         let app = TestApp::new().await;
         let seeded: Seeded = app.seed().await;
         let message = decode_logs_json(

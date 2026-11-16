@@ -8,7 +8,7 @@ Code reviewed:
 
 Method: five read-only review passes, one per group of sub-phases (Q1–5, Q6–9, Q10–13, Q14–17, Q18–20). Every finding kept here was checked again against the code. Findings marked **probed** were reproduced with a throwaway test that was not committed (code below in § Probes).
 
-`cargo test -p llmobs-storage --lib` on the A2 modules (`views:: filter:: sql:: reads:: query_text query_error`): 132 passed, 0 failed.
+`cargo test -p cetra-storage --lib` on the A2 modules (`views:: filter:: sql:: reads:: query_text query_error`): 132 passed, 0 failed.
 
 ## Summary
 
@@ -19,7 +19,7 @@ The weak point is **resource safety of the SQL console**, the one surface where 
 - **D95 does not hold.** Chains of operators that the token pre-check does not count abort the whole process with a stack overflow, in release builds, under the 64 KiB limit.
 - **The D91 memory cap is bypassable.** Scalar functions such as `range` and `repeat` allocate outside the DataFusion memory pool. One query took the process to 1.6 GB of RSS under a 64 MiB pool.
 
-Since llmobs is a single binary, both let one authenticated user take the server down. Fix them before G exposes `/sql`.
+Since cetra is a single binary, both let one authenticated user take the server down. Fix them before G exposes `/sql`.
 
 Counts: **2 blocker, 4 major, 22 minor** confirmed; 5 discarded. The blockers, the majors and m-9 are fixed by [`plans/a2-fixes/`](../plans/a2-fixes/) (#48).
 
@@ -191,7 +191,7 @@ What the code shows:
 
 ## Probes
 
-The throwaway test module used for the probed findings, run with `cargo test -p llmobs-storage --lib [--release] -- --nocapture --exact review_probe::<name>`. It was not committed.
+The throwaway test module used for the probed findings, run with `cargo test -p cetra-storage --lib [--release] -- --nocapture --exact review_probe::<name>`. It was not committed.
 
 ```rust
 fn ctx_with_pool(bytes: usize) -> QueryContext {

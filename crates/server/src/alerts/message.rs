@@ -4,9 +4,9 @@ use serde::Serialize;
 use url::form_urlencoded::Serializer;
 use uuid::Uuid;
 
-use llmobs_core::ids::ProjectId;
-use llmobs_core::names::PRODUCT;
-use llmobs_core::time_serde;
+use cetra_core::ids::ProjectId;
+use cetra_core::names::PRODUCT;
+use cetra_core::time_serde;
 
 use crate::api::alerts::{AlertMetric, AlertWindow, Comparator};
 use crate::config::PublicUrl;

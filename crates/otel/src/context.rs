@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::enums::Convention;
-use llmobs_core::names::{attr, metadata_key};
+use cetra_core::enums::Convention;
+use cetra_core::names::{attr, metadata_key};
 use serde_json::Value as Json;
 
 use crate::bag::{AttrBag, Use};
@@ -47,7 +47,7 @@ const ADK_FRAMEWORK: &str = "gcp.vertex.agent";
 const OPERATION: &[Source] = &[span("gen_ai.operation.name", Convention::Genai)];
 
 const SESSION_ID: &[Source] = &[
-    span(attr::SESSION_ID, Convention::Llmobs),
+    span(attr::SESSION_ID, Convention::Cetra),
     span("session.id", Convention::Openinference),
     span("gen_ai.conversation.id", Convention::Genai),
     span(
@@ -65,7 +65,7 @@ const SESSION_ID: &[Source] = &[
 ];
 
 const USER_ID: &[Source] = &[
-    span(attr::USER_ID, Convention::Llmobs),
+    span(attr::USER_ID, Convention::Cetra),
     span("user.id", Convention::Openinference),
     span("enduser.id", Convention::Openinference),
     span(
@@ -79,7 +79,7 @@ const USER_ID: &[Source] = &[
 ];
 
 const TAGS: &[Source] = &[
-    span(attr::TAGS, Convention::Llmobs),
+    span(attr::TAGS, Convention::Cetra),
     span("tag.tags", Convention::Openinference),
     span("ai.telemetry.metadata.tags", Convention::Vercel),
     span("langfuse.trace.tags", Convention::Langfuse),
@@ -87,14 +87,14 @@ const TAGS: &[Source] = &[
 ];
 
 const ENVIRONMENT: &[Source] = &[
-    span(attr::ENVIRONMENT, Convention::Llmobs),
+    span(attr::ENVIRONMENT, Convention::Cetra),
     resource("deployment.environment.name", Convention::Openinference),
     resource("deployment.environment", Convention::Openinference),
     span("langfuse.environment", Convention::Langfuse),
 ];
 
 const RELEASE: &[Source] = &[
-    span(attr::RELEASE, Convention::Llmobs),
+    span(attr::RELEASE, Convention::Cetra),
     resource("service.version", Convention::Openinference),
     span("langfuse.release", Convention::Langfuse),
     span("lmnr.span.release", Convention::Laminar),
@@ -830,8 +830,8 @@ mod tests {
             string_attr("ai.telemetry.metadata.sessionId", "session"),
             string_attr("ai.telemetry.metadata.plan", "pro"),
             string_attr(attr::SESSION_ID, "ours"),
-            string_attr("llmobs.metadata.feature", "search"),
-            int_attr("llmobs.metadata.n", 2),
+            string_attr("cetra.metadata.feature", "search"),
+            int_attr("cetra.metadata.n", 2),
             string_attr(
                 "metadata",
                 r#"{"feature":"openinference","region":"eu","n":null}"#,
@@ -840,7 +840,7 @@ mod tests {
             string_attr("traceloop.association.properties.topic", "billing"),
             string_attr(attr::EXPERIMENT_ID, "exp-1"),
             string_attr(attr::DATASET_ITEM_ID, "item-1"),
-            string_attr("llmobs.metadata.llmobs.experiment_id", "from-metadata"),
+            string_attr("cetra.metadata.cetra.experiment_id", "from-metadata"),
         ];
         let (fields, bag) = filled(&attrs, &[]);
         assert_eq!(fields.session_id.as_deref(), Some("ours"));
@@ -883,7 +883,7 @@ mod tests {
             bag.state("ai.telemetry.metadata.feature"),
             Some(Use::Unread)
         );
-        assert_eq!(bag.state("llmobs.metadata.feature"), Some(Use::Consumed));
+        assert_eq!(bag.state("cetra.metadata.feature"), Some(Use::Consumed));
         assert_eq!(bag.state("metadata"), Some(Use::Consumed));
         assert_eq!(
             bag.state("traceloop.association.properties.user_id"),

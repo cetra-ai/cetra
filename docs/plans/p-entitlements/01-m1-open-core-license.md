@@ -5,7 +5,7 @@ Milestone 1 of track P ([`00-design.md`](00-design.md)). It splits the code into
 When M1 is done:
 - the repository has an MIT `LICENSE`, three `ee` directories with the ELv2 text, and `just check-ee` keeps them honest;
 - `cargo deny` checks dependency licences;
-- `LLMOBS_LICENSE_KEY` takes a signed licence; release builds trust only the built-in production key;
+- `CETRA_LICENSE_KEY` takes a signed licence; release builds trust only the built-in production key;
 - `GET /api/v1/orgs/{org}/entitlements` and `GET /api/v1/admin/license` exist;
 - creating or changing a per-project override needs the `project_roles` feature (`403 plan_required` otherwise); removing one never does;
 - `auth.enforce_sso_domains` applies only with a genuine licence listing `sso_enforcement` (expired or not);
@@ -30,7 +30,7 @@ When M1 is done:
   and no other source file contains that string.
 - **Errors**: server code returns `ApiError` (`crates/server/src/http/error.rs`). No `unwrap()`/`expect()` outside tests unless a comment states the invariant.
 - **Privacy**: never log or return a licence key, a token, a payload field other than `id`, `kid`, `kind` and the status, or an email address. `customer` is shown on the admin API and page only.
-- **Time**: `i64` ns; `state.clock.now_ns()`. JSON instants use `llmobs_core::time_serde` (and the `optional_time` helper of `crate::api::keys` for `Option<i64>`).
+- **Time**: `i64` ns; `state.clock.now_ns()`. JSON instants use `cetra_core::time_serde` (and the `optional_time` helper of `crate::api::keys` for `Option<i64>`).
 - **Tests**: Rust unit tests next to the code (`#[cfg(test)] mod tests`). Server tests use `crate::test_support::TestApp` (manual clock at `2026-01-01T00:00:00Z`). Web tests use Vitest + Testing Library on the MSW server; override an endpoint with `server.use(...)`, never `vi.mock`.
 - **Contract**: when the OpenAPI document changes, run `just openapi` (it rewrites `crates/server/openapi.json` and `web/src/api/schema.gen.ts`; commit both). When the API examples change, run `just api-examples`.
 
@@ -48,7 +48,7 @@ just fmt
 just check
 ```
 
-`just check` must pass before every commit. Quick loops: `cargo test -p llmobs-server <name>`, `cargo test -p llmobs-license-tool`, `cd web && pnpm vitest run <file>`. P1 edits `.github/`, so it also runs `just check-workflows` (needs `actionlint` and `zizmor`).
+`just check` must pass before every commit. Quick loops: `cargo test -p cetra-server <name>`, `cargo test -p cetra-license-tool`, `cd web && pnpm vitest run <file>`. P1 edits `.github/`, so it also runs `just check-workflows` (needs `actionlint` and `zizmor`).
 
 ## Sub-phases
 
@@ -77,7 +77,7 @@ Run them in this order.
 **`LICENSE`** (new, repository root), exactly:
 
 ```
-The llmobs source code is licensed under the MIT License below, except for the
+The cetra source code is licensed under the MIT License below, except for the
 contents of these directories, which are licensed under the Elastic License 2.0
 (see the LICENSE file in each of them):
 
@@ -87,7 +87,7 @@ contents of these directories, which are licensed under the Elastic License 2.0
 
 MIT License
 
-Copyright (c) 2026 the llmobs authors
+Copyright (c) 2026 the cetra authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -252,9 +252,9 @@ pub(crate) mod token;
 // SPDX-License-Identifier: Elastic-2.0
 //! Signed tokens: licence keys, org entitlement tokens and control-plane requests (D-P-5).
 //!
-//! A token is `llmobs1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
+//! A token is `cetra1.<kid>.<payload>.<signature>`. `<payload>` and `<signature>` are
 //! base64url without padding. The signature is ed25519 over the ASCII bytes of
-//! `llmobs1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
+//! `cetra1.<kid>.<payload>`, checked before the payload is decoded as JSON, so the JSON
 //! is never re-serialised. Release builds trust only [`RELEASE_KEYS`]; debug builds also
 //! trust [`DEV_KEYS`] (D-P-6). No config can add a key.
 
@@ -263,7 +263,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Format tag. Renamed with the product (D46).
-pub(crate) const TOKEN_TAG: &str = "llmobs1";
+pub(crate) const TOKEN_TAG: &str = "cetra1";
 
 /// Largest accepted token, in bytes.
 pub(crate) const MAX_TOKEN_BYTES: usize = 16 * 1024;
@@ -428,10 +428,10 @@ Count the `../` in `include_str!` from `crates/server/src/test_support/mod.rs` t
 2. `dev_seed_matches_dev_key`: the public key of the seed in `fixtures/license/dev-1.key` (`SigningKey::from_bytes(..).verifying_key().to_bytes()`, standard base64) equals `DEV_KEYS[0].1`.
 3. `round_trip`: `verify(&sign_token(&json!({"kind": "license"})))` is `Ok` with `kid == "dev-1"` and `payload` equal to `serde_json::to_vec(&json!({"kind": "license"}))`. With surrounding whitespace (`format!("  {token}\n")`) it is still `Ok`.
 4. `tampering_is_refused`: changing one character of the payload part (re-encode a different JSON body but keep the old signature) → `BadSignature`; changing the signature's last character to another base64url character that decodes to different bytes → `BadSignature` or `Malformed` (assert it is one of the two).
-5. `malformed_tokens`: `""`, `"llmobs1.dev-1.abc"` (three parts), five parts, tag `llmobs2`, kid `Dev-1` (uppercase), kid of 33 characters, payload `"!!"` (bad base64), signature of 10 bytes → `Malformed`; a 16 KiB + 1 byte string → `TooLarge`.
+5. `malformed_tokens`: `""`, `"cetra1.dev-1.abc"` (three parts), five parts, tag `cetra2`, kid `Dev-1` (uppercase), kid of 33 characters, payload `"!!"` (bad base64), signature of 10 bytes → `Malformed`; a 16 KiB + 1 byte string → `TooLarge`.
 6. `unknown_key`: a token built like `sign_token` but with kid `nope-1` → `UnknownKey`.
 7. `release_key_needs_prod_signature`: a dev-signed token whose kid is rewritten to `prod-1` → `BadSignature`.
-8. `error_text_never_quotes_the_token`: for each `TokenError`, `to_string()` does not contain `llmobs1.`.
+8. `error_text_never_quotes_the_token`: for each `TokenError`, `to_string()` does not contain `cetra1.`.
 
 ### Done
 
@@ -451,8 +451,8 @@ A small Elastic-2.0 tool that signs payloads with a seed file. It is for develop
 
 ```toml
 [package]
-name = "llmobs-license-tool"
-description = "Sign llmobs licence keys and entitlement tokens with a seed file (development and trials)"
+name = "cetra-license-tool"
+description = "Sign cetra licence keys and entitlement tokens with a seed file (development and trials)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -460,7 +460,7 @@ publish = false
 license = "Elastic-2.0"
 
 [[bin]]
-name = "llmobs-license"
+name = "cetra-license"
 path = "src/main.rs"
 
 [dependencies]
@@ -479,12 +479,12 @@ Root `Cargo.toml` `[workspace] members`: `["crates/*", "tools/capture", "tools/l
 **`tools/license/src/main.rs`** (new; first line the SPDX header). Behaviour:
 
 ```
-llmobs-license sign --key <seed-file> --kid <kid> --payload <json-file>
+cetra-license sign --key <seed-file> --kid <kid> --payload <json-file>
     Prints the token and a newline. The payload file must be a JSON object; it is
     re-encoded compactly with serde_json (key order preserved) before signing.
-llmobs-license public-key --key <seed-file>
+cetra-license public-key --key <seed-file>
     Prints the public key in standard base64 and a newline.
-llmobs-license fixtures [--check]
+cetra-license fixtures [--check]
     Signs every fixtures/license/payloads/<name>.json with fixtures/license/dev-1.key
     and kid dev-1 into fixtures/license/tokens/<name>.token (token + newline).
     --check writes nothing and exits 1 listing every token file that differs or is
@@ -492,14 +492,14 @@ llmobs-license fixtures [--check]
 ```
 
 Structure:
-- `fn sign(seed: &[u8; 32], kid: &str, payload: &serde_json::Value) -> Result<String, ToolError>`: refuses a kid that is not `[a-z0-9-]{1,32}` and a payload that is not an object; builds `llmobs1.<kid>.<base64url(serde_json::to_vec(payload))>`, signs those bytes, appends `.<base64url(signature)>`. The tag is the literal `"llmobs1"` (the tool does not depend on `llmobs-server`).
+- `fn sign(seed: &[u8; 32], kid: &str, payload: &serde_json::Value) -> Result<String, ToolError>`: refuses a kid that is not `[a-z0-9-]{1,32}` and a payload that is not an object; builds `cetra1.<kid>.<base64url(serde_json::to_vec(payload))>`, signs those bytes, appends `.<base64url(signature)>`. The tag is the literal `"cetra1"` (the tool does not depend on `cetra-server`).
 - `fn read_seed(path) -> Result<[u8; 32], ToolError>`: trims the file, standard-base64 decodes, requires 32 bytes. The error text names the path, never the content.
 - `ToolError` is a `thiserror` enum (`Io { path: String }`, `BadSeed { path: String }`, `BadPayload { path: String }`, `BadKid`, `Differs { files: Vec<String> }`). `main` returns `std::process::ExitCode`, prints errors with `eprintln!` (allowed here: add `#![allow(clippy::print_stdout, clippy::print_stderr)]` at the top of `main.rs` with a comment "a CLI tool prints its result").
 - `fn fixtures(check: bool) -> Result<(), ToolError>`: lists `payloads/*.json` sorted by name, signs each with `read_seed(dev-1.key)` and kid `dev-1`, and either writes `tokens/<name>.token` (`check == false`) or collects the names whose token file is missing or differs, plus token files without a payload, into `ToolError::Differs { files }` (`check == true`). `main` calls it for the `fixtures` subcommand; test 1 calls `fixtures(true)`.
 - Paths for `fixtures` are relative to the workspace root: `concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/license")`.
 - clap derive with subcommands `Sign { key, kid, payload }`, `PublicKey { key }`, `Fixtures { check: bool }`.
 
-To make a production licence (documented, not run by you): convert the PEM to a seed with `openssl pkey -in llmobs-signing-1.pem -outform DER | tail -c 32 | base64 > seed`, then `llmobs-license sign --key seed --kid prod-1 --payload licence.json`, then delete `seed`.
+To make a production licence (documented, not run by you): convert the PEM to a seed with `openssl pkey -in cetra-signing-1.pem -outform DER | tail -c 32 | base64 > seed`, then `cetra-license sign --key seed --kid prod-1 --payload licence.json`, then delete `seed`.
 
 **`fixtures/license/payloads/`** (new), three files:
 
@@ -525,7 +525,7 @@ To make a production licence (documented, not run by you): convert the PEM to a 
 ```just
 # Re-sign fixtures/license/payloads with the dev key (D-P-6)
 license-fixtures:
-    cargo run -q -p llmobs-license-tool -- fixtures
+    cargo run -q -p cetra-license-tool -- fixtures
 ```
 
 and in `check-ee`, after the `while … done` over SPDX headers, add `tools/license` to the `for dir in` list and the `case` pattern (`crates/server/src/ee/*|web/src/ee/*|tools/license/*`), so it checks `tools/license/LICENSE` and `tools/license/src/*.rs`.
@@ -693,13 +693,13 @@ use crate::entitlements::FeatureSet;
 #[derive(Debug, Deserialize)]
 struct Claims {
     id: Uuid,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     issued_at: i64,
     customer: String,
     features: Vec<String>,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     expires_at: i64,
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     grace_ends_at: i64,
 }
 
@@ -852,7 +852,7 @@ fn parse(key: &str) -> Result<License, InvalidLicense> {
 4. `absent_and_status_over_time`: `from_key(None)` is `Absent`, status `Absent`, `active_features` empty. A licence with `expires_at` 2026-02-01 and `grace_ends_at` 2026-03-01: status `Active` at 2026-01-15, `Grace` exactly at 2026-02-01 and at 2026-02-15, `Expired` exactly at 2026-03-01; `active_features` holds `project_roles` while active and in grace and is empty when expired; `listed_features` holds it in all three.
 5. `fixture_licences`: `from_key` of `fixtures/license/tokens/active.token` (via `include_str!`) is `Valid` with customer `Example Corp`, id `01900000-0000-7000-8000-000000000500`, kid `dev-1`, both features; `future-feature.token` is `Valid` with only `project_roles`; `wrong-kind.token` is `Invalid(WrongKind)`.
 6. `invalid_keys`: `"garbage"` → `Invalid(Token(Malformed))`; a signed payload `{"kind": "license"}` (fields missing) → `Invalid(Payload)`; `grace_ends_at` before `expires_at` → `Invalid(Fields)`; empty `customer` (`"  "`) → `Invalid(Fields)`; a customer of 201 characters → `Invalid(Fields)`; an `expires_at` that is not RFC 3339 → `Invalid(Payload)`.
-7. `invalid_text_is_generic`: no `InvalidLicense` `to_string()` contains `llmobs1.` or `Example`.
+7. `invalid_text_is_generic`: no `InvalidLicense` `to_string()` contains `cetra1.` or `Example`.
 
 ### Done
 
@@ -872,22 +872,22 @@ fn parse(key: &str) -> Result<License, InvalidLicense> {
   pub license_key: Option<Secret<String>>,
   ```
 
-- `ALIASES`: add `("LLMOBS_LICENSE_KEY", "license_key"),` after the `LLMOBS_ENCRYPTION_KEY` entry.
+- `ALIASES`: add `("CETRA_LICENSE_KEY", "license_key"),` after the `CETRA_ENCRYPTION_KEY` entry.
 - `secret_key`: add the arm `[key] if key == "license_key" => Some("license_key"),` after the `encryption_key` arm.
 - `is_secret_path`: add `"license_key"` to the `matches!` list.
-- `validate`: an empty or whitespace-only `license_key` becomes `None` (set `config.license_key = None` when `key.expose().trim().is_empty()`), so `LLMOBS_LICENSE_KEY=` means "no licence".
+- `validate`: an empty or whitespace-only `license_key` becomes `None` (set `config.license_key = None` when `key.expose().trim().is_empty()`), so `CETRA_LICENSE_KEY=` means "no licence".
 - Every literal `ServerConfig { … }` (`test_support/mod.rs` `default_config`, `ingest/fixtures_tests.rs` `serve_config`, `serve.rs` tests' `config`) gains `license_key: None,`; fix any other the compiler lists.
 
 Config tests (next to `encryption_key_comes_from_the_environment`):
-1. `license_key_comes_from_the_environment`: `LLMOBS_LICENSE_KEY=abc` → `Some("abc")`.
-2. `empty_license_key_is_unset`: `LLMOBS_LICENSE_KEY=` and `"   "` → `None`.
+1. `license_key_comes_from_the_environment`: `CETRA_LICENSE_KEY=abc` → `Some("abc")`.
+2. `empty_license_key_is_unset`: `CETRA_LICENSE_KEY=` and `"   "` → `None`.
 3. `license_key_type_error_does_not_quote_the_value`: TOML `license_key = 424242` → `ConfigError::Invalid { key: "license_key", .. }` whose text does not contain `424242`.
 4. Extend the existing `Debug`-redaction test that sets `encryption_key = Some(Secret::new("topsecretvalue"…))` to also set `license_key` to `"licensevalue"` and assert `format!("{config:?}")` does not contain `licensevalue`.
 
 ### State (`crates/server/src/entitlements/mod.rs`)
 
 ```rust
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::ee::license::{LicenseState, LicenseStatus};
 use crate::http::AppState;
@@ -1024,11 +1024,11 @@ impl TestApp {
 6. `license_features_apply_to_every_org`: `TestApp::with_license(&["project_roles"])` → `allows(Feature::ProjectRoles)` for two different `OrgId`s; `allows(Feature::SsoEnforcement)` is false.
 7. `expired_license_allows_nothing`: config with `license_key_until(&["project_roles"], "2025-12-01T00:00:00Z", "2025-12-31T00:00:00Z")` (grace ended before the manual clock) → no feature; `state.entitlements.license().listed_features()` still holds it.
 8. `refused_key_runs_without_license`: config `license_key = "garbage"` → `TestApp` starts, `license()` is `Invalid(Token(Malformed))`, no feature.
-9. `log_license_never_prints_the_customer`: with `crate::test_support::capture_logs(future) -> (T, String)`, `log_license` of a valid licence logs `licence active` and the id, and not `Test Customer` nor `llmobs1.`; of an invalid one logs `refused` and not the key.
+9. `log_license_never_prints_the_customer`: with `crate::test_support::capture_logs(future) -> (T, String)`, `log_license` of a valid licence logs `licence active` and the id, and not `Test Customer` nor `cetra1.`; of an invalid one logs `refused` and not the key.
 
 ### Done
 
-`just check` passes. Starting `just run serve` with `LLMOBS_LICENSE_KEY=$(cat fixtures/license/tokens/active.token)` logs `licence active` (debug build).
+`just check` passes. Starting `just run serve` with `CETRA_LICENSE_KEY=$(cat fixtures/license/tokens/active.token)` logs `licence active` (debug build).
 
 ---
 
@@ -1092,10 +1092,10 @@ fn validate_entitlements(entitlements: &EntitlementsConfig) -> Result<(), Config
 }
 ```
 
-The env form is `LLMOBS_ENTITLEMENTS__UPGRADE_URL` (the split provider; no alias). Config tests:
+The env form is `CETRA_ENTITLEMENTS__UPGRADE_URL` (the split provider; no alias). Config tests:
 1. `upgrade_url_accepts_the_org_placeholder`: TOML `[entitlements]\nupgrade_url = "https://app.example.com/orgs/{org}/billing"` loads.
 2. `upgrade_url_rejects_other_placeholders_and_schemes`: `"https://x.example/{plan}"`, `"ftp://x.example"`, `"not a url"`, `"https:///nohost"` → `Invalid { key: "entitlements.upgrade_url", .. }`.
-3. `upgrade_url_from_env`: `LLMOBS_ENTITLEMENTS__UPGRADE_URL=https://example.com/up` → set.
+3. `upgrade_url_from_env`: `CETRA_ENTITLEMENTS__UPGRADE_URL=https://example.com/up` → set.
 
 `entitlements/mod.rs`:
 
@@ -1551,7 +1551,7 @@ export function useOrgEntitlements(org: string) {
 - Status: `none` → "No licence key. Enterprise features are locked."; `invalid` → "The licence key was refused: {reason}." (`reason` as returned); `active` → "Active until {date}"; `grace` → "Expired on {expires date}. Enterprise features stop on {grace date}." with the `TriangleAlert` icon; `expired` → "Expired on {expires date}. Enterprise features are locked.".
 - Customer (when present), Licence id (when present, mono font), Features: the labels `Per-project roles` and `SSO enforcement` joined by ", ", or "None".
 - Dates are the UTC day of the RFC 3339 value: `iso.slice(0, 10)` (for example `2099-01-01`). Licence instants are whole days in UTC, so no time zone conversion is wanted.
-- A paragraph: "Set the key with LLMOBS_LICENSE_KEY and restart the server."
+- A paragraph: "Set the key with CETRA_LICENSE_KEY and restart the server."
 
 First line of the file: the SPDX header.
 
@@ -1619,7 +1619,7 @@ export function ProjectAccessSelect(props: {
 
 ### Done
 
-`just check` passes; `just e2e` passes (the e2e suite does not set overrides through the API; if it does, give its server the dev licence with `LLMOBS_LICENSE_KEY`, read from `fixtures/license/tokens/active.token` in `tools/e2e/run.sh`, and say so in the commit message).
+`just check` passes; `just e2e` passes (the e2e suite does not set overrides through the API; if it does, give its server the dev licence with `CETRA_LICENSE_KEY`, read from `fixtures/license/tokens/active.token` in `tools/e2e/run.sh`, and say so in the commit message).
 
 ## Report
 

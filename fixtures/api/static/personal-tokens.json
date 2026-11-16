@@ -3,7 +3,7 @@
     {
       "id": "01900000-0000-7000-8000-000000000201",
       "name": "CLI",
-      "prefix": "pat-llmobs-EXAMPL",
+      "prefix": "pat-cetra-EXAMPL",
       "scopes": [
         "read",
         "write"

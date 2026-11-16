@@ -76,19 +76,19 @@ expression: protobuf
       "input_preview": "{\"query\":\"pricing\",\"limit\":2}",
       "output_preview": "[\"doc-1\",\"doc-2\"]",
       "attributes": {
-        "llmobs.span.kind": "tool"
+        "cetra.span.kind": "tool"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1

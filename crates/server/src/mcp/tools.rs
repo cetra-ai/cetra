@@ -48,7 +48,7 @@ pub(crate) fn tool_list() -> Vec<Tool> {
         tool(
             super::sql::QUERY_SQL,
             "Run a SQL query",
-            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'llmobs-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
+            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'cetra-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
             json!({
                 "type": "object",
                 "properties": {
@@ -92,7 +92,7 @@ pub(crate) fn tool_list() -> Vec<Tool> {
                     "filter": {"type": "string", "description": "Filter DSL: a SQL boolean expression over the traces view."},
                     "search": {"type": "string", "description": "Full-text search in span input, output, name and system instructions."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most traces to return."},
-                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'llmobs-eval')."},
+                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'cetra-eval')."},
                     "include_experiments": {"type": "boolean", "description": "Include experiment traces."},
                     "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later traces are left out beyond it."}
                 },

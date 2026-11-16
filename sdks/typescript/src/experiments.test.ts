@@ -2,7 +2,7 @@ import { diag, SpanStatusCode } from "@opentelemetry/api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, Client } from "./client.js";
-import { ConfigError, type LlmobsOptions } from "./config.js";
+import { type CetraOptions, ConfigError } from "./config.js";
 import { withContext } from "./context.js";
 import { Dataset } from "./datasets.js";
 import {
@@ -24,7 +24,7 @@ import type { FetchLike } from "./web.js";
  * Without it the queue would post to the real network and `flush()` would wait
  * through the retries.
  */
-function startScoring(options?: Partial<LlmobsOptions>, calls: ScoreCall[] = []) {
+function startScoring(options?: Partial<CetraOptions>, calls: ScoreCall[] = []) {
   return startMemory(options, {}, { fetch: scoreFetch(calls) });
 }
 
@@ -68,7 +68,7 @@ interface Api {
 }
 
 /**
- * A fake llmobs API for experiments. `items` are the pinned version's items,
+ * A fake cetra API for experiments. `items` are the pinned version's items,
  * `pageSize` the create answer's page. `override` answers first when it returns
  * a reply; the defaults serve the happy path.
  */
@@ -127,8 +127,8 @@ function api(
     return { status: 404, json: { code: "not_found" } };
   });
   const client = new Client({
-    apiKey: "sk-llmobs-test",
-    baseUrl: "http://llmobs.test",
+    apiKey: "sk-cetra-test",
+    baseUrl: "http://cetra.test",
     fetch: rest.fetch,
     sleep: rest.sleep,
   });
@@ -149,7 +149,7 @@ function resultRows(requests: RecordedRequest[]): Record<string, unknown>[] {
 }
 
 describe("evaluate", () => {
-  it("needs llmobs.init() first, and makes no request", async () => {
+  it("needs cetra.init() first, and makes no request", async () => {
     const { client, requests } = api(1);
     await expect(evaluate({ dataset: "faq", task: () => 1, client })).rejects.toBeInstanceOf(
       ConfigError,
@@ -237,10 +237,10 @@ describe("evaluate", () => {
     expect(roots).toHaveLength(4);
     expect(roots.every((span) => span.name === "exp")).toBe(true);
     for (const span of spans) {
-      expect(span.attributes["llmobs.experiment.id"]).toBe("e1");
-      expect(span.attributes["llmobs.environment"]).toBe("experiment");
+      expect(span.attributes["cetra.experiment.id"]).toBe("e1");
+      expect(span.attributes["cetra.environment"]).toBe("experiment");
     }
-    expect(roots.map((span) => span.attributes["llmobs.dataset_item.id"]).sort()).toEqual([
+    expect(roots.map((span) => span.attributes["cetra.dataset_item.id"]).sort()).toEqual([
       "item-1",
       "item-1",
       "item-2",
@@ -256,7 +256,7 @@ describe("evaluate", () => {
     );
     const roots = (await finished(exporter)).filter((span) => span.parentSpanContext === undefined);
     expect(roots).toHaveLength(1);
-    expect(roots[0]?.attributes["llmobs.session.id"]).toBeUndefined();
+    expect(roots[0]?.attributes["cetra.session.id"]).toBeUndefined();
   });
 
   it("records a task error on its row and span, and runs no scorer for it", async () => {
@@ -371,7 +371,7 @@ describe("evaluate", () => {
     expect(result.scorerErrors).toEqual({ bad: 4 });
     const messages = warn.mock.calls.map((call) => String(call[0]));
     expect(
-      messages.filter((message) => message === "llmobs: scorer 0 failed (RangeError)"),
+      messages.filter((message) => message === "cetra: scorer 0 failed (RangeError)"),
     ).toHaveLength(1);
     expect(messages.some((message) => message.includes("secret-canary"))).toBe(false);
   });
@@ -449,7 +449,7 @@ describe("evaluate", () => {
     const [row] = resultRows(requests());
     const output = row?.output as string;
     expect(output.startsWith(`"${"x".repeat(259_999)}`)).toBe(true);
-    expect(output.endsWith("…[llmobs: truncated, original 300002 bytes]")).toBe(true);
+    expect(output.endsWith("…[cetra: truncated, original 300002 bytes]")).toBe(true);
   });
 
   it("finishes with an error and raises when the results upload fails", async () => {
@@ -481,7 +481,7 @@ describe("evaluate", () => {
       messages.filter(
         (message) =>
           message ===
-          "llmobs: sample_rate is below 1; some experiment runs will have no trace and no score",
+          "cetra: sample_rate is below 1; some experiment runs will have no trace and no score",
       ),
     ).toHaveLength(1);
   });
@@ -513,7 +513,7 @@ describe("evaluate", () => {
       messages.filter(
         (message) =>
           message ===
-          "llmobs: the monthly units cap paused score uploads; experiment scores are being dropped",
+          "cetra: the monthly units cap paused score uploads; experiment scores are being dropped",
       ),
     ).toHaveLength(1);
   });
@@ -540,7 +540,7 @@ describe("evaluate", () => {
       experimentName: "exp",
     });
     expect(warn.mock.calls.map((call) => String(call[0]))).toContain(
-      "llmobs: scorer 0 failed (Error)",
+      "cetra: scorer 0 failed (Error)",
     );
     const logged = [...warn.mock.calls, ...debug.mock.calls].map((call) =>
       call.map((part) => String(part)).join(" "),
@@ -620,9 +620,9 @@ describe("evaluate: scopes, failures and limits", () => {
     );
     await flush();
     const scorerSpan = (await finished(exporter)).find((span) => span.name === "scorer-span");
-    expect(scorerSpan?.attributes["llmobs.experiment.id"]).toBe("e1");
-    expect(scorerSpan?.attributes["llmobs.dataset_item.id"]).toBe("item-1");
-    expect(scorerSpan?.attributes["llmobs.session.id"]).toBeUndefined();
+    expect(scorerSpan?.attributes["cetra.experiment.id"]).toBe("e1");
+    expect(scorerSpan?.attributes["cetra.dataset_item.id"]).toBe("item-1");
+    expect(scorerSpan?.attributes["cetra.session.id"]).toBeUndefined();
     const queued = scoresOf(calls);
     expect(queued).toHaveLength(1);
     expect(queued[0]).not.toHaveProperty("user_id");

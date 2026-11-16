@@ -27,6 +27,8 @@ use arrow::compute::{
 };
 use arrow::datatypes::{Schema, SchemaRef};
 use async_trait::async_trait;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::schema::{traces, traces_schema};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DataFusionError, ScalarValue};
@@ -63,8 +65,6 @@ use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::memory::MemorySourceConfig;
 use datafusion_datasource::source::DataSourceExec;
 use futures::stream::{Stream, StreamExt};
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::schema::{traces, traces_schema};
 
 use super::{
     DAY_NS, TimeBounds, distribute, file_day_range, file_groups, file_overlaps, lookup_ids,
@@ -1452,16 +1452,16 @@ mod tests {
     use arrow::array::{Array, ArrayRef, AsArray, Int64Array, RecordBatch, StringArray};
     use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record_batch};
     use arrow::datatypes::{Field, Float64Type, Int32Type, Schema, SchemaRef};
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::schema::{traces, traces_schema};
+    use cetra_core::span::Span;
     use datafusion::catalog::TableProvider;
     use datafusion::common::ScalarValue;
     use datafusion::execution::context::{SessionConfig, SessionContext};
     use datafusion::logical_expr::{BinaryExpr, Expr, Operator, col};
     use datafusion::physical_plan::execution_plan::collect as collect_plan;
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::schema::{traces, traces_schema};
-    use llmobs_core::span::Span;
 
     use crate::ProjectQuery;
     use crate::QueryOptions;
@@ -3406,7 +3406,7 @@ mod tests {
         storage
             .append_scores(
                 project(),
-                llmobs_core::batch::scores_to_record_batch(&live).unwrap(),
+                cetra_core::batch::scores_to_record_batch(&live).unwrap(),
             )
             .await
             .unwrap();

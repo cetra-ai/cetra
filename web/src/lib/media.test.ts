@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { classifyMedia } from "@/lib/media";
 
 it.each([
-  ["llmobs:dropped", "acme/support-bot", { kind: "dropped" }],
+  ["cetra:dropped", "acme/support-bot", { kind: "dropped" }],
   [
     "media://497790947d466676",
     "acme/support-bot",

@@ -4,8 +4,8 @@
 
 use std::borrow::Cow;
 
-use llmobs_core::enums::PayloadFormat;
-use llmobs_core::message::Message;
+use cetra_core::enums::PayloadFormat;
+use cetra_core::message::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, OneOfBuilder, SchemaType};
@@ -166,9 +166,9 @@ mod tests {
     #[test]
     fn payload_serialization_snapshots() {
         let messages = Payload::Messages(vec![Message {
-            role: llmobs_core::message::Role::User,
+            role: cetra_core::message::Role::User,
             name: None,
-            parts: vec![llmobs_core::message::Part::Text {
+            parts: vec![cetra_core::message::Part::Text {
                 content: "hi".to_owned(),
                 extra: serde_json::Map::new(),
             }],

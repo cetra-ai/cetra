@@ -3,7 +3,7 @@
 //! Spec 01 § Canonical message format. Responses API `output` items are not
 //! converted here: the N13 and N18 fixtures use Chat Completions shapes.
 
-use llmobs_core::message::{Message, Modality, Part, Role};
+use cetra_core::message::{Message, Modality, Part, Role};
 use serde_json::{Map, Value as Json};
 
 use crate::payload::parse_tool_arguments;
@@ -308,7 +308,7 @@ fn take_string(map: &mut Map<String, Json>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ConvertError, openai_messages};
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::message::messages_to_json;
     use serde_json::json;
 
     fn converted(value: &serde_json::Value) -> String {

@@ -6,14 +6,14 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post};
-use llmobs_core::ids::{ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page};
-use llmobs_storage::{
+use cetra_storage::{
     MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, QueryContext, RunError, experiment_scores,
     experiment_traces,
 };
@@ -1016,9 +1016,9 @@ mod tests {
     use crate::test_support::{
         Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
     };
-    use llmobs_core::ids::SpanId;
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::score::{ScoreTarget, ScoreValue};
+    use cetra_core::ids::SpanId;
+    use cetra_core::names::metadata_key;
+    use cetra_core::score::{ScoreTarget, ScoreValue};
     use std::collections::BTreeMap;
 
     fn base(seeded: &Seeded) -> String {

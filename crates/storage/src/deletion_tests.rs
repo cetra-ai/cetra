@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use arrow::array::{Array, RecordBatch};
 use bytesize::ByteSize;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::score::ScoreTarget;
+use cetra_core::ids::ProjectId;
+use cetra_core::score::ScoreTarget;
 use uuid::Uuid;
 
 use crate::QueryOptions;
@@ -164,7 +164,7 @@ fn spans_trace_ids(dir: &Path, file: &crate::catalog::FileMeta) -> Vec<[u8; 16]>
         .collect();
     let all = arrow::compute::concat_batches(&schema, &batches).unwrap();
     let column = all
-        .column_by_name(llmobs_core::schema::spans::TRACE_ID)
+        .column_by_name(cetra_core::schema::spans::TRACE_ID)
         .unwrap();
     let array = column
         .as_any()

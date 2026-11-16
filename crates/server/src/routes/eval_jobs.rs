@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use llmobs_core::ids::{SpanId, TraceId};
-use llmobs_eval::VariableMapping;
+use cetra_core::ids::{SpanId, TraceId};
+use cetra_eval::VariableMapping;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -338,9 +338,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use axum::http::{Method, header};
-    use llmobs_core::enums::PayloadFormat;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::span::Span;
     use serde_json::json;
 
     use super::*;

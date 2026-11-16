@@ -4,7 +4,7 @@
 //! `traceloop.entity.input` and `traceloop.entity.output`. Those fallbacks are
 //! stored as JSON without unwrapping `args`, `kwargs`, or `output`.
 
-use llmobs_core::message::Message;
+use cetra_core::message::Message;
 use serde_json::{Map, Value as Json};
 
 use super::present_json;
@@ -164,8 +164,8 @@ mod tests {
     use crate::bag::{AttrBag, Use};
     use crate::payload::{Payload, ReadContext};
     use crate::warn::Warnings;
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use serde_json::json;

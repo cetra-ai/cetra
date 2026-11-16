@@ -3,7 +3,7 @@
 use axum::extract::{Extension, State};
 use axum::http::Method;
 use axum::routing::get;
-use llmobs_storage as storage;
+use cetra_storage as storage;
 use serde::Deserialize;
 
 use crate::api::common::{ExclusionParams, Page};
@@ -139,7 +139,7 @@ fn session_sort(sort: SessionSort) -> storage::SessionSort {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::score::ScoreValue;
     use serde_json::Value as Json;
 
     use super::*;

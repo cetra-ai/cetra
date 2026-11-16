@@ -1,6 +1,6 @@
 # Cross-track consistency review
 
-Date: 2026-11-14. Base: `main` at `0fb6b0a`, track R's branch `claude/r-hardening-design-43eb31` (design and M1 plan), and the control-plane docs (`llmobs-control` `docs/00-design.md`, `01-m1-first-cell.md`, `decisions.md`).
+Date: 2026-11-14. Base: `main` at `0fb6b0a`, track R's branch `claude/r-hardening-design-43eb31` (design and M1 plan), and the control-plane docs (`cetra-control` `docs/00-design.md`, `01-m1-first-cell.md`, `decisions.md`).
 
 This review looks only at the **seams between tracks**: contracts, decisions, hooks and behaviours that two or more tracks must agree on. Each plan already had its own review. Nothing in the plans, spec or decisions was changed here; each finding names the track that should make the fix.
 
@@ -35,12 +35,12 @@ The main themes:
 ### What could not be checked
 
 - Plans not yet written: P's M4/M5, I's M5/M6, Q's M2–M6 and R's M2–M8. Hooks they are supposed to provide were judged from the designs only.
-- Q's 2 000-line M1 plan was read only where it touches llmobs (config, image, env, backups, restore).
+- Q's 2 000-line M1 plan was read only where it touches cetra (config, image, env, backups, restore).
 - The web error handling of `402 quota_exceeded` and `403 plan_limit` across C, H, K, L and I, and `fixtures/api` against `openapi.json`, were not compared in detail.
 - What sqlx does on duplicate migration versions was not tested; collisions are inferred from merge history (renumber merges `68937f2`, `c5a09d9`, `355a602`, `60deeff`).
 - Track R's branch was available locally and was read; it is not on `main` yet.
 
-Each finding below lists the reviewer ids it merges, the verdict, and the references on both sides of the seam. Paths without a prefix are in this repository; `llmobs-control docs/` is the private control-plane repository.
+Each finding below lists the reviewer ids it merges, the verdict, and the references on both sides of the seam. Paths without a prefix are in this repository; `cetra-control docs/` is the private control-plane repository.
 
 ## Owner: Track Q
 
@@ -49,8 +49,8 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** blocker · **Verdict:** CONFIRMED · **Owner:** Q · **Tracks:** A1, N, Q
 - **Reviewer ids:** SC-1, DS-1, OW-4, LC-7, CL-1
 - **References:**
-  - llmobs-control `docs/`00-design.md line 40 (D-Q-12), line 149 (R10), line 189
-  - llmobs-control `docs/`01-m1-first-cell.md line 13 (Gates), lines 1592-1616 (Phase 10 Precondition and llmobs.toml.tmpl)
+  - cetra-control `docs/`00-design.md line 40 (D-Q-12), line 149 (R10), line 189
+  - cetra-control `docs/`01-m1-first-cell.md line 13 (Gates), lines 1592-1616 (Phase 10 Precondition and cetra.toml.tmpl)
   - docs/plans/n-packaging/m2/00-design.md § S3 object retention: raise `gc.grace`'s cap (D-N-20), lines ~234-242
   - docs/mvp-decisions.md line 561 (D-N-20)
   - docs/spec/12-operations.md § Configuration (line 5: unknown keys are an error) and § Backups 'Online backups' paragraph
@@ -68,7 +68,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** major · **Verdict:** CONFIRMED · **Owner:** Q · **Tracks:** A1, N, Q
 - **Reviewer ids:** SC-2, CL-5, OW-4
 - **References:**
-  - llmobs-control `docs/`01-m1-first-cell.md Phase 11 (line 1812+), docs/runbooks/cell-restore.md 'same server' steps 1-7 and 'new server' steps 1-4
+  - cetra-control `docs/`01-m1-first-cell.md Phase 11 (line 1812+), docs/runbooks/cell-restore.md 'same server' steps 1-7 and 'new server' steps 1-4
   - docs/plans/n-packaging/m2/00-design.md § Restore (D-N-21) steps 1-5, and the manifest `restorable_until` field (line ~220)
   - docs/mvp-decisions.md line 562 (D-N-21)
   - docs/plans/a1-storage/00-design.md line 488
@@ -78,16 +78,16 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Failure scenario.** The server is lost and restored from a 5-day-old meta-only backup. Every Parquet file written in the 5 days is now an orphan in the bucket and is never collected, so the bucket grows forever. If the backup was past `gc.grace`, the cell starts with catalog rows pointing at deleted objects and queries fail at read time instead of at restore time. The drill (a copy of the bucket) never exercises either path.
 
-**Fix.** In Q's cell-restore.md (both the same-server and new-server paths), add a step after the restore and before any start. It runs `docker compose run --rm --no-deps llmobs admin gc-orphans --dry-run`, then the real command, and requires zero missing data files, with a warning that this deletes objects written after the snapshot. Choose the snapshot by `manifest.json` `restorable_until`. Have restore-drill.sh run `gc-orphans` against the drill bucket. Add the `gc-orphans --help` check to the Phase 11 precondition.
+**Fix.** In Q's cell-restore.md (both the same-server and new-server paths), add a step after the restore and before any start. It runs `docker compose run --rm --no-deps cetra admin gc-orphans --dry-run`, then the real command, and requires zero missing data files, with a warning that this deletes objects written after the snapshot. Choose the snapshot by `manifest.json` `restorable_until`. Have restore-drill.sh run `gc-orphans` against the drill bucket. Add the `gc-orphans --help` check to the Phase 11 precondition.
 
-**Verifier.** Q's cell-restore runbook (01-m1-first-cell.md Phase 11, around lines 1950-1960) goes: stop, move the data dir aside, restic-restore meta.db and catalog.db, start once to migrate, reapply-deletions, up. It never runs `gc-orphans` and never reads `manifest.json`. It hard-codes "no older than 7 days". N's § Restore (D-N-21) step 3 runs `llmobs admin gc-orphans` before the first start, with the server stopped. That step deletes objects the restored catalog does not know ("In S3 mode this is a rollback of the live bucket") and exits 1 on missing data files. Spec 12 § Online backups and A1 00-design line 488 say the same. Q's step 4 also starts the server before any orphan check, the reverse of N's order.
+**Verifier.** Q's cell-restore runbook (01-m1-first-cell.md Phase 11, around lines 1950-1960) goes: stop, move the data dir aside, restic-restore meta.db and catalog.db, start once to migrate, reapply-deletions, up. It never runs `gc-orphans` and never reads `manifest.json`. It hard-codes "no older than 7 days". N's § Restore (D-N-21) step 3 runs `cetra admin gc-orphans` before the first start, with the server stopped. That step deletes objects the restored catalog does not know ("In S3 mode this is a rollback of the live bucket") and exits 1 on missing data files. Spec 12 § Online backups and A1 00-design line 488 say the same. Q's step 4 also starts the server before any orphan check, the reverse of N's order.
 
 ### X3. Q's 30-day 'keep the old window' workaround assumes R12 is unbuilt; P built it
 
 - **Severity:** major · **Verdict:** CONFIRMED · **Owner:** Q · **Tracks:** M, P, Q
 - **Reviewer ids:** CL-3
 - **References:**
-  - llmobs-control `docs/`00-design.md D-Q-23 (line 61, Defaults), D-Q-26 (line 69), R12 (line 151), M3 row (line 184), Cell config row (line 129)
+  - cetra-control `docs/`00-design.md D-Q-23 (line 61, Defaults), D-Q-26 (line 69), R12 (line 151), M3 row (line 184), Cell config row (line 129)
   - docs/plans/p-entitlements/00-design.md D-P-22 (line 68), D-P-30 (line 88), § Milestones M2/M4 rows (lines 229, 231), § Open items (line 241)
   - crates/server/migrations/meta/0008_entitlements.sql (org_window_ends)
   - docs/mvp-decisions.md D-P-30
@@ -105,18 +105,18 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** major · **Verdict:** CONFIRMED · **Owner:** Q · **Tracks:** N, Q
 - **Reviewer ids:** CL-6
 - **References:**
-  - llmobs-control `docs/`00-design.md line 36 (D-Q-8), line 147 (R8)
-  - llmobs-control `docs/`01-m1-first-cell.md Phase 2 (line 185, Dockerfile 264-269), lines 1112-1113, 1858-1861, 1911, cell-restore step 2-3
-  - llmobs-control `docs/`runbooks/cell-upgrade.md § New llmobs version
-  - docs/plans/n-packaging/04-image.md (nonroot distroless, USER 65532, ENTRYPOINT /usr/local/bin/llmobs)
+  - cetra-control `docs/`00-design.md line 36 (D-Q-8), line 147 (R8)
+  - cetra-control `docs/`01-m1-first-cell.md Phase 2 (line 185, Dockerfile 264-269), lines 1112-1113, 1858-1861, 1911, cell-restore step 2-3
+  - cetra-control `docs/`runbooks/cell-upgrade.md § New cetra version
+  - docs/plans/n-packaging/04-image.md (nonroot distroless, USER 65532, ENTRYPOINT /usr/local/bin/cetra)
   - deploy/docker/Dockerfile lines 13,16
   - docs/plans/n-packaging/m2/00-design.md § Trigger (line ~109: backup dir writable by uid 65532)
   - docs/spec/12-operations.md line 70 (distroless)
   - side-session-notes n-requests-for-q.md line 21
 
-**Problem.** Q's M1 scripts and runbooks hard-code uid 10001 for `/srv/llmobs/data` and `/srv/llmobs/backups`, and use a Debian-based image with `rm`, `chown` and `curl`. N's image runs as 65532 and, being distroless, has none of those tools. Q's design cites spec 12 for uid 10001, but spec 12 says 65532. N told Q about the uid, but no Q document carries a switch step.
+**Problem.** Q's M1 scripts and runbooks hard-code uid 10001 for `/srv/cetra/data` and `/srv/cetra/backups`, and use a Debian-based image with `rm`, `chown` and `curl`. N's image runs as 65532 and, being distroless, has none of those tools. Q's design cites spec 12 for uid 10001, but spec 12 says 65532. N told Q about the uid, but no Q document carries a switch step.
 
-**Failure scenario.** After Q points `versions.env` at N's image, the host's backup dir is owned by 10001, so the server (65532) cannot create `/backups/<stamp>` and every nightly `llmobs admin backup` fails; the restore drill's `docker run --entrypoint chown/rm` fails on the distroless image; the restore runbook creates a data dir owned by the wrong uid and the server cannot open it.
+**Failure scenario.** After Q points `versions.env` at N's image, the host's backup dir is owned by 10001, so the server (65532) cannot create `/backups/<stamp>` and every nightly `cetra admin backup` fails; the restore drill's `docker run --entrypoint chown/rm` fails on the distroless image; the restore runbook creates a data dir owned by the wrong uid and the server cannot open it.
 
 **Fix.** Q: add a 'switch to the official image' step to the upgrade runbook and phase scripts: chown `data` and `backups` to 65532:65532 once, replace `--entrypoint rm/chown` helper containers with a pinned utility image (or host `sudo` commands), parametrize the uid in `render.sh`, `deploy.sh`, `restore-drill.sh` and the runbooks, and fix the spec 12 citation. N: nothing, provided its README keeps the uid/`/backups` notes.
 
@@ -127,7 +127,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** minor · **Verdict:** CONFIRMED · **Owner:** Q · **Tracks:** P, Q
 - **Reviewer ids:** CL-8
 - **References:**
-  - llmobs-control `docs/`00-design.md line 61 (D-Q-23 pacing), lines 136-157 (Requests table)
+  - cetra-control `docs/`00-design.md line 61 (D-Q-23 pacing), lines 136-157 (Requests table)
   - docs/plans/p-entitlements/00-design.md D-P-26..D-P-31, D-P-33, D-P-39, D-P-40
   - docs/plans/p-entitlements/03-m3-units-and-limits.md lines ~534-544
   - crates/token/src/keys.rs (cloud-1, cloud-2)
@@ -145,7 +145,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** minor · **Verdict:** PLAUSIBLE · **Owner:** Q · **Tracks:** P, Q
 - **Reviewer ids:** CL-9
 - **References:**
-  - llmobs-control `docs/`00-design.md D-Q-22, D-Q-23 (Defaults), § Plan values (Features row: Free '—'), line 129 cell-config row
+  - cetra-control `docs/`00-design.md D-Q-22, D-Q-23 (Defaults), § Plan values (Features row: Free '—'), line 129 cell-config row
   - docs/spec/12-operations.md config table rows `entitlements.defaults.plan_name` / `entitlements.defaults.features` (lines 24-25)
   - docs/plans/p-entitlements/02-m2-org-entitlements.md § Config tests `cloud_defaults_load`, § Tests `configured_defaults_apply`
   - docs/plans/p-entitlements/00-design.md § Interfaces for track Q (items 1-5: no item on `[entitlements.defaults]`)
@@ -194,7 +194,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/m-deletion/06-retention.md:94
   - crates/server/src/retention.rs:59-61
   - crates/server/src/entitlements/mod.rs:305-330 retention_window_at
-  - llmobs-control `docs/`00-design.md:151 R12, D-Q-26
+  - cetra-control `docs/`00-design.md:151 R12, D-Q-26
 
 **Problem.** M's hook, P's hook table, P's side note and M's README all say P replaces the `None` with the synchronous `of(..).retention_cap_days()`. D-P-30, added later for Q's R12, says retention must use `retention_window_at`, which is async, reads `meta.db`, and returns the largest window of the last 30 days, not the current one. The two are different values and signatures. The hook table was never updated, and D-P-22's ingest D85 age check (synchronous, in `IngestContext`) uses the same `retention_cap_days()`.
 
@@ -216,7 +216,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/p-entitlements/03-m3-units-and-limits.md:514 ('Rows of dropped orgs stay')
   - docs/plans/p-entitlements/00-design.md:106 D-P-43 and :231 M4 row (no R5/R17)
   - docs/mvp-decisions.md:534 D-P-43
-  - llmobs-control `docs/`00-design.md:144 R5
+  - cetra-control `docs/`00-design.md:144 R5
 
 **Problem.** Q's R5 asks that a dropped org's usage rows stay in the export for at least 40 days. D-P-43 gives R5 to P's M4, but P's M4 scope row leaves it out. M's org drop (in its decision, plan and merged code) deletes the rows in the same transaction as the org. P's M3 export plan assumes the opposite ('Rows of dropped orgs stay'). Two tracks state opposite behaviour, and nobody owns the change.
 
@@ -224,7 +224,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** Amend D-M-7 and m-deletion/README.md § Cascades: an org drop keeps its usage_daily rows. P's M4, which owns R5 under D-P-43, removes `delete_org_usage` from the drop, changes M's tests, and adds a pruner for rows of orgs that no longer exist after 40 days (or more). Add R5, R17 and the 40-day rule to P's M4 milestone row and to § Interfaces for track Q (3). Fix the wording at 03-m3:514 so it matches.
 
-**Verifier.** D-M-7 (mvp-decisions.md:474), m-deletion/README.md § Cascades (usage_daily, org column: 'deleted, after one Usage::flush'), and the code in crates/server/src/deletion/mod.rs:581 (`crate::usage::delete_org_usage(conn, org)` in the drop transaction) all delete the org's usage rows. Q's R5 (llmobs-control/docs/00-design.md:144) asks for 'at least 40 days', and D-P-43 assigns R5 to P's M4, but P's M4 milestone row (00-design.md:231) never mentions R5, R17 or the 40 days. P's own M3 plan (03-m3-units-and-limits.md:514) also says 'Rows of dropped orgs stay (`usage_daily` has no foreign key)', which contradicts M's code.
+**Verifier.** D-M-7 (mvp-decisions.md:474), m-deletion/README.md § Cascades (usage_daily, org column: 'deleted, after one Usage::flush'), and the code in crates/server/src/deletion/mod.rs:581 (`crate::usage::delete_org_usage(conn, org)` in the drop transaction) all delete the org's usage rows. Q's R5 (cetra-control/docs/00-design.md:144) asks for 'at least 40 days', and D-P-43 assigns R5 to P's M4, but P's M4 milestone row (00-design.md:231) never mentions R5, R17 or the 40 days. P's own M3 plan (03-m3-units-and-limits.md:514) also says 'Rows of dropped orgs stay (`usage_daily` has no foreign key)', which contradicts M's code.
 
 ### X10. I's active-rule-limit hook is described three ways
 
@@ -257,13 +257,13 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/n-packaging/m2/08-cli.md § docs/spec/09-api.md § CLI (lines 119-127)
   - docs/plans/i-online-eval/00-design.md line 89; docs/spec/12-operations.md line 5
 
-**Problem.** Spec 09's CLI table lacks P's shipped `llmobs admin entitlements show <org>`. Its prefix table omits `/api/internal/*`, although those endpoints and their token auth are documented in the endpoints section. `llmobs admin check` is specified in specs 09 and 12 but no track owns building it. N's B8 edits a different row and does not conflict.
+**Problem.** Spec 09's CLI table lacks P's shipped `cetra admin entitlements show <org>`. Its prefix table omits `/api/internal/*`, although those endpoints and their token auth are documented in the endpoints section. `cetra admin check` is specified in specs 09 and 12 but no track owns building it. N's B8 edits a different row and does not conflict.
 
-**Failure scenario.** Q's authors, who work from spec 09, cannot find the internal-endpoint contract in the prefix table. N's B8 and the P follow-up both edit the same table rows and conflict, or one silently drops the other's line. `llmobs admin check` is documented in specs and, by D-N-4/N docs, may be relied on as a preflight that does not exist.
+**Failure scenario.** Q's authors, who work from spec 09, cannot find the internal-endpoint contract in the prefix table. N's B8 and the P follow-up both edit the same table rows and conflict, or one silently drops the other's line. `cetra admin check` is documented in specs and, by D-N-4/N docs, may be relied on as a preflight that does not exist.
 
-**Fix.** P: add `llmobs admin entitlements show <org>` to spec 09's CLI table, and a `/api/internal/*` row to the prefix table (auth: signed org token or control_plane bearer; see § Orgs). Coordinator: assign `admin check` to a track, or mark it '(not built)' in specs 09 and 12.
+**Fix.** P: add `cetra admin entitlements show <org>` to spec 09's CLI table, and a `/api/internal/*` row to the prefix table (auth: signed org token or control_plane bearer; see § Orgs). Coordinator: assign `admin check` to a track, or mark it '(not built)' in specs 09 and 12.
 
-**Verifier.** `llmobs admin entitlements show` is on main and absent from spec 09's CLI table, and `admin check` is specified in specs 09 and 12 but built by no track. Two parts of the original claim are overstated. The /api/internal endpoints and their auth are already in spec 09's endpoint table (line 67); only the prefix table lacks the row. N's B8 replaces only the compact/wal-inspect/gc-orphans row (line 181), not the admin row (line 179), so it does not conflict with P's command.
+**Verifier.** `cetra admin entitlements show` is on main and absent from spec 09's CLI table, and `admin check` is specified in specs 09 and 12 but built by no track. Two parts of the original claim are overstated. The /api/internal endpoints and their auth are already in spec 09's endpoint table (line 67); only the prefix table lacks the row. N's B8 replaces only the compact/wal-inspect/gc-orphans row (line 181), not the admin row (line 179), so it does not conflict with P's command.
 
 
 ## Owner: Track I
@@ -316,7 +316,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/n-packaging/m2/00-design.md § Pre-migration copies (D-N-22), lines 275-287
   - docs/plans/n-packaging/m2/09-pre-migration.md § One rule, lines 26-40 ('target = dir / "{name}.pre-{CARGO_PKG_VERSION}"'; 'if target exists: keep it and skip the copy')
   - Cargo.toml line 6 `version = "0.0.0"`
-  - llmobs-control `docs/`01-m1-first-cell.md `docs/runbooks/cell-upgrade.md` steps 1 and 4 and Rollback (lines ~1556-1566); 00-design.md D-Q-8
+  - cetra-control `docs/`01-m1-first-cell.md `docs/runbooks/cell-upgrade.md` steps 1 and 4 and Rollback (lines ~1556-1566); 00-design.md D-Q-8
 
 **Problem.** Between releases, every commit has the same CARGO_PKG_VERSION (0.0.0 today). After the first migrating upgrade, N's rule keeps the existing `.pre-0.0.0` copy and skips new ones. Q's cell-upgrade rollback restores that copy, which can be from several upgrades earlier. Q's runbook does take a full backup first (step 3), so data is recoverable. But the documented rollback path silently restores stale meta.db/catalog.db.
 
@@ -324,7 +324,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** N (B9/D-N-22): key the copy on the schema being left, e.g. `{name}.pre-m{applied}` (applied migration number), keeping 'never replace an existing copy of the same name'. A failed half-migration leaves `applied` unchanged, so the rule still holds. Q: make the rollback step name the copy by that key, or restore from the step-3 backup instead.
 
-**Verifier.** N names the copy `<name>.pre-<CARGO_PKG_VERSION>` and keeps an existing one; the workspace is 0.0.0, and Q's runbook moves `LLMOBS_COMMIT` between main commits, then on rollback restores `meta.db.pre-<version>`/`catalog.db.pre-<version>`. So after the first upgrade, later upgrades skip the copy, and a rollback restores a stale copy. Q's step 3 takes a backup first, which limits the damage. The rollback text still points at the wrong file.
+**Verifier.** N names the copy `<name>.pre-<CARGO_PKG_VERSION>` and keeps an existing one; the workspace is 0.0.0, and Q's runbook moves `CETRA_COMMIT` between main commits, then on rollback restores `meta.db.pre-<version>`/`catalog.db.pre-<version>`. So after the first upgrade, later upgrades skip the copy, and a rollback restores a stale copy. Q's step 3 takes a backup first, which limits the damage. The rollback text still points at the wrong file.
 
 ### X15. Restore starts the server before `reapply-deletions`, and reapply does not cover eval or `meta.db` cascades
 
@@ -344,7 +344,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** N: in 10-docs.md and 00-design.md § Restore (and spec 12 § Backups 'Restore'), run `reapply-deletions` before the first start when the backup is at the binary's schema. When it is not, start with eval workers and alerts disabled, or provide a migrate-only command, until reapply is done. M: in M7, load reapplied rows into the guard at registration regardless of `created_at` age, re-run `eval_trace_ids` over the stored scope when registering, and apply M8's eval_jobs cascade to reapplied rows. Add a test for each.
 
-**Verifier.** N's 10-docs.md § Restore steps 6-7 and 00-design.md § Restore steps 4-5 always start `llmobs serve` before `reapply-deletions`. M7 (07-reapply.md intro) and spec 12 'GDPR and backups' say to start the server once only if the backup is from an older version, and the command 'works whether the server runs or not'. M7's last paragraph accepts that the guard learns reapplied scopes only at the next start and that M8's eval_jobs cascade does not run. D-I-28 keeps queued backfill jobs for 7 days, and the pending_traces sweeper creates new jobs, so restored jobs can judge erased traces in that window. Their judge traces get an ingest_time after the cut-off, outside the stored scope.
+**Verifier.** N's 10-docs.md § Restore steps 6-7 and 00-design.md § Restore steps 4-5 always start `cetra serve` before `reapply-deletions`. M7 (07-reapply.md intro) and spec 12 'GDPR and backups' say to start the server once only if the backup is from an older version, and the command 'works whether the server runs or not'. M7's last paragraph accepts that the guard learns reapplied scopes only at the next start and that M8's eval_jobs cascade does not run. D-I-28 keeps queued backfill jobs for 7 days, and the pending_traces sweeper creates new jobs, so restored jobs can judge erased traces in that window. Their judge traces get an ingest_time after the cut-off, outside the stored scope.
 
 
 ## Owner: Track M
@@ -358,7 +358,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/m-deletion/README.md § Hooks for other tracks, Q bullet (line ~317): "add the control-plane notification to `deletion::on_dropped`"
   - crates/server/src/deletion/mod.rs:192-195 (doc comment "Track Q adds the control-plane notification here ... through its own outbox"; `on_dropped(_state: &AppState, ...)`)
   - docs/plans/p-entitlements/00-design.md line 222 ("Not P's ... `deletion::on_dropped` (track M's hook for Q, D-M-17)")
-  - llmobs-control `docs/`00-design.md § Interfaces table row "Org drops ... (via R5)" and R5 row (pull of `deletions` rows, "D-M-17's durable outbox")
+  - cetra-control `docs/`00-design.md § Interfaces table row "Org drops ... (via R5)" and R5 row (pull of `deletions` rows, "D-M-17's durable outbox")
   - docs/mvp-decisions.md line 534 (D-P-43: R5 to P's M4)
 
 **Problem.** D-M-17 says Q adds its notification inside `on_dropped`. Q is a separate repository and instead pulls `GET /api/internal/v1/deletions` (R5), assigned to P's M4. Nobody owns the push hook, so `on_dropped` stays a function that only logs and ignores its state argument.
@@ -394,7 +394,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **References:**
   - docs/spec/12-operations.md § Upgrades (line 128 'Downgrades are not supported (documented: restore the pre-upgrade backup)'; line 125) and § Backups 'GDPR and backups' (line 119)
   - docs/plans/n-packaging/m2/00-design.md § Pre-migration copies (D-N-22) lines 275-286; 09-pre-migration.md § Changes; 10-docs.md § docs/self-hosting/upgrade.md
-  - docs/plans/m-deletion/07-reapply.md § Admin function lines 78-107 (`SourceSchema`: 'run `llmobs serve` on a copy of it first') and line 7
+  - docs/plans/m-deletion/07-reapply.md § Admin function lines 78-107 (`SourceSchema`: 'run `cetra serve` on a copy of it first') and line 7
   - crates/server/src/meta/mod.rs open_existing / SchemaMismatch (lines ~77-86, 181)
 
 **Problem.** (a) A rollback restores the `.pre-<version>` copies or a pre-upgrade backup and runs the old binary. `reapply-deletions --from <kept dir>` then fails with `SourceSchema`, because the source is newer. The suggested remedy (run serve on the source) cannot work, since the old binary cannot open a newer schema either. Erasures made between the upgrade and the rollback are lost with no supported way to reapply them. (b) `meta.db.pre-<version>` keeps pre-upgrade member emails, names and project rows until the next upgrade, which may be months away, and the GDPR backup-retention advice does not cover it. `catalog.db.pre-*` holds only file and catalog metadata, not payload, so the GDPR concern is mainly about `meta.db.pre-*`.
@@ -431,19 +431,19 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** minor · **Verdict:** CONFIRMED · **Owner:** R · **Tracks:** A1, M, N, P, R
 - **Reviewer ids:** SC-11, DS-9, OW-9, LC-8, PR-5
 - **References:**
-  - claude/r-hardening-design-43eb31:docs/plans/r-hardening/00-design.md § Audit so far item 2 ('Nothing lists the object tree'), § M2 (fs seam: 'Every local file operation of crates/storage'), § M4 Checks ('an orphan audit (list the bucket, compare it with catalog.db)'), § M1 Budget (LLMOBS_MODEL_CASES, D-R-14)
+  - claude/r-hardening-design-43eb31:docs/plans/r-hardening/00-design.md § Audit so far item 2 ('Nothing lists the object tree'), § M2 (fs seam: 'Every local file operation of crates/storage'), § M4 Checks ('an orphan audit (list the bucket, compare it with catalog.db)'), § M1 Budget (CETRA_MODEL_CASES, D-R-14)
   - claude/r-hardening-design-43eb31:docs/roadmap.md row R (deps 'A1, A2, M')
   - docs/plans/n-packaging/m2/00-design.md lines 162-178 (Storage::copy_objects hard links), 320-321 (copy_objects, collect_orphans in storage), § Pre-migration copies; docs/roadmap.md row N ('M2 ... planned')
   - docs/plans/p-entitlements/00-design.md D-P-21 (line 67, QueryOptions::visible_from, media per-blob newest start_time) and M4 row (line 231)
-  - crates/otel/tests/proptest.rs line 95, crates/eval/tests/hostile.rs line 100 (LLMOBS_PROPTEST_CASES)
+  - crates/otel/tests/proptest.rs line 95, crates/eval/tests/hostile.rs line 100 (CETRA_PROPTEST_CASES)
 
-**Problem.** R's statement 'nothing lists the object tree' describes current code. N's planned M2 adds that listing (`collect_orphans`) and new file operations (`copy_objects` hard links) in crates/storage. P's M4 adds `visible_from` to every provider. R's design and dependency column ignore both, so R's M2 fs seam, its M4 orphan audit and its M1 model risk duplicating or missing them. The case-count env var differs from the repo's existing LLMOBS_PROPTEST_CASES.
+**Problem.** R's statement 'nothing lists the object tree' describes current code. N's planned M2 adds that listing (`collect_orphans`) and new file operations (`copy_objects` hard links) in crates/storage. P's M4 adds `visible_from` to every provider. R's design and dependency column ignore both, so R's M2 fs seam, its M4 orphan audit and its M1 model risk duplicating or missing them. The case-count env var differs from the repo's existing CETRA_PROPTEST_CASES.
 
 **Failure scenario.** R's M4 writes a second bucket lister that drifts from `collect_orphans`. N's `copy_objects` lands with raw `std::fs` calls and R's M2 either misses them (backup path untested for lost writes) or must refactor merged code. P's window filter is untested by R's model, so wrong results from `visible_from` pass R's 'never returns a wrong result' claim.
 
-**Fix.** R: in M4, reuse N's `collect_orphans(dry_run)` for the orphan audit (or state the order if R lands first). Add N M2's storage file operations to M2's fs-seam scope and the durability table. Add `visible_from` to the M1 model's read set once P's M4 lands. Reuse LLMOBS_PROPTEST_CASES or document both. Coordinator: add N M2 and P M4 to R's dependency/ordering column. P's M4 plan states where the media record lives (if it goes in catalog.db, it is a format change).
+**Fix.** R: in M4, reuse N's `collect_orphans(dry_run)` for the orphan audit (or state the order if R lands first). Add N M2's storage file operations to M2's fs-seam scope and the durability table. Add `visible_from` to the M1 model's read set once P's M4 lands. Reuse CETRA_PROPTEST_CASES or document both. Coordinator: add N M2 and P M4 to R's dependency/ordering column. P's M4 plan states where the media record lives (if it goes in catalog.db, it is a format change).
 
-**Verifier.** R's design never mentions N's M2 or P's M4. Its roadmap row depends only on A1, A2 and M. N's M2 adds `Storage::copy_objects` (hard links) and `collect_orphans` (lists the store) in crates/storage, and P's M4 adds `QueryOptions::visible_from` to every provider. Both overlap R's M2 fs-seam scope, R's M4 orphan audit, and R's model of every read. The env var split (LLMOBS_MODEL_CASES vs the existing LLMOBS_PROPTEST_CASES) is also real. Sub-point (d) is speculative: P's M4 plan is not written, and it does not say where the media record lives.
+**Verifier.** R's design never mentions N's M2 or P's M4. Its roadmap row depends only on A1, A2 and M. N's M2 adds `Storage::copy_objects` (hard links) and `collect_orphans` (lists the store) in crates/storage, and P's M4 adds `QueryOptions::visible_from` to every provider. Both overlap R's M2 fs-seam scope, R's M4 orphan audit, and R's model of every read. The env var split (CETRA_MODEL_CASES vs the existing CETRA_PROPTEST_CASES) is also real. Sub-point (d) is speculative: P's M4 plan is not written, and it does not say where the media record lives.
 
 ### X21. Track R's golden data directory per release has no owner in N's release process
 
@@ -477,7 +477,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Failure scenario.** `user_deletion_scope` misses a trace whose spans carry no `user_id`, or `eval_trace_ids` misses a judge trace. R's model still passes, because the oracle computes the scope itself, so the erasure gap ships. P's `visible_from` later hides spans by `start_time` and traces by their own `start_time`. A trace that straddles the boundary shows up with some spans missing, and no model test notices.
 
-**Fix.** R: either add `user_deletion_scope`, `filter_trace_ids` (unfiltered) and `eval_trace_ids` (model eval spans with `llmobs.eval.target_trace_id`) plus `alert_value` to the checked reads, and resolve `DeleteUser` through the real read compared against the oracle, or reword 'every read' and list them under 'What not to build'. P M4's plan should say whether it extends R's model with a `visible_from` window.
+**Fix.** R: either add `user_deletion_scope`, `filter_trace_ids` (unfiltered) and `eval_trace_ids` (model eval spans with `cetra.eval.target_trace_id`) plus `alert_value` to the checked reads, and resolve `DeleteUser` through the real read compared against the oracle, or reword 'every read' and list them under 'What not to build'. P M4's plan should say whether it extends R's model with a `visible_from` window.
 
 **Verifier.** R's 00-design § M1 and 01-m1-model.md list the checked reads (trace/span/score/session/user lists, metrics, `deletion_status`). They do not include `filter_trace_ids`, `user_deletion_scope`, `eval_trace_ids` (crates/storage/src/reads/deletions.rs) or `alert_value` (reads/alerts.rs). `DeleteUser` is resolved inside the oracle ('A user deletion as the server resolves it (D-M-3)', lines 591/604), and nothing in R mentions `visible_from`, which P M4 adds to storage under D-P-21. The gap is real. It is mostly R's own coverage choice, and the 'What not to build' section openly excludes several reads, so the cross-track inconsistency is limited to the 'every read the server makes' wording and the oracle re-implementing M's rule.
 
@@ -499,7 +499,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** Either make fuzz a root workspace member outside default-members with libfuzzer-sys/arbitrary in [workspace.dependencies], or keep it standalone and add `cargo deny --manifest-path fuzz/Cargo.toml check` to `just deny` plus a `/fuzz` cargo entry in dependabot.yml; widen R's scope of edits to include those files (or request it from the coordinator) and note the choice in AGENTS.md § Dependencies.
 
-**Verifier.** Confirmed that just deny, deny.toml bans and Dependabot cover only the root manifest, so a standalone fuzz/Cargo.lock is never audited or updated. But the reviewer's failure scenario is overstated: the fuzz crate depends on llmobs-storage by path and that crate inherits its version requirements from the root workspace, so a DataFusion major bump forces fuzz's lock to re-resolve to the new major. Only patch-level drift and missing advisory scans remain, in a crate that does not ship, hence minor.
+**Verifier.** Confirmed that just deny, deny.toml bans and Dependabot cover only the root manifest, so a standalone fuzz/Cargo.lock is never audited or updated. But the reviewer's failure scenario is overstated: the fuzz crate depends on cetra-storage by path and that crate inherits its version requirements from the root workspace, so a DataFusion major bump forces fuzz's lock to re-resolve to the new major. Only patch-level drift and missing advisory scans remain, in a crate that does not ship, hence minor.
 
 ### X24. Track R's conventions deviate from AGENTS.md registries
 
@@ -512,13 +512,13 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - AGENTS.md § Tests, § Commands, § Layout
   - docs/plans/a1-storage/00-design.md:495 (precedent)
 
-**Problem.** R's scope lists leave out AGENTS.md, so the new `just model` recipe, the LLMOBS_MODEL_CASES env var and, later, `fuzz/`, `tools/lazyfs/` and the nightly workflow will not appear in AGENTS.md's Commands, Tests, Layout and CI sections. The commit-subject and D-R-2 parts of the finding do not hold.
+**Problem.** R's scope lists leave out AGENTS.md, so the new `just model` recipe, the CETRA_MODEL_CASES env var and, later, `fuzz/`, `tools/lazyfs/` and the nightly workflow will not appear in AGENTS.md's Commands, Tests, Layout and CI sections. The commit-subject and D-R-2 parts of the finding do not hold.
 
-**Failure scenario.** After R1.7 merges, `just model` and LLMOBS_MODEL_CASES exist but the commands table and Tests section do not list them, so the next session does not know how to run the long model test. Sub-phase subjects with '(R1.1)' stay in history next to plain ones, breaking the plain-subject convention that D-N-5 sets for release tooling.
+**Failure scenario.** After R1.7 merges, `just model` and CETRA_MODEL_CASES exist but the commands table and Tests section do not list them, so the next session does not know how to run the long model test. Sub-phase subjects with '(R1.1)' stay in history next to plain ones, breaking the plain-subject convention that D-N-5 sets for release tooling.
 
-**Fix.** Add AGENTS.md to R's scope lists (r01 § Conventions and 00-design § Scope of edits). R1.7 adds `just model <cases>` to the Commands table and LLMOBS_MODEL_CASES to § Tests. M3 adds `fuzz/`, `tools/lazyfs/` to § Layout and the nightly workflow to § CI. Leave the commit subjects unchanged.
+**Fix.** Add AGENTS.md to R's scope lists (r01 § Conventions and 00-design § Scope of edits). R1.7 adds `just model <cases>` to the Commands table and CETRA_MODEL_CASES to § Tests. M3 adds `fuzz/`, `tools/lazyfs/` to § Layout and the nightly workflow to § CI. Leave the commit subjects unchanged.
 
-**Verifier.** Only part of this holds. The commit-subject claim is refuted: 416 of the 751 subjects on main use a `scope: ` prefix, and several end in a sub-phase id, e.g. `storage: ... (M6.9)`. R follows the existing practice. D-N-5's 'Commit subjects stay plain' is about release tooling, not about forbidding scopes. D-R-2 / R1.8 fixing 'anywhere in crates/storage/src/' stays inside R's own scope (00-design § Scope of edits: `crates/storage/`), so that is not a violation either. What holds: neither r01 § Conventions 'Scope' nor 00-design.md:167 lists AGENTS.md, yet R adds `just model`, `LLMOBS_MODEL_CASES` (D-R-14), `fuzz/`, `tools/lazyfs/` and `nightly.yml`. AGENTS.md has none of them, while it lists the sibling LLMOBS_CRASH_ITERATIONS / LLMOBS_TEST_S3_* and every just recipe. A1 set the precedent of updating AGENTS.md (a1-storage/00-design.md:495).
+**Verifier.** Only part of this holds. The commit-subject claim is refuted: 416 of the 751 subjects on main use a `scope: ` prefix, and several end in a sub-phase id, e.g. `storage: ... (M6.9)`. R follows the existing practice. D-N-5's 'Commit subjects stay plain' is about release tooling, not about forbidding scopes. D-R-2 / R1.8 fixing 'anywhere in crates/storage/src/' stays inside R's own scope (00-design § Scope of edits: `crates/storage/`), so that is not a violation either. What holds: neither r01 § Conventions 'Scope' nor 00-design.md:167 lists AGENTS.md, yet R adds `just model`, `CETRA_MODEL_CASES` (D-R-14), `fuzz/`, `tools/lazyfs/` and `nightly.yml`. AGENTS.md has none of them, while it lists the sibling CETRA_CRASH_ITERATIONS / CETRA_TEST_S3_* and every just recipe. A1 set the precedent of updating AGENTS.md (a1-storage/00-design.md:495).
 
 
 ## Owner: Coordinator
@@ -528,7 +528,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **Severity:** major · **Verdict:** CONFIRMED · **Owner:** coordinator · **Tracks:** D, I, K, L, M, N, P, Q, coordinator
 - **Reviewer ids:** OW-1, SC-6, DS-5, CL-4, PR-7
 - **References:**
-  - llmobs-control `docs/`00-design.md § Requests to llm-observer (line 136 and rows R5, R7, R11, R13, R14, R16, R17, R18), § Milestones M2 and M6 rows
+  - cetra-control `docs/`00-design.md § Requests to llm-observer (line 136 and rows R5, R7, R11, R13, R14, R16, R17, R18), § Milestones M2 and M6 rows
   - docs/mvp-decisions.md D-P-43 (line 534)
   - docs/plans/p-entitlements/00-design.md D-P-43 (line 106), D-P-39 (line 102), § Milestones M3/M4 rows (lines 230-231)
   - docs/plans/p-entitlements/03-m3-units-and-limits.md § Coordination (line 625)
@@ -542,7 +542,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** The coordinator adds a roadmap row and a small plan for the auth track (R7, R13, R16), or folds them into a named P/D-follow-up milestone. It assigns R18 (restore mode) to N, either in N's M2 next to backups/restore or as N M3, with a D-N decision, and assigns R11 to a named milestone. P adds R5 and R17 to its M4 row, or moves R5 into M3, since M's deletions outbox is on main. Q adds R18 to its M2 'Depends on', replaces the 'None is in a llm-observer plan yet' line with the actual owners, and the roadmap Q row records these dependencies.
 
-**Verifier.** The reviewer misstated one detail. Q's M2 row (llmobs-control/docs/00-design.md § Milestones) does list 'R1–R5, R7, R13–R16' as dependencies, not just P's M2. Q's design (line 136) also says the coordinator assigns the remaining requests before Q's M2 plan is written. Still, the ownership gaps are real. D-P-43 (mvp-decisions.md line 534; p-entitlements/00-design.md line 106) sends R7, R13 and R16 to 'a small auth track' that has no row in docs/roadmap.md and no plan. It sends R5 and R17 to P's M4, but the P M4 milestone row (00-design.md line 231) lists neither. R14 is in P's M3 (D-P-39, P8). R18 is marked 'Q M2 (before the first customer)' in Q's table, yet it is missing from Q's M2 dependency list and appears in no llm-observer doc. R11 (/metrics, Q M6) is deferred by N's README line 77 ('comes just before release') with no owner. The Q row in the roadmap still says 'Depends on P' and 'Not planned'.
+**Verifier.** The reviewer misstated one detail. Q's M2 row (cetra-control/docs/00-design.md § Milestones) does list 'R1–R5, R7, R13–R16' as dependencies, not just P's M2. Q's design (line 136) also says the coordinator assigns the remaining requests before Q's M2 plan is written. Still, the ownership gaps are real. D-P-43 (mvp-decisions.md line 534; p-entitlements/00-design.md line 106) sends R7, R13 and R16 to 'a small auth track' that has no row in docs/roadmap.md and no plan. It sends R5 and R17 to P's M4, but the P M4 milestone row (00-design.md line 231) lists neither. R14 is in P's M3 (D-P-39, P8). R18 is marked 'Q M2 (before the first customer)' in Q's table, yet it is missing from Q's M2 dependency list and appears in no llm-observer doc. R11 (/metrics, Q M6) is deferred by N's README line 77 ('comes just before release') with no owner. The Q row in the roadmap still says 'Depends on P' and 'Not planned'.
 
 ### X26. The 'erased within 24 h' promise ignores `gc.grace` (now up to 30 days; 8 days on Q cells)
 
@@ -553,7 +553,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/plans/m-deletion/09-web-data-tab.md:138,142; 10-web-actions.md:68,83; 11-web-drop.md:52,61; 04-api.md:83
   - docs/plans/n-packaging/m2/00-design.md § 'S3 object retention: raise gc.grace's cap (D-N-20)' lines 234-243; D-N-20 row line 307
   - docs/plans/n-packaging/m2/01-gc-grace.md (edits spec 03 §5 only)
-  - llmobs-control `docs/`00-design.md D-Q-12 (line 40)
+  - cetra-control `docs/`00-design.md D-Q-12 (line 40)
   - docs/spec/12-operations.md § Backups 'GDPR and backups' (line 119)
 
 **Problem.** Even before N, the guarantee was really 24 h + `gc.grace` (default 5 min, cap 24 h). N M2 raises the cap to 30 days and Q uses 8 days, but only N's self-hosting docs and Q's decision say so. Spec 03 §7's Guarantee, M's API doc comment and M's UI copy still promise erasure within 24 h. This covers deletions, project/org drops and retention, since all of them obsolete files that GC removes.
@@ -572,12 +572,12 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - crates/server/src/http/health.rs lines 1-44 (`readyz`, module comment)
   - crates/storage/src/lib.rs `StorageHealth` (~lines 131-140)
   - docs/spec/12-operations.md § Process lifecycle (line 82)
-  - llmobs-control `docs/`00-design.md D-Q-13 (line 41)
+  - cetra-control `docs/`00-design.md D-Q-13 (line 41)
   - docs/plans/n-packaging/README.md § Requests for Q item 2 (line 468)
   - docs/mvp-decisions.md D-N-4, D-N-10 (container healthcheck and Helm readiness on /readyz)
   - claude/r-hardening-design-43eb31:docs/plans/r-hardening/00-design.md D-R-6 (lines 81-84), § Scope of edits (line 167)
 
-**Problem.** Spec 12 promises that `/readyz` covers the object store and free disk. Code and N's own statement to Q say it covers only `meta.db` and the WALs. Q's only external health signal for a cell (D-Q-13) and N's container healthcheck (`llmobs health`) rely on it. R's D-R-6 makes the storage 'report unhealthy' after a failed fsync, but `StorageHealth` has no such field, R's scope excludes `crates/server`, and no doc says who wires it into `/readyz`.
+**Problem.** Spec 12 promises that `/readyz` covers the object store and free disk. Code and N's own statement to Q say it covers only `meta.db` and the WALs. Q's only external health signal for a cell (D-Q-13) and N's container healthcheck (`cetra health`) rely on it. R's D-R-6 makes the storage 'report unhealthy' after a failed fsync, but `StorageHealth` has no such field, R's scope excludes `crates/server`, and no doc says who wires it into `/readyz`.
 
 **Failure scenario.** The Hetzner bucket becomes unreachable, or the NVMe fills below `min_free_bytes`. Appends answer 503 and flushes fail, but `/readyz` stays 200. UptimeRobot never alerts, and the container healthcheck keeps the container 'healthy'. After R's M2, a catalog committer stopped by a failed fsync is likewise invisible to probes.
 
@@ -592,7 +592,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **References:**
   - docs/mvp-decisions.md:532 D-P-41, :503 D-P-12, D-P-10
   - docs/plans/p-entitlements/00-design.md:53 D-P-12, :198-200 licence payload, :209 org token example with org_sso, :232 M5 row
-  - llmobs-control `docs/`00-design.md:174 Plan values, :184 M3, :195 Open items
+  - cetra-control `docs/`00-design.md:174 Plan values, :184 M3, :195 Open items
 
 **Problem.** After D-P-41, Q's design still treats Teams SSO as undecided. M3 gates Teams sales on P's M5, which now serves self-hosted only. Q's Teams token still carries `org_sso`, which a cloud cell must never act on, and no Q milestone holds the IdP federation work. On P's side, D-P-12 and the examples still tie `org_sso` to Teams and to org tokens, with no licence example for self-hosted M5.
 
@@ -632,7 +632,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/spec/12-operations.md § Upgrades (line ~127): "WAL format carries a version byte in each segment header; a new binary reads the previous WAL version"
   - branch claude/r-hardening-design-43eb31: docs/mvp-decisions.md D-R-12 and docs/plans/r-hardening/00-design.md § M8 lines 149-163 ("Before the first public release: no constraint (no users, `AGENTS.md`)"; "M8's plan is written once the release date is close")
   - docs/mvp-decisions.md D-N-6 (line 547), D-N-12 (line 553)
-  - llmobs-control `docs/`decisions.md D-Q-8 (interim image from a pinned public commit); 00-design.md § Milestones M1 (eu1 cell, ops org) and M2 (invite-only customers)
+  - cetra-control `docs/`decisions.md D-Q-8 (interim image from a pinned public commit); 00-design.md § Milestones M1 (eu1 cell, ops org) and M2 (invite-only customers)
 
 **Problem.** Three documents disagree on storage format compatibility. Spec 12 § Upgrades requires reading the previous WAL version now. AGENTS.md forbids versioned codecs. D-R-12 (R branch) has no constraint until the "first public release", which nothing defines. Q's cloud cells (eu1 in M1, invited customers in M2) may hold data that must survive while still before that trigger. Then a storage format change in A1, R or M ships without a migration, and M8's golden-directory tooling is not built yet.
 
@@ -689,7 +689,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
   - docs/roadmap.md § Wave 2 intro and § Order (line after the Wave 2 table)
   - docs/roadmap.md rows H, K, M, N, P, Q
   - docs/roadmap.md § Decision IDs (lines 15-23)
-  - llmobs-control `docs/`00-design.md requests R9/R10 (lines 148-149), M1 row (line 182), line 189
+  - cetra-control `docs/`00-design.md requests R9/R10 (lines 148-149), M1 row (line 182), line 189
   - docs/plans/n-packaging/m2/00-design.md lines 4-7
 
 **Problem.** The Order paragraph is stale: it still schedules H, I and M as next and says P's design can start. Row Q says 'Not planned' and depends only on P, while Q has a design and an M1 plan whose go-live needs N's M2 (R9 and R10). N's M2 is planned but has no place in the Order paragraph. The roadmap also does not say that Q's decisions live outside mvp-decisions.md.
@@ -698,7 +698,7 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 
 **Fix.** Rewrite § Order as a dependency chain: I M3 then M M8; I M3, K and M M6 then P M4; N M2 then Q M1 go-live; P M3 and M4 then Q's later milestones. Update row Q's Plan and Status columns and give it N M2 as a dependency, and state where D-Q decisions live. Add row R when its branch merges.
 
-**Verifier.** On main, roadmap § Order still says 'P's design can start now' and 'Next: H and I, then M'. The rows say H is Implemented, K, L and G are Done, M is done except M8, and P's M1 and M2 are merged with M3 planned. Row Q says 'Not planned' and depends only on P, but llmobs-control/docs/00-design.md has a design, a 2005-line M1 plan, and an M1 go-live that waits on R9 and R10, which N's M2 implements (n-packaging/m2/00-design.md line 5). § Decision IDs puts every track's decisions in mvp-decisions.md, but Q keeps its D-Q decisions in its private repo. I did not check the 'missing auth track (OW-1)' part.
+**Verifier.** On main, roadmap § Order still says 'P's design can start now' and 'Next: H and I, then M'. The rows say H is Implemented, K, L and G are Done, M is done except M8, and P's M1 and M2 are merged with M3 planned. Row Q says 'Not planned' and depends only on P, but cetra-control/docs/00-design.md has a design, a 2005-line M1 plan, and an M1 go-live that waits on R9 and R10, which N's M2 implements (n-packaging/m2/00-design.md line 5). § Decision IDs puts every track's decisions in mvp-decisions.md, but Q keeps its D-Q decisions in its private repo. I did not check the 'missing auth track (OW-1)' part.
 
 ### X34. Q's decisions and status are invisible in llm-observer; decision-ID registry drift
 
@@ -707,8 +707,8 @@ Each finding below lists the reviewer ids it merges, the verdict, and the refere
 - **References:**
   - docs/roadmap.md Wave 2 Q row: "the org → cell mapping and request routing (D170)" | plan "—" | "Not planned" | decisions "—"
   - docs/mvp-decisions.md line 223 D170: "the org → cell mapping and routing"; 8 D-P decisions cite "Q's R<n>" (e.g. D-P-31 "Q's R4")
-  - llmobs-control `docs/`00-design.md line 34 D-Q-6 (customers use the cell hostname directly; "no request ro[uter]")
-  - llmobs-control `docs/`decisions.md header (never restates plain decisions) and D-Q-1..D-Q-27
+  - cetra-control `docs/`00-design.md line 34 D-Q-6 (customers use the cell hostname directly; "no request ro[uter]")
+  - cetra-control `docs/`decisions.md header (never restates plain decisions) and D-Q-1..D-Q-27
 
 **Problem.** Q has a design, a written M1 plan and 27 decisions in a private repository, but llm-observer's roadmap says 'Not planned' and mvp-decisions has no Track Q section. Many D-P decisions refer to R-numbers that readers of this repository cannot resolve. D-Q-6 (customers use the cell hostname, no routing) contradicts D170 and the roadmap row ('request routing'); Q's decisions.md says it never restates plain decisions.
 
@@ -808,7 +808,7 @@ These come from X25, X31, X34–X38 and the repeated collisions behind several f
 
 1. **Migration numbers (four renumber merges so far, three more queued).** Keep contiguous numbering (`expected_version()` and the idempotence test rely on it), but stop writing literal numbers in designs: plans say `NNNN_<stem>.sql`. Put the single rule in AGENTS.md § Parallel work: "take the next free number on `origin/main` when you start; whoever merges second renumbers on rebase and regenerates `meta_schema.snap`; a merged migration is never renumbered." Add a "pending `meta.db` migrations" list to `docs/roadmap.md` (today: I M3, I M4, I M6, P M3) and a cheap `just check` test that prefixes are unique and contiguous. Timestamped names were considered and rejected: they break the contiguous-version invariant for no gain on a single-writer schema.
 2. **Cross-repository requests.** Keep one registry of Q's requests (R1–R18) in `docs/roadmap.md`, one row per request: owning track, milestone, decision (D-P-n, D-N-n) and status. Q's design points to it instead of keeping its own copy. A track that answers a request differently from how Q asked (R10 → D-N-20) updates the row and tells Q in the same change.
-3. **Decision IDs.** Register Q's decision range (`D-Q-n`, kept in `llmobs-control`) in `docs/roadmap.md` § Decision IDs, so that a Q decision that narrows a plain decision (D-Q-6 vs D170) is visible here. Rename Q's request ids (`R1`…) to `Q-R1`… so they cannot be confused with track R. Cross-cutting choices made inside a track (D-R-12 on format compatibility, D-N-20 on erasure timing) go to the coordinator as plain decisions.
+3. **Decision IDs.** Register Q's decision range (`D-Q-n`, kept in `cetra-control`) in `docs/roadmap.md` § Decision IDs, so that a Q decision that narrows a plain decision (D-Q-6 vs D170) is visible here. Rename Q's request ids (`R1`…) to `Q-R1`… so they cannot be confused with track R. Cross-cutting choices made inside a track (D-R-12 on format compatibility, D-N-20 on erasure timing) go to the coordinator as plain decisions.
 4. **Changelog lines (D-N-5).** Add a "CHANGELOG" line to the plan template and to every sub-phase that changes user-visible behaviour, and a `just check` step that fails when `CHANGELOG.md` § `[Unreleased]` is unchanged on a branch that touches `crates/`, `web/` or `sdks/` without a `[no-changelog]` marker in the commit message.
 5. **`just check` versus CI.** Fix AGENTS.md § CI: `ci-ok` also needs `just e2e`, `just check-workflows` and `just check-packaging-lint`. Plans that touch packaging or workflows list those recipes in their check step.
 6. **Node PATH.** Remove the user-specific nvm path from the ~50 plan files and the reference to a non-existent AGENTS.md section. Put one line in AGENTS.md § Commands ("Node must be on PATH; see `.node-version`") and leave the local path in the user's environment.

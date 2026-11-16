@@ -455,7 +455,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::{Method, header};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::*;

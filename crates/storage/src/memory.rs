@@ -231,7 +231,7 @@ impl QueryPool {
 
 impl MemoryPool for QueryPool {
     fn name(&self) -> &str {
-        "llmobs_query"
+        "cetra_query"
     }
 
     fn register(&self, consumer: &MemoryConsumer) {
@@ -314,7 +314,7 @@ impl MemoryPool for QueryPool {
 
 impl Display for QueryPool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "llmobs_query(cap={})", self.cap)
+        write!(f, "cetra_query(cap={})", self.cap)
     }
 }
 

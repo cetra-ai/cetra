@@ -24,7 +24,7 @@ See [README.md](README.md). K10 adds the Python scenario project and records the
 - **`pyproject.toml`:**
   ```toml
   [project]
-  name = "llmobs-capture-scenarios"
+  name = "cetra-capture-scenarios"
   version = "0.0.0"
   requires-python = "==3.13.*"
   dependencies = [
@@ -62,8 +62,8 @@ See [README.md](README.md). K10 adds the Python scenario project and records the
     - installs it with `trace.set_tracer_provider` and returns it.
 
     `SimpleSpanProcessor`, not batching: every span is exported as it ends, so nothing is lost at exit, and the merge in K7 makes the batching irrelevant.
-  - `mock_url(path)` returns `os.environ["LLMOBS_CAPTURE_MOCK_URL"] + path`.
-  - `finish(provider)` calls `force_flush()` and `shutdown()`, then writes `{"libraries": {name: importlib.metadata.version(name)}}` for each name in `LLMOBS_CAPTURE_LIBRARIES` to `LLMOBS_CAPTURE_META`.
+  - `mock_url(path)` returns `os.environ["CETRA_CAPTURE_MOCK_URL"] + path`.
+  - `finish(provider)` calls `force_flush()` and `shutdown()`, then writes `{"libraries": {name: importlib.metadata.version(name)}}` for each name in `CETRA_CAPTURE_LIBRARIES` to `CETRA_CAPTURE_META`.
   - Any missing environment variable raises immediately with the variable's name.
 - **`scenarios/openinference/openai-chat-tool/`:**
   - **`scenario.json`:**
@@ -120,7 +120,7 @@ capture-py-sync:
 # Lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded)
 check-capture: capture-py-sync
     cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run mypy
-    cargo run -q -p llmobs-capture -- run --all --check
+    cargo run -q -p cetra-capture -- run --all --check
 ```
 
 Make `capture` and `capture-all` depend on `capture-py-sync`. **Don't add `check-capture` to `check`** (D117).

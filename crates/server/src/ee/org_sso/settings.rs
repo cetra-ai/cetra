@@ -4,7 +4,7 @@
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, patch, post, put};
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -1285,8 +1285,8 @@ mod tests {
         let row = added.json::<OrgSsoView>().domains[0].clone();
         assert_eq!(row.domain, "acme.test");
         assert_eq!(row.status, DomainStatus::Pending);
-        assert_eq!(row.txt_name, "_llmobs-verify.acme.test");
-        let token = row.txt_value.strip_prefix("llmobs-verify=").expect("value");
+        assert_eq!(row.txt_name, "_cetra-verify.acme.test");
+        let token = row.txt_value.strip_prefix("cetra-verify=").expect("value");
         assert_eq!(token.len(), 32);
         assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
 
@@ -1502,7 +1502,7 @@ mod tests {
     async fn logs_carry_no_domain() {
         let (app, seeded, owner) = org_sso_app().await;
         seed_provider(&app, seeded.org_id, "https://idp.example").await;
-        assert_logs_clean(&["acme.test", "llmobs-verify="], async {
+        assert_logs_clean(&["acme.test", "cetra-verify="], async {
             add_domain(&app, "acme", &owner.cookie, "acme.test").await;
             let row = domain_of(&app, "acme", &owner.cookie, "acme.test").await;
             app.dns_txt(&row.txt_name, &[quoted(&row.txt_value).as_str()]);
@@ -1717,7 +1717,7 @@ mod tests {
 
         // A login in flight: a password session, and a token made after the revocation.
         let token = new_opaque_token().expect("token");
-        let in_flight = format!("llmobs_session={}", token.plaintext);
+        let in_flight = format!("cetra_session={}", token.plaintext);
         let now = app.state.clock.now_ns();
         let user = ada.id;
         let hash = token.hash.clone();

@@ -2,8 +2,8 @@
 
 use std::fmt;
 
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use futures::TryStreamExt;
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
 use serde_json::{Map, Value};
 use sqlx::{AssertSqlSafe, SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -779,7 +779,7 @@ fn span_bytes(span: &SpanId) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use serde_json::{Map, Value, json};
     use uuid::Uuid;
 

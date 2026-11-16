@@ -1,20 +1,20 @@
 //! Payload readers in convention precedence order.
 //!
-//! Spec 02 § Input and output. llmobs and GenAI are N13. OpenInference is N18.
+//! Spec 02 § Input and output. cetra and GenAI are N13. OpenInference is N18.
 //! Vercel is N19. OpenLLMetry is N20. Langfuse and Laminar are N21.
 //! Google ADK is N22.
 
 mod adk;
+mod cetra;
 mod genai;
 mod laminar;
 mod langfuse;
-mod llmobs;
 pub(crate) mod openinference;
 mod openllmetry;
 mod vercel;
 
-use llmobs_core::enums::Convention;
-use llmobs_core::message::{Message, Part};
+use cetra_core::enums::Convention;
+use cetra_core::message::{Message, Part};
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use serde_json::Value as Json;
 
@@ -26,12 +26,12 @@ use crate::payload::{
 use crate::value::{as_str, to_json};
 use crate::warn::Warnings;
 
-/// llmobs, then GenAI, then OpenInference, then Vercel, then OpenLLMetry,
+/// cetra, then GenAI, then OpenInference, then Vercel, then OpenLLMetry,
 /// then Langfuse, then Laminar, then Google ADK.
 pub(crate) const READERS: &[ConventionPayload] = &[
     ConventionPayload {
-        convention: Convention::Llmobs,
-        read: llmobs::read,
+        convention: Convention::Cetra,
+        read: cetra::read,
     },
     ConventionPayload {
         convention: Convention::Genai,
@@ -66,8 +66,8 @@ pub(crate) const READERS: &[ConventionPayload] = &[
 /// Payload keys removed when a higher-precedence convention wins the field.
 pub(crate) const REGISTRIES: &[PayloadKeys] = &[
     PayloadKeys {
-        convention: Convention::Llmobs,
-        keys: llmobs::PAYLOAD_KEYS,
+        convention: Convention::Cetra,
+        keys: cetra::PAYLOAD_KEYS,
     },
     PayloadKeys {
         convention: Convention::Genai,
@@ -106,7 +106,7 @@ pub(crate) const REGISTRIES: &[PayloadKeys] = &[
 pub(super) fn messages_from_value(value: &AnyValue, warnings: &mut Warnings) -> (Payload, bool) {
     if let Some(json) = decode_json_text(value, warnings) {
         let text = serde_json::to_string(&json).unwrap_or_else(|_| "null".to_owned());
-        return match llmobs_core::message::parse_messages(&text) {
+        return match cetra_core::message::parse_messages(&text) {
             Ok(mut messages) => {
                 parse_tool_values(&mut messages);
                 (Payload::Messages(messages), false)
@@ -156,8 +156,8 @@ pub(super) fn present_json(value: &AnyValue, warnings: &mut Warnings) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::SpanKind;
-    use llmobs_core::message::messages_to_json;
+    use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use serde_json::json;
@@ -178,13 +178,13 @@ mod tests {
     }
 
     #[test]
-    fn llmobs_input_wins_and_genai_messages_are_not_merged() {
+    fn cetra_input_wins_and_genai_messages_are_not_merged() {
         let attrs = vec![
             string_attr(
-                "llmobs.input",
+                "cetra.input",
                 r#"[{"role":"user","parts":[{"type":"text","content":"ours"}]}]"#,
             ),
-            string_attr("llmobs.input.format", "messages"),
+            string_attr("cetra.input.format", "messages"),
             string_attr(
                 "gen_ai.input.messages",
                 r#"[{"role":"user","parts":[{"type":"text","content":"theirs"}]}]"#,
@@ -209,8 +209,8 @@ mod tests {
             r#"[{"role":"user","parts":[{"type":"text","content":"ours"}]}]"#
         );
         assert!(assembled.io.errors.is_empty());
-        assert_eq!(bag.state("llmobs.input"), Some(Use::Payload));
-        assert_eq!(bag.state("llmobs.input.format"), Some(Use::Payload));
+        assert_eq!(bag.state("cetra.input"), Some(Use::Payload));
+        assert_eq!(bag.state("cetra.input.format"), Some(Use::Payload));
         assert_eq!(bag.state("gen_ai.input.messages"), Some(Use::Payload));
         assert_eq!(json!(messages.len()), json!(1));
     }

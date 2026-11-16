@@ -1,4 +1,4 @@
-# Phase 0 · Step 2 — `llmobs-core`: shared contracts
+# Phase 0 · Step 2 — `cetra-core`: shared contracts
 
 Implementation plan, split into small sub-phases. Each sub-phase is done by one agent in one go and ends with `just check` green and one commit.
 
@@ -12,19 +12,19 @@ Implementation plan, split into small sub-phases. Each sub-phase is done by one 
 - `docs/spec/README.md` § Cross-cutting conventions.
 - Decisions D59–D63 in `docs/mvp-decisions.md`.
 
-## What `llmobs-core` is (and is not)
+## What `cetra-core` is (and is not)
 
-`llmobs-core` holds the **contracts shared by more than one crate**, nothing else.
+`cetra-core` holds the **contracts shared by more than one crate**, nothing else.
 
 | In core | Not in core (owner) |
 |---|---|
-| `TraceId`, `SpanId`, `ProjectId`, `OrgId` | other entity IDs: plain `uuid::Uuid` in `llmobs-server` (D61) |
+| `TraceId`, `SpanId`, `ProjectId`, `OrgId` | other entity IDs: plain `uuid::Uuid` in `cetra-server` (D61) |
 | enums that appear in stored data (span kind, status, payload format, cost source, convention, score enums) | config types: each crate owns its section (D59) |
-| the canonical message types (`Message`, `Part`, …) | OTLP decoding, normalization, previews, cost computation: `llmobs-otel` |
-| the `Span` and `Score` Rust structs (the otel → storage and API → storage contract) (D60) | trace partial computation, WAL, partition keys, day strings: `llmobs-storage` |
+| the canonical message types (`Message`, `Part`, …) | OTLP decoding, normalization, previews, cost computation: `cetra-otel` |
+| the `Span` and `Score` Rust structs (the otel → storage and API → storage contract) (D60) | trace partial computation, WAL, partition keys, day strings: `cetra-storage` |
 | the Arrow schemas of `spans`, `traces`, `scores`, plus column-name constants | the trace partial Rust type: none, storage computes partials with Arrow/DataFusion |
 | `Span` → `RecordBatch` and `Score` → `RecordBatch` conversion | `RecordBatch` → `Span` (no consumer yet) |
-| attribute names, reserved metadata keys and reserved values (`llmobs.*`, `llmobs-eval`, `media://`) | time formatting/parsing helpers: added where first needed |
+| attribute names, reserved metadata keys and reserved values (`cetra.*`, `cetra-eval`, `media://`) | time formatting/parsing helpers: added where first needed |
 
 **Rules** (on top of `AGENTS.md`):
 - Every public item has a doc comment that references the spec section it implements.
@@ -134,7 +134,7 @@ Add `pub fn as_str(self) -> &'static str` (via `IntoStaticStr`). Parsing failure
 | `SpanStatus` | `unset, ok, error` | 01 `status` |
 | `PayloadFormat` | `messages, json, text` | 01 § Payloads |
 | `CostSource` | `computed, reported, none` | 01 `cost_source` |
-| `Convention` | `llmobs, genai, openinference, openllmetry, vercel, langfuse, laminar, google_adk` | 01 `conventions`, 02 § Convention detection |
+| `Convention` | `cetra, genai, openinference, openllmetry, vercel, langfuse, laminar, google_adk` | 01 `conventions`, 02 § Convention detection |
 | `ScoreTargetKind` | `span, trace, session` | 01 § Score `target` |
 | `ScoreDataType` | `numeric, boolean, categorical, text` | 01 § Score `data_type` |
 | `ScoreSource` | `api, sdk, human, end_user, llm_judge, check, webhook` | 01 § Score `source` |
@@ -152,48 +152,48 @@ Add `pub fn as_str(self) -> &'static str` (via `IntoStaticStr`). Parsing failure
 
 ## C3 — Names: attributes, reserved keys and values
 
-**Goal:** a single place for every `llmobs`-branded string, so the future rename (D46) touches one macro.
+**Goal:** a single place for every `cetra`-branded string, so the future rename (D46) touches one macro.
 
 **`names.rs`:**
 ```rust
 /// Product name used in every branded identifier. Renaming the product = changing this macro.
 #[macro_export]
-macro_rules! llmobs_name {
-    () => { "llmobs" };
-    ($suffix:literal) => { concat!("llmobs", $suffix) };
+macro_rules! cetra_name {
+    () => { "cetra" };
+    ($suffix:literal) => { concat!("cetra", $suffix) };
 }
-pub const PRODUCT: &str = llmobs_name!();
+pub const PRODUCT: &str = cetra_name!();
 ```
 
-Then constants grouped in sub-modules. All are `pub const …: &str = llmobs_name!("…")` where branded, or plain literals for standard attribute names. Values come from specs 02, 06 and 10:
+Then constants grouped in sub-modules. All are `pub const …: &str = cetra_name!("…")` where branded, or plain literals for standard attribute names. Values come from specs 02, 06 and 10:
 
 ```rust
 pub mod attr {          // span attributes emitted by our SDKs / read by otel (spec 02, 10)
-    SPAN_KIND          = "llmobs.span.kind"
-    INPUT              = "llmobs.input"
-    INPUT_FORMAT       = "llmobs.input.format"
-    OUTPUT             = "llmobs.output"
-    OUTPUT_FORMAT      = "llmobs.output.format"
-    SESSION_ID         = "llmobs.session.id"
-    USER_ID            = "llmobs.user.id"
-    TAGS               = "llmobs.tags"
-    METADATA_PREFIX    = "llmobs.metadata."      // one attribute per metadata key
-    ENVIRONMENT        = "llmobs.environment"
-    RELEASE            = "llmobs.release"
-    TTFT_NS            = "llmobs.ttft_ns"
-    COST_TOTAL         = "llmobs.cost.total"
-    EXPERIMENT_ID      = "llmobs.experiment.id"
-    DATASET_ITEM_ID    = "llmobs.dataset_item.id"
+    SPAN_KIND          = "cetra.span.kind"
+    INPUT              = "cetra.input"
+    INPUT_FORMAT       = "cetra.input.format"
+    OUTPUT             = "cetra.output"
+    OUTPUT_FORMAT      = "cetra.output.format"
+    SESSION_ID         = "cetra.session.id"
+    USER_ID            = "cetra.user.id"
+    TAGS               = "cetra.tags"
+    METADATA_PREFIX    = "cetra.metadata."      // one attribute per metadata key
+    ENVIRONMENT        = "cetra.environment"
+    RELEASE            = "cetra.release"
+    TTFT_NS            = "cetra.ttft_ns"
+    COST_TOTAL         = "cetra.cost.total"
+    EXPERIMENT_ID      = "cetra.experiment.id"
+    DATASET_ITEM_ID    = "cetra.dataset_item.id"
 }
 pub mod metadata_key {  // reserved keys inside the `metadata` map (spec 02 context fields, 06)
-    EXPERIMENT_ID         = "llmobs.experiment_id"
-    DATASET_ITEM_ID       = "llmobs.dataset_item_id"
-    EVAL_TARGET_TRACE_ID  = "llmobs.eval.target_trace_id"
-    EVAL_TARGET_SPAN_ID   = "llmobs.eval.target_span_id"
-    EVAL_RULE_ID          = "llmobs.eval.rule_id"
-    EVAL_EXPERIMENT_ID    = "llmobs.eval.experiment_id"
-    EVAL_EVALUATOR_ID     = "llmobs.eval.evaluator_id"
-    NORMALIZE_ERROR       = "llmobs.normalize_error"   // spec 02 § message conversion; stored in `attributes`
+    EXPERIMENT_ID         = "cetra.experiment_id"
+    DATASET_ITEM_ID       = "cetra.dataset_item_id"
+    EVAL_TARGET_TRACE_ID  = "cetra.eval.target_trace_id"
+    EVAL_TARGET_SPAN_ID   = "cetra.eval.target_span_id"
+    EVAL_RULE_ID          = "cetra.eval.rule_id"
+    EVAL_EXPERIMENT_ID    = "cetra.eval.experiment_id"
+    EVAL_EVALUATOR_ID     = "cetra.eval.evaluator_id"
+    NORMALIZE_ERROR       = "cetra.normalize_error"   // spec 02 § message conversion; stored in `attributes`
 }
 pub mod score_metadata_key { // keys in Score.metadata written by evaluators (spec 06)
     JUDGE_TRACE_ID = "judge.trace_id", JUDGE_MODEL = "judge.model",
@@ -201,24 +201,24 @@ pub mod score_metadata_key { // keys in Score.metadata written by evaluators (sp
     JUDGE_COST_USD = "judge.cost_usd", JUDGE_LATENCY_MS = "judge.latency_ms"
 }
 pub mod environment {   // reserved environment values (spec 01, 06)
-    EVAL                = "llmobs-eval"
-    EVAL_EXTERNAL       = "llmobs-eval-external"   // what external data claiming EVAL is rewritten to
+    EVAL                = "cetra-eval"
+    EVAL_EXTERNAL       = "cetra-eval-external"   // what external data claiming EVAL is rewritten to
     EXPERIMENT          = "experiment"
 }
 pub mod media {         // spec 01 § Media blob, 02 § Media extraction
     URI_SCHEME          = "media://"
-    DROPPED_URI         = "llmobs:dropped"
+    DROPPED_URI         = "cetra:dropped"
 }
 pub mod marker {        // truncation texts (spec 02 § Truncation)
-    TRUNCATED_STRING_SUFFIX_PREFIX = "…[llmobs: truncated, original "   // followed by "<N> bytes]"
-    TRUNCATED_MESSAGES_PREFIX      = "[llmobs: "                        // followed by "<K> messages truncated]"
+    TRUNCATED_STRING_SUFFIX_PREFIX = "…[cetra: truncated, original "   // followed by "<N> bytes]"
+    TRUNCATED_MESSAGES_PREFIX      = "[cetra: "                        // followed by "<K> messages truncated]"
 }
 ```
 The pseudo-syntax above shows names and values. Write real `pub const NAME: &str = …;` items, with a doc comment on each pointing to the spec. Truncation markers are only prefixes; otel formats the full text.
 
 **Tests:**
 - An insta snapshot `names.snap` of every constant as `module::NAME = "value"`.
-- A test asserting every branded constant starts with `PRODUCT`. This catches a hand-typed `"llmobs"`.
+- A test asserting every branded constant starts with `PRODUCT`. This catches a hand-typed `"cetra"`.
 
 **Commit:** `core: add branded names and reserved values`
 
@@ -518,8 +518,8 @@ Add the `CoreError::Arrow` variant now.
 
 **Do (no new features):**
 1. Run `just check`.
-2. Run `cargo doc -p llmobs-core --no-deps` and fix warnings. Every public item must be documented; add `#![warn(missing_docs)]` to `crates/core/src/lib.rs`, a lint local to this crate.
-3. Check `cargo tree -p llmobs-core -e normal` for unexpected heavy dependencies. `arrow` is expected. `datafusion` and `parquet` must **not** be normal dependencies of core.
+2. Run `cargo doc -p cetra-core --no-deps` and fix warnings. Every public item must be documented; add `#![warn(missing_docs)]` to `crates/core/src/lib.rs`, a lint local to this crate.
+3. Check `cargo tree -p cetra-core -e normal` for unexpected heavy dependencies. `arrow` is expected. `datafusion` and `parquet` must **not** be normal dependencies of core.
 4. Re-read spec 01's three tables against `schema.rs` column by column. Every name, type, nullability and the order must match the plan above.
 
 **Report back:**

@@ -4,7 +4,7 @@ Read [README.md](README.md) first, especially § Design › Build, § Design ›
 § Conventions.
 
 **Goal:**
-- `just dist <target>` builds the release archive `target/dist/llmobs-<version>-<target>.tar.gz`
+- `just dist <target>` builds the release archive `target/dist/cetra-<version>-<target>.tar.gz`
   for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` or `aarch64-apple-darwin`
   (D-N-1, D-N-16). For a Linux target it also stages the image build context
   `target/dist/image/linux-<amd64|arm64>/` that N4's Dockerfile copies.
@@ -33,12 +33,12 @@ cargo-about 0.9.3, Node on `PATH`, python3, curl, `file`.
 2. Reads the version (`version.sh`).
 3. `rustup target add <target>`.
 4. Builds the web.
-5. `cargo auditable build --release --locked --target <target> -p llmobs-cli`. For musl it sets
+5. `cargo auditable build --release --locked --target <target> -p cetra-cli`. For musl it sets
    `CC_<target>=musl-gcc` so the C dependencies compile against musl.
-6. Runs the binary, which must print `llmobs <version>` and `ui: embedded`. A Linux binary must
+6. Runs the binary, which must print `cetra <version>` and `ui: embedded`. A Linux binary must
    also be static (`file` says `static`).
 7. Writes the notices (N2).
-8. Stages `target/dist/llmobs-<version>-<target>/` with `llmobs`, `LICENSE`, `LICENSE-ELASTIC` and
+8. Stages `target/dist/cetra-<version>-<target>/` with `cetra`, `LICENSE`, `LICENSE-ELASTIC` and
    `THIRD-PARTY-NOTICES.md`, and tars it. The staged binary has its DWARF debug info stripped
    (`strip --strip-debug`, `strip -S` on macOS): the workspace release profile keeps line tables,
    which make the binary about 600 MB; stripped it is about 150 MB and keeps its symbol table and
@@ -53,7 +53,7 @@ archives: artifact uploads drop file modes and empty directories, and tar keeps 
 no cross-building.
 
 The smoke test and its launcher are described in README § Design › Verification. The fixed key
-`sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ` has 32 characters after the prefix (spec 08).
+`sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ` has 32 characters after the prefix (spec 08).
 
 ## Files
 
@@ -81,11 +81,11 @@ echo "$version"
 #!/usr/bin/env bash
 # Builds the release archive of one target into target/dist (D-N-1, D-N-16):
 #
-#   target/dist/llmobs-<version>-<target>.tar.gz
-#     llmobs-<version>-<target>/llmobs                   the binary, debug info stripped
-#     llmobs-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
-#     llmobs-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
-#     llmobs-<version>-<target>/THIRD-PARTY-NOTICES.md
+#   target/dist/cetra-<version>-<target>.tar.gz
+#     cetra-<version>-<target>/cetra                   the binary, debug info stripped
+#     cetra-<version>-<target>/LICENSE                  the root LICENSE (MIT, names the ee dirs)
+#     cetra-<version>-<target>/LICENSE-ELASTIC          crates/server/src/ee/LICENSE (ELv2)
+#     cetra-<version>-<target>/THIRD-PARTY-NOTICES.md
 #
 # and, for a Linux target, the Docker build context of that architecture,
 # target/dist/image/linux-<amd64|arm64>/ (image-context.sh, D-N-3).
@@ -129,16 +129,16 @@ for file in LICENSE crates/server/src/ee/LICENSE; do
 done
 
 version="$(tools/packaging/version.sh)"
-name="llmobs-${version}-${target}"
+name="cetra-${version}-${target}"
 
 rustup target add "$target"
 pnpm --dir web run build
-cargo auditable build --release --locked --target "$target" -p llmobs-cli
-bin="target/${target}/release/llmobs"
+cargo auditable build --release --locked --target "$target" -p cetra-cli
+bin="target/${target}/release/cetra"
 
 # The binary must run here and embed the UI (D-G-37).
 "$bin" version | grep -qx 'ui: embedded'
-"$bin" version | grep -qx "llmobs ${version}"
+"$bin" version | grep -qx "cetra ${version}"
 if [[ "$target" == *-linux-musl ]]; then
   # Static: no interpreter, no shared libraries (D-N-1).
   if ! file "$bin" | grep -q 'static'; then
@@ -153,15 +153,15 @@ tools/packaging/notices.sh
 stage="target/dist/${name}"
 rm -rf "$stage" "target/dist/${name}.tar.gz"
 mkdir -p "$stage"
-install -m 0755 "$bin" "$stage/llmobs"
+install -m 0755 "$bin" "$stage/cetra"
 # Drop the DWARF debug info (about 75 % of the file) but keep the symbol table, so backtraces
 # still name functions, and the `.dep-v0` section cargo auditable adds (D-N-16).
 if [[ "$target" == *-apple-darwin ]]; then
-  strip -S "$stage/llmobs"
+  strip -S "$stage/cetra"
 else
-  strip --strip-debug "$stage/llmobs"
+  strip --strip-debug "$stage/cetra"
 fi
-"$stage/llmobs" version | grep -qx 'ui: embedded'
+"$stage/cetra" version | grep -qx 'ui: embedded'
 install -m 0644 LICENSE "$stage/LICENSE"
 install -m 0644 crates/server/src/ee/LICENSE "$stage/LICENSE-ELASTIC"
 install -m 0644 target/dist/THIRD-PARTY-NOTICES.md "$stage/THIRD-PARTY-NOTICES.md"
@@ -179,8 +179,8 @@ fi
 #!/usr/bin/env bash
 # Stages the Docker build context of one architecture from a Linux release archive (D-N-3):
 #
-#   target/dist/image/linux-<arch>/rootfs/usr/local/bin/llmobs                    (mode 0755)
-#   target/dist/image/linux-<arch>/rootfs/usr/share/doc/llmobs/{LICENSE,LICENSE-ELASTIC,THIRD-PARTY-NOTICES.md}
+#   target/dist/image/linux-<arch>/rootfs/usr/local/bin/cetra                    (mode 0755)
+#   target/dist/image/linux-<arch>/rootfs/usr/share/doc/cetra/{LICENSE,LICENSE-ELASTIC,THIRD-PARTY-NOTICES.md}
 #   target/dist/image/linux-<arch>/datadir/data/                                   (empty; becomes /data)
 #
 # The image is built from the archive, not from target/<triple>/release, so the release job can
@@ -211,10 +211,10 @@ trap 'rm -rf "$tmp"' EXIT
 tar -xzf "$archive" -C "$tmp"
 
 rm -rf "$context"
-mkdir -p "$context/rootfs/usr/local/bin" "$context/rootfs/usr/share/doc/llmobs" "$context/datadir/data"
-install -m 0755 "$tmp/$name/llmobs" "$context/rootfs/usr/local/bin/llmobs"
+mkdir -p "$context/rootfs/usr/local/bin" "$context/rootfs/usr/share/doc/cetra" "$context/datadir/data"
+install -m 0755 "$tmp/$name/cetra" "$context/rootfs/usr/local/bin/cetra"
 install -m 0644 "$tmp/$name/LICENSE" "$tmp/$name/LICENSE-ELASTIC" "$tmp/$name/THIRD-PARTY-NOTICES.md" \
-  "$context/rootfs/usr/share/doc/llmobs/"
+  "$context/rootfs/usr/share/doc/cetra/"
 echo "wrote target/dist/image/linux-$arch"
 ```
 
@@ -222,13 +222,13 @@ echo "wrote target/dist/image/linux-$arch"
 
 ```bash
 #!/usr/bin/env bash
-# Smoke-tests a running llmobs (D-N-13): readiness, the embedded UI, and one span sent over
+# Smoke-tests a running cetra (D-N-13): readiness, the embedded UI, and one span sent over
 # OTLP/HTTP and read back through the API.
 #
 # Usage: smoke.sh <http_url> <otlp_http_url> <secret_key>
 #   http_url       the UI and API listener, e.g. http://127.0.0.1:8080
 #   otlp_http_url  the OTLP/HTTP listener, e.g. http://127.0.0.1:4318
-#   secret_key     an `sk-llmobs-…` key of the project (LLMOBS_INIT_SECRET_KEY)
+#   secret_key     an `sk-cetra-…` key of the project (CETRA_INIT_SECRET_KEY)
 #
 # Needs bash, curl and python3. Waits up to 120 s for /readyz.
 set -euo pipefail
@@ -267,7 +267,7 @@ span_id="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 start="$(python3 -c 'import time; print(time.time_ns() - 1_000_000_000)')"
 end="$(python3 -c 'import time; print(time.time_ns())')"
 body="$(cat <<EOF
-{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"llmobs-smoke"}}]},"scopeSpans":[{"scope":{"name":"llmobs-smoke"},"spans":[{"traceId":"$trace_id","spanId":"$span_id","name":"llmobs-smoke","kind":1,"startTimeUnixNano":"$start","endTimeUnixNano":"$end"}]}]}]}
+{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"cetra-smoke"}}]},"scopeSpans":[{"scope":{"name":"cetra-smoke"},"spans":[{"traceId":"$trace_id","spanId":"$span_id","name":"cetra-smoke","kind":1,"startTimeUnixNano":"$start","endTimeUnixNano":"$end"}]}]}]}
 EOF
 )"
 
@@ -285,7 +285,7 @@ echo "smoke: span sent to $otlp/v1/traces"
 for _ in $(seq 1 60); do
   if curl -sf -H "Authorization: Bearer $key" \
     "$base/api/v1/projects/current/traces/$trace_id" 2>/dev/null |
-    python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["trace"]["name"] == "llmobs-smoke" else 1)' 2>/dev/null; then
+    python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["trace"]["name"] == "cetra-smoke" else 1)' 2>/dev/null; then
     echo "smoke: trace $trace_id read back"
     exit 0
   fi
@@ -300,9 +300,9 @@ exit 1
 ```bash
 #!/usr/bin/env bash
 # Starts `<binary> serve` on free loopback ports with a fresh data directory and runs smoke.sh
-# against it, then `llmobs health` (D-N-4, D-N-13).
+# against it, then `cetra health` (D-N-4, D-N-13).
 #
-# Usage: binary-smoke.sh <path to the llmobs binary>
+# Usage: binary-smoke.sh <path to the cetra binary>
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -340,18 +340,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-key="sk-llmobs-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
+key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 
-LLMOBS_DATA_DIR="$dir/data" \
-LLMOBS_PUBLIC_URL="http://127.0.0.1:${http_port}" \
-LLMOBS_HTTP_ADDR="127.0.0.1:${http_port}" \
-LLMOBS_OTLP_HTTP_ADDR="127.0.0.1:${otlp_port}" \
-LLMOBS_GRPC_ADDR="127.0.0.1:${grpc_port}" \
-LLMOBS_INIT_ADMIN_EMAIL="smoke@example.com" \
-LLMOBS_INIT_ADMIN_PASSWORD="llmobs-smoke-1" \
-LLMOBS_INIT_ORG="Smoke" \
-LLMOBS_INIT_PROJECT="Smoke" \
-LLMOBS_INIT_SECRET_KEY="$key" \
+CETRA_DATA_DIR="$dir/data" \
+CETRA_PUBLIC_URL="http://127.0.0.1:${http_port}" \
+CETRA_HTTP_ADDR="127.0.0.1:${http_port}" \
+CETRA_OTLP_HTTP_ADDR="127.0.0.1:${otlp_port}" \
+CETRA_GRPC_ADDR="127.0.0.1:${grpc_port}" \
+CETRA_INIT_ADMIN_EMAIL="smoke@example.com" \
+CETRA_INIT_ADMIN_PASSWORD="cetra-smoke-1" \
+CETRA_INIT_ORG="Smoke" \
+CETRA_INIT_PROJECT="Smoke" \
+CETRA_INIT_SECRET_KEY="$key" \
   "$bin" serve >"$dir/serve.log" 2>&1 &
 server_pid=$!
 
@@ -420,10 +420,10 @@ Keep that order: `dist`, `image-context`, `binary-smoke`, `checksums`.
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
 just dist x86_64-unknown-linux-musl
-tar -tzf target/dist/llmobs-0.0.0-x86_64-unknown-linux-musl.tar.gz
-ls -l target/dist/image/linux-amd64/rootfs/usr/local/bin/llmobs target/dist/image/linux-amd64/rootfs/usr/share/doc/llmobs
+tar -tzf target/dist/cetra-0.0.0-x86_64-unknown-linux-musl.tar.gz
+ls -l target/dist/image/linux-amd64/rootfs/usr/local/bin/cetra target/dist/image/linux-amd64/rootfs/usr/share/doc/cetra
 test -d target/dist/image/linux-amd64/datadir/data
-just binary-smoke target/x86_64-unknown-linux-musl/release/llmobs
+just binary-smoke target/x86_64-unknown-linux-musl/release/cetra
 just checksums target/dist
 cat target/dist/SHA256SUMS
 just check
@@ -431,7 +431,7 @@ just assert-clean
 ```
 
 Expected:
-- `tar -tzf` lists exactly `llmobs-0.0.0-x86_64-unknown-linux-musl/` and its four files. The
+- `tar -tzf` lists exactly `cetra-0.0.0-x86_64-unknown-linux-musl/` and its four files. The
   archive is about 50 MB.
 - The staged binary is `-rwxr-xr-x`.
 - `binary-smoke` prints, in order:
@@ -439,7 +439,7 @@ Expected:
   - `smoke: the web UI is embedded`;
   - `smoke: span sent to …`;
   - `smoke: trace <id> read back`;
-  - `binary-smoke: … passed` (`llmobs health` before it prints nothing on success).
+  - `binary-smoke: … passed` (`cetra health` before it prints nothing on success).
 - `SHA256SUMS` has one line per archive in `target/dist`.
 
 The first musl release build takes 10–20 minutes. If `cargo auditable build` fails while compiling

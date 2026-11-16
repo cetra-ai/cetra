@@ -4,8 +4,8 @@
 //! `output.value`. Mime types are consumed attributes, not payload attributes.
 //! OpenInference's redaction placeholder ([`REDACTED`]) is not captured content.
 
-use llmobs_core::enums::SpanKind;
-use llmobs_core::message::Message;
+use cetra_core::enums::SpanKind;
+use cetra_core::message::Message;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use serde_json::{Map, Value as Json};
 

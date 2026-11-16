@@ -19,7 +19,7 @@ grep -n 'experiments' fixtures/api/manifest.json
 ```
 
 - J6.2 needs M5's `web/src/routes/$org/$project/datasets/$datasetId.tsx` (the Experiments tab goes there). If M5 is not merged when J6.2 starts, do J6.2 without § 4 (the tab), and add § 4 at the start of J6.5.
-- J6.5 only: M4 and M5 are merged (`grep -n "def evaluate" sdks/python/src/llmobs/_experiments.py` prints a line; `web/src/components/datasets/import-dialog.tsx` exists).
+- J6.5 only: M4 and M5 are merged (`grep -n "def evaluate" sdks/python/src/cetra/_experiments.py` prints a line; `web/src/components/datasets/import-dialog.tsx` exists).
 - Node `26.13.0` at `$HOME/.local/share/nvm/v26.13.0/bin` (§ Commands).
 
 ## Read first (every sub-phase)
@@ -216,9 +216,9 @@ export function EvaluateSnippet(props: { datasetName?: string }): JSX.Element;
 `Tabs` "Python" and "TypeScript", each a `<pre>` with a `CopyButton` (`components/copy-button.tsx`, label "code"). `name` is `props.datasetName ?? "my-dataset"`, inserted with `JSON.stringify(name)` so quotes are escaped. Python:
 
 ```python
-import llmobs
+import cetra
 
-llmobs.init()  # LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init()  # CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
 def task(input):
     return my_app(input)
@@ -226,18 +226,18 @@ def task(input):
 def exact(output, expected):
     return output == expected
 
-result = llmobs.evaluate(dataset=<name>, task=task, scorers=[exact])
+result = cetra.evaluate(dataset=<name>, task=task, scorers=[exact])
 print(result.summary())
 ```
 
 TypeScript:
 
 ```ts
-import * as llmobs from "llmobs";
+import * as cetra from "@cetra-ai/sdk";
 
-llmobs.init(); // LLMOBS_API_KEY: a secret key with the ingest, read and write scopes
+cetra.init(); // CETRA_API_KEY: a secret key with the ingest, read and write scopes
 
-const result = await llmobs.evaluate({
+const result = await cetra.evaluate({
   dataset: <name>,
   task: async (input) => myApp(input),
   scorers: [function exact({ output, expected }) { return output === expected; }],
@@ -264,7 +264,7 @@ If M4's READMEs show a different call shape, use theirs and report it.
 4. 2,001 words on one side → `undefined`.
 5. A 2,000-word text against itself with one word changed returns in under 1 s (`performance.now()` around the call) and has exactly one removed and one added part.
 
-`evaluate-snippet.test.tsx`: with `datasetName='faq "v2"'` the Python block contains `dataset="faq \"v2\""`; the TypeScript tab shows `llmobs.evaluate({`.
+`evaluate-snippet.test.tsx`: with `datasetName='faq "v2"'` the Python block contains `dataset="faq \"v2\""`; the TypeScript tab shows `cetra.evaluate({`.
 
 ### Done when
 
@@ -331,7 +331,7 @@ Table `aria-label="Experiments"`. Columns: a `Checkbox` (`aria-label={"Select " 
 4. `"needs two experiments of one dataset"`: answer the list with two experiments of different `dataset_id`s; select both; Compare is disabled and its reason reads "Pick experiments of the same dataset".
 5. `"allows at most four"`: answer the list with five experiments of one dataset; after checking four, the fifth checkbox is disabled.
 6. `"shows a deleted dataset"`: an experiment without `dataset_id`; its row shows "(deleted)" and no dataset link.
-7. `"shows the snippet when empty"`: an empty list; "No experiments" and `llmobs.evaluate(` show.
+7. `"shows the snippet when empty"`: an empty list; "No experiments" and `cetra.evaluate(` show.
 8. `"deletes an experiment"`: open "Actions of <name>", Delete, confirm; the DELETE handler is called.
 
 `$datasetId.test.tsx` (extend): `"lists the dataset's experiments"`: `?tab=experiments`; the list request has `dataset=<DATASET id>`; the table has no Dataset column header.
@@ -411,7 +411,7 @@ Table `aria-label="Results"`, columns: **Item** (`shortId(dataset_item_id)` in a
 3. `"filters to errors"`: toggle "Errors only"; the URL has `errors=1` and the next results request has `errors_only=true`.
 4. `"answers not found"`: the experiment request answers 404; the not-found view shows.
 5. `"shows a failed run"`: answer the experiment and results with `status: "failed", error: "results upload failed"`; "The run failed: results upload failed" shows.
-6. `"shows the snippet while waiting"`: a running experiment with no rows; "Waiting for results" and `llmobs.evaluate(` show.
+6. `"shows the snippet while waiting"`: a running experiment with no rows; "Waiting for results" and `cetra.evaluate(` show.
 7. `"hides the repetition column for one repetition"`: no "Rep" header with `repetitions: 1`; with `repetitions: 3` it shows and the first row reads `1`.
 
 ### Done when
@@ -526,7 +526,7 @@ Each side becomes text: a string as itself, anything else `JSON.stringify(value,
 ### Steps
 
 1. **Deferred tab.** If J6.2 skipped the dataset page's Experiments tab, do J6.2 § 3 and its test now.
-2. **End-to-end.** Check the two e2e tests exist: `grep -n "test_dataset_experiment_round_trip" sdks/python/tests/test_e2e.py` and `grep -n "runs an experiment and reads its results back" sdks/typescript/src/e2e.test.ts`. If either is missing, STOP and report. Run `just e2e` (it builds the server and runs both SDK suites against `llmobs serve`). It must pass. If it fails in a J test, STOP and report the failure with the test name and the server log's relevant lines (`$dir/serve.log`, ids and status codes only).
+2. **End-to-end.** Check the two e2e tests exist: `grep -n "test_dataset_experiment_round_trip" sdks/python/tests/test_e2e.py` and `grep -n "runs an experiment and reads its results back" sdks/typescript/src/e2e.test.ts`. If either is missing, STOP and report. Run `just e2e` (it builds the server and runs both SDK suites against `cetra serve`). It must pass. If it fails in a J test, STOP and report the failure with the test name and the server log's relevant lines (`$dir/serve.log`, ids and status codes only).
 3. **Spec 11.**
    - § Routes: replace the two J lines with
      `/:org/:project/datasets · /datasets/:datasetId   datasets (track J, D-J-17)` and
@@ -536,7 +536,7 @@ Each side becomes text: a string as itself, anything else `JSON.stringify(value,
    - § Datasets: replace the paragraph with what M5 built: list (search, New dataset with optional JSON Schemas); dataset page with version selector (past versions read-only), tabs Items (side sheet: JSON textareas, save, delete), Versions, Experiments, Settings (edit, schemas, delete by typing the name); Add item; Import wizard (file → preview and column mapping for CSV → import → row errors; 100 MiB, D-J-6); Export JSONL/CSV of the shown version (D-J-7); a per-item source trace link.
    - § Experiments: replace the whole paragraph (it drops the old "List grouped by dataset" and the experiment page's "regressions" filter, which M6 does not build: the page has "Errors only", and regressions live in the compare view) with what M6 built: list (dataset filter, select 2–4 of one dataset, the first is the baseline, delete); experiment page (summary cards: results, errors, latency, cost, one per score; results table with input, expected, output, error, scores, latency, cost, trace link; "Errors only"; the evaluate snippet while empty); compare view (score table with deltas against the baseline, colored by direction, higher is better (CG-J1); warnings; per-item rows with a word diff of outputs against the baseline, regressions highlighted, threshold and "Regressions only"). No server evaluators on experiments (D-J-11).
 4. **Roadmap.** J row: Plan `[plans/j-datasets/](plans/j-datasets/): design doc, then one plan per milestone (M1–M6)`; Status **Done.** with one sentence per milestone and its PR numbers (`gh pr list --state merged --search "j-datasets OR datasets OR experiments" --json number,title` to find them; list the numbers you can confirm and say "PR numbers to confirm" for the rest); Decisions `D-J-1–D-J-19`. Update the **Order** paragraph only if it still says J is pending.
-5. **Changelog.** Grep first (`grep -n "Datasets:\|Experiments:" CHANGELOG.md`) and add only what is missing. Under `### Added` in § [Unreleased], if M1–M5 did not already add them: "Datasets: versioned datasets of input, expected output and metadata items, with optional JSON Schemas, CSV and JSONL import, JSONL and CSV export, and Add to dataset from a trace or span." and "Experiments: `llmobs.evaluate()` in the Python and TypeScript SDKs runs a task on a dataset and scores it; the experiment page and a comparison of 2–4 experiments with regressions highlighted; `dataset_items` and `experiment_items` in the SQL console." Add one line for this milestone if those lines exist: "Experiments: the experiments list, experiment page and compare view."
+5. **Changelog.** Grep first (`grep -n "Datasets:\|Experiments:" CHANGELOG.md`) and add only what is missing. Under `### Added` in § [Unreleased], if M1–M5 did not already add them: "Datasets: versioned datasets of input, expected output and metadata items, with optional JSON Schemas, CSV and JSONL import, JSONL and CSV export, and Add to dataset from a trace or span." and "Experiments: `cetra.evaluate()` in the Python and TypeScript SDKs runs a task on a dataset and scores it; the experiment page and a comparison of 2–4 experiments with regressions highlighted; `dataset_items` and `experiment_items` in the SQL console." Add one line for this milestone if those lines exist: "Experiments: the experiments list, experiment page and compare view."
 
 ### Tests
 

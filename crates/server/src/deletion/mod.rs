@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use llmobs_core::ids::{OrgId, ProjectId, TraceId};
-use llmobs_storage::error::{DeletionError, QueryError};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_storage::error::{DeletionError, QueryError};
+use cetra_storage::{
     Deletion, DeletionScope, DeletionStatus, MAX_FILTER_DELETION_TRACES, RunError,
 };
 use tokio::sync::Notify;
@@ -744,12 +744,12 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::batch::spans_to_record_batch;
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::names::metadata_key;
-    use llmobs_core::span::Span;
-    use llmobs_storage::DeletionStatus;
-    use llmobs_storage::error::{AppendError, DeletionError};
+    use cetra_core::batch::spans_to_record_batch;
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::names::metadata_key;
+    use cetra_core::span::Span;
+    use cetra_storage::DeletionStatus;
+    use cetra_storage::error::{AppendError, DeletionError};
 
     use super::*;
     use crate::meta::datasets::{
@@ -929,7 +929,7 @@ mod tests {
         let (a, e) = (trace_id(1), trace_id(3));
         commit(&app, project, &a, &span_id(1), |_| {}).await;
         commit(&app, project, &e, &span_id(3), |row| {
-            row.environment = Some("llmobs-eval".to_owned());
+            row.environment = Some("cetra-eval".to_owned());
             row.metadata
                 .insert(metadata_key::EVAL_TARGET_TRACE_ID.to_owned(), a.clone());
         })

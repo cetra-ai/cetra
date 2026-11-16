@@ -15,8 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use arrow::array::AsArray;
+use cetra_core::schema::{scores, spans};
 use datafusion::execution::context::{SessionConfig, SessionContext};
-use llmobs_core::schema::{scores, spans};
 
 use super::harness::Harness;
 use super::model::{ExpectedScore, ExpectedTrace, Model, ProjectModel};

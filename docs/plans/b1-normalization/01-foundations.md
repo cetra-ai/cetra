@@ -13,7 +13,7 @@ See [README.md](README.md) for the decisions, the boundaries, the public API and
 
 **Commit:** `docs: settle B1 normalization decisions in spec 02`
 
-**Prerequisite.** A1's spec edits (rule 15 with the D85 bounds, media step 4 through `llmobs-storage`) are on branch `worktree-a1-storage-design`.
+**Prerequisite.** A1's spec edits (rule 15 with the D85 bounds, media step 4 through `cetra-storage`) are on branch `worktree-a1-storage-design`.
 - If they are on `main`, build on them.
 - If not, write rule 15 and media step 4 exactly as below, then report the overlap so whoever merges second resolves it.
 
@@ -27,7 +27,7 @@ Add D102–D113 from the README's decisions table, one row each, in the file's e
 
 Replace the paragraph under the diagram with:
 
-> Normalization is a pure function in `llmobs-otel`: `normalize(request, ingest_context, price_table) -> Normalized { spans, media, rejections }` (D102, D103, D105). It does no I/O. The server stores each returned media blob through `llmobs-storage` before the WAL append. Re-sends are safe because blobs are content-addressed. `ingest_context` carries the project ID, the ingest time, the project's `retention_days` and the limits.
+> Normalization is a pure function in `cetra-otel`: `normalize(request, ingest_context, price_table) -> Normalized { spans, media, rejections }` (D102, D103, D105). It does no I/O. The server stores each returned media blob through `cetra-storage` before the WAL append. Re-sends are safe because blobs are content-addressed. `ingest_context` carries the project ID, the ingest time, the project's `retention_days` and the limits.
 
 In the diagram, add a step `store media` after `compute cost`.
 
@@ -49,7 +49,7 @@ Add a **detection table**: a convention is listed in `conventions` when the span
 
 | Convention | Present when |
 |---|---|
-| `llmobs` | any `llmobs.*` attribute |
+| `cetra` | any `cetra.*` attribute |
 | `genai` | any `gen_ai.*` attribute **except** the OpenLLMetry ones below, or an event named `gen_ai.*` |
 | `openinference` | `openinference.span.kind`, or any `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` attribute |
 | `vercel` | any `ai.*` attribute |
@@ -94,7 +94,7 @@ Apply the rows below from `docs/research/ingestion/genai-mapping.md` § Gap tabl
 - `input_tokens`: add `ai.usage.inputTokens` (v5+) before `ai.usage.promptTokens` (v4), as today. `output_tokens`: the same for `outputTokens`/`completionTokens`.
 - `total_tokens` (24): `llm.token_count.total`, `gen_ai.usage.total_tokens`, `ai.usage.totalTokens`, `ai.usage.tokens`, `llm.usage.total_tokens`, else rule 4.
 - `ttft_ns` (18):
-  - `llmobs.ttft_ns`;
+  - `cetra.ttft_ns`;
   - `gen_ai.response.time_to_first_chunk` (seconds, ×1e9);
   - `ai.response.msToFirstChunk`, then `ai.stream.msToFirstChunk` (ms, ×1e6);
   - `langfuse.observation.completion_start_time` (an instant: `ttft = instant − start_time`, null when negative).
@@ -105,7 +105,7 @@ Apply the rows below from `docs/research/ingestion/genai-mapping.md` § Gap tabl
   - the semconv well-known values, kept as they are: `aws.bedrock`, `azure.ai.openai`, `azure.ai.inference`, `gcp.vertex_ai`, `gcp.gemini`, `gcp.gen_ai`, `x_ai`, `ibm.watsonx.ai`, `mistral_ai`, `groq`, `deepseek`, `perplexity`, `cohere`, `anthropic`, `openai`;
   - the Vercel IDs, mapped: `google.generative-ai` → `gcp.gemini`, `google.vertex.*` → `gcp.vertex_ai`, `amazon-bedrock` → `aws.bedrock`, `azure.*` → `azure.ai.openai`, `xai.*` → `x_ai`, `mistral.*` → `mistral_ai`, `<name>.<anything>` → `<name>` otherwise;
   - `xai` → `x_ai`.
-- Reported cost (8): `llmobs.cost.total`, `llm.cost.total`, `gen_ai.usage.cost`, `gen_ai.usage.total_cost` fill `cost_total`. `llm.cost.prompt` and `gen_ai.usage.input_cost` fill `cost_input`. `llm.cost.completion` and `gen_ai.usage.output_cost` fill `cost_output`. Non-numeric values are ignored and stay in `attributes`. D109 applies.
+- Reported cost (8): `cetra.cost.total`, `llm.cost.total`, `gen_ai.usage.cost`, `gen_ai.usage.total_cost` fill `cost_total`. `llm.cost.prompt` and `gen_ai.usage.input_cost` fill `cost_input`. `llm.cost.completion` and `gen_ai.usage.output_cost` fill `cost_output`. Non-numeric values are ignored and stay in `attributes`. D109 applies.
 
 **Context fields** table:
 - `session_id` (19, 20): add `lmnr.association.properties.session_id`, after `langfuse.session.id`.
@@ -145,8 +145,8 @@ Add: per-modality counts (`gen_ai.usage.{audio,image,text}.*`, `llm.token_count.
 Add rules 17–21:
 
 17. **Timestamps** (D106). `start_time_unix_nano` and `end_time_unix_nano` above `i64::MAX` reject the span. `end < start` sets `end_time = start_time` and records the warning `end_before_start`. A zero `end_time_unix_nano` (an unended span) counts as `end < start`.
-18. **Warnings.** Recoverable oddities are recorded as warning codes in the attribute `llmobs.normalize_warning`: a JSON array of strings, sorted, without duplicates. Codes: `duplicate_key`, `end_before_start`, `input_excludes_cache`, `invalid_event_time`, `invalid_number`, `max_depth`. The set is closed. Adding a code means updating this rule.
-19. **AnyValue limits** (D107). Nesting deeper than 32 levels (array or kvlist inside array or kvlist) is replaced at depth 33 by the string `[llmobs: max depth]`. The attribute name goes into `truncated`, and the `max_depth` warning is recorded. Duplicate keys in one key-value list: the last one wins, and `duplicate_key` is recorded. This applies to attributes, resource attributes, event and link attributes, and nested kvlists.
+18. **Warnings.** Recoverable oddities are recorded as warning codes in the attribute `cetra.normalize_warning`: a JSON array of strings, sorted, without duplicates. Codes: `duplicate_key`, `end_before_start`, `input_excludes_cache`, `invalid_event_time`, `invalid_number`, `max_depth`. The set is closed. Adding a code means updating this rule.
+19. **AnyValue limits** (D107). Nesting deeper than 32 levels (array or kvlist inside array or kvlist) is replaced at depth 33 by the string `[cetra: max depth]`. The attribute name goes into `truncated`, and the `max_depth` warning is recorded. Duplicate keys in one key-value list: the last one wins, and `duplicate_key` is recorded. This applies to attributes, resource attributes, event and link attributes, and nested kvlists.
 20. **Numbers.** A field typed as an integer accepts `intValue`, a `doubleValue` with no fractional part, or a string holding a decimal integer. A field typed as a float accepts `intValue`, `doubleValue` or a numeric string. Anything else does not fill the field. The attribute stays in `attributes`, unconsumed, and `invalid_number` is recorded. Negative token counts are invalid numbers.
 21. **Rejection reasons** (D111). The rejection reasons are `invalid_trace_id`, `invalid_span_id`, `timestamp_overflow` and `start_time_out_of_range`. `partial_success.error_message` lists at most 4 of them with counts, for example `rejected 3 spans: invalid_span_id ×2, start_time_out_of_range ×1`, and never any value from the request.
 
@@ -156,7 +156,7 @@ Edit rule 15: reference rule 21 for the reasons. Edit the rule 2 bullet "Payload
 
 - Step 1: add Vercel `image`/`file` parts (raw base64 in `image`/`data`) to the candidates. The Vercel converter turns them into `blob` parts.
 - Step 3: "sniff MIME if missing" uses a fixed magic-byte table (N14): PNG, JPEG, GIF, WebP, PDF, WAV, MP3, OGG, FLAC, MP4/M4A, WebM. Otherwise it uses the declared type, else `application/octet-stream`.
-- Step 4: as in A1's text, the server stores the blob through `llmobs-storage`. Add "(normalization returns the blob; D103)".
+- Step 4: as in A1's text, the server stores the blob through `cetra-storage`. Add "(normalization returns the blob; D103)".
 
 ### 8. Spec 02 § Cost computation
 
@@ -165,7 +165,7 @@ Edit rule 15: reference rule 21 for the reasons. Edit the rule 2 bullet "Payload
 
 ### 9. Spec 01
 
-`attributes` row: append "Includes `llmobs.normalize_warning` (02 rule 18) and `llmobs.normalize_error`."
+`attributes` row: append "Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`."
 
 ### 10. `fixtures/otlp/README.md`
 
@@ -346,7 +346,7 @@ pub(crate) const SMALL_ATTRIBUTE_BYTES: usize = 256;
 
 ### `normalize.rs`
 
-The public `IngestContext`, `IngestLimits` (with the spec's defaults) and `Normalized` (README § Public API). `media: Vec<llmobs_core::media::MediaBlob>` stays empty until N14.
+The public `IngestContext`, `IngestLimits` (with the spec's defaults) and `Normalized` (README § Public API). `media: Vec<cetra_core::media::MediaBlob>` stays empty until N14.
 
 `pub fn normalize(request, ctx, prices: &PriceTable) -> Normalized`. `PriceTable` doesn't exist until N16. Until then the signature is `normalize(request, ctx)`, and N16 adds the parameter. This is the one planned API change, and N16 updates every caller.
 
@@ -355,7 +355,7 @@ For each `ResourceSpans` → `ScopeSpans` → `Span`:
 1. **IDs (rule 15).**
    - The trace ID must be 16 bytes, and not all zero. Otherwise reject with `InvalidTraceId`.
    - The span ID must be 8 bytes, and not all zero. Otherwise reject with `InvalidSpanId`.
-   - `parent_span_id`: empty or all zero → `None`. 8 bytes → `Some`. Any other length → `None`. The fixture pins this. `llmobs-otel` does no logging.
+   - `parent_span_id`: empty or all zero → `None`. 8 bytes → `Some`. Any other length → `None`. The fixture pins this. `cetra-otel` does no logging.
 
    Use core's `TraceId`/`SpanId` constructors from bytes.
 2. **Timestamps (rule 17, D85).**
@@ -386,14 +386,14 @@ For each `ResourceSpans` → `ScopeSpans` → `Span`:
 - Load every case with `support::load_all_cases()`. Build an `IngestContext` from `case.json` (`context`, plus `settings` including `retention_days`).
 - Decode `input.json` with `decode_json`. Normalize, sort the spans like `support::sort_spans`, and compare with `expected.json` using the README rules (1e-12 on the cost fields).
 - Compare media as `{sha256, mime_type, size_bytes}`, and `rejected_spans` as `rejections.total()`.
-- **Bless mode:** with `LLMOBS_BLESS=1`, write `expected.json` in canonical format (`support::canonical_json`) instead of comparing. It never runs in CI.
+- **Bless mode:** with `CETRA_BLESS=1`, write `expected.json` in canonical format (`support::canonical_json`) instead of comparing. It never runs in CI.
 - **`const PENDING: &[&str]`:** case paths (`group/case`) the normalizer can't produce yet.
   - Pending cases are run and must **fail**. A pending case that passes fails the test with "remove it from PENDING".
   - Start with all 6 existing cases, unless `edge/zero-parent-span-id` passes, in which case it's not pending.
   - Report the list.
 - **Failure messages:** the case name plus the first differing field path, from a JSON diff of the two `Span` values. Fixtures are test data, so values may appear in test output.
 
-`justfile`: add a `fixtures-bless` recipe that runs `LLMOBS_BLESS=1 cargo test -p llmobs-otel --test golden`.
+`justfile`: add a `fixtures-bless` recipe that runs `CETRA_BLESS=1 cargo test -p cetra-otel --test golden`.
 
 `support/mod.rs` and `fixtures.rs`: accept `retention_days` in `settings` (integer ≥ 1).
 

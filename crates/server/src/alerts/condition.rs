@@ -1,6 +1,6 @@
 //! Rule condition defaults and checks (D-K-2).
 
-use llmobs_storage::AlertMeasure;
+use cetra_storage::AlertMeasure;
 
 use crate::api::alerts::{AlertCondition, AlertMetric, LatencyTarget, ScoreAggregation};
 use crate::api::common::FieldError;

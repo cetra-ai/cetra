@@ -40,7 +40,7 @@ mod tests {
     use crate::bootstrap;
     use crate::test_support::{TestApp, capture_logs, license_key, license_key_until};
 
-    const PASSWORD: &str = "llmobs-ok1";
+    const PASSWORD: &str = "cetra-ok-1";
 
     fn login_body(email: &str) -> serde_json::Value {
         serde_json::json!({ "email": email, "password": PASSWORD })
@@ -281,7 +281,7 @@ mod tests {
             .unwrap();
         let reset = app
             .request(Method::POST, "/api/auth/password/reset")
-            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-llmobs-1" }))
+            .json(&serde_json::json!({ "token": token.plaintext, "password": "new-cetra-1" }))
             .send()
             .await;
         assert_eq!(reset.status, 403);

@@ -106,7 +106,7 @@ export interface SpanStart {
 
 /** What one traced call knows before it starts. Internal. */
 interface TracedPlan extends SpanStart {
-  /** `observe`: record the settled result as `llmobs.output` (D-F-11). */
+  /** `observe`: record the settled result as `cetra.output` (D-F-11). */
   readonly captureResultAsOutput: boolean;
 }
 
@@ -171,16 +171,16 @@ export function tracedSpan<T, H extends SpanHandle>(
 export function startTracedSpan(runtime: Runtime, plan: SpanStart): Span | undefined {
   try {
     const span = runtime.tracer.startSpan(plan.name, undefined, context.active());
-    span.setAttribute("llmobs.span.kind", plan.kind);
+    span.setAttribute("cetra.span.kind", plan.kind);
     if (plan.hasInput) {
-      setPayload(span, "llmobs.input", plan.inputValue, runtime);
+      setPayload(span, "cetra.input", plan.inputValue, runtime);
     }
     if (plan.metadata !== undefined) {
       stampMetadata(span, plan.metadata);
     }
     return span;
   } catch (error) {
-    debug(`llmobs: starting a span failed: ${errorName(error)}`);
+    debug(`cetra: starting a span failed: ${errorName(error)}`);
     return undefined;
   }
 }
@@ -190,7 +190,7 @@ function captureResult(plan: TracedPlan, span: Span, runtime: Runtime, value: un
   // § D-F-11 and the README: undefined means "no output"; generator and async
   // generator objects are passed through untouched, never consumed.
   if (plan.captureResultAsOutput && value !== undefined && !isGeneratorObject(value)) {
-    setPayload(span, "llmobs.output", value, runtime);
+    setPayload(span, "cetra.output", value, runtime);
   }
 }
 
@@ -207,14 +207,14 @@ export function recordError(span: Span, error: unknown): void {
     });
     span.setStatus({ code: SpanStatusCode.ERROR, message: `${type}: ${message}` });
   } catch (failure) {
-    debug(`llmobs: recording an exception failed: ${errorName(failure)}`);
+    debug(`cetra: recording an exception failed: ${errorName(failure)}`);
   }
 }
 
 /** The masked, serialized payload under `key` plus its format, when content capture is on. Never throws. */
 export function setPayload(
   span: Span,
-  key: "llmobs.input" | "llmobs.output",
+  key: "cetra.input" | "cetra.output",
   value: unknown,
   runtime: Runtime,
 ): void {
@@ -226,11 +226,11 @@ export function setPayload(
     span.setAttribute(key, text);
     span.setAttribute(`${key}.format`, format);
   } catch (error) {
-    debug(`llmobs: setting a payload attribute failed: ${errorName(error)}`);
+    debug(`cetra: setting a payload attribute failed: ${errorName(error)}`);
   }
 }
 
-/** Each metadata value as its `llmobs.metadata.<key>` attribute, masked per value (D-F-6).
+/** Each metadata value as its `cetra.metadata.<key>` attribute, masked per value (D-F-6).
  * Never throws. Shared with the LLM span (T8). */
 export function stampMetadata(span: Span, values: Readonly<Record<string, unknown>>): void {
   try {
@@ -241,7 +241,7 @@ export function stampMetadata(span: Span, values: Readonly<Record<string, unknow
       }
     }
   } catch (error) {
-    debug(`llmobs: setting a metadata attribute failed: ${errorName(error)}`);
+    debug(`cetra: setting a metadata attribute failed: ${errorName(error)}`);
   }
 }
 
@@ -267,13 +267,13 @@ class LiveSpanHandle implements SpanHandle {
 
   setInput(value: unknown): void {
     if (this.span.isRecording()) {
-      setPayload(this.span, "llmobs.input", value, this.runtime);
+      setPayload(this.span, "cetra.input", value, this.runtime);
     }
   }
 
   setOutput(value: unknown): void {
     if (this.span.isRecording()) {
-      setPayload(this.span, "llmobs.output", value, this.runtime);
+      setPayload(this.span, "cetra.output", value, this.runtime);
     }
   }
 

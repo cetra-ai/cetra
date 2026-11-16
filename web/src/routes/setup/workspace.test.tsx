@@ -57,7 +57,7 @@ it("creates the org, the project and a secret key, then shows the key", async ()
     { project: "acme/support-bot", body: { kind: "secret", name: "Default" } },
   ]);
   expect(screen.getByLabelText("Secret key")).toHaveValue(
-    "sk-llmobs-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+    "sk-cetra-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
   );
   // gcTime 0 plus reset() drops the key mutation: its data holds the secret and its
   // variables the request that made it (`name: "Default"`). `reset()` alone would leave
@@ -73,7 +73,7 @@ it("creates the org, the project and a secret key, then shows the key", async ()
         })),
     );
   await waitFor(() => {
-    expect(cached()).not.toContain("sk-llmobs-EXAMPLE0");
+    expect(cached()).not.toContain("sk-cetra-EXAMPLE0");
     expect(cached()).not.toContain('"name":"Default"');
   });
 });

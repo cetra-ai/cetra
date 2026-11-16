@@ -244,7 +244,7 @@ pub(crate) struct Limits {
     /// runs share this limiter.
     pub(crate) connection_tests: KeyedLimiter<Uuid>,
     /// Org domain verifications, D-P-54, D-P-64: 10 per minute per org.
-    pub(crate) sso_dns_checks: KeyedLimiter<llmobs_core::ids::OrgId>,
+    pub(crate) sso_dns_checks: KeyedLimiter<cetra_core::ids::OrgId>,
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,

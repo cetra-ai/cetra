@@ -3,7 +3,7 @@
 This is track N's third milestone. D180 and D182 (`docs/mvp-decisions.md`) give N three pieces of work:
 
 - **Restore mode** (Q's request R18; D180). A config switch under which the server serves reads and does no outbound work: no alert deliveries, webhooks, judge calls, emails or identity-provider calls.
-  - Q's restore drills start copies of cells. Those copies hold live channel and LLM-connection secrets (llmobs-control `docs/00-design.md`, D-Q-12).
+  - Q's restore drills start copies of cells. Those copies hold live channel and LLM-connection secrets (cetra-control `docs/00-design.md`, D-Q-12).
   - Q's phase Q2.25 needs restore mode before a cell holds customer data.
 - **`/metrics`** (Q's request R11; D38, D180). Prometheus metrics on a separate admin port, for Q's M6 monitoring.
 - **`/readyz` as spec 12 describes it** (D182). It adds three checks:
@@ -55,7 +55,7 @@ The module doc says the object store and disk checks "arrive with the tracks tha
 | Where | Probe |
 |---|---|
 | Helm `statefulset.yaml` | `startupProbe` and `livenessProbe` on `/healthz`, `readinessProbe` on `/readyz` |
-| Docker image and compose | `healthcheck: llmobs health`, which runs `GET /readyz` (`crates/cli/src/main.rs`) |
+| Docker image and compose | `healthcheck: cetra health`, which runs `GET /readyz` (`crates/cli/src/main.rs`) |
 
 ### Outbound calls
 
@@ -63,8 +63,8 @@ Every outbound call goes through one of five places. Restore mode closes all fiv
 
 | Choke point | Built in | Used by |
 |---|---|---|
-| `llmobs_eval::EgressClient`: SSRF-guarded, no proxy, no redirects (D166) | `serve.rs`: `EvalRunner::new(EgressPolicy { allow_private_network })` | LLM judges and webhook evaluators (`eval/dispatch.rs`, `eval/execute.rs`, `eval/test_run.rs`); alert webhook and Slack deliveries (`alerts/deliver.rs`, through `eval_runner.egress()`, D-K-11); the connection test (`routes/connections.rs`); the channel test (`routes/channels.rs`) |
-| `llmobs_eval::identity_http_client(policy)`: same resolver | `ee/org_sso/mod.rs` | per-org OIDC providers: login (`ee/org_sso/login.rs`) and the provider check of `put_org_sso_provider` (`ee/org_sso/settings.rs`, discovery). `spawn_org_sso` (`ee::org_sso::refresh`) only reloads from `meta.db` and calls nothing. |
+| `cetra_eval::EgressClient`: SSRF-guarded, no proxy, no redirects (D166) | `serve.rs`: `EvalRunner::new(EgressPolicy { allow_private_network })` | LLM judges and webhook evaluators (`eval/dispatch.rs`, `eval/execute.rs`, `eval/test_run.rs`); alert webhook and Slack deliveries (`alerts/deliver.rs`, through `eval_runner.egress()`, D-K-11); the connection test (`routes/connections.rs`); the channel test (`routes/channels.rs`) |
+| `cetra_eval::identity_http_client(policy)`: same resolver | `ee/org_sso/mod.rs` | per-org OIDC providers: login (`ee/org_sso/login.rs`) and the provider check of `put_org_sso_provider` (`ee/org_sso/settings.rs`, discovery). `spawn_org_sso` (`ee::org_sso::refresh`) only reloads from `meta.db` and calls nothing. |
 | `crate::auth::oidc::identity_client()`: plain reqwest, operator-configured issuers | `serve.rs`: `Providers::from_config` | GitHub, Google and generic OIDC login (`routes/oauth.rs`, `routes/auth.rs`); discovery is lazy, at the first login |
 | `ee::org_sso::dns::TxtResolver` (hickory DNS) | `serve.rs`: `OrgSso::new(…, TxtResolver::system())` | DNS TXT lookups of `post_org_sso_domain_verify` (`ee/org_sso/settings.rs`). `TxtResolver::Unconfigured` exists and looks nothing up. |
 | `crate::email::Mailer` (lettre SMTP) | `serve.rs`: `Mailer::from_config`, `None` without `smtp_url` | alert emails (`alerts/deliver.rs`, `send_now`); invites and password reset (`send_in_background`); usage notices (`entitlements/notices.rs`); the SMTP test (`routes/admin.rs`, `send_now`) |
@@ -87,7 +87,7 @@ There is no Prometheus code and no metrics dependency. `routes/metrics.rs` (`Met
 
 ### Restore mode (D-N-25 to D-N-27)
 
-**Switch.** A top-level config key, `restore_mode = true`, or `LLMOBS_RESTORE_MODE=true` through the usual env mapping. It defaults to `false`. There is no `serve` flag: one way to set it, and Q's drill script already supports a config key (Q2.25 § Precondition).
+**Switch.** A top-level config key, `restore_mode = true`, or `CETRA_RESTORE_MODE=true` through the usual env mapping. It defaults to `false`. There is no `serve` flag: one way to set it, and Q's drill script already supports a config key (Q2.25 § Precondition).
 
 **What it turns off.** All five choke points are closed, the loops that would only fail are not started, and the storage deletes no object:
 
@@ -139,7 +139,7 @@ The choke points above would refuse these calls anyway. The helper makes the ans
 
 - at startup, one `warn` line: `restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)`;
 - `/readyz` answers `{"status":"ready","restore_mode":true}`; the field is present only when the mode is on;
-- the metric `llmobs_restore_mode` is `1`.
+- the metric `cetra_restore_mode` is `1`.
 
 ### `/readyz` (D-N-30)
 
@@ -173,14 +173,14 @@ The checks run in this order. Each failure adds a name to the 503 problem's deta
 - `meta.db`, free disk and the object store are not sticky. They stay readiness-only: a restart would not fix them, and a full disk must not cause a restart loop.
 
 **What each environment does:**
-- **Kubernetes.** A full disk or an unreachable bucket takes the pod out of the Service until it recovers. The UI is unreachable through the Service meanwhile, which D182 accepts. `kubernetes.md` says to free space through `kubectl exec` or a bigger volume, and to alert on `llmobs_storage_disk_free_bytes`.
-- **Docker.** Its healthcheck (`llmobs health` → `/readyz`) marks the container `unhealthy`, which restarts nothing under plain Docker or compose.
+- **Kubernetes.** A full disk or an unreachable bucket takes the pod out of the Service until it recovers. The UI is unreachable through the Service meanwhile, which D182 accepts. `kubernetes.md` says to free space through `kubectl exec` or a bigger volume, and to alert on `cetra_storage_disk_free_bytes`.
+- **Docker.** Its healthcheck (`cetra health` → `/readyz`) marks the container `unhealthy`, which restarts nothing under plain Docker or compose.
 
 `docs/self-hosting/monitoring.md` says all of this. Nothing in `deploy/` changes for the probes.
 
 ### `/metrics` (D-N-28, D-N-29)
 
-**The port.** A new top-level key, `metrics_addr`, or `LLMOBS_METRICS_ADDR`.
+**The port.** A new top-level key, `metrics_addr`, or `CETRA_METRICS_ADDR`.
 - It defaults to unset (off), and `""` also means off, like `grpc_addr`.
 - It must differ from `http_addr`, `otlp_http_addr` and `grpc_addr`; it is validated like them.
 - The listener serves exactly `GET /metrics` and answers 404 for anything else.
@@ -189,24 +189,24 @@ The checks run in this order. Each failure adds a name to the 503 problem's deta
 
 **The library.** `prometheus-client` **0.26.0** (`cargo info prometheus-client`, 2026-11-15; Apache-2.0 OR MIT), the official Prometheus Rust client.
 - It encodes the OpenMetrics text format with `Content-Type: application/openmetrics-text; version=1.0.0; charset=utf-8`, which Prometheus scrapes natively.
-- It is declared once in `[workspace.dependencies]` and used by `llmobs-server` only.
+- It is declared once in `[workspace.dependencies]` and used by `cetra-server` only.
 
 **The registry.** It lives in a new module, `crates/server/src/telemetry.rs`, chosen so it does not clash with `routes::metrics`.
 - `pub(crate) struct Telemetry` holds the counters, gauges and histograms as fields (`prometheus_client::metrics::family::Family` where labelled) and a `Registry` built once in `Telemetry::new()`.
-- **One root `Registry::default()`.** The `process_*` gauges are registered on the root; every `llmobs_*` metric is registered on `root.sub_registry_with_prefix(PREFIX)`. Encoding the root once gives one valid document with a single `# EOF`.
+- **One root `Registry::default()`.** The `process_*` gauges are registered on the root; every `cetra_*` metric is registered on `root.sub_registry_with_prefix(PREFIX)`. Encoding the root once gives one valid document with a single `# EOF`.
 - **prometheus-client rules** (0.26.0; checked in its source):
-  - A counter is registered **without** `_total`: `register("http_requests", …)` renders `llmobs_http_requests_total`. `Registry::register` debug-asserts that a counter name does not end in `_total`.
+  - A counter is registered **without** `_total`: `register("http_requests", …)` renders `cetra_http_requests_total`. `Registry::register` debug-asserts that a counter name does not end in `_total`.
   - A unit comes from the name or from `register_with_unit`, never both. Use names that already end in `_seconds`/`_bytes` and plain `register`.
-  - Build info is a `Family<VersionLabel, Gauge>` named `build_info`, set to 1. `Info` would render `llmobs_build_info_info`.
+  - Build info is a `Family<VersionLabel, Gauge>` named `build_info`, set to 1. `Info` would render `cetra_build_info_info`.
   - Labelled histograms are `Family<L, Histogram, fn() -> Histogram>`, built with `Family::new_with_constructor(fn)`.
   - `Counter<f64, AtomicU64>` for float counters.
   - `#[derive(EncodeLabelValue)]` writes the variant's identifier as is: name variants like the values with `#[allow(non_camel_case_types)]`, e.g. `otlp_http`, `GET` (`#[allow(clippy::upper_case_acronyms)]`). A value that is not an identifier (`2xx`) needs a hand-written `impl EncodeLabelValue`.
-  - A family series appears only after its first use. Gauges that must show `0` (e.g. `llmobs_eval_jobs{status="queued"}`) are set on every render.
+  - A family series appears only after its first use. Gauges that must show `0` (e.g. `cetra_eval_jobs{status="queued"}`) are set on every render.
 - `AppInner` gets `telemetry: Telemetry`.
 - Gauges that read the state (storage health, disk, read cache, eval queue depth, process) are refreshed by `Telemetry::render(&state)` before it encodes, not by a background task.
 - The eval queue count is one `SELECT status, COUNT(*) FROM eval_jobs WHERE status IN ('queued','running') GROUP BY status`. Its result is cached for 10 s, so scrapes every second cannot load `meta.db`.
 
-**The prefix.** Every name starts with `llmobs_`, written once as `const PREFIX: &str = "llmobs"` and passed to `Registry::with_prefix`, so the product rename (D46) touches one line.
+**The prefix.** Every name starts with `cetra_`, written once as `const PREFIX: &str = "cetra"` and passed to `Registry::with_prefix`, so the product rename (D46) touches one line.
 
 **Label rule (D-N-29).** Labels take values from fixed, code-defined sets only:
 - a route template, a protocol, a table name, an outcome, a channel kind, a status class;
@@ -218,33 +218,33 @@ Per-tenant numbers stay in the usage API (P) and the control plane. This keeps c
 
 | Metric | Type | Labels | Source |
 |---|---|---|---|
-| `llmobs_build_info` | gauge = 1 | `version` | `env!("CARGO_PKG_VERSION")` |
-| `llmobs_restore_mode` | gauge | — | config |
-| `llmobs_http_requests_total` | counter | `route`, `method`, `status` (`2xx`…`5xx`) | middleware (phase 06) |
-| `llmobs_http_request_duration_seconds` | histogram | `route`, `method` | middleware |
-| `llmobs_ingest_requests_total` | counter | `protocol` (`otlp_http`, `otlp_grpc`), `outcome` (`ok`, `invalid`, `unauthorized`, `too_large`, `rate_limited`, `quota`, `unavailable`, `disk_full`) | ingest handlers |
-| `llmobs_ingest_spans_total` | counter | `protocol` | ingest handlers, accepted spans |
-| `llmobs_ingest_bytes_total` | counter | `protocol` | request body size, accepted requests |
-| `llmobs_storage_memtable_bytes` / `_memtable_hard_limit_bytes` | gauge | — | `StorageHealth` |
-| `llmobs_storage_failed` | gauge (0/1) | `check` (`spans_wal`, `scores_wal`, `objects_sync`, `catalog`) | `StorageHealth` |
-| `llmobs_storage_disk_free_bytes` / `_disk_min_free_bytes` | gauge | — | `StorageHealth` (phase 01) |
-| `llmobs_storage_wal_bytes` | gauge | `table` (`spans`, `scores`) | `StorageStats` (phase 01) |
-| `llmobs_storage_flushes_total` | counter | `table`, `outcome` (`ok`, `failed`) | `StorageStats` |
-| `llmobs_storage_flush_seconds_total` | counter | `table` | `StorageStats` (sum; rate ÷ flushes gives the mean) |
-| `llmobs_storage_compactions_total` | counter | `outcome` (`ok`, `failed`, `deferred`, `conflict`) | `StorageStats` |
-| `llmobs_storage_compaction_bytes_written_total` | counter | — | `StorageStats` |
-| `llmobs_storage_gc_objects_deleted_total` | counter | — | `StorageStats` (obsolete data files and staged objects, including staged media uploads; media blobs collected by media GC are not counted) |
-| `llmobs_storage_read_cache_hits_total` / `_misses_total` | counter | — | `read_cache_stats()` (absent in local mode) |
-| `llmobs_storage_read_cache_bytes` | gauge | — | `read_cache_stats()` |
-| `llmobs_eval_jobs` | gauge | `status` (`queued`, `running`) | `meta.db` count, cached 10 s |
-| `llmobs_eval_jobs_finished_total` | counter | `outcome` (`done`, `failed`, `skipped`, the `eval_jobs` final statuses) | dispatcher |
-| `llmobs_eval_run_duration_seconds` | histogram | `kind` (`llm_judge`, `webhook`, `check`) | dispatcher |
-| `llmobs_alert_evaluations_total` | counter | `outcome` (`ok`, `failed`) | evaluation loop |
-| `llmobs_alert_deliveries_total` | counter | `channel` (`email`, `webhook`, `slack`), `outcome` (`sent`, `failed`) | delivery loop |
-| `llmobs_emails_total` | counter | `outcome` (`sent`, `failed`, `refused`) | `Mailer` |
+| `cetra_build_info` | gauge = 1 | `version` | `env!("CARGO_PKG_VERSION")` |
+| `cetra_restore_mode` | gauge | — | config |
+| `cetra_http_requests_total` | counter | `route`, `method`, `status` (`2xx`…`5xx`) | middleware (phase 06) |
+| `cetra_http_request_duration_seconds` | histogram | `route`, `method` | middleware |
+| `cetra_ingest_requests_total` | counter | `protocol` (`otlp_http`, `otlp_grpc`), `outcome` (`ok`, `invalid`, `unauthorized`, `too_large`, `rate_limited`, `quota`, `unavailable`, `disk_full`) | ingest handlers |
+| `cetra_ingest_spans_total` | counter | `protocol` | ingest handlers, accepted spans |
+| `cetra_ingest_bytes_total` | counter | `protocol` | request body size, accepted requests |
+| `cetra_storage_memtable_bytes` / `_memtable_hard_limit_bytes` | gauge | — | `StorageHealth` |
+| `cetra_storage_failed` | gauge (0/1) | `check` (`spans_wal`, `scores_wal`, `objects_sync`, `catalog`) | `StorageHealth` |
+| `cetra_storage_disk_free_bytes` / `_disk_min_free_bytes` | gauge | — | `StorageHealth` (phase 01) |
+| `cetra_storage_wal_bytes` | gauge | `table` (`spans`, `scores`) | `StorageStats` (phase 01) |
+| `cetra_storage_flushes_total` | counter | `table`, `outcome` (`ok`, `failed`) | `StorageStats` |
+| `cetra_storage_flush_seconds_total` | counter | `table` | `StorageStats` (sum; rate ÷ flushes gives the mean) |
+| `cetra_storage_compactions_total` | counter | `outcome` (`ok`, `failed`, `deferred`, `conflict`) | `StorageStats` |
+| `cetra_storage_compaction_bytes_written_total` | counter | — | `StorageStats` |
+| `cetra_storage_gc_objects_deleted_total` | counter | — | `StorageStats` (obsolete data files and staged objects, including staged media uploads; media blobs collected by media GC are not counted) |
+| `cetra_storage_read_cache_hits_total` / `_misses_total` | counter | — | `read_cache_stats()` (absent in local mode) |
+| `cetra_storage_read_cache_bytes` | gauge | — | `read_cache_stats()` |
+| `cetra_eval_jobs` | gauge | `status` (`queued`, `running`) | `meta.db` count, cached 10 s |
+| `cetra_eval_jobs_finished_total` | counter | `outcome` (`done`, `failed`, `skipped`, the `eval_jobs` final statuses) | dispatcher |
+| `cetra_eval_run_duration_seconds` | histogram | `kind` (`llm_judge`, `webhook`, `check`) | dispatcher |
+| `cetra_alert_evaluations_total` | counter | `outcome` (`ok`, `failed`) | evaluation loop |
+| `cetra_alert_deliveries_total` | counter | `channel` (`email`, `webhook`, `slack`), `outcome` (`sent`, `failed`) | delivery loop |
+| `cetra_emails_total` | counter | `outcome` (`sent`, `failed`, `refused`) | `Mailer` |
 | `process_resident_memory_bytes`, `process_open_fds`, `process_start_time_seconds` | gauge | — | Linux: `VmRSS` of `/proc/self/status`, the entries of `/proc/self/fd`, the start time; absent elsewhere (no prefix: Prometheus convention) |
 
-**Query latency** is not a metric of its own. The query endpoints' latency is `llmobs_http_request_duration_seconds` for their routes (`/api/v1/projects/{project}/traces`, `…/sql`, `…/metrics`), which is what an operator watches. A per-surface storage histogram would need storage hooks for no new information.
+**Query latency** is not a metric of its own. The query endpoints' latency is `cetra_http_request_duration_seconds` for their routes (`/api/v1/projects/{project}/traces`, `…/sql`, `…/metrics`), which is what an operator watches. A per-surface storage histogram would need storage hooks for no new information.
 
 The **histogram buckets** are prometheus-client's `exponential_buckets(0.005, 2.0, 12)`: 5 ms to about 10 s for HTTP, and `exponential_buckets(0.05, 2.0, 12)` for eval runs (50 ms to about 100 s).
 
@@ -289,14 +289,14 @@ They are in `docs/mvp-decisions.md` § Track N from this plan's PR. "(planner)" 
 
 | ID | Decision |
 |---|---|
-| D-N-25 | **Restore mode is a config key** (`restore_mode`, `LLMOBS_RESTORE_MODE`), not a `serve` flag. It closes the five outbound choke points (egress policy, org-SSO clients, operator identity providers, the org-SSO DNS resolver, the mailer). It also leaves unstarted the alert evaluation and delivery loops, the eval dispatcher and backfill runner, and usage notices. It shows in a startup `warn` line, in `/readyz`'s `restore_mode` field and in `llmobs_restore_mode`. Reads, ingestion, deletions, retention, compaction and backups keep running. (planner) |
+| D-N-25 | **Restore mode is a config key** (`restore_mode`, `CETRA_RESTORE_MODE`), not a `serve` flag. It closes the five outbound choke points (egress policy, org-SSO clients, operator identity providers, the org-SSO DNS resolver, the mailer). It also leaves unstarted the alert evaluation and delivery loops, the eval dispatcher and backfill runner, and usage notices. It shows in a startup `warn` line, in `/readyz`'s `restore_mode` field and in `cetra_restore_mode`. Reads, ingestion, deletions, retention, compaction and backups keep running. (planner) |
 | D-N-26 | **User-triggered outbound calls in restore mode answer 503 `restore_mode`**, through one helper called first in each handler, on top of the choke points. (planner) |
 | D-N-27 | **No external sign-in in restore mode**: operator providers are not built, and org-SSO login is refused, because the token exchange would reach a live IdP with the cell's client secret. Password login and API keys still work. Members of SSO-enforced orgs, and everyone under `auth.disable_password`, use API keys. (planner) |
 | D-N-28 | **`/metrics` on `metrics_addr`** (off by default), no authentication, `prometheus-client` 0.26.0, OpenMetrics text. (planner, within D38's "separate admin port") |
 | D-N-29 | **The metric set of § `/metrics`, and the label rule**: labels from fixed code-defined sets only; never an org, project, user, key, email, model, URL, host or evaluator name. Query latency is the HTTP route histogram. (planner) |
 | D-N-30 | **`/readyz`** checks `meta.db`, both WALs, object fsync, the catalog, free disk, and the object-store probe of D-N-36. The probe has a 2 s timeout and is cached 10 s with single flight. (planner, implements D182) |
 | D-N-31 | **Storage additions, reviewed by R**: `StorageHealth::{disk_low, disk_free_bytes, disk_min_free_bytes}`, `Storage::probe_objects`, `Storage::stats() -> StorageStats` (counters on the `Committer`), and `StorageConfig::delete_objects` (D-N-34). Reviewed by R on 2026-11-15; N implements them after R's stacked PRs. |
-| D-N-32 | **Packaging**: the image `EXPOSE`s 9464, the conventional port of OpenTelemetry's Prometheus exporter. The chart gets `metrics.enabled` (default `false`), which sets `LLMOBS_METRICS_ADDR=0.0.0.0:9464`, adds a `metrics` container port and adds `metrics.podAnnotations` (`prometheus.io/scrape`, `port`, `path`) for pod scraping. It gets no Service port, because a `LoadBalancer` Service would publish the unauthenticated port, and no `ServiceMonitor`. Compose documents the key in a comment. (planner) |
+| D-N-32 | **Packaging**: the image `EXPOSE`s 9464, the conventional port of OpenTelemetry's Prometheus exporter. The chart gets `metrics.enabled` (default `false`), which sets `CETRA_METRICS_ADDR=0.0.0.0:9464`, adds a `metrics` container port and adds `metrics.podAnnotations` (`prometheus.io/scrape`, `port`, `path`) for pod scraping. It gets no Service port, because a `LoadBalancer` Service would publish the unauthenticated port, and no `ServiceMonitor`. Compose documents the key in a comment. (planner) |
 | D-N-33 | **D38 settled for `/metrics`**: spec 12 § Self-monitoring describes `/metrics` and `/readyz` as built; OTel self-traces stay deferred. |
 | D-N-34 | **Restore mode deletes no object.** The storage opens with `delete_objects = false`, so `Objects` refuses every deletion and callers keep their catalog rows: GC, media collection and project drops remove nothing until a later server. A drill copy pointed at the live bucket by mistake can only add objects, which the live server's staged-object GC removes, and never deletes a live one. `gc-orphans` still deletes. Drills still use a bucket copy. (planner; R's design, 2026-11-15) |
 | D-N-35 | **`/healthz` fails on the sticky storage failures** (`*_wal_failed`, `objects_sync_failed`, `catalog_failed`, D-R-6), so Kubernetes' liveness probe restarts the pod. `meta.db`, free disk and the object store stay readiness-only, because a restart would not fix them. (planner) |
@@ -310,7 +310,7 @@ They are in `docs/mvp-decisions.md` § Track N from this plan's PR. "(planner)" 
 | 02 | [02-readyz.md](02-readyz.md) | `Check the object store, free disk and storage flags in /readyz` | 01, 03 | server `http/health.rs` (`/readyz`, `/healthz`), specs 09 and 12 |
 | 03 | [03-restore-mode.md](03-restore-mode.md) | `Add restore mode` | — | `crates/eval/src/egress.rs`, server config, serve, email, ee/org_sso |
 | 04 | [04-restore-handlers.md](04-restore-handlers.md) | `Refuse user-triggered outbound calls in restore mode` | 03 | server routes, `http/restore.rs`, `ProblemCode` |
-| 05 | [05-metrics-endpoint.md](05-metrics-endpoint.md) | `Serve Prometheus metrics on metrics_addr` | 03 (`llmobs_restore_mode` reads `config.restore_mode`) | root `Cargo.toml`, server `telemetry.rs`, config, serve |
+| 05 | [05-metrics-endpoint.md](05-metrics-endpoint.md) | `Serve Prometheus metrics on metrics_addr` | 03 (`cetra_restore_mode` reads `config.restore_mode`) | root `Cargo.toml`, server `telemetry.rs`, config, serve |
 | 06 | [06-metrics-instrumentation.md](06-metrics-instrumentation.md) | `Count HTTP, ingest, eval, alert and email events` | 05 | server http middleware, ingest, eval, alerts, email |
 | 07 | [07-storage-metrics.md](07-storage-metrics.md) | `Export the storage counters as metrics` | 01, 05 | server `telemetry.rs` |
 | 08 | [08-packaging-docs.md](08-packaging-docs.md) | `Document restore mode, /metrics and /readyz` | all | `deploy/`, `docs/`, CHANGELOG, decisions, roadmap |
@@ -346,14 +346,14 @@ All of these conflicts are small; the second phase to land rebases.
 
 With a release build (`just build-release`) and a local data directory:
 
-1. **Readiness.** `llmobs serve` with `metrics_addr = "127.0.0.1:9464"`. `curl -s localhost:8080/readyz` gives `{"status":"ready"}`. `curl -s localhost:9464/metrics | grep -E '^llmobs_(build_info|restore_mode|storage_disk_free_bytes)'` shows the three.
-2. **Ingest metrics.** Run `tools/packaging/smoke.sh`, then `llmobs_ingest_spans_total{protocol="otlp_http"}` is > 0 and `llmobs_http_requests_total` has a `route` label for the traces API.
+1. **Readiness.** `cetra serve` with `metrics_addr = "127.0.0.1:9464"`. `curl -s localhost:8080/readyz` gives `{"status":"ready"}`. `curl -s localhost:9464/metrics | grep -E '^cetra_(build_info|restore_mode|storage_disk_free_bytes)'` shows the three.
+2. **Ingest metrics.** Run `tools/packaging/smoke.sh`, then `cetra_ingest_spans_total{protocol="otlp_http"}` is > 0 and `cetra_http_requests_total` has a `route` label for the traces API.
 3. **Disk check.** Stop, set `storage.min_free_bytes` above the free space, start: `/readyz` answers 503 with `free disk` in the detail; `/healthz` still answers 200 (free disk is not sticky, D-N-35).
 4. **Object-store check (S3 mode).** With `deploy/compose/compose.s3.yaml`, stop the Garage container: within 10 s `/readyz` is 503 with `object store`; restart Garage and it is 200 again within 10 s.
 5. **Restore mode.** Stop, add `restore_mode = true`, start:
    - the `warn` line appears;
    - `/readyz` has `"restore_mode":true`;
-   - `llmobs_restore_mode 1`;
+   - `cetra_restore_mode 1`;
    - `POST` the channel test of a webhook channel pointing at `http://127.0.0.1:9` gives 503 `restore_mode`, and nothing listens there so a real attempt would show a different error;
    - an alert rule that fires creates no delivery attempt;
    - password login works and the provider list is empty;

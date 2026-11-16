@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use crate::config::EntitlementDefaults;
 use crate::ee::license::{LicenseState, LicenseStatus};
@@ -463,7 +463,7 @@ mod tests {
     use crate::test_support::{
         TestApp, capture_logs, license_key, license_key_until, org_token, sign_token,
     };
-    use llmobs_token::TokenError;
+    use cetra_token::TokenError;
     use serde_json::json;
     use tokens::grant_from_token;
     use uuid::Uuid;
@@ -702,7 +702,7 @@ mod tests {
             "{logs}"
         );
         assert!(!logs.contains("Test Customer"), "{logs}");
-        assert!(!logs.contains("llmobs1."), "{logs}");
+        assert!(!logs.contains("cetra1."), "{logs}");
 
         let refused = LicenseState::from_key(Some("garbage"));
         let (_, logs) = capture_logs(async { log_license(&refused, now) }).await;
@@ -837,7 +837,7 @@ mod tests {
         assert!(logs.contains("WARN"), "{logs}");
         assert!(logs.contains(&other_org.to_string()), "{logs}");
         assert!(logs.contains("the token is for another cell"), "{logs}");
-        assert!(!logs.contains("llmobs1."), "{logs}");
+        assert!(!logs.contains("cetra1."), "{logs}");
     }
 
     #[tokio::test]
@@ -883,7 +883,7 @@ mod tests {
         );
         assert!(logs.contains("stored org tokens ignored"), "{logs}");
         assert!(logs.contains("count=1"), "{logs}");
-        assert!(!logs.contains("llmobs1."), "{logs}");
+        assert!(!logs.contains("cetra1."), "{logs}");
     }
 
     #[tokio::test]

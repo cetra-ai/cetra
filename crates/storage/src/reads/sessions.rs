@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use cetra_core::schema::{spans, traces};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{col, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::schema::{spans, traces};
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present, scoped_traces};
@@ -328,11 +328,11 @@ mod tests {
 
     use arrow::json::{ArrayWriter, WriterBuilder};
     use arrow::record_batch::RecordBatch;
-    use llmobs_core::time_serde::parse_rfc3339;
+    use cetra_core::time_serde::parse_rfc3339;
     use serde_json::Value;
 
-    use llmobs_core::names::environment;
-    use llmobs_core::span::Span;
+    use cetra_core::names::environment;
+    use cetra_core::span::Span;
 
     use super::{SessionListRequest, SessionSort, session_detail, session_list};
     use crate::reads::{ListScope, Page, SortOrder};

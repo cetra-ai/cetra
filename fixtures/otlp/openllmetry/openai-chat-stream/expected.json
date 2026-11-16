@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "88a48dea034a590bde6518086cf636f1",
-      "span_id": "1a3f5ff51e30cc85",
+      "trace_id": "89bdcb646bc3f0988d7126eb0cc4fe62",
+      "span_id": "723f10f6de8597ff",
       "name": "openai.chat",
       "span_kind": "llm",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.170000000Z",
+      "end_time": "2025-12-31T23:59:50.238000000Z",
       "status": "ok",
       "service_name": "capture-app",
       "provider": "openai",
@@ -22,7 +22,7 @@
       "cost_output": 0.000032,
       "cost_total": 0.000052000000000000004,
       "cost_source": "computed",
-      "ttft_ns": 130000000,
+      "ttft_ns": 197000000,
       "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Describe the harbor in a few words.\"}]}]",
       "input_format": "messages",
       "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"Clear skies over the harbor.\"}],\"finish_reason\":\"stop\"}]",
@@ -52,31 +52,31 @@
       "scope_version": "0.62.4",
       "events": [
         {
-          "time": "2025-12-31T23:59:50.130000000Z",
+          "time": "2025-12-31T23:59:50.197000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.133000000Z",
+          "time": "2025-12-31T23:59:50.201000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.139000000Z",
+          "time": "2025-12-31T23:59:50.207000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.145000000Z",
+          "time": "2025-12-31T23:59:50.213000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.151000000Z",
+          "time": "2025-12-31T23:59:50.219000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.157000000Z",
+          "time": "2025-12-31T23:59:50.225000000Z",
           "name": "gen_ai.content.completion.chunk"
         },
         {
-          "time": "2025-12-31T23:59:50.164000000Z",
+          "time": "2025-12-31T23:59:50.232000000Z",
           "name": "gen_ai.content.completion.chunk"
         }
       ],

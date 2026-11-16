@@ -9,12 +9,12 @@ use std::time::Duration;
 use arrow::array::BooleanArray;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::record_batch::RecordBatch;
+use cetra_core::schema::{spans, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit};
 use datafusion::prelude::DataFrame;
-use llmobs_core::schema::{spans, traces};
 
 use super::cursor::{after, assemble, decode, order_by};
 use super::{ListScope, Page, SortOrder, present};
@@ -105,7 +105,7 @@ pub struct MatchCountRequest<'a> {
     pub timeout: Duration,
 }
 
-/// Span list columns: [`llmobs_core::schema::SPANS_LIGHT_COLUMNS`] without
+/// Span list columns: [`cetra_core::schema::SPANS_LIGHT_COLUMNS`] without
 /// `project_id`, with `duration_ms` after `duration_ns`.
 pub const SPAN_LIST_COLUMNS: &[&str] = &[
     spans::TRACE_ID,
@@ -1113,14 +1113,14 @@ mod tests {
 
     use arrow::json::{ArrayWriter, WriterBuilder};
     use arrow::record_batch::RecordBatch;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::names::{environment, metadata_key};
+    use cetra_core::schema::{SPANS_LIGHT_COLUMNS, spans};
+    use cetra_core::span::Span;
+    use cetra_core::time_serde::parse_rfc3339;
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::physical_plan::displayable;
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::names::{environment, metadata_key};
-    use llmobs_core::schema::{SPANS_LIGHT_COLUMNS, spans};
-    use llmobs_core::span::Span;
-    use llmobs_core::time_serde::parse_rfc3339;
     use serde_json::Value;
 
     use super::{
@@ -2387,7 +2387,7 @@ mod tests {
         let ctx = context_for(&spans);
         let owned = strict_trace_ids(&spans);
         let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
-        let filter = "environment = 'llmobs-eval'";
+        let filter = "environment = 'cetra-eval'";
 
         let open = TraceRefreshRequest {
             include_experiments: true,
@@ -2523,7 +2523,7 @@ mod tests {
         let owned = strict_trace_ids(&spans);
         let ids = [owned[0].as_str(), owned[1].as_str(), owned[2].as_str()];
         let named = "name = 'child'";
-        let eval = "environment = 'llmobs-eval'";
+        let eval = "environment = 'cetra-eval'";
 
         let batches = span_refresh(&ctx, span_refresh_request(Some(named), &ids, 10, false))
             .await
@@ -2748,7 +2748,7 @@ mod tests {
         let ctx = context_for(&spans);
         // The strict test traces start within the first microsecond after the epoch.
         let window = TimeWindow::new(0, 1_000_000).expect("window");
-        let filter = Some("environment = 'llmobs-eval'");
+        let filter = Some("environment = 'cetra-eval'");
         let named = match_count(
             &ctx,
             count_request(ViewName::Traces, filter, window, 100, false),

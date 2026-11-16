@@ -264,7 +264,7 @@ fn assign(
 }
 
 fn mint(case: &str, kind: &str, k: u64, len: usize) -> Vec<u8> {
-    let material = format!("llmobs-capture\0{case}\0{kind}\0{k}");
+    let material = format!("cetra-capture\0{case}\0{kind}\0{k}");
     let digest = Sha256::digest(material.as_bytes());
     let mut id = digest[..len].to_vec();
     if id.iter().all(|byte| *byte == 0) {
@@ -902,7 +902,7 @@ mod tests {
     }
 
     fn expected_id(kind: &str, k: u64, len: usize) -> Vec<u8> {
-        let material = format!("llmobs-capture\0genai/chat-tool\0{kind}\0{k}");
+        let material = format!("cetra-capture\0genai/chat-tool\0{kind}\0{k}");
         Sha256::digest(material.as_bytes())[..len].to_vec()
     }
 

@@ -14,6 +14,12 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use async_trait::async_trait;
 use bytes::Bytes;
+use cetra_core::batch::{scores_to_record_batch, spans_to_record_batch};
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::ids::TraceId;
+use cetra_core::schema::traces_schema;
+use cetra_core::score::Score;
+use cetra_core::span::Span;
 use datafusion::catalog::Session;
 use datafusion::datasource::memory::MemTable;
 use datafusion::datasource::{TableProvider, TableType};
@@ -21,12 +27,6 @@ use datafusion::error::Result as DfResult;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
-use llmobs_core::batch::{scores_to_record_batch, spans_to_record_batch};
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::ids::TraceId;
-use llmobs_core::schema::traces_schema;
-use llmobs_core::score::Score;
-use llmobs_core::span::Span;
 
 use crate::Storage;
 use crate::config::StorageConfig;
@@ -86,7 +86,7 @@ pub(crate) fn parquet_rows(bytes: Bytes) -> RecordBatch {
 /// The `trace_id` bytes of every row of a stored batch.
 pub(crate) fn trace_ids_of(rows: &RecordBatch) -> Vec<[u8; 16]> {
     let column = rows
-        .column_by_name(llmobs_core::schema::spans::TRACE_ID)
+        .column_by_name(cetra_core::schema::spans::TRACE_ID)
         .unwrap();
     let array = column
         .as_any()
@@ -177,13 +177,13 @@ pub(crate) fn copy_dir(from: &Path, to: &Path) {
 /// field (`parent_span_id`, `input`) sets it on the returned `Span`.
 pub(crate) fn span_row(trace: u16, span: u8, start: i64, ingest: i64) -> Span {
     assert!(span < u8::MAX, "span must be below u8::MAX");
-    let project_id: llmobs_core::ids::ProjectId =
+    let project_id: cetra_core::ids::ProjectId =
         "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap();
     let span_bytes = [span + 1; 8];
     Span {
         project_id,
         trace_id: trace_id_of(trace),
-        span_id: llmobs_core::ids::SpanId::from_bytes(span_bytes).unwrap(),
+        span_id: cetra_core::ids::SpanId::from_bytes(span_bytes).unwrap(),
         parent_span_id: None,
         name: "root".to_owned(),
         span_kind: SpanKind::Span,
@@ -279,15 +279,15 @@ pub(crate) fn score_row(
     Score {
         project_id: "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap(),
         score_id: uuid::Uuid::from_u128(id),
-        target: llmobs_core::score::ScoreTarget::Trace {
+        target: cetra_core::score::ScoreTarget::Trace {
             trace_id: trace_id_of(trace),
         },
         session_id: None,
         user_id: None,
         name: name.to_owned(),
-        value: llmobs_core::score::ScoreValue::Numeric(0.5),
+        value: cetra_core::score::ScoreValue::Numeric(0.5),
         reason: None,
-        source: llmobs_core::enums::ScoreSource::Api,
+        source: cetra_core::enums::ScoreSource::Api,
         evaluator_id: None,
         rule_id: None,
         experiment_id: None,

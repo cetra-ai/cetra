@@ -1,9 +1,9 @@
 //! axum router, shared state, and the request log (D150).
 //!
-//! `llmobs serve` binds [`router`] with
+//! `cetra serve` binds [`router`] with
 //! `into_make_service_with_connect_info::<SocketAddr>()` so [`ClientIp`] can
 //! read the socket peer. That binding is P5.
-#![cfg_attr(not(test), allow(dead_code))] // `llmobs serve` binds this in P5
+#![cfg_attr(not(test), allow(dead_code))] // `cetra serve` binds this in P5
 
 pub(crate) mod access;
 pub(crate) mod client_ip;
@@ -21,7 +21,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use llmobs_storage::Storage;
+use cetra_storage::Storage;
 use tower::ServiceExt;
 
 use crate::auth::Limits;
@@ -78,7 +78,7 @@ pub(crate) struct AppInner {
     /// Seals and opens secret columns (D-I-2).
     pub(crate) secrets: crate::crypto::SecretBox,
     /// One egress client for judges, webhooks and connection tests (D-I-29).
-    pub(crate) eval_runner: Arc<llmobs_eval::EvalRunner>,
+    pub(crate) eval_runner: Arc<cetra_eval::EvalRunner>,
     /// Decrypted connections, keyed by id and `updated_at`.
     pub(crate) connections: crate::eval::connection::ConnectionCache,
     /// Trace-load permits (D-I-23).

@@ -1,12 +1,12 @@
 //! The OTLP-only rewrite of the reserved `environment` value (D-G-7).
 
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::span::Span;
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::span::Span;
 
 /// Warning code added to a span whose external `environment` was rewritten.
 const RESERVED_ENVIRONMENT: &str = "reserved_environment";
 
-/// Rewrites `llmobs-eval` claims from external data to `llmobs-eval-external` and
+/// Rewrites `cetra-eval` claims from external data to `cetra-eval-external` and
 /// records the `reserved_environment` warning. Returns how many spans were rewritten.
 pub(crate) fn rewrite_reserved_environment(spans: &mut [Span]) -> usize {
     let mut rewritten = 0;

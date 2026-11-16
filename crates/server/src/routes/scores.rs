@@ -3,8 +3,8 @@
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post};
-use llmobs_core::score::Score;
-use llmobs_storage as storage;
+use cetra_core::score::Score;
+use cetra_storage as storage;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -198,9 +198,9 @@ mod tests {
     use std::str::FromStr;
 
     use axum::http::{Method, StatusCode};
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::score::{ScoreTarget, ScoreValue};
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::score::{ScoreTarget, ScoreValue};
     use serde_json::Value as Json;
 
     use super::*;

@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "cd41efad697e61ccb5a6d7329274f927",
-              "spanId": "b8f43fc39e1f2aff",
+              "traceId": "879c9b7f750111b743e2cadef4753e0f",
+              "spanId": "f419d4c90a108797",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "messages.create",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590211000000",
+              "endTimeUnixNano": "1767225590208000000",
               "attributes": [
                 {
                   "key": "llm.provider",

@@ -4,7 +4,7 @@
  * `instrument` takes any object with `setTracerProvider`, `enable` and
  * `disable` functions (the OpenTelemetry `Instrumentation` shape), so the SDK
  * stays independent of the OpenInference packages: the subpath helpers
- * `llmobs/openai`, `llmobs/anthropic` and `llmobs/langchain` build one from
+ * `cetra/openai`, `cetra/anthropic` and `cetra/langchain` build one from
  * the matching optional peer dependency. Nothing here raises into the app:
  * a failing instrumentation is logged at debug level and skipped.
  */
@@ -35,7 +35,7 @@ export function enableInstrumentations(runtime: Runtime): void {
       item.enable();
       items.push(item);
     } catch (error) {
-      debug(`llmobs: instrumentation skipped after ${errorName(error)}`);
+      debug(`cetra: instrumentation skipped after ${errorName(error)}`);
     }
   }
   enabled = items;
@@ -49,7 +49,7 @@ export function disableInstrumentations(): void {
     try {
       item.disable();
     } catch (error) {
-      debug(`llmobs: instrumentation disable failed: ${errorName(error)}`);
+      debug(`cetra: instrumentation disable failed: ${errorName(error)}`);
     }
   }
 }

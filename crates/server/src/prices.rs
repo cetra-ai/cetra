@@ -8,9 +8,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_eval::Adapter;
-use llmobs_otel::{PriceError, PriceRow, PriceScope, PriceTable, PriceTier, exact_pattern};
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_eval::Adapter;
+use cetra_otel::{PriceError, PriceRow, PriceScope, PriceTable, PriceTier, exact_pattern};
 use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
@@ -713,7 +713,7 @@ fn row_json(row: &PriceRow) -> ModelPrice {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_otel::PriceScope;
+    use cetra_otel::PriceScope;
     use uuid::Uuid;
 
     use super::*;

@@ -623,7 +623,7 @@ fn user_row(record: UserRecord) -> Result<UserRow, MetaError> {
 mod tests {
     use super::*;
     use crate::meta::test_db;
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     #[test]

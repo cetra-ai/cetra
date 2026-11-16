@@ -1,6 +1,6 @@
 //! Property tests for decoding and normalization.
 //!
-//! Spec 02 and N23. Each property runs 256 cases unless `LLMOBS_PROPTEST_CASES`
+//! Spec 02 and N23. Each property runs 256 cases unless `CETRA_PROPTEST_CASES`
 //! sets another count. `proptest` is built with the `std` feature only.
 
 #![allow(clippy::expect_used)]
@@ -12,11 +12,11 @@ use std::sync::OnceLock;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use llmobs_core::enums::{Convention, PayloadFormat, SpanKind};
-use llmobs_core::message::parse_messages;
-use llmobs_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
-use llmobs_core::span::Span;
-use llmobs_otel::{
+use cetra_core::enums::{Convention, PayloadFormat, SpanKind};
+use cetra_core::message::parse_messages;
+use cetra_core::names::marker::TRUNCATED_STRING_SUFFIX_PREFIX;
+use cetra_core::span::Span;
+use cetra_otel::{
     DecodeError, IngestContext, IngestLimits, JsonErrorCategory, PriceTable, decode_json,
     decode_protobuf, normalize,
 };
@@ -54,7 +54,7 @@ const PREFIXES: &[&str] = &[
     "langfuse.",
     "lmnr.",
     "gcp.vertex.agent.",
-    "llmobs.",
+    "cetra.",
     "embedding.",
     "retrieval.",
     "tool.",
@@ -70,13 +70,13 @@ const PROMOTED: &[&str] = &[
     "gen_ai.operation.name",
     "gen_ai.conversation.id",
     "tag.tags",
-    "llmobs.metadata.note",
-    "llmobs.environment",
+    "cetra.metadata.note",
+    "cetra.environment",
     "deployment.environment.name",
     "gen_ai.request.temperature",
     "gen_ai.request.max_tokens",
     "gen_ai.provider.name",
-    "llmobs.release",
+    "cetra.release",
     "langfuse.release",
     "lmnr.span.release",
 ];
@@ -91,7 +91,7 @@ const GENAI_EVENTS: &[&str] = &[
 ];
 
 const PRECEDENCE: [Convention; 8] = [
-    Convention::Llmobs,
+    Convention::Cetra,
     Convention::Genai,
     Convention::Openinference,
     Convention::Vercel,
@@ -102,7 +102,7 @@ const PRECEDENCE: [Convention; 8] = [
 ];
 
 fn config() -> ProptestConfig {
-    let cases = std::env::var("LLMOBS_PROPTEST_CASES")
+    let cases = std::env::var("CETRA_PROPTEST_CASES")
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(256);

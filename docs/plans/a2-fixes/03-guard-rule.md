@@ -363,5 +363,5 @@ Also run `SELECT name || 'x' AS a, count(*) AS n FROM spans GROUP BY ROLLUP(name
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib` passes.
+- `cargo test -p cetra-storage --lib` passes.
 - `just check` passes.

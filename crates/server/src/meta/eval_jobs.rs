@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments, SqlitePool, SqliteRow};
 use sqlx::{FromRow, Row, SqliteConnection};
@@ -1194,7 +1194,7 @@ fn optional_uuid(value: Option<String>, column: &'static str) -> Result<Option<U
 mod tests {
     use std::str::FromStr;
 
-    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use uuid::Uuid;
 
     use super::{

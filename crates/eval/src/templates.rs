@@ -222,7 +222,7 @@ fn correctness_output() -> JudgeOutput {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use llmobs_core::enums::ScoreDataType;
+    use cetra_core::enums::ScoreDataType;
     use serde_json::{Map, Value, json};
     use uuid::Uuid;
 

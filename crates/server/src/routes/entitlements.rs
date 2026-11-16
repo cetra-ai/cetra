@@ -19,7 +19,7 @@ use crate::meta::MetaError;
 use crate::meta::entitlements::{StoredToken, put_token, record_window_end, token_of_tx};
 use crate::meta::orgs::org_by_id_tx;
 use crate::usage::month_bounds;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// `GET /api/v1/orgs/{org}/entitlements`; `PUT /api/internal/v1/orgs/{org_id}/entitlements`.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -258,7 +258,7 @@ mod tests {
     use crate::test_support::{
         TestApp, TestResponse, capture_logs, license_key, org_token, set_limits, sign_token,
     };
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     /// Signs in a new user and returns its id and session cookie.
     async fn signed_in(app: &TestApp, email: &str) -> (Uuid, String) {
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::NO_CONTENT);
         assert!(logs.contains("org entitlements updated"), "{logs}");
         assert!(logs.contains(&org.to_string()), "{logs}");
-        assert!(!logs.contains("llmobs1."), "{logs}");
+        assert!(!logs.contains("cetra1."), "{logs}");
     }
 
     #[tokio::test]

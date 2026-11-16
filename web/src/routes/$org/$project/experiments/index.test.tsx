@@ -161,7 +161,7 @@ it("shows the snippet when the project has no experiments", async () => {
   await renderApp("/acme/support-bot/experiments");
 
   expect(await screen.findByText("No experiments")).toBeInTheDocument();
-  expect(screen.getByText(/llmobs\.evaluate\(/, { selector: "code" })).toBeInTheDocument();
+  expect(screen.getByText(/cetra\.evaluate\(/, { selector: "code" })).toBeInTheDocument();
 });
 
 it("deletes an experiment after confirmation", async () => {

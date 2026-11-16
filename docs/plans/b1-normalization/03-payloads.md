@@ -1,6 +1,6 @@
 # B1 · Payloads (N9–N13)
 
-See [README.md](README.md). These sub-phases fill `input`, `output`, their formats and previews, `system_instructions` and `tool_definitions`, for the llmobs and GenAI conventions. The other conventions come in [05-conventions.md](05-conventions.md).
+See [README.md](README.md). These sub-phases fill `input`, `output`, their formats and previews, `system_instructions` and `tool_definitions`, for the cetra and GenAI conventions. The other conventions come in [05-conventions.md](05-conventions.md).
 
 ## N9 — Payload model, formats and previews
 
@@ -10,7 +10,7 @@ See [README.md](README.md). These sub-phases fill `input`, `output`, their forma
 
 ```rust
 pub(crate) enum Payload {
-    Messages(Vec<llmobs_core::message::Message>),
+    Messages(Vec<cetra_core::message::Message>),
     Json(serde_json::Value),
     Text(String),
 }
@@ -34,9 +34,9 @@ Helpers, each unit-tested:
 - `tool_definitions(items) -> Vec<Value>` (rule 7): each item is parsed when it's a JSON string, and kept in index order.
 - `preview_input(&Payload) -> Option<String>` and `preview_output(&Payload) -> Option<String>` (rule 9): 512 Unicode scalar values, cut without an ellipsis. With no text parts, the preview is `None` for messages.
 - `write(span: &mut Span, io: Io)`: sets `input`, `input_format`, `input_preview`, the same for `output`, `system_instructions` (compact JSON), and `tool_definitions` (a compact JSON array, `None` if empty). Messages are serialized with core's `messages_to_json`.
-- **Conversion failure** (spec 02 § Message conversion): a convention function that recognizes its source but can't convert it returns `Payload::Json(raw)`, and the caller sets the attribute `llmobs.normalize_error` to a short code such as `"messages:genai:input"`. Never include the raw text. The code format is `messages:<convention>:<field>`. If several conversions fail, the codes are joined with `,`. Add this format to spec 02 § Message conversion in this commit.
+- **Conversion failure** (spec 02 § Message conversion): a convention function that recognizes its source but can't convert it returns `Payload::Json(raw)`, and the caller sets the attribute `cetra.normalize_error` to a short code such as `"messages:genai:input"`. Never include the raw text. The code format is `messages:<convention>:<field>`. If several conversions fail, the codes are joined with `,`. Add this format to spec 02 § Message conversion in this commit.
 
-The **driver**, in `normalize.rs` or a `payload.rs` function: for each of the four fields, call the convention functions in precedence order (`llmobs`, `genai`, `openinference`, `vercel`, `openllmetry`, `langfuse`, `laminar`, `google_adk`) and keep the first `Some` (D102). After the winner is chosen, call `drop_lower_payloads(field, winner)`. It marks the payload source keys of every **lower-precedence** convention for that field as `Payload` (rule 2, second bullet). Each convention module exposes `const PAYLOAD_KEYS: &[(Field, KeyPattern)]` for this. A `KeyPattern` is an exact key, an indexed prefix such as `llm.input_messages.`, or an event name. Conventions not written yet contribute nothing. The driver is a plain list of function pointers, so adding a convention later is one line.
+The **driver**, in `normalize.rs` or a `payload.rs` function: for each of the four fields, call the convention functions in precedence order (`cetra`, `genai`, `openinference`, `vercel`, `openllmetry`, `langfuse`, `laminar`, `google_adk`) and keep the first `Some` (D102). After the winner is chosen, call `drop_lower_payloads(field, winner)`. It marks the payload source keys of every **lower-precedence** convention for that field as `Payload` (rule 2, second bullet). Each convention module exposes `const PAYLOAD_KEYS: &[(Field, KeyPattern)]` for this. A `KeyPattern` is an exact key, an indexed prefix such as `llm.input_messages.`, or an event name. Conventions not written yet contribute nothing. The driver is a plain list of function pointers, so adding a convention later is one line.
 
 Events consumed as payload sources are removed from `span.events` (N1 § 6). The convention function returns the indices of the events it used, and the driver removes them after the winner is chosen. Events of losing conventions are also removed when they are payload sources (rule 2).
 
@@ -112,18 +112,18 @@ Unit tests per part type, in both camelCase and snake_case spellings.
 
 ---
 
-## N13 — llmobs and GenAI payloads
+## N13 — cetra and GenAI payloads
 
 **Edit only:**
-- `crates/otel/src/conventions/{mod.rs,llmobs.rs,genai.rs}`;
+- `crates/otel/src/conventions/{mod.rs,cetra.rs,genai.rs}`;
 - `crates/otel/src/{payload.rs,normalize.rs,lib.rs}`;
-- fixtures under `fixtures/otlp/{llmobs,genai}/`.
+- fixtures under `fixtures/otlp/{cetra,genai}/`.
 
-**Commit:** `otel: read llmobs and GenAI payloads`
+**Commit:** `otel: read cetra and GenAI payloads`
 
-`llmobs.rs`:
-- `llmobs.input` + `llmobs.input.format` (`messages`, `json` or `text`; when absent, rule 10 decides) → `Payload`;
-- the same for `llmobs.output`;
+`cetra.rs`:
+- `cetra.input` + `cetra.input.format` (`messages`, `json` or `text`; when absent, rule 10 decides) → `Payload`;
+- the same for `cetra.output`;
 - `messages` → parse with core `parse_messages`. On failure, the raw value is kept as `Json`, or as `Text` when it isn't JSON, plus `normalize_error`.
 
 `genai.rs` (spec 02 GenAI and GenAI legacy events rows, N1 additions):
@@ -137,7 +137,7 @@ Unit tests per part type, in both camelCase and snake_case spellings.
 - `PAYLOAD_KEYS` for both modules.
 
 Fixtures:
-- `llmobs/input-output-formats`: three spans with messages, json and text;
+- `cetra/input-output-formats`: three spans with messages, json and text;
 - `genai/tool-span`;
 - `genai/operation-details-event`;
 - `genai/legacy-message-events`: `notes` says the shape is as emitted by Strands/Logfire bridges and that no captured case covers it yet;
@@ -147,4 +147,4 @@ Fixtures:
 
 Now `genai/chat-cache-tokens` should only need cost (N16). Check, and report its remaining diff.
 
-Unit tests for the precedence between the llmobs and GenAI fields, and that "message lists are never merged". Example: `llmobs.input` wins, so `gen_ai.input.messages` is dropped from `attributes` and isn't merged.
+Unit tests for the precedence between the cetra and GenAI fields, and that "message lists are never merged". Example: `cetra.input` wins, so `gen_ai.input.messages` is dropped from `attributes` and isn't merged.

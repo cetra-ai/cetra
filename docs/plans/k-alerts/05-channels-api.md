@@ -33,7 +33,7 @@ Adds `GET/POST /api/v1/projects/{project}/channels` and `PATCH/DELETE /api/v1/pr
 
 ## 1. Types in `api/alerts.rs`
 
-Add (imports: `std::collections::BTreeMap`, `llmobs_core::time_serde`, `uuid::Uuid`):
+Add (imports: `std::collections::BTreeMap`, `cetra_core::time_serde`, `uuid::Uuid`):
 
 ```rust
 /// A delivery's status.
@@ -329,7 +329,7 @@ The content of `fixtures/api/static/channels.json`:
 
 - `api_examples.rs` `generate()`: add, in the static block next to the `list_api_keys` entry, `example("list_channels", BTreeMap::new(), BTreeMap::new(), "static/channels.json", "application/json"),`.
 - Run `just api-examples` (it regenerates `fixtures/api/manifest.json`); commit the manifest.
-- `tests/api_examples.rs` `static_files_match_their_types`: `roundtrip::<Page<NotificationChannel>>("static/channels.json");` and import `NotificationChannel` from `llmobs_server::api::alerts` (rustfmt places the `use` line).
+- `tests/api_examples.rs` `static_files_match_their_types`: `roundtrip::<Page<NotificationChannel>>("static/channels.json");` and import `NotificationChannel` from `cetra_server::api::alerts` (rustfmt places the `use` line).
 - `tests/api_examples.rs` `generated_files_roundtrip`: its `match` panics on an unknown operation id; add `| "list_channels"` to the arm that lists the static operations (with `"list_saved_views"`).
 
 ## 5. Tests (`#[cfg(test)] mod tests` in `routes/channels.rs`)
@@ -370,7 +370,7 @@ just fmt
 ```
 
 ```bash
-cargo test -p llmobs-server channels
+cargo test -p cetra-server channels
 ```
 
 ```bash

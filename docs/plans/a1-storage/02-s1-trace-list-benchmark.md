@@ -28,7 +28,7 @@ Plan for spike S1 of the storage track. One agent runs it from start to end, alo
 
 - **Branch:** `spike/s1-trace-bench`, from `main`.
 - **Crate:** `tools/trace-bench/`, a binary crate added as a workspace member on the spike branch only.
-  - Dependencies: `llmobs-core` (for `traces_schema()` and the `spans` schema), `datafusion`, `arrow`, `parquet`, `tokio`, `clap`, and `serde_json` for the results output.
+  - Dependencies: `cetra-core` (for `traces_schema()` and the `spans` schema), `datafusion`, `arrow`, `parquet`, `tokio`, `clap`, and `serde_json` for the results output.
   - Use the workspace pins; if anything else is needed, add it on the spike branch only.
   - Generate random data with a small seeded xorshift; no `rand` crate is needed.
 - **Machine:** the dev machine. Record in the results:
@@ -51,7 +51,7 @@ One project, 7 days (2026-03-02 00:00 → 2026-03-09 00:00 UTC), **5,000,000 tra
 - `start_time`: uniform over the 7 days, with a daily cycle (twice the rate between 08:00 and 20:00 UTC).
 - Duration: log-normal, median 2 s, p99 60 s.
 - 2% of traces start within 1 h before midnight and end after it (they matter for the anchor numbers).
-- `environment`: `production` 80%, `staging` 15%, `llmobs-eval` 5%.
+- `environment`: `production` 80%, `staging` 15%, `cetra-eval` 5%.
 - `session_id`: 30% of traces, drawn from 50,000 sessions. `user_id`: 60% of traces, from 20,000 users.
 - `release`: 5 values. `tags`: 0–3 of 10 values.
 - `metadata`: 0–4 keys from 20, short values.

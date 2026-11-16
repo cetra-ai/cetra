@@ -8,8 +8,8 @@ use std::str::FromStr;
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::routing::{delete, get, post};
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trace_ids};
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trace_ids};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -591,8 +591,8 @@ mod tests {
     use std::time::Duration;
 
     use axum::http::header;
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_storage::error::DeletionError;
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_storage::error::DeletionError;
     use serde_json::{Value, json};
 
     use super::*;
@@ -1488,7 +1488,7 @@ mod tests {
             .write(move |conn| {
                 Box::pin(async move {
                     let beta =
-                        insert_org(conn, llmobs_core::ids::OrgId::new_v7(), "Beta", "beta", now)
+                        insert_org(conn, cetra_core::ids::OrgId::new_v7(), "Beta", "beta", now)
                             .await?;
                     add_org_member(conn, beta.id, user_id, OrgRole::Owner, now).await?;
                     let b1 = insert_project(conn, beta.id, "b1", "b1", None, now).await?;
@@ -1563,7 +1563,7 @@ mod tests {
                 Box::pin(async move {
                     let gamma = insert_org(
                         conn,
-                        llmobs_core::ids::OrgId::new_v7(),
+                        cetra_core::ids::OrgId::new_v7(),
                         "Gamma",
                         "gamma",
                         now,

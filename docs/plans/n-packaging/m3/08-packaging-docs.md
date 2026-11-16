@@ -6,7 +6,7 @@ Read [00-design.md](00-design.md) first, especially § Decisions (D-N-25 to D-N-
 
 **Edit only:**
 - `deploy/docker/Dockerfile`;
-- `deploy/helm/llmobs/` (`values.yaml`, `templates/statefulset.yaml`, `README.md`, a new `ci/metrics-values.yaml`);
+- `deploy/helm/cetra/` (`values.yaml`, `templates/statefulset.yaml`, `README.md`, a new `ci/metrics-values.yaml`);
 - `tools/packaging/helm-check.sh`;
 - `deploy/compose/compose.yaml`;
 - `docs/self-hosting/` (`configuration.md`, `backup.md`, `kubernetes.md`, `docker-compose.md`, `s3.md`, a new `monitoring.md`, `README.md`);
@@ -42,7 +42,7 @@ metrics:
 ```
 
 **`templates/statefulset.yaml`,** when `.Values.metrics.enabled`:
-- the env var `LLMOBS_METRICS_ADDR` = `0.0.0.0:9464`;
+- the env var `CETRA_METRICS_ADDR` = `0.0.0.0:9464`;
 - a container port `metrics` (9464/TCP);
 - `.Values.metrics.podAnnotations` merged into the pod annotations. Build **one** dict, so a key set in both does not render twice (duplicate YAML keys):
 
@@ -64,11 +64,11 @@ No Service port and no `ServiceMonitor`: Prometheus scrapes the pod. Keep the pr
 
 ### Compose
 
-`deploy/compose/compose.yaml`, in the `llmobs` service's environment block, add commented lines:
+`deploy/compose/compose.yaml`, in the `cetra` service's environment block, add commented lines:
 
 ```yaml
       # Prometheus metrics (docs/self-hosting/monitoring.md); also publish the port.
-      # LLMOBS_METRICS_ADDR: "0.0.0.0:9464"
+      # CETRA_METRICS_ADDR: "0.0.0.0:9464"
 ```
 
 ### `docs/self-hosting/`
@@ -76,18 +76,18 @@ No Service port and no `ServiceMonitor`: Prometheus scrapes the pod. Keep the pr
 **`monitoring.md` (new):**
 - **Health endpoints:**
   - `/healthz`: the process is alive and has no storage failure that only a restart clears (D-N-35); use it for liveness. Under Kubernetes a failing `/healthz` restarts the pod.
-  - `/readyz`: the six checks of spec 12; use it for readiness. A full disk or an unreachable bucket makes it fail. Under Kubernetes the pod leaves the Service and is not restarted; with one replica the UI is then unreachable through the Service. Free space with `kubectl exec` or a bigger volume, and alert on `llmobs_storage_disk_free_bytes` before it happens. Under Docker the container shows `unhealthy` and keeps running.
+  - `/readyz`: the six checks of spec 12; use it for readiness. A full disk or an unreachable bucket makes it fail. Under Kubernetes the pod leaves the Service and is not restarted; with one replica the UI is then unreachable through the Service. Free space with `kubectl exec` or a bigger volume, and alert on `cetra_storage_disk_free_bytes` before it happens. Under Docker the container shows `unhealthy` and keeps running.
 - **Metrics:** how to enable `metrics_addr` (TOML, env, compose, Helm), that it has no authentication (bind it privately), and a table of the metrics (copy the 00-design table's name, type, labels and a one-line meaning).
 - **The label rule** in one sentence (D-N-29).
 - **Five example alert expressions:**
-  - `llmobs_storage_failed == 1`;
-  - `llmobs_storage_disk_free_bytes < 2 * llmobs_storage_disk_min_free_bytes`;
-  - `rate(llmobs_storage_flushes_total{outcome="failed"}[10m]) > 0`;
-  - `llmobs_eval_jobs{status="queued"} > 1000`;
-  - `sum(rate(llmobs_http_requests_total{status="5xx"}[5m])) / sum(rate(llmobs_http_requests_total[5m])) > 0.05`.
+  - `cetra_storage_failed == 1`;
+  - `cetra_storage_disk_free_bytes < 2 * cetra_storage_disk_min_free_bytes`;
+  - `rate(cetra_storage_flushes_total{outcome="failed"}[10m]) > 0`;
+  - `cetra_eval_jobs{status="queued"} > 1000`;
+  - `sum(rate(cetra_http_requests_total{status="5xx"}[5m])) / sum(rate(cetra_http_requests_total[5m])) > 0.05`.
 
 **`backup.md`:** a new section, `## Restore mode (restore drills)`:
-- `restore_mode = true` / `LLMOBS_RESTORE_MODE=true` starts a server that makes no outbound call:
+- `restore_mode = true` / `CETRA_RESTORE_MODE=true` starts a server that makes no outbound call:
   - no alert evaluation or delivery;
   - no judge, webhook-evaluator or backfill run;
   - no email (logged and dropped);
@@ -96,7 +96,7 @@ No Service port and no `ServiceMonitor`: Prometheus scrapes the pod. Keep the pr
   - no usage notices.
 - User-triggered outbound calls answer 503 `restore_mode`.
 - Reads, ingestion, deletions, retention, compaction and backups work.
-- **How to check it is on:** the startup line `restore mode: outbound work is off …`, `/readyz` returns `"restore_mode": true`, and the metric `llmobs_restore_mode 1`.
+- **How to check it is on:** the startup line `restore mode: outbound work is off …`, `/readyz` returns `"restore_mode": true`, and the metric `cetra_restore_mode 1`.
 - **What it does not do:**
   - it does not make the copy read-only;
   - it does not stop a copy from reaching the live bucket if it is configured to; point it at a copy of the bucket, as the restore procedure says.

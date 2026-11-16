@@ -8,9 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use llmobs_core::enums::ScoreDataType;
-use llmobs_core::ids::{OrgId, TraceId};
-use llmobs_storage::{ExperimentScore, ExperimentTrace};
+use cetra_core::enums::ScoreDataType;
+use cetra_core::ids::{OrgId, TraceId};
+use cetra_storage::{ExperimentScore, ExperimentTrace};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ pub(crate) struct Loaded {
 
 impl Loaded {
     /// Loads `experiment` from its reads: `keys` (every result), `scores` (the live scores whose
-    /// `experiment_id` is the experiment) and `traces` (the traces whose `llmobs.experiment_id`
+    /// `experiment_id` is the experiment) and `traces` (the traces whose `cetra.experiment_id`
     /// is the experiment). Builds the index once.
     pub(crate) fn new(
         experiment: ExperimentRow,
@@ -655,7 +655,7 @@ pub(crate) fn compare(
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::ids::ProjectId;
+    use cetra_core::ids::ProjectId;
 
     use super::*;
 

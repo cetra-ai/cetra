@@ -2,7 +2,7 @@
 
 Read [README.md](README.md) first.
 
-**Goal:** one end-to-end test over a real `llmobs serve` (the harness of `crates/cli/tests/e2e.rs`) that exercises the whole deletion path, then the documentation closeout: specs checked against what was built, and the roadmap row.
+**Goal:** one end-to-end test over a real `cetra serve` (the harness of `crates/cli/tests/e2e.rs`) that exercises the whole deletion path, then the documentation closeout: specs checked against what was built, and the roadmap row.
 
 **Edit only:**
 - `crates/cli/tests/e2e.rs` (one new test, plus small helpers on `Api` if needed);
@@ -18,7 +18,7 @@ Read [README.md](README.md) first.
 
 ## Test
 
-The fixture `sdk-context` (under `fixtures/otlp/llmobs/`) is the only SDK fixture with an end user: `user_id` `u-17`, session `chat-42`. `sdk-span-manual` has no user; use it for T3.
+The fixture `sdk-context` (under `fixtures/otlp/cetra/`) is the only SDK fixture with an end user: `user_id` `u-17`, session `chat-42`. `sdk-span-manual` has no user; use it for T3.
 
 Add these helpers next to `Api` (the existing `Api::post`, `Api::get` and `post_otlp_http` assert success, so they cannot check a 404):
 - `Api::get_status(&self, path: &str) -> u16`: like `get`, returns `response.status().as_u16()` without reading the body;

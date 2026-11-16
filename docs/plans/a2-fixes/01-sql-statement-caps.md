@@ -301,6 +301,6 @@ If one of these fails only because of the new operator cost, stop and report.
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib sql::`, `cargo test -p llmobs-storage --lib query_text` and `cargo test -p llmobs-storage --lib filter::` pass.
+- `cargo test -p cetra-storage --lib sql::`, `cargo test -p cetra-storage --lib query_text` and `cargo test -p cetra-storage --lib filter::` pass.
 - `just check` passes.
 - The commit contains only the files listed under "Edit only".

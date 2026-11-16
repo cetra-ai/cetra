@@ -157,7 +157,7 @@ export function createDataset(options: { seed: number; now: number; traces: numb
     metrics(from, to, bucket, includeEval, includeExperiments) {
       return metricsFrom(
         visibleTraces(traces, includeEval, includeExperiments),
-        traces.filter((trace) => trace.environment === "llmobs-eval"),
+        traces.filter((trace) => trace.environment === "cetra-eval"),
         from,
         to,
         bucket,
@@ -172,10 +172,10 @@ export function visibleTraces(
   includeExperiments: boolean,
 ): Schema<"TraceSummary">[] {
   return traces.filter((trace) => {
-    if (!includeEval && trace.environment === "llmobs-eval") {
+    if (!includeEval && trace.environment === "cetra-eval") {
       return false;
     }
-    if (!includeExperiments && trace.metadata["llmobs.experiment_id"] !== undefined) {
+    if (!includeExperiments && trace.metadata["cetra.experiment_id"] !== undefined) {
       return false;
     }
     return true;
@@ -188,7 +188,7 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   const errored = rng() < 0.08;
   const errorCount = errored ? Math.min(spanCount, 1 + Math.floor(rng() * 3)) : 0;
   const environment = environmentOf(rng);
-  const experiment = environment !== "llmobs-eval" && rng() < 0.04;
+  const experiment = environment !== "cetra-eval" && rng() < 0.04;
   const ageMs = ageOf(rng, index);
   const durationMs = index === 0 ? 60_000 : 200 + Math.floor(rng() * 20_000);
   const startMs = now - ageMs;
@@ -202,7 +202,7 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   const tags = pickTags(rng);
   const metadata: Record<string, string> = {};
   if (experiment) {
-    metadata["llmobs.experiment_id"] = `exp-${String(index % 12).padStart(2, "0")}`;
+    metadata["cetra.experiment_id"] = `exp-${String(index % 12).padStart(2, "0")}`;
   }
   const traceId = `a${index.toString(16).padStart(31, "0")}`;
   return {
@@ -412,7 +412,7 @@ function spanFromSummary(span: Schema<"SpanSummary">): Schema<"SpanDetail"> {
     resource_attributes: { "host.name": "mock" },
     schema_version: 1,
     truncated,
-    scope_name: "llmobs",
+    scope_name: "cetra",
   };
   if (span.span_kind === "llm") {
     detail.input = {
@@ -839,7 +839,7 @@ function errorSpan(index: number, spanCount: number, errorCount: number): boolea
 function environmentOf(rng: () => number): string {
   const roll = rng();
   if (roll < 0.03) {
-    return "llmobs-eval";
+    return "cetra-eval";
   }
   if (roll < 0.28) {
     return "staging";

@@ -6,7 +6,7 @@ Read [00-design.md](00-design.md) first, especially § Storage API needed from t
 > - `crates/storage` is track R's area. R reviewed this phase on 2026-11-15, and this file includes its six changes. N implements it; R does not.
 > - **When:** after R's stacked PRs (M5–M7) are merged into `main`, so R never rebases onto N. Check with the coordinator before starting. If one of R's branches is still open and adds `StorageConfig { … }` literals, add the new field to those literals in this phase only once they are on `main`.
 
-**Goal:** four additions to `llmobs_storage`. With the switch at its default, nothing changes behaviour.
+**Goal:** four additions to `cetra_storage`. With the switch at its default, nothing changes behaviour.
 
 1. `StorageHealth` gets the free-disk fields.
 2. `Storage::probe_objects()` checks that the object store answers, with a marker object (D-N-36).
@@ -187,7 +187,7 @@ Every caller already treats a delete error as "try again later" and keeps its ca
 
 **`MediaGc::finish_drop`** (`media.rs`) must not reach `self.committer.finish_drop(project)` when a blob deletion fails. As written, `self.objects.delete(&path).await?` already returns early, so the drop stays `dropping` and is retried by a later server. Keep it that way, and add a comment at the `?`: "With deletion off (D-N-34) this returns before `finish_drop`, so the drop stays `dropping` and its blobs are deleted by a later server."
 
-**`Maintenance::open`** (`maintenance.rs`) always builds `Objects` with deletion **on**, whatever `config.delete_objects` says. `gc-orphans` must delete even when the drill's config carries `restore_mode` (Q's drill runs it with the same `llmobs.toml`). Clone the config and set `delete_objects = true` before `Objects::new`, with a comment saying why.
+**`Maintenance::open`** (`maintenance.rs`) always builds `Objects` with deletion **on**, whatever `config.delete_objects` says. `gc-orphans` must delete even when the drill's config carries `restore_mode` (Q's drill runs it with the same `cetra.toml`). Clone the config and set `delete_objects = true` before `Objects::new`, with a comment saying why.
 
 **Log** once at `Storage::open`, when off: `tracing::warn!("object deletion is off (restore mode)")`.
 
@@ -233,11 +233,11 @@ Two edits, one per section:
 ## Verify
 
 ```bash
-cargo test -p llmobs-storage --all-features low_disk
-cargo test -p llmobs-storage --all-features probe_objects
-cargo test -p llmobs-storage --all-features stats_
-cargo test -p llmobs-storage --all-features delete_objects
-cargo test -p llmobs-storage --all-features maintenance_deletes
+cargo test -p cetra-storage --all-features low_disk
+cargo test -p cetra-storage --all-features probe_objects
+cargo test -p cetra-storage --all-features stats_
+cargo test -p cetra-storage --all-features delete_objects
+cargo test -p cetra-storage --all-features maintenance_deletes
 just check
 ```
 

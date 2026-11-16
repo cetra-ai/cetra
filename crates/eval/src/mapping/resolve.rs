@@ -8,9 +8,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use llmobs_core::enums::{PayloadFormat, SpanKind};
-use llmobs_core::ids::SpanId;
-use llmobs_core::span::Span;
+use cetra_core::enums::{PayloadFormat, SpanKind};
+use cetra_core::ids::SpanId;
+use cetra_core::span::Span;
 use serde_json::{Map, Value};
 
 use super::{
@@ -263,9 +263,9 @@ fn apply_path(path: &serde_json_path::JsonPath, value: &Value) -> Option<Value> 
 mod tests {
     use std::collections::BTreeMap;
 
-    use llmobs_core::enums::{PayloadFormat, SpanKind, SpanStatus};
-    use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-    use llmobs_core::span::Span;
+    use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::span::Span;
     use serde_json::{Map, Value, json};
 
     use super::{ItemData, TraceData, Variables, resolve};
@@ -496,7 +496,7 @@ mod tests {
         set_payload(&mut root, true, Some(messages), PayloadFormat::Messages);
         set_payload(&mut root, false, Some("done"), PayloadFormat::Text);
         root.metadata
-            .insert("llmobs.eval.rule_id".to_owned(), "\"rule-7\"".to_owned());
+            .insert("cetra.eval.rule_id".to_owned(), "\"rule-7\"".to_owned());
 
         let mut target = bare(2, Some(1), "chat", SpanKind::Llm, 1);
         set_payload(&mut target, true, Some("prompt"), PayloadFormat::Text);
@@ -511,7 +511,7 @@ mod tests {
             .insert("k".to_owned(), "\"from-span\"".to_owned());
         target
             .attributes
-            .insert("llmobs.eval.rule_id".to_owned(), "{\"n\":1}".to_owned());
+            .insert("cetra.eval.rule_id".to_owned(), "{\"n\":1}".to_owned());
 
         let retrieve = text_io(
             bare(3, Some(1), "retrieve", SpanKind::Retriever, 4),
@@ -531,12 +531,12 @@ mod tests {
             &mapping(&json!({
                 "trace_in": "trace.input",
                 "trace_out": "trace.output",
-                "trace_meta": "trace.metadata.llmobs.eval.rule_id",
+                "trace_meta": "trace.metadata.cetra.eval.rule_id",
                 "transcript": "trace.transcript",
                 "span_in": "span.input",
                 "span_out": "span.output",
                 "span_meta": "span.metadata.k",
-                "span_attr": "span.attributes.llmobs.eval.rule_id",
+                "span_attr": "span.attributes.cetra.eval.rule_id",
                 "by_name": "span[name=\"retrieve\"].output",
                 "by_kind": "span[kind=\"retriever\"].output",
                 "expected": "expected",
@@ -636,7 +636,7 @@ mod tests {
         set_payload(&mut span, true, Some("{not json"), PayloadFormat::Messages);
         set_payload(&mut span, false, Some("{\"a\":1}"), PayloadFormat::Text);
         span.metadata
-            .insert("llmobs.eval.rule_id".to_owned(), "\"dotted\"".to_owned());
+            .insert("cetra.eval.rule_id".to_owned(), "\"dotted\"".to_owned());
         span.attributes.insert("count".to_owned(), "12".to_owned());
         span.attributes
             .insert("raw".to_owned(), "{not json".to_owned());
@@ -645,7 +645,7 @@ mod tests {
             &mapping(&json!({
                 "broken": "trace.input",
                 "text": "trace.output",
-                "meta": "trace.metadata.llmobs.eval.rule_id",
+                "meta": "trace.metadata.cetra.eval.rule_id",
                 "count": "span.attributes.count",
                 "raw": "span.attributes.raw",
             })),

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use arrow::array::{Array, AsArray, RecordBatch};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, TimestampNanosecondType};
+use cetra_core::schema::{scores, scores_schema, spans, spans_schema};
 use datafusion::common::ScalarValue;
 use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::error::DataFusionError;
@@ -31,7 +32,6 @@ use datafusion_datasource::PartitionedFile;
 use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use futures::StreamExt;
-use llmobs_core::schema::{scores, scores_schema, spans, spans_schema};
 
 use crate::catalog::{FileMeta, FileTable};
 use crate::compaction::slice::Slice;
@@ -419,15 +419,15 @@ mod tests {
     use arrow::compute::{
         SortColumn, SortOptions, concat_batches, lexsort_to_indices, take_record_batch,
     };
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::schema::{scores, spans, traces};
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use chrono::NaiveDate;
     use datafusion::execution::memory_pool::GreedyMemoryPool;
     use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion::physical_plan::displayable;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::schema::{scores, spans, traces};
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use uuid::Uuid;
 

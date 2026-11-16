@@ -72,19 +72,19 @@ expression: protobuf
       "input_preview": "{\"prompt\":\"hi\"}",
       "output_preview": "Hello",
       "attributes": {
-        "llmobs.span.kind": "chain"
+        "cetra.span.kind": "chain"
       },
       "resource_attributes": {
-        "telemetry.distro.name": "llmobs"
+        "telemetry.distro.name": "cetra"
       },
-      "scope_name": "llmobs",
+      "scope_name": "cetra",
       "scope_version": "0.0.0",
       "events": [],
       "links": [],
       "media_refs": [],
       "truncated": [],
       "conventions": [
-        "llmobs"
+        "cetra"
       ],
       "ingest_time": "[redacted]",
       "schema_version": 1

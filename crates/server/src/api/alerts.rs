@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use llmobs_core::time_serde;
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -533,7 +533,7 @@ impl AlertEventKind {
 /// One delivery of an event to a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AlertDelivery {
-    /// Delivery id; the webhook's `X-Llmobs-Delivery`.
+    /// Delivery id; the webhook's `X-Cetra-Delivery`.
     pub id: Uuid,
     /// The channel.
     pub channel_id: Uuid,

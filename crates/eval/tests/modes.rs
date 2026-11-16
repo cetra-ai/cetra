@@ -12,7 +12,7 @@ use crate::judge::{
 };
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
-use llmobs_core::score::ScoreValue;
+use cetra_core::score::ScoreValue;
 use serde_json::json;
 
 const KEY: &str = "mode-SECRET-PAYLOAD";

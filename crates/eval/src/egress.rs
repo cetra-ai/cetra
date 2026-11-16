@@ -175,7 +175,7 @@ impl EgressClient {
 fn user_agent() -> String {
     format!(
         "{}/{}",
-        llmobs_core::names::PRODUCT,
+        cetra_core::names::PRODUCT,
         env!("CARGO_PKG_VERSION")
     )
 }

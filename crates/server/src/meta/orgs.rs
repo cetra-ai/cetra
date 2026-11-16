@@ -1,7 +1,7 @@
 //! `orgs` rows and slug rules (spec 04, spec 11).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 

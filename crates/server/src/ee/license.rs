@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Licence keys (D172, D-P-7): claims, the status over time, and the features they grant.
 
-use llmobs_token::{Claims, TokenError};
+use cetra_token::{Claims, TokenError};
 use uuid::Uuid;
 
 use crate::entitlements::FeatureSet;
@@ -106,7 +106,7 @@ impl LicenseState {
 }
 
 fn parse(key: &str) -> Result<License, InvalidLicense> {
-    let verified = llmobs_token::verify(key)?;
+    let verified = cetra_token::verify(key)?;
     let Claims::License(claims) = verified.claims else {
         return Err(InvalidLicense::Token(TokenError::WrongKind));
     };
@@ -141,7 +141,7 @@ mod tests {
         include_str!("../../../../fixtures/license/tokens/wrong-kind.token");
 
     fn ns(text: &str) -> i64 {
-        llmobs_core::time_serde::parse_rfc3339(text).unwrap()
+        cetra_core::time_serde::parse_rfc3339(text).unwrap()
     }
 
     fn claims(expires_at: &str, grace_ends_at: &str) -> Value {
@@ -284,7 +284,7 @@ mod tests {
         ];
         for reason in reasons {
             let text = reason.to_string();
-            assert!(!text.contains("llmobs1."), "{text}");
+            assert!(!text.contains("cetra1."), "{text}");
             assert!(!text.contains("Example"), "{text}");
         }
     }

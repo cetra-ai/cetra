@@ -7,9 +7,9 @@
 //! cache write before Vercel v6 is read from `ai.response.providerMetadata`.
 //! `gen_ai.usage.*` stays inclusive and relies on the safety net.
 
-use llmobs_core::enums::{Convention, SpanKind};
-use llmobs_core::names::attr;
-use llmobs_core::time_serde::parse_rfc3339;
+use cetra_core::enums::{Convention, SpanKind};
+use cetra_core::names::attr;
+use cetra_core::time_serde::parse_rfc3339;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value;
 use opentelemetry_proto::tonic::trace::v1::span::Event;

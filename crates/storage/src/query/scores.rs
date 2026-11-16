@@ -6,6 +6,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cetra_core::ids::ProjectId;
+use cetra_core::schema::{scores, scores_schema};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::DataFusionError;
 use datafusion::datasource::provider_as_source;
@@ -15,8 +17,6 @@ use datafusion::logical_expr::{
     col, lit,
 };
 use datafusion::physical_plan::ExecutionPlan;
-use llmobs_core::ids::ProjectId;
-use llmobs_core::schema::{scores, scores_schema};
 
 #[cfg(test)]
 use super::overlapping_files;
@@ -240,13 +240,13 @@ mod tests {
     use std::path::Path;
 
     use arrow::array::{Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+    use cetra_core::batch::scores_to_record_batch;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::ids::{ProjectId, TraceId};
+    use cetra_core::schema::scores;
+    use cetra_core::score::{Score, ScoreTarget, ScoreValue};
     use datafusion::execution::context::SessionContext;
     use datafusion::logical_expr::Expr;
-    use llmobs_core::batch::scores_to_record_batch;
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::ids::{ProjectId, TraceId};
-    use llmobs_core::schema::scores;
-    use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
 
     use crate::config::{
         FlushConfig, MemtableConfig, QueryConfig, S3Config, StorageConfig, WalConfig,

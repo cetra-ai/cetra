@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "8aa129e8474d6203",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "f2d733f1d6443987",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "LangGraph",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590087000000",
+              "endTimeUnixNano": "1767225590091000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -111,15 +111,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "66616a7eb6dcfb41",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "3d7e2a660fb9a942",
               "traceState": "",
-              "parentSpanId": "8aa129e8474d6203",
+              "parentSpanId": "f2d733f1d6443987",
               "flags": 256,
               "name": "model",
               "kind": 1,
               "startTimeUnixNano": "1767225590001000000",
-              "endTimeUnixNano": "1767225590046000000",
+              "endTimeUnixNano": "1767225590049000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -181,15 +181,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "ff61144d7b4194be",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "a2b6610f0f5da1c2",
               "traceState": "",
-              "parentSpanId": "66616a7eb6dcfb41",
+              "parentSpanId": "3d7e2a660fb9a942",
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
-              "startTimeUnixNano": "1767225590002000000",
-              "endTimeUnixNano": "1767225590043000000",
+              "startTimeUnixNano": "1767225590003000000",
+              "endTimeUnixNano": "1767225590047000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -365,15 +365,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "4a7b7ae41292ecfd",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "ed9a8b85cd74189a",
               "traceState": "",
-              "parentSpanId": "8aa129e8474d6203",
+              "parentSpanId": "f2d733f1d6443987",
               "flags": 256,
               "name": "tools",
               "kind": 1,
-              "startTimeUnixNano": "1767225590047000000",
-              "endTimeUnixNano": "1767225590049000000",
+              "startTimeUnixNano": "1767225590051000000",
+              "endTimeUnixNano": "1767225590053000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -423,15 +423,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "6c7e8e80a4035d36",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "ed7198b6bd7fe0fb",
               "traceState": "",
-              "parentSpanId": "4a7b7ae41292ecfd",
+              "parentSpanId": "ed9a8b85cd74189a",
               "flags": 256,
               "name": "get_weather",
               "kind": 1,
-              "startTimeUnixNano": "1767225590048000000",
-              "endTimeUnixNano": "1767225590048000000",
+              "startTimeUnixNano": "1767225590051000000",
+              "endTimeUnixNano": "1767225590052000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -487,15 +487,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "078c4236ac479098",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "01892e8e0a6e3426",
               "traceState": "",
-              "parentSpanId": "8aa129e8474d6203",
+              "parentSpanId": "f2d733f1d6443987",
               "flags": 256,
               "name": "model",
               "kind": 1,
-              "startTimeUnixNano": "1767225590050000000",
-              "endTimeUnixNano": "1767225590086000000",
+              "startTimeUnixNano": "1767225590054000000",
+              "endTimeUnixNano": "1767225590090000000",
               "attributes": [
                 {
                   "key": "input.value",
@@ -557,15 +557,15 @@
               }
             },
             {
-              "traceId": "01d88a7e4bcd41f492baf3694116060a",
-              "spanId": "ca9858e8f202f17a",
+              "traceId": "69d24452fa30e1f336fa2ba592a53ca4",
+              "spanId": "195ffc03c3897c49",
               "traceState": "",
-              "parentSpanId": "078c4236ac479098",
+              "parentSpanId": "01892e8e0a6e3426",
               "flags": 256,
               "name": "ChatOpenAI",
               "kind": 1,
-              "startTimeUnixNano": "1767225590051000000",
-              "endTimeUnixNano": "1767225590085000000",
+              "startTimeUnixNano": "1767225590055000000",
+              "endTimeUnixNano": "1767225590089000000",
               "attributes": [
                 {
                   "key": "input.value",

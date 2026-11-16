@@ -10,7 +10,7 @@ Sub-phases R5.1–R5.8, one commit each. R5.8 can produce several commits, one p
 
 **Decided by the user for this plan:**
 - **Q1, memory:** document a minimum and a small-machine profile, and warn at open when the budgets exceed the detected limit. No auto-sizing (R5.6).
-- **Q2, descriptors:** `llmobs serve` raises its soft `RLIMIT_NOFILE` to the hard limit. That is server code: R5.8 requests it from the coordinator.
+- **Q2, descriptors:** `cetra serve` raises its soft `RLIMIT_NOFILE` to the hard limit. That is server code: R5.8 requests it from the coordinator.
 - **Q3, WAL rotation:** a failed rotation is not final. It changes spec 03 §1, so R5.8 stops and reports it with the proposed decision text written out there.
 - **Q4, CI:** the disk-full, memory and descriptor runs are run by hand. The nightly workflow does not run them.
 
@@ -64,7 +64,7 @@ Sub-phases R5.1–R5.8, one commit each. R5.8 can produce several commits, one p
 ### Names used throughout
 
 - **The filler project** `C` = `"018f6b4e-7c1a-7c1a-8c1a-0000000000c3"`. Its rows only take space. The model never reads it, so a failed append of filler rows that a restart replays anyway (an unacknowledged WAL group, audit item 3 of `00-design.md`) cannot break a model check. Model rows (projects A and B) are only appended while space is known to be free.
-- **The small filesystem** is either a 64 MiB tmpfs mounted in a private user and mount namespace (`unshare -rm`), or the directory named by `LLMOBS_TEST_SMALL_FS`: a small filesystem the operator mounted, for example an ext4 loop device (R5.1). The case code receives its root path and never knows which.
+- **The small filesystem** is either a 64 MiB tmpfs mounted in a private user and mount namespace (`unshare -rm`), or the directory named by `CETRA_TEST_SMALL_FS`: a small filesystem the operator mounted, for example an ext4 loop device (R5.1). The case code receives its root path and never knows which.
 - **Ballast**: a file of zeros under the small filesystem's root that leaves a chosen number of bytes free. Freeing space means removing or shrinking it.
 - **Day `D`, `midnight`, `day`, `HOUR_NS`, the clock**: as in M1 (`model_tests/shape.rs`, `01-m1-model.md` § Names).
 
@@ -129,9 +129,9 @@ pub(super) struct SmallFs {
 
 /// Runs `case` with the root of a small, empty filesystem.
 ///
-/// - `LLMOBS_SMALL_FS_CHILD` set: this process is the namespace child; `case`
+/// - `CETRA_SMALL_FS_CHILD` set: this process is the namespace child; `case`
 ///   runs on that mount.
-/// - `LLMOBS_TEST_SMALL_FS` set: `case` runs in a new directory under it.
+/// - `CETRA_TEST_SMALL_FS` set: `case` runs in a new directory under it.
 /// - Neither: re-executes the test `name` inside `unshare -rm` over a fresh
 ///   tmpfs and asserts that it exited successfully.
 pub(super) fn on_small_fs(name: &str, fs: SmallFs, case: impl FnOnce(&std::path::Path));
@@ -178,11 +178,11 @@ Ballast writes real zeros (`write_all` of a zeroed buffer), never `set_len` upwa
 **The namespace child.** The parent creates `mount = tempfile::tempdir()` and runs:
 
 ```text
-unshare -rm sh -c 'mount -t tmpfs -o "$LLMOBS_SMALL_FS_OPTIONS" tmpfs "$LLMOBS_SMALL_FS_CHILD" && exec "$0" "$@"' \
+unshare -rm sh -c 'mount -t tmpfs -o "$CETRA_SMALL_FS_OPTIONS" tmpfs "$CETRA_SMALL_FS_CHILD" && exec "$0" "$@"' \
     <current_exe> --exact <name> --ignored --nocapture --test-threads=1
 ```
 
-with `LLMOBS_SMALL_FS_CHILD=<mount>` and `LLMOBS_SMALL_FS_OPTIONS=size=<bytes>,mode=0700[,nr_inodes=<n>]`, stdout piped, stderr inherited. It polls `try_wait` every 20 ms (reading stdout on a helper thread so the pipe never fills), kills the child after 300 s, and asserts `status.success()`, as `crash_tests.rs::run_child` does.
+with `CETRA_SMALL_FS_CHILD=<mount>` and `CETRA_SMALL_FS_OPTIONS=size=<bytes>,mode=0700[,nr_inodes=<n>]`, stdout piped, stderr inherited. It polls `try_wait` every 20 ms (reading stdout on a helper thread so the pipe never fills), kills the child after 300 s, and asserts `status.success()`, as `crash_tests.rs::run_child` does.
 
 **A typo must not pass.** libtest given an `--exact` name that matches nothing runs 0 tests and exits 0. So the parent also asserts that the child's stdout contains `test result: ok. 1 passed`, and panics with the name otherwise. Each case takes its name from one constant next to it, used both for the call and nowhere else:
 
@@ -196,23 +196,23 @@ fn appends_stop_at_min_free_before_the_disk_fills() {
 }
 ```
 
-The memory and descriptor parents (R5.6, R5.7) are safe from the same mistake: they require the child's `LLMOBS_MEMORY` / `LLMOBS_FD` result line, which a child that ran no test never prints. The mount is private to the child's namespace: every step of a case, restarts and model checks included, runs in the child. Tmpfs pages come from RAM, so 64 MiB per case.
+The memory and descriptor parents (R5.6, R5.7) are safe from the same mistake: they require the child's `CETRA_MEMORY` / `CETRA_FD` result line, which a child that ran no test never prints. The mount is private to the child's namespace: every step of a case, restarts and model checks included, runs in the child. Tmpfs pages come from RAM, so 64 MiB per case.
 
-- `unshare` fails with "Operation not permitted" where unprivileged user namespaces are off (some distributions; Ubuntu 24.04's AppArmor default restricts them). The parent then panics with `"unshare -rm failed: enable unprivileged user namespaces, or set LLMOBS_TEST_SMALL_FS to a small mounted filesystem"`, plus the child's stderr.
-- With `LLMOBS_TEST_SMALL_FS`: `case` runs on `tempfile::tempdir_in(root)` in the current process. All cases then share one filesystem, so they must run one at a time: `--test-threads=1`, which `just resources` passes. Running a case by hand with `cargo test` needs it too. `on_small_fs` panics when the filesystem has less than 48 MiB or more than 1 GiB free (ballast writes would be too slow). `SmallFs::inodes` is ignored there; D9 uses `InodeBallast` on both kinds.
+- `unshare` fails with "Operation not permitted" where unprivileged user namespaces are off (some distributions; Ubuntu 24.04's AppArmor default restricts them). The parent then panics with `"unshare -rm failed: enable unprivileged user namespaces, or set CETRA_TEST_SMALL_FS to a small mounted filesystem"`, plus the child's stderr.
+- With `CETRA_TEST_SMALL_FS`: `case` runs on `tempfile::tempdir_in(root)` in the current process. All cases then share one filesystem, so they must run one at a time: `--test-threads=1`, which `just resources` passes. Running a case by hand with `cargo test` needs it too. `on_small_fs` panics when the filesystem has less than 48 MiB or more than 1 GiB free (ballast writes would be too slow). `SmallFs::inodes` is ignored there; D9 uses `InodeBallast` on both kinds.
 
 **Why tmpfs is not the whole answer.** tmpfs reports `ENOSPC` at `write()`, never later: it has no delayed allocation and no writeback, `fsync` is a no-op, and it has no journal or metadata blocks to run out of. So it misses:
 - `ENOSPC` or `EIO` reported by `fsync` after writeback, as on thin provisioning, NFS, or btrfs and XFS when metadata or speculative preallocation runs out. That path is a failed fsync, which M2's injected fsync errors (D-R-6) cover.
 - Space taken by journal and metadata, and ext4's reserved blocks (`f_bavail` already excludes them).
 - btrfs needing free space to delete a file.
 
-`LLMOBS_TEST_SMALL_FS` over an ext4 (or XFS, btrfs) loop device runs the same cases with real allocation and journaling. The setup needs root once and is documented in `hardening.md` (R5.8):
+`CETRA_TEST_SMALL_FS` over an ext4 (or XFS, btrfs) loop device runs the same cases with real allocation and journaling. The setup needs root once and is documented in `hardening.md` (R5.8):
 
 ```bash
-truncate -s 128M /var/tmp/llmobs-small.img && mkfs.ext4 -q /var/tmp/llmobs-small.img
-sudo mkdir -p /mnt/llmobs-small && sudo mount -o loop /var/tmp/llmobs-small.img /mnt/llmobs-small
-sudo chown "$USER" /mnt/llmobs-small
-LLMOBS_TEST_SMALL_FS=/mnt/llmobs-small just resources
+truncate -s 128M /var/tmp/cetra-small.img && mkfs.ext4 -q /var/tmp/cetra-small.img
+sudo mkdir -p /mnt/cetra-small && sudo mount -o loop /var/tmp/cetra-small.img /mnt/cetra-small
+sudo chown "$USER" /mnt/cetra-small
+CETRA_TEST_SMALL_FS=/mnt/cetra-small just resources
 ```
 
 ### `model_tests/resources/fill.rs`
@@ -292,7 +292,7 @@ After `model`:
 
 ```just
 # Resource exhaustion (track R M5, D-R-9): a full disk and few file descriptors.
-# Needs unprivileged user namespaces, or LLMOBS_TEST_SMALL_FS (a small mounted filesystem).
+# Needs unprivileged user namespaces, or CETRA_TEST_SMALL_FS (a small mounted filesystem).
 resources:
     cargo test --workspace --all-features -- --ignored --test-threads=1 model_tests::resources::small_fs:: model_tests::resources::disk_full:: model_tests::resources::descriptors::
 ```
@@ -303,7 +303,7 @@ resources:
 
 ```bash
 just resources
-LLMOBS_TEST_SMALL_FS=<a small mount> just resources   # when one is available
+CETRA_TEST_SMALL_FS=<a small mount> just resources   # when one is available
 ```
 
 Expected: 1 passed. Report whether `unshare` worked here, and the run time.
@@ -401,8 +401,8 @@ No config key is added: the bound is the one the operator already sets, `storage
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features spill
-cargo test -p llmobs-storage --all-features too_large
+cargo test -p cetra-storage --all-features spill
+cargo test -p cetra-storage --all-features too_large
 just check
 ```
 
@@ -691,7 +691,7 @@ A **child** runs a heavy workload in its own process. A **parent** re-executes i
 #[derive(Debug, Clone, Copy)]
 enum Profile { Defaults, Small, Probe }
 
-/// Every default budget, for `data_dir`: what `llmobs serve` runs with.
+/// Every default budget, for `data_dir`: what `cetra serve` runs with.
 fn defaults_config(data_dir: &Path) -> StorageConfig;
 /// The small-machine profile (below).
 fn small_config(data_dir: &Path) -> StorageConfig;
@@ -718,7 +718,7 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed>;
   - `query.max_memory_total` 256 MiB, `max_memory` 128 MiB, `initial_memory` 16 MiB, `metadata_cache_bytes` 64 MiB, `target_partitions` 2.
 
   Timers as in the defaults.
-- **The data directory** must not be on tmpfs: tmpfs pages are charged to the writer's cgroup and cannot be reclaimed without swap, so WAL and Parquet bytes would count as memory. Use `<target dir>/llmobs-resources/<uuid v7>`, where the target dir is `current_exe().ancestors().nth(3)` (the binary is `target/<profile>/deps/<exe>`, so `nth(3)` is `target/`). The parent asserts `rustix::fs::statfs(dir).f_type != 0x0102_1994` (`TMPFS_MAGIC`) and removes the directory afterwards. `f_type`'s integer type differs between targets: cast both sides as the compiler asks (for example `as i64`). A disk-backed file's page cache is reclaimable, so it does not cause an OOM kill.
+- **The data directory** must not be on tmpfs: tmpfs pages are charged to the writer's cgroup and cannot be reclaimed without swap, so WAL and Parquet bytes would count as memory. Use `<target dir>/cetra-resources/<uuid v7>`, where the target dir is `current_exe().ancestors().nth(3)` (the binary is `target/<profile>/deps/<exe>`, so `nth(3)` is `target/`). The parent asserts `rustix::fs::statfs(dir).f_type != 0x0102_1994` (`TMPFS_MAGIC`) and removes the directory afterwards. `f_type`'s integer type differs between targets: cast both sides as the compiler asks (for example `as i64`). A disk-backed file's page cache is reclaimable, so it does not cause an OOM kill.
 - **`run_limited`** spawns:
 
   ```text
@@ -726,12 +726,12 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed>;
       <current_exe> --exact model_tests::resources::memory::child_run --ignored --nocapture --test-threads=1
   ```
 
-  with env `LLMOBS_MEMORY_CHILD_DIR`, `LLMOBS_MEMORY_CHILD_LIMIT` (bytes) and `LLMOBS_MEMORY_CHILD_PROFILE` (`defaults`, `small` or `probe`). Stdout is piped (the child prints one `LLMOBS_MEMORY …` line), stderr inherited, with a 600 s timeout. `status.signal() == Some(9)` (`std::os::unix::process::ExitStatusExt`) or `status.code() == Some(137)` is `Killed`. Any other non-success panics with the child's last 40 lines of stdout. `systemd-run` failing to start (no user bus: "Failed to connect to bus") panics with "needs a systemd user session (systemd-run --user)".
+  with env `CETRA_MEMORY_CHILD_DIR`, `CETRA_MEMORY_CHILD_LIMIT` (bytes) and `CETRA_MEMORY_CHILD_PROFILE` (`defaults`, `small` or `probe`). Stdout is piped (the child prints one `CETRA_MEMORY …` line), stderr inherited, with a 600 s timeout. `status.signal() == Some(9)` (`std::os::unix::process::ExitStatusExt`) or `status.code() == Some(137)` is `Killed`. Any other non-success panics with the child's last 40 lines of stdout. `systemd-run` failing to start (no user bus: "Failed to connect to bus") panics with "needs a systemd user session (systemd-run --user)".
 
-### The child (`child_run`, ignored, returns at once without `LLMOBS_MEMORY_CHILD_DIR`)
+### The child (`child_run`, ignored, returns at once without `CETRA_MEMORY_CHILD_DIR`)
 
-1. `probe` profile: print `LLMOBS_MEMORY total=<default_total_memory()> cgroup=<the 0:: line of /proc/self/cgroup>` and return.
-2. Build the profile's config. If `memory::default_total_memory()` is above `limit / 2 + 1 MiB`, the process cannot see its cgroup limit (a cgroup namespace whose root is not the mounted one, or cgroup v1): print `LLMOBS_MEMORY note=limit-not-visible`, and set `query.max_memory_total = Some(limit / 2)`, which mirrors the default rule. The run still tests every other budget.
+1. `probe` profile: print `CETRA_MEMORY total=<default_total_memory()> cgroup=<the 0:: line of /proc/self/cgroup>` and return.
+2. Build the profile's config. If `memory::default_total_memory()` is above `limit / 2 + 1 MiB`, the process cannot see its cgroup limit (a cgroup namespace whose root is not the mounted one, or cgroup v1): print `CETRA_MEMORY note=limit-not-visible`, and set `query.max_memory_total = Some(limit / 2)`, which mirrors the default rule. The run still tests every other budget.
 3. `Harness::with_options` with `root` = the data dir, `workers` = `std::thread::available_parallelism()`, and an `adjust` that replaces the config with the profile's (keeping the harness's `data_dir`).
 4. `model_steps(seed_ops())`.
 5. **How the loops run.** One `h.block_on(async { … })` drives every loop of a phase with `tokio::join!` (or a `futures::future::join_all` over a `Vec` of loops), so they all run on the life's runtime and borrow `h.storage()` without `Arc`. Each loop checks a shared `stop: AtomicBool` before every call and returns its tally when it is set. A timer future in the same `join!` sets `stop` at the phase's deadline. Batch numbers come from a shared `AtomicU32` counter, passed to `filler_batch` as `counter % 60_000`, with `day_offset = counter % 8`. Arrow bytes appended so far are summed in a shared `AtomicU64`.
@@ -744,13 +744,13 @@ fn run_limited(profile: Profile, limit: u64) -> Result<String, Killed>;
    Background compaction runs (5 s interval).
 8. **Tally.** Appends: `Ok`, `Backpressure`, `DiskFull`, and anything else. Queries: `Ok`, `Err(QueryError::Busy)` from `Storage::query`, `RunError::TooLarge`, `RunError::Timeout`, and anything else. **Anything else fails the child**: print its kind (`RunError::kind`, the `AppendError` variant) and panic.
 9. After the `block_on` returns (every loop has stopped): `h.restart()`, then `check_full(h, model, 500)` (A/B). No settle: the filler is gigabytes.
-10. Print one line: `LLMOBS_MEMORY profile=<p> limit=<bytes> peak_rss=<VmHWM bytes> appends_ok=… backpressure=… queries_ok=… busy=… too_large=… timeout=…`. `VmHWM` comes from `/proc/self/status`.
+10. Print one line: `CETRA_MEMORY profile=<p> limit=<bytes> peak_rss=<VmHWM bytes> appends_ok=… backpressure=… queries_ok=… busy=… too_large=… timeout=…`. `VmHWM` comes from `/proc/self/status`.
 
 ### Parents
 
 - `defaults_at_the_documented_minimum` (ignored): `run_limited(Profile::Defaults, MIN_MEMORY_DEFAULTS)` is `Ok`.
 - `small_profile_at_its_minimum` (ignored): `run_limited(Profile::Small, MIN_MEMORY_SMALL)` is `Ok`.
-- `minimum_memory` (ignored, run by its own recipe). The profile comes from `LLMOBS_MEMORY_PROFILE` (default `defaults`). It runs `run_limited` at decreasing limits until the first `Killed`:
+- `minimum_memory` (ignored, run by its own recipe). The profile comes from `CETRA_MEMORY_PROFILE` (default `defaults`). It runs `run_limited` at decreasing limits until the first `Killed`:
   - `defaults`: 12, 10, 8, 7, 6, 5, 4 and 3 GiB;
   - `small`: 2 GiB, 1.5 GiB, 1 GiB, 768 MiB and 512 MiB.
 
@@ -768,7 +768,7 @@ resources-memory:
 
 # The smallest memory limit a profile survives (defaults or small). Takes tens of minutes.
 resources-memory-min profile="defaults":
-    LLMOBS_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
+    CETRA_MEMORY_PROFILE={{profile}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::resources::memory::minimum_memory
 ```
 
 ### Commands
@@ -826,15 +826,15 @@ enum ChildMode {
     /// Lower the limit first, then only open the storage.
     Open,
 }
-/// Re-executes `child_run` with `LLMOBS_FD_CHILD_MODE` (`load` | `open`),
-/// `LLMOBS_FD_CHILD_LIMIT` (0: keep the current limit) and
-/// `LLMOBS_FD_CHILD_SECONDS`, and returns its `LLMOBS_FD` line.
+/// Re-executes `child_run` with `CETRA_FD_CHILD_MODE` (`load` | `open`),
+/// `CETRA_FD_CHILD_LIMIT` (0: keep the current limit) and
+/// `CETRA_FD_CHILD_SECONDS`, and returns its `CETRA_FD` line.
 fn run_child(mode: ChildMode, limit: u64, seconds: u64) -> String;
 ```
 
 `run_child` works as `crash_tests.rs::run_child`, without a namespace: `Command::new(current_exe()) --exact model_tests::resources::descriptors::child_run --ignored --nocapture --test-threads=1`, stdout piped, a 300 s timeout, and it asserts `status.success()`.
 
-**The data directory** is under `current_exe().ancestors().nth(3)` (`target/`) `/llmobs-resources/`, as in R5.6 (`HarnessOptions::root` set explicitly, never the system temp dir), removed by the parent afterwards.
+**The data directory** is under `current_exe().ancestors().nth(3)` (`target/`) `/cetra-resources/`, as in R5.6 (`HarnessOptions::root` set explicitly, never the system temp dir), removed by the parent afterwards.
 
 **The config**, `model_config` with:
 - `flush.max_bytes` 1 MiB, `flush.max_age` 1 s (background flushes);
@@ -842,14 +842,14 @@ fn run_child(mode: ChildMode, limit: u64, seconds: u64) -> String;
 - `wal.segment_bytes` 1 MiB (frequent rotations);
 - `query.target_partitions` 8, `query.max_memory` 16 MiB, `query.initial_memory` 8 MiB (queries spill). `validate` requires `initial_memory ≤ max_memory` (`config.rs`), and the default `initial_memory` is 64 MiB.
 
-**The child in `Open` mode** (`child_run`, ignored, returns at once without `LLMOBS_FD_CHILD_MODE`):
+**The child in `Open` mode** (`child_run`, ignored, returns at once without `CETRA_FD_CHILD_MODE`):
 1. Build the tokio runtime first (a multi-thread runtime opens its own descriptors: epoll, an eventfd), with the data directory already created at the normal limit.
 2. Then `set_soft_nofile(limit)`.
 3. Then `runtime.block_on(Storage::open(config))`. `Ok`: shut it down cleanly. `Err`, by `OpenError` variant (`error.rs`):
    - **accepted** as a clean refusal: `Io`, `Objects`, `Catalog`, `WalReplay`, `Anchor`;
    - **panic** on `Config` (the test's config is wrong, and every run would pass vacuously), `Locked`, `Runtime`, and `WalCorrupt`: running out of descriptors must never be reported as corruption.
    - If a `WalReplay` error turns out to wrap `EMFILE` as corruption (a `WalError::Corrupt`, or a message that calls the segment corrupt), record that as a finding for R5.8 with the error's `Debug`; the case still passes.
-4. Print `LLMOBS_FD mode=open limit=<n> open=<ok|failed> kind=<variant>`.
+4. Print `CETRA_FD mode=open limit=<n> open=<ok|failed> kind=<variant>`.
 
 **The child in `Load` mode:**
 1. `let original = getrlimit(Resource::Nofile).current`. Build the harness at the normal limit: `Harness::with_options` (root as above, `workers` 4) with the config. Opening must succeed here; a `Config` error panics with "the descriptor test's config is invalid".
@@ -865,7 +865,7 @@ fn run_child(mode: ChildMode, limit: u64, seconds: u64) -> String;
 5. Restore the limit: `set_soft_nofile(original)`. Wait 3 s.
 6. If `health().spans_wal_failed`, record `wal_failed=true`; then `crash_then_try_open()` must be `Ok`. Otherwise one more A append through `apply` must be `Ok`.
 7. `h.restart()`, `check_full(h, model, 500)`. `h.block_on(h.storage().verify_pass()).quarantined == 0`: no file was quarantined by a descriptor error. `settle_and_check`.
-8. Print `LLMOBS_FD mode=load limit=<n> baseline=<b> peak=<p> appends_ok=… wal_failed=<bool> queries_ok=… query_errors=<kind:count,…> compaction_failed=…`.
+8. Print `CETRA_FD mode=load limit=<n> baseline=<b> peak=<p> appends_ok=… wal_failed=<bool> queries_ok=… query_errors=<kind:count,…> compaction_failed=…`.
 
 ### Parents
 
@@ -903,7 +903,7 @@ Commit per bug: `storage: <fix in imperative> (R5.8)`. A final docs commit: `doc
 
 ### Runs
 
-1. `just resources` three times, plus once with `LLMOBS_TEST_SMALL_FS` on an ext4 loop device if `sudo` is available (R5.1's commands). If it is not, say so; the user can run it.
+1. `just resources` three times, plus once with `CETRA_TEST_SMALL_FS` on an ext4 loop device if `sudo` is available (R5.1's commands). If it is not, say so; the user can run it.
 2. `just resources-memory`, and `just resources-memory-min` for both profiles once more at the final commit.
 3. `a_low_limit_gives_errors_not_panics` at `[1024, 512]` as well, for the record (a temporary local change of the list, not committed).
 
@@ -978,7 +978,7 @@ In § Configuration, after the paragraph below the keys table that starts "The s
   - a "Sizing" section or page with the memory minimum, the small profile, `min_free_bytes` and the descriptor limit;
   - in `install.md`'s systemd unit, `LimitNOFILE=` at the recommended value, and an optional `MemoryMax=` (now honoured by the query pool);
   - Helm `values.yaml` resource requests and limits at the documented minimum.
-- **The server/CLI (decided, Q2):** `llmobs serve` raises its soft `RLIMIT_NOFILE` to the hard limit at start, as Go programs do, and logs both values. This is the coordinator's to assign (it is not R code). Spec 03 § Resource needs states the storage's needs either way.
+- **The server/CLI (decided, Q2):** `cetra serve` raises its soft `RLIMIT_NOFILE` to the hard limit at start, as Go programs do, and logs both values. This is the coordinator's to assign (it is not R code). Spec 03 § Resource needs states the storage's needs either way.
 - **The server's OpenAPI text** for `query_too_large` ("needed more memory than allowed"): add "or temporary disk space".
 - **The coordinator: the proposed WAL-rotation decision**, if R5.3 D9 or R5.7 showed a `WalFailed` from a failed rotation.
 

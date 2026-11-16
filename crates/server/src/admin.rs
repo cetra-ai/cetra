@@ -1,17 +1,17 @@
 //! Local admin operations on an existing `meta.db` (spec 09 § CLI).
 //!
 //! These open the database without migrating and without the data-dir lock, so
-//! they work while `llmobs serve` is running (D136). `rotate_encryption_key`,
+//! they work while `cetra serve` is running (D136). `rotate_encryption_key`,
 //! `gc_orphans` and `migrate` are the exceptions: they take the lock (through
 //! `Maintenance::open` for the last two) and need the server stopped (D-I-3, N M2 D-N-21).
 
 use std::path::Path;
 use std::time::Duration;
 
-use llmobs_core::ids::OrgId;
-use llmobs_storage::Maintenance;
-use llmobs_storage::config::ObjectStoreUrl;
-use llmobs_storage::error::{OpenError, OrphanError, StorageError};
+use cetra_core::ids::OrgId;
+use cetra_storage::Maintenance;
+use cetra_storage::config::ObjectStoreUrl;
+use cetra_storage::error::{OpenError, OrphanError, StorageError};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -62,7 +62,7 @@ pub struct UserSummary {
     pub created_at: i64,
 }
 
-/// One org's resolved entitlements, for `llmobs admin entitlements show` (D-P-32).
+/// One org's resolved entitlements, for `cetra admin entitlements show` (D-P-32).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntitlementsReport {
     /// `orgs.id`.
@@ -86,7 +86,7 @@ pub struct EntitlementsReport {
 #[derive(Debug, thiserror::Error)]
 pub enum AdminError {
     /// `meta.db` does not exist yet.
-    #[error("run `llmobs serve` once to create the database")]
+    #[error("run `cetra serve` once to create the database")]
     NotInitialized,
     /// The file's schema is not this binary's.
     #[error("this binary expects schema {expected}, found {found}")]
@@ -160,7 +160,7 @@ pub enum AdminError {
     /// The `--from` database is at an older schema version. A newer one is read as it is
     /// (D-M-9).
     #[error(
-        "the --from meta.db has schema {found}, older than this binary's {expected}; run `llmobs admin migrate` on a copy of it first"
+        "the --from meta.db has schema {found}, older than this binary's {expected}; run `cetra admin migrate` on a copy of it first"
     )]
     SourceSchema {
         /// Migration version embedded in this binary.
@@ -380,7 +380,7 @@ pub struct ReapplyReport {
 /// reapplies from the kept, already migrated directory). An older source is refused.
 ///
 /// Each copied row keeps its id, scope and cut-off and is opened again: the running
-/// (or next) `llmobs serve` registers or drops it through its worker. Each row is one
+/// (or next) `cetra serve` registers or drops it through its worker. Each row is one
 /// transaction, so an interrupted run leaves whole rows, and a second run copies nothing
 /// new. `from` is opened read-write (WAL), so copy a read-only backup somewhere writable
 /// first. Pointing `from` at the current data directory copies nothing.
@@ -578,7 +578,7 @@ pub struct Rotated {
 
 /// Re-encrypts every sealed column under a new key (D-I-3). The server must be stopped.
 /// `new_key` is base64 text (from stdin); `None` generates a key, unless the current
-/// key comes from `LLMOBS_ENCRYPTION_KEY`: then the new key must be given, because
+/// key comes from `CETRA_ENCRYPTION_KEY`: then the new key must be given, because
 /// a generated one would exist only in memory after the commit.
 ///
 /// # Errors
@@ -668,7 +668,7 @@ async fn rotate_locked(
             // A generated key would exist only in memory after the commit,
             // and the next start would still use the env value.
             return Err(AdminError::Crypto(
-                "the key comes from LLMOBS_ENCRYPTION_KEY: pass the new key with --new-from-stdin"
+                "the key comes from CETRA_ENCRYPTION_KEY: pass the new key with --new-from-stdin"
                     .into(),
             ));
         }
@@ -852,11 +852,11 @@ mod tests {
     use crate::meta::users::{set_disabled, user_by_email};
     use crate::test_support::{TestApp, dataset_span, org_token};
     use axum::http::{Method, StatusCode};
-    use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use serde_json::json;
     use std::time::Duration;
 
-    const PASSWORD: &str = "llmobs-ok1";
+    const PASSWORD: &str = "cetra-ok-1";
 
     /// The org every seeded connection belongs to.
     const ORG: &str = "01900000-0000-7000-8000-00000000000a";
@@ -941,7 +941,7 @@ mod tests {
         let error = list_users(&config).await.unwrap_err();
         assert_eq!(
             error.to_string(),
-            "run `llmobs serve` once to create the database"
+            "run `cetra serve` once to create the database"
         );
         let rejected = create_user(
             &config,
@@ -1464,7 +1464,7 @@ mod tests {
         assert!(matches!(error, AdminError::Crypto(_)), "{error}");
         assert_eq!(
             error.to_string(),
-            "the key comes from LLMOBS_ENCRYPTION_KEY: pass the new key with --new-from-stdin"
+            "the key comes from CETRA_ENCRYPTION_KEY: pass the new key with --new-from-stdin"
         );
         assert!(!crypto::key_path(dir.path()).exists());
         assert!(!dir.path().join("secret.key.new").exists());

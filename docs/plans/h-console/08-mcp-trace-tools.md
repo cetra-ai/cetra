@@ -33,8 +33,8 @@ No dependency, OpenAPI, fixture or spec change.
 ```rust
 //! MCP tools over traces and spans (D-H-9, D-H-10, D-H-11).
 
-use llmobs_core::ids::ProjectId;
-use llmobs_storage as storage;
+use cetra_core::ids::ProjectId;
+use cetra_storage as storage;
 use rmcp::model::JsonObject;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -335,7 +335,7 @@ Append after `list_saved_views`, in this order:
                     "filter": {"type": "string", "description": "Filter DSL: a SQL boolean expression over the traces view."},
                     "search": {"type": "string", "description": "Full-text search in span input, output, name and system instructions."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most traces to return."},
-                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'llmobs-eval')."},
+                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'cetra-eval')."},
                     "include_experiments": {"type": "boolean", "description": "Include experiment traces."},
                     "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later traces are left out beyond it."}
                 },
@@ -387,7 +387,7 @@ In `tools_list_has_every_tool_read_only` and in `stateless_2026_07_28_requests` 
 
 ## Tests
 
-In `mcp/traces.rs`, `#[cfg(test)] mod tests`. Imports: `std::str::FromStr`; `serde_json::{Map, Value, json}`; `crate::mcp::test_helpers::*`; `crate::mcp::output::{char_len, render}`; `super::*`; `crate::api::saved_views::SavedViewKind`; `crate::auth::roles::{OrgRole, ProjectOverride}`; `crate::meta::members::set_project_override`; `crate::meta::saved_views::{self, NewSavedView}`; `llmobs_core::ids::{SpanId, TraceId}`; `crate::test_support::{TestApp, dataset_span}`. Drop any import the compiler reports unused.
+In `mcp/traces.rs`, `#[cfg(test)] mod tests`. Imports: `std::str::FromStr`; `serde_json::{Map, Value, json}`; `crate::mcp::test_helpers::*`; `crate::mcp::output::{char_len, render}`; `super::*`; `crate::api::saved_views::SavedViewKind`; `crate::auth::roles::{OrgRole, ProjectOverride}`; `crate::meta::members::set_project_override`; `crate::meta::saved_views::{self, NewSavedView}`; `cetra_core::ids::{SpanId, TraceId}`; `crate::test_support::{TestApp, dataset_span}`. Drop any import the compiler reports unused.
 
 `#[tokio::test(flavor = "multi_thread")]` except the log test (`#[tokio::test]`). Every test starts with `let (app, seeded, tok) = app_with_token().await; app.load_example_dataset(seeded.project.id).await;`. `P` is `seeded.project.id.to_string()`; `T1` … `T6` stand for `a1000000000000000000000000000001` … `…006` (write them out). Tool arguments are passed to `call` as `&json!(…)` (H6's helpers take `&Value`). "Error `c` / `m`" means `is_error` is true, `body["error"]["code"]` = `c` and `body["error"]["message"]` = `m`. Fixtures are loaded with `serde_json::from_str::<Value>(include_str!("../../../../fixtures/api/responses/…")).unwrap()`.
 
@@ -480,7 +480,7 @@ async fn insert(app: &TestApp, project_id: ProjectId, owner: Uuid, kind: SavedVi
 ## Commands
 
 ```bash
-cargo test -p llmobs-server mcp
+cargo test -p cetra-server mcp
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH" && just check
 ```
 

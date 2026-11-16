@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Start an OAuth or OIDC login
-         * @description Redirects to the provider and sets the `llmobs_oauth` cookie. `redirect` is kept when it starts with `/`, does not start with `//` or `/\`, is at most 1024 bytes, and contains no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is 404. When metadata cannot be loaded, the response redirects to `/login?error=provider_unavailable` and sets no cookie.
+         * @description Redirects to the provider and sets the `cetra_oauth` cookie. `redirect` is kept when it starts with `/`, does not start with `//` or `/\`, is at most 1024 bytes, and contains no ASCII control character. Otherwise the browser returns to `/`. An unknown provider is 404. When metadata cannot be loaded, the response redirects to `/login?error=provider_unavailable` and sets no cookie.
          */
         get: operations["get_oauth_authorize"];
         put?: never;
@@ -1057,7 +1057,7 @@ export interface paths {
         put?: never;
         /**
          * Verify an email domain with its DNS TXT record
-         * @description Looks up `_llmobs-verify.<domain>` and verifies the domain when its value `llmobs-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
+         * @description Looks up `_cetra-verify.<domain>` and verifies the domain when its value `cetra-verify=<token>` is there (D-P-54, D-P-64). An already verified domain answers 200 without a lookup. A domain another org holds moves to this org only when the holder's record is gone from the answer. At most 10 lookups per minute per org. A failed lookup answers 503. Needs the Teams add-on or an enterprise licence (D-P-61). Owners only, session only.
          */
         post: operations["post_org_sso_domain_verify"];
         delete?: never;
@@ -1643,7 +1643,7 @@ export interface paths {
         put?: never;
         /**
          * Run an evaluator once
-         * @description Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `llmobs-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.
+         * @description Project members and above. API keys cannot call it. Runs synchronously, writes the judge trace (environment `cetra-eval`) and the judge usage, and writes no score. Shares the 10 per minute per user limit with connection tests.
          */
         post: operations["post_evaluator_test"];
         delete?: never;
@@ -1892,7 +1892,7 @@ export interface paths {
         };
         /**
          * Get metrics
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Series have one point per bucket. Latencies and TTFT are nanoseconds. Costs are USD. Results are cached for 10 seconds. The evaluation cost series always counts evaluation traces (spec 05 § Dashboard metrics).
          */
         get: operations["get_metrics"];
         put?: never;
@@ -2274,7 +2274,7 @@ export interface paths {
         };
         /**
          * List sessions
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_sessions"];
         put?: never;
@@ -2294,7 +2294,7 @@ export interface paths {
         };
         /**
          * Get a session
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.
          */
         get: operations["get_session"];
         put?: never;
@@ -2314,7 +2314,7 @@ export interface paths {
         };
         /**
          * List spans
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_spans"];
         put?: never;
@@ -2354,7 +2354,7 @@ export interface paths {
         };
         /**
          * List traces
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.
          */
         get: operations["list_traces"];
         put?: never;
@@ -2374,7 +2374,7 @@ export interface paths {
         };
         /**
          * Stream traces
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.
          */
         get: operations["stream_traces"];
         put?: never;
@@ -2451,7 +2451,7 @@ export interface paths {
         };
         /**
          * List users
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.
          */
         get: operations["list_users"];
         put?: never;
@@ -2471,7 +2471,7 @@ export interface paths {
         };
         /**
          * Get a user
-         * @description Evaluation traces (`environment = llmobs-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
+         * @description Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.
          */
         get: operations["get_user"];
         put?: never;
@@ -2675,7 +2675,7 @@ export interface components {
             channel_name: string;
             /**
              * Format: uuid
-             * @description Delivery id; the webhook's `X-Llmobs-Delivery`.
+             * @description Delivery id; the webhook's `X-Cetra-Delivery`.
              */
             id: string;
             /** @description The last attempt's error. */
@@ -2898,7 +2898,7 @@ export interface components {
             /** @description Where "New organization" goes when users may not create orgs. Omitted when unset. */
             org_create_url?: string;
             /**
-             * @description Password login is enabled for everyone. False when `LLMOBS_AUTH_DISABLE_PASSWORD` is
+             * @description Password login is enabled for everyone. False when `CETRA_AUTH_DISABLE_PASSWORD` is
              *     set; instance admins then still sign in with a password at `/login?password=1` (D-S-4).
              */
             password_enabled: boolean;
@@ -3186,7 +3186,7 @@ export interface components {
          *     Spec 01 `conventions` and spec 02 § Convention detection.
          * @enum {string}
          */
-        Convention: "llmobs" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
+        Convention: "cetra" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
         /**
          * @description Where a span's cost came from.
          *
@@ -4067,7 +4067,7 @@ export interface components {
         EvaluatorTestResult: {
             /** @description The failure. Omitted when `ok` is true. */
             error?: components["schemas"]["EvaluatorTestError"];
-            /** @description The judge trace the run wrote (environment `llmobs-eval`). Omitted when no judge trace was written. */
+            /** @description The judge trace the run wrote (environment `cetra-eval`). Omitted when no judge trace was written. */
             judge_trace_id?: components["schemas"]["TraceId"];
             /**
              * Format: int64
@@ -5468,9 +5468,9 @@ export interface components {
             last_checked_at?: string;
             /** @description Pending or verified. */
             status: components["schemas"]["DomainStatus"];
-            /** @description TXT record name, `_llmobs-verify.<domain>`. */
+            /** @description TXT record name, `_cetra-verify.<domain>`. */
             txt_name: string;
-            /** @description TXT record value, `llmobs-verify=<token>`. */
+            /** @description TXT record value, `cetra-verify=<token>`. */
             txt_value: string;
             /**
              * Format: date-time
@@ -5515,7 +5515,7 @@ export interface components {
             from: string;
             to: string;
         };
-        /** @description The score an evaluator writes. The JSON of `llmobs_eval::OutputScore`. */
+        /** @description The score an evaluator writes. The JSON of `cetra_eval::OutputScore`. */
         OutputScoreBody: {
             /** @description Category labels of a categorical score. Omitted otherwise. */
             categories?: string[];
@@ -6407,7 +6407,7 @@ export interface components {
         /**
          * @description Who may register after the first user exists.
          *
-         *     Spec 08 `LLMOBS_AUTH_SIGNUP`.
+         *     Spec 08 `CETRA_AUTH_SIGNUP`.
          * @enum {string}
          */
         SignupPolicy: "open" | "invite_only" | "disabled";

@@ -1052,9 +1052,9 @@ pub(super) fn concurrent_remote_tweaks(config: &mut StorageConfig) {
 /// The step hold of the proptest cases (`ConcurrentOptions::step_hold`).
 const PROPTEST_STEP_HOLD: Duration = Duration::from_millis(1);
 
-/// Cases of the concurrent proptest: `LLMOBS_CONCURRENT_CASES`, else 4 (the budget of § R6.5).
+/// Cases of the concurrent proptest: `CETRA_CONCURRENT_CASES`, else 4 (the budget of § R6.5).
 fn concurrent_cases() -> u32 {
-    std::env::var("LLMOBS_CONCURRENT_CASES")
+    std::env::var("CETRA_CONCURRENT_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(4)

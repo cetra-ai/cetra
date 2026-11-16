@@ -2,13 +2,13 @@
 //!
 //! [`Usage::add`] sums accepted spans, request bytes and appended scores per org, project
 //! and UTC day. [`Usage::flush`] upserts the sums into `usage_daily` and clears them.
-//! `llmobs serve` flushes every 10 s and once at shutdown.
+//! `cetra serve` flushes every 10 s and once at shutdown.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use cetra_core::ids::{OrgId, ProjectId};
 use chrono::{DateTime, Datelike, Months, NaiveDate};
-use llmobs_core::ids::{OrgId, ProjectId};
 use sqlx::SqlitePool;
 
 use crate::meta::MetaDb;

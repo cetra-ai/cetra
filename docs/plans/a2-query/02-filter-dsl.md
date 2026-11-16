@@ -238,7 +238,7 @@ These identifiers are internal. A user typing `__score_0_num` still fails as an 
    - Add `row_number() OVER (PARTITION BY <keys> ORDER BY updated_at DESC, score_id DESC) AS __rn`, filter `__rn = 1`.
    - Select the keys renamed `__score_<i>_<key>`, plus `value_num AS __score_<i>_num`, `value_str AS __score_<i>_str`, `lit(true) AS __score_<i>_present`.
 
-   The target string comes from `llmobs_core::enums::ScoreTargetKind` (its serialized name), not a literal in this module.
+   The target string comes from `cetra_core::enums::ScoreTargetKind` (its serialized name), not a literal in this module.
 
    | View | Keys |
    |---|---|
@@ -295,7 +295,7 @@ The `pub(crate)` functions in `scope.rs` build `Expr`s over view columns:
   - unless `include_eval || filter_references_environment`: `environment IS DISTINCT FROM '<names::environment::EVAL>'`;
   - unless `include_experiments`: `metadata['<names::metadata_key::EXPERIMENT_ID>'] IS NULL`.
 
-  Build the map access by planning the fixed text through `create_logical_expr` against the view schema (trusted text, with the names from `llmobs_core::names`). It returns `None` when both are off. It is valid on `traces` and `spans`.
+  Build the map access by planning the fixed text through `create_logical_expr` against the view schema (trusted text, with the names from `cetra_core::names`). It returns `None` when both are off. It is valid on `traces` and `spans`.
 - `search(view, query: &str, window: Option<TimeWindow>, ctx) -> Result<Option<Expr>, RunError>`:
   - Trim the query; an empty one returns `Ok(None)`.
   - Escape `\` → `\\`, `%` → `\%`, `_` → `\_`, and make the pattern `%<escaped>%`.
@@ -308,7 +308,7 @@ The `pub(crate)` functions in `scope.rs` build `Expr`s over view columns:
 
 ### Tests
 
-1. `exclusions(false, false, false)` on `traces` drops trace 5 (environment `llmobs-eval`, fixture README) and any trace with the experiment metadata key. The visible set equals `fixtures/api/responses/traces.json`'s IDs.
+1. `exclusions(false, false, false)` on `traces` drops trace 5 (environment `cetra-eval`, fixture README) and any trace with the experiment metadata key. The visible set equals `fixtures/api/responses/traces.json`'s IDs.
 2. `include_eval` brings trace 5 back. `filter_references_environment` does too, while the experiment exclusion stays.
 3. `time_window` with `[10:05, 10:20)` on 2026-01-01 returns exactly the traces starting in it (the boundary trace at 10:20 is excluded).
 4. Search on `spans`:

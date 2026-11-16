@@ -208,5 +208,5 @@ Unlike T1, this test is not guaranteed to fail on today's code, because DataFusi
 
 ## Done when
 
-- `cargo test -p llmobs-storage --lib` passes.
+- `cargo test -p cetra-storage --lib` passes.
 - `just check` passes.

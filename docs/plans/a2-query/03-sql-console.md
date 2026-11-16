@@ -2,7 +2,7 @@
 
 Read [README.md](README.md) first: decisions D91–D101, boundaries, verified DataFusion facts, crate layout, public API.
 
-The SQL console is `POST /api/v1/projects/{p}/sql`. The MCP tool `query_sql` and `llmobs query` call the same functions. A2 provides the sandbox, execution and encoding; the server does HTTP.
+The SQL console is `POST /api/v1/projects/{p}/sql`. The MCP tool `query_sql` and `cetra query` call the same functions. A2 provides the sandbox, execution and encoding; the server does HTTP.
 
 ---
 
@@ -135,7 +135,7 @@ The exact sqlparser 0.62 field names you matched for `Explain` and `TableFactor`
   | `Int` | integer that fits `i64` (no fraction) |
   | `Float` | any number, converted to `f64` |
   | `Bool` | boolean |
-  | `Timestamp` | string through `llmobs_core::time_serde::parse_rfc3339`, or integer epoch milliseconds × 1,000,000 with `checked_mul` |
+  | `Timestamp` | string through `cetra_core::time_serde::parse_rfc3339`, or integer epoch milliseconds × 1,000,000 with `checked_mul` |
 
   Anything else: `InvalidRequest("parameter <name> must be <a string|an integer|…>")`. The message never quotes the value.
 

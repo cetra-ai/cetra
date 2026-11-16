@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use llmobs_core::enums::{Convention, PayloadFormat, SpanKind, SpanStatus};
-use llmobs_core::ids::{ProjectId, SpanId, TraceId};
-use llmobs_core::span::Span;
+use cetra_core::enums::{Convention, PayloadFormat, SpanKind, SpanStatus};
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::span::Span;
 use serde_json::{Value, json};
 
 use super::corpus::{Corpus, cut};

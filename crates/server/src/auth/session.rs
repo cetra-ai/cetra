@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum_extra::extract::cookie::Cookie;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 use super::secret::{hash_token, is_opaque_token, new_opaque_token};
 use crate::http::AppState;
@@ -17,8 +17,8 @@ use crate::meta::web_sessions::{
     NewSession, SessionRow, insert_session, session_user, touch_session,
 };
 
-/// `llmobs_session`. Built from [`llmobs_core::llmobs_name`], the same constant as the key prefixes.
-pub(crate) const SESSION_COOKIE: &str = llmobs_core::llmobs_name!("_session");
+/// `cetra_session`. Built from [`cetra_core::cetra_name`], the same constant as the key prefixes.
+pub(crate) const SESSION_COOKIE: &str = cetra_core::cetra_name!("_session");
 
 /// How long a session stays valid after it was last seen.
 pub(crate) const LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -152,7 +152,7 @@ fn refused_under_enforcement(state: &AppState, row: &SessionRow) -> bool {
     row.sso_org_id != route_org
 }
 
-/// The first `llmobs_session` cookie in `headers` that resolves.
+/// The first `cetra_session` cookie in `headers` that resolves.
 ///
 /// A request can repeat the name. Values that are not opaque tokens are skipped
 /// without a query. The first one that finds a session wins.
@@ -252,7 +252,7 @@ mod tests {
     async fn a_session_records_its_org_provider() {
         let app = TestApp::new().await;
         let user_id = user(&app).await;
-        let org = llmobs_core::ids::OrgId::new_v7();
+        let org = cetra_core::ids::OrgId::new_v7();
         let now = app.state.clock.now_ns();
         app.state
             .meta
@@ -343,7 +343,7 @@ mod tests {
         assert_eq!(stored_agent.chars().count(), 256);
 
         let https = TestApp::with_config(|config| {
-            config.public_url = serde_json::from_str("\"https://llmobs.example\"").unwrap();
+            config.public_url = serde_json::from_str("\"https://cetra.example\"").unwrap();
         })
         .await;
         let secure = start_session(

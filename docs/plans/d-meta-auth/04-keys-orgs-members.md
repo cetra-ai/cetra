@@ -1,6 +1,6 @@
 # Part 4 · Orgs, projects, members, API keys and PATs (P14–P18)
 
-At the end of this part the tenancy API is complete, API keys and personal access tokens authenticate requests, `llmobs login`/`logout` work, and a generated suite checks every route against every kind of principal.
+At the end of this part the tenancy API is complete, API keys and personal access tokens authenticate requests, `cetra login`/`logout` work, and a generated suite checks every route against every kind of principal.
 
 **List responses** in this part follow spec 09: `?limit` (1–1000, default 50), opaque `?cursor`, `{data, next_cursor}`. Reuse the existing `PageParams` and page types in `api::common`. The cursor encodes the last sort key (base64url of a small JSON); a cursor that does not decode is 400.
 
@@ -165,7 +165,7 @@ Standard.
 
 ## P17 — Personal access tokens and CLI login
 
-**Goal:** `/api/v1/me/tokens`, PAT authentication with the scope rules of D140, and `llmobs login` / `llmobs logout`.
+**Goal:** `/api/v1/me/tokens`, PAT authentication with the scope rules of D140, and `cetra login` / `cetra logout`.
 
 **Edit only:** `crates/server/src/meta/personal_tokens.rs`, `crates/server/src/auth/principal.rs`, `crates/server/src/http/access.rs`, `crates/server/src/routes/tokens.rs` (new), `crates/server/src/routes/mod.rs`, `crates/server/src/api/keys.rs`, `crates/server/src/api/openapi.rs`, `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `fixtures/api/`, `crates/cli/src/{main.rs,login.rs}` (`login.rs` new), `crates/cli/Cargo.toml`, root `Cargo.toml` (`reqwest`, `dirs`, `toml`, as in the README table).
 
@@ -195,15 +195,15 @@ Check that axum 0.8's router lets `/me/tokens/current` and `/me/tokens/{id}` coe
 ### CLI
 
 ```
-llmobs login --url <URL> [--no-browser]
-llmobs logout [--url <URL>]
+cetra login --url <URL> [--no-browser]
+cetra logout [--url <URL>]
 ```
 
 `crates/cli/src/login.rs`:
 - `login`: bind `127.0.0.1:0`; `state = new opaque token` (generate with `rand` + base64url in the CLI; do not reach into server internals); URL `<URL>/cli-auth?port=<p>&state=<s>`; print it; unless `--no-browser`, try `xdg-open` / `open` / `cmd /c start` (ignore failures). Serve exactly one valid request: `GET /callback?token=…&state=…` with a matching state and a token that parses as a PAT; others get 400 and the wait continues; give up after 5 minutes. Answer the browser with a small static HTML page that does not echo the token. Verify the token with `GET <URL>/api/auth/me` (bearer); on success, save it.
-- Credentials: `dirs::config_dir()/llmobs/credentials.toml`, directory 0700, file 0600 (Unix; written via a temp file + rename with the mode set at creation). Format: `[servers."<URL>"]` `token = "…"`. A server URL is normalized (no trailing slash).
+- Credentials: `dirs::config_dir()/cetra/credentials.toml`, directory 0700, file 0600 (Unix; written via a temp file + rename with the mode set at creation). Format: `[servers."<URL>"]` `token = "…"`. A server URL is normalized (no trailing slash).
 - `logout`: with `--url`, or the only saved server; `DELETE <URL>/api/v1/me/tokens/current`; remove the entry even if the call fails (print a warning).
-- The local callback server is a tiny `tokio` TCP loop parsing the request line, or axum (already a dependency of `llmobs-server`; add it to the CLI only if it keeps the code shorter). The CLI never logs the token.
+- The local callback server is a tiny `tokio` TCP loop parsing the request line, or axum (already a dependency of `cetra-server`; add it to the CLI only if it keeps the code shorter). The CLI never logs the token.
 
 ### Tests
 

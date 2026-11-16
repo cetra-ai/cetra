@@ -41,8 +41,8 @@ Nothing creates **rule** jobs yet: the trigger is M4 and backfill is M6. M3 runs
 | D-I-13 | Retryable errors back off `min(5 s · 2^(attempts−1), 10 min) ± 20 %`, at most 6 attempts. Load failures retry 3 times, 30 s apart (`load_retries`). Failed result writes retry 3 times, 5 s apart, then take the retryable path. |
 | D-I-14 | Pause classes: a connection error pauses every enabled rule whose evaluator uses the connection (`'connection'`) and re-queues the job with its attempt given back (`attempts − 1`); a webhook evaluator's rules pause with `'errors'`; a manual job fails. A job whose connection changed since its claim re-queues without pausing anything. The breaker pauses a rule (`'errors'`) when at least 20 of its last 50 evaluated jobs exist and half or more failed. Resume clears a pause; a successful connection test or a key change resumes `'connection'` pauses. |
 | D-I-15 | Budgets on judge rules only, per UTC day or month, kept per day in `rule_spend`. Estimate `ceil(chars/4)` input tokens + `max_output_tokens` at the model price; reservations in memory; over budget pauses the rule (`'budget'`) and skips its queued jobs. A 30 s ticker clears `'budget'` pauses when the period turns. |
-| D-I-16 | Judge trace id per run: SHA-256(`llmobs.judge-trace.v1` ‖ job id ‖ the run's `claims` as `u32` BE)[..16]. |
-| D-I-17 | The executor fails a job whose target trace has an `llmobs-eval` span. |
+| D-I-16 | Judge trace id per run: SHA-256(`cetra.judge-trace.v1` ‖ job id ‖ the run's `claims` as `u32` BE)[..16]. |
+| D-I-17 | The executor fails a job whose target trace has a`cetra-eval` span. |
 | D-I-18 | `Writer::Evaluator { kind, evaluator_id, rule_id }`: source by kind, author = rule or evaluator, `session_id` and `user_id` from the root span, metadata = `judge.*` plus `<prefix>.eval.job_id` and `<prefix>.eval.evaluator_version`. |
 | D-I-19 | Deleting an evaluator that rules use is a 409; a PATCH that would break a rule is a 409 that lists the rules. |
 | D-I-22 | `POST /evaluators/{id}/run` → `202` with the job; origin `Test`; no budget; counts usage. |
@@ -56,7 +56,7 @@ Nothing creates **rule** jobs yet: the trigger is M4 and backfill is M6. M3 runs
 
 ## Versions
 
-No new dependency. `chrono`, `futures`, `sha2` and `tokio` are already dependencies of `llmobs-server`.
+No new dependency. `chrono`, `futures`, `sha2` and `tokio` are already dependencies of `cetra-server`.
 
 ## Conventions for every sub-phase
 
@@ -73,7 +73,7 @@ M1's and M2's conventions apply unchanged (`01-m1-secrets-connections.md` § Con
 - **Dead code across sub-phases.** rustc treats an item with `#[allow(dead_code)]` as used, and so is everything it reaches. When a sub-phase adds an entry point whose caller comes later, it marks that entry point (and any field nothing reads yet) with an item-level `#[allow(dead_code)] // <sub-phase> calls it.` and removes the allows of the items the entry point now reaches. Each sub-phase lists the allows it adds and removes.
 - **After a merge of another branch, Biome reports import-order errors** in the files the merge touched. Run `just fmt`, then check the diff is only import order.
 - **Vitest workers can die with `SIGILL`** when the machine is loaded. That is not a test failure: rerun only the files that crashed (`pnpm --dir web exec vitest run <files>`), then rerun `just check-web`.
-- **The storage test `crash_tests` can time out under load.** Rerun that one test alone (`cargo test -p llmobs-storage crash_tests -- --test-threads=1`); report it if it fails alone.
+- **The storage test `crash_tests` can time out under load.** Rerun that one test alone (`cargo test -p cetra-storage crash_tests -- --test-threads=1`); report it if it fails alone.
 - **Tests that run an evaluator set the manual clock to the real time before seeding** (M2 § Conventions gives the code). This covers every test that reaches `EvalRunner::run`: test runs, `run_job`, `dispatch_once` and manual runs.
 - **Log-capture tests** (`crate::test_support::capture_logs`) use plain `#[tokio::test]`, never `flavor = "multi_thread"`.
 - **Background loops** follow track K's pattern (`crates/server/src/alerts/mod.rs`): a timing struct with `DEFAULT` and `TEST`, `interval` with `MissedTickBehavior::Skip`, and a `*_once(&AppState, now) -> Result<Report, _>` function that tests call directly with the manual clock. Loops log errors and go on.
@@ -167,7 +167,7 @@ If another branch takes the number after you, the one that merges second renumbe
 
 ### Online rule contract
 
-JSON field names are exact. Times are RFC 3339 (`llmobs_core::time_serde`; `crate::api::keys::optional_time` for optional times). Every `Option` field has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`. The enums are `snake_case`, `Copy`, with `as_str` and `from_name -> Option<Self>` like M2's `EvaluatorKind`.
+JSON field names are exact. Times are RFC 3339 (`cetra_core::time_serde`; `crate::api::keys::optional_time` for optional times). Every `Option` field has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`. The enums are `snake_case`, `Copy`, with `as_str` and `from_name -> Option<Self>` like M2's `EvaluatorKind`.
 
 - **`RuleTarget`**: `"trace"` | `"span"`.
 - **`BudgetPeriod`**: `"day"` | `"month"` (added in I3.3, `ToSchema` included; I3.5 registers it).
@@ -227,7 +227,7 @@ Run on create, and on PATCH against the merged result (stored values overlaid by
 |---|---|---|---|
 | 1 | `name` trimmed is 1–128 characters (`chars().count()`) | `name` | `name must be 1 to 128 characters` |
 | 2 | create: `evaluator_id` names an evaluator of this project | `evaluator_id` | `evaluator not found in this project` |
-| 3 | `filter`, when present and not blank, parses for the target's view (`llmobs_storage::validate_filter`) | — | the `invalid_filter` problem (not a field error; checked last, after every other check passed) |
+| 3 | `filter`, when present and not blank, parses for the target's view (`cetra_storage::validate_filter`) | — | the `invalid_filter` problem (not a field error; checked last, after every other check passed) |
 | 4 | `filter` is at most 4 096 bytes | `filter` | `filter must be at most 4096 bytes` |
 | 5 | `variable_mapping` has 1–32 entries | `variable_mapping` | `map 1 to 32 variables` |
 | 6 | `VariableMapping::from_json` accepts it | `variable_mapping` | the `MappingError` display |
@@ -281,7 +281,7 @@ The limits (checks 1, 4, 5, 13, 16 and the 500 rules of a project) are D-I-30's.
 | 4 | `evaluator::load` (opens a webhook's sealed values); a judge's connection row from `connections::get_connection`, its adapter from `Adapter::from_name(&row.adapter)` (it returns `Result<Adapter, UnknownName>`), and its key from `state.connections.get`. When the row's `updated_at` differs from `job.connection_updated_at`, the connection changed since the claim: `Requeue { not_before: now }` and return | `Failed { class: Permanent, error: "evaluator could not be loaded" }`, `"connection not found"`, or `"unknown adapter"` when `from_name` fails |
 | 5 | the mapping: the rule's `variable_mapping`, or the job's for a manual run; `VariableMapping::from_json` | `Failed { Permanent, <MappingError display> }` |
 | 6 | `trace_load::load_trace(state, project, trace_id, span_id, Some(trace_start_ns))` | `Saturated` (no load permit within 30 s) → `Requeue { not_before: now + retry::SATURATED_REQUEUE_NS }`, no load retry spent; `NotFound`/`NoTargetSpan` → load retry, final error `trace not found`; `Busy` → load retry, final error `storage unavailable`; `TooLarge` → `Failed { Permanent, "trace too large" }`; `EvaluationTrace` → `Failed { Permanent, "target is an evaluation trace" }`; `Failed`/`Convert` → `Failed { Permanent, "storage read failed" }`. A load retry is `LoadRetry { not_before: now + 30 s }` while `load_retries < 3`, else `Failed { Permanent, <final error> }` |
-| 7 | `llmobs_eval::resolve(&mapping, Some(&TraceData::new(&spans, span_id)), None)` | `Failed { Permanent, <MappingError display> }` |
+| 7 | `cetra_eval::resolve(&mapping, Some(&TraceData::new(&spans, span_id)), None)` | `Failed { Permanent, <MappingError display> }` |
 | 8 | the live score definition of `output.name` (`state.definitions.live`), checked with `fits_definition` | `Failed { Permanent, "score definition mismatch" }` |
 | 9 | a levenshtein check with `output` or `expected` over 64 KiB | `Failed { Permanent, "levenshtein inputs must be at most 64 KiB each" }` |
 | 10 | first, for a judge or a webhook evaluator (not a check): `entitlements::units::check_cap(state, project.org_id)`; at the cap → `Skipped { error: "quota" }`, no call (D-I-35). Then, for a rule or backfill job, judge evaluator, rule with a budget: render the prompt, `budget::model_price`, estimate, reserve (§ I3.6). The reservation is a guard (`budget::Reservation`, § I3.3) | no price → `Failed { Permanent, "model has no price" }` and pause the rule (`errors`, detail `model has no price`); over budget → `Skipped { error: "budget" }`, pause the rule (`budget`), skip the rule's other queued jobs |
@@ -345,7 +345,7 @@ pub(crate) async fn strict_exclusions(
 ```
 Add `strict_exclusions` to the `pub(crate) use scope::{exclusions, search, time_window};` line of `filter/mod.rs`, so `reads/traces.rs` can import it from `crate::filter`.
 - `Traces`: the conjunction that `exclusions(ctx, FilterView::Traces, false, false, false)` returns (both clauses). It always returns `Some` for those arguments; map `None` to `RunError::Internal(DataFusionError::Internal("…".into()))` rather than unwrapping.
-- `Spans`: `trace_id NOT IN (SELECT trace_id FROM traces WHERE [trace_id IN (<ids>) AND] <bad>)`, where `<bad>` is `environment = 'llmobs-eval' OR metadata['<experiment key>'] IS NOT NULL` on the `traces` view. Build `<bad>` as `NOT (<traces conjunction above>)`, the subquery with `ctx.session().table("traces")` → `.filter(bad)` (and, when `trace_ids` is `Some`, a first `.filter(col(traces::TRACE_ID).in_list(<lowercased ids as lit>, false))`, so DataFusion pushes the id test below the view's aggregation instead of aggregating every trace) → `.select(vec![col(traces::TRACE_ID)])`, and the expression with `datafusion::logical_expr::not_in_subquery(col(spans::TRACE_ID), Arc::new(plan.into_unoptimized_plan()))` (the `search` function above builds an `in_subquery` the same way).
+- `Spans`: `trace_id NOT IN (SELECT trace_id FROM traces WHERE [trace_id IN (<ids>) AND] <bad>)`, where `<bad>` is `environment = 'cetra-eval' OR metadata['<experiment key>'] IS NOT NULL` on the `traces` view. Build `<bad>` as `NOT (<traces conjunction above>)`, the subquery with `ctx.session().table("traces")` → `.filter(bad)` (and, when `trace_ids` is `Some`, a first `.filter(col(traces::TRACE_ID).in_list(<lowercased ids as lit>, false))`, so DataFusion pushes the id test below the view's aggregation instead of aggregating every trace) → `.select(vec![col(traces::TRACE_ID)])`, and the expression with `datafusion::logical_expr::not_in_subquery(col(spans::TRACE_ID), Arc::new(plan.into_unoptimized_plan()))` (the `search` function above builds an `in_subquery` the same way).
 - Any other view: `RunError::InvalidRequest("strict exclusions apply to traces and spans".to_owned())`.
 
 `filter/scope.rs` starts with `#![allow(dead_code)]` (line 4). Remove it only if nothing in the module is unused afterwards.
@@ -404,7 +404,7 @@ pub fn validate_filter(ctx: &QueryContext, view: ViewName, text: &str) -> Result
 ```
 `ViewName::Traces` → `FilterView::Traces`, `ViewName::Spans` → `FilterView::Spans`, others → `InvalidRequest("filters are checked for traces and spans only")`. The body is `check_alert_filter`'s, with that view. Its blank test, `present(Some(text))`, is already in `reads/mod.rs` (`pub(crate) fn present`, which `reads/alerts.rs` imports), so `validate_filter` calls it in place and nothing moves.
 
-Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its test to `reads/mod.rs` as `validate_filter_accepts_blank_and_rejects_bad_text` (same cases, `ViewName::Traces`), plus a spans case (`validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'")` is `Ok`, and `ViewName::Sessions` is `InvalidRequest`). The one caller, `routes/alert_rules.rs` `checked_condition`, calls `llmobs_storage::validate_filter(&ctx, ViewName::Traces, text)`.
+Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its test to `reads/mod.rs` as `validate_filter_accepts_blank_and_rejects_bad_text` (same cases, `ViewName::Traces`), plus a spans case (`validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'")` is `Ok`, and `ViewName::Sessions` is `InvalidRequest`). The one caller, `routes/alert_rules.rs` `checked_condition`, calls `cetra_storage::validate_filter(&ctx, ViewName::Traces, text)`.
 
 ### Score filters (`reads/scores.rs`, server)
 
@@ -415,15 +415,15 @@ Delete `check_alert_filter` from `reads/alerts.rs`, its re-exports, and move its
 
 ### Spec
 
-- `docs/spec/05-query.md` § Default exclusions, a new last paragraph: "**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'llmobs-eval' OR metadata['llmobs.experiment_id'] IS NOT NULL)`."
+- `docs/spec/05-query.md` § Default exclusions, a new last paragraph: "**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'cetra-eval' OR metadata['cetra.experiment_id'] IS NOT NULL)`."
 - `docs/spec/09-api.md` § Scores & annotations, the `GET /scores` row: "filter by target, name, source, `evaluator_id`, `rule_id`, time".
 
 ### Tests
 
 `crates/storage` (read the existing `trace_refresh` tests, e.g. `refresh_keeps_the_listed_traces_and_the_default_exclusions`, and copy their setup):
-- `refresh_strict_drops_eval_traces_even_when_the_filter_names_environment`: three traces (normal, `llmobs-eval`, experiment); filter `environment = 'llmobs-eval'` with `include_eval: true` and `strict_exclusions: true` returns nothing; the same with `strict_exclusions: false` returns the eval trace.
+- `refresh_strict_drops_eval_traces_even_when_the_filter_names_environment`: three traces (normal, `cetra-eval`, experiment); filter `environment = 'cetra-eval'` with `include_eval: true` and `strict_exclusions: true` returns nothing; the same with `strict_exclusions: false` returns the eval trace.
 - `trace_list_strict_ignores_the_include_flags`: `include_eval` and `include_experiments` true, strict true → only the normal trace.
-- `span_list_strict_tests_the_trace`: a trace whose root has `environment = 'production'` but whose trace row is an experiment (metadata `llmobs.experiment_id` on the root) — its spans are left out under strict and kept without it.
+- `span_list_strict_tests_the_trace`: a trace whose root has `environment = 'production'` but whose trace row is an experiment (metadata `cetra.experiment_id` on the root) — its spans are left out under strict and kept without it.
 - `span_refresh_caps_each_trace_and_orders_by_start`: trace A with 5 spans, trace B with 2; `per_trace: 3` → A's 3 earliest then B's 2, columns exactly `SPAN_REFRESH_COLUMNS`.
 - `span_refresh_applies_the_filter_and_strict_exclusions`: filter `span_kind = 'llm'` keeps only llm spans; an eval trace's spans are absent.
 - `span_refresh_validates_its_request`: 501 ids, a 31-digit id, `per_trace: 0` and `201` are `InvalidRequest`; a bad filter is `Invalid`; no ids is `Ok(vec![])`.
@@ -521,7 +521,7 @@ CREATE TABLE rule_spend (
 
 `online_rules.evaluator_id` has the default `NO ACTION`: deleting a project cascades to evaluators and rules in one statement; deleting an evaluator that rules use is refused by the route (I3.8). `eval_jobs_project` serves the jobs list (newest first per project); it is not in the design's table list, which this plan's commit updates.
 
-**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the three tables, the five named indexes, and SQLite's automatic indexes (the primary keys of `online_rules` and `eval_jobs`, `rule_spend`'s composite key, `UNIQUE(project_id, name)` and `UNIQUE(dedup_key)`). List them in the report.
+**Existing tests:** only the `meta_schema` snapshot changes (§ The migration number). Regenerate the snapshot with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. Its diff must add only the three tables, the five named indexes, and SQLite's automatic indexes (the primary keys of `online_rules` and `eval_jobs`, `rule_spend`'s composite key, `UNIQUE(project_id, name)` and `UNIQUE(dedup_key)`). List them in the report.
 
 ### `meta/online_rules.rs`
 
@@ -937,7 +937,7 @@ pub(crate) const WRITE_RETRY: Duration = Duration::from_secs(5);
 pub(crate) const SATURATED_REQUEUE_NS: i64 = 5_000_000_000;
 
 /// `min(5 s · 2^(attempts−1), 10 min)` scaled by a factor in `[0.8, 1.2)` taken from
-/// SHA-256(`llmobs.retry.v1` ‖ job id ‖ attempts as u32 BE): deterministic, so a test can pin it.
+/// SHA-256(`cetra.retry.v1` ‖ job id ‖ attempts as u32 BE): deterministic, so a test can pin it.
 pub(crate) fn backoff_ns(job: Uuid, attempts: u32) -> i64;
 ```
 The factor is `0.8 + 0.4 · (first 8 bytes as big-endian u64) / 2^64`. `attempts` 0 is treated as 1. Use saturating arithmetic.
@@ -997,7 +997,7 @@ Items with no production caller before I3.6 get the item-level `#[allow(dead_cod
 
 ### Done when
 
-`just check` passes, and `cargo insta test -p llmobs-eval` reports no snapshot change.
+`just check` passes, and `cargo insta test -p cetra-eval` reports no snapshot change.
 
 ---
 
@@ -1048,7 +1048,7 @@ pub(crate) fn count_judge_usage(state: &AppState, project: &ProjectRow, now: i64
 pub(crate) async fn commit_judge_trace(state: &AppState, project: &ProjectRow, now: i64, trace: Normalized) -> Result<CommitReceipt, IngestError>;
 
 /// The judge trace id of a job's run (D-I-16): the first 16 bytes of
-/// SHA-256(`llmobs.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
+/// SHA-256(`cetra.judge-trace.v1` ‖ job id (16 bytes) ‖ the run's claims as u32 BE).
 pub(crate) fn job_judge_trace_id(job: Uuid, claims: u32) -> TraceId;
 
 /// A check's `output` or `expected` over 64 KiB (the distance is quadratic).
@@ -1064,7 +1064,7 @@ pub(crate) enum ExecuteError {
 - `run_evaluator` is `test_run.rs`'s two `runner.run(RunInput { … })` branches, unchanged, building `RunInput` from `args` (`ingest` from `state.ingest.context(project, now)`, `prices` from `state.ingest.prices()`). The check branch keeps `spawn_blocking` + `Handle::block_on`.
 - `judge_usage` finds the `llm` span (`span.span_kind == SpanKind::Llm`) as `test_run.rs` does. `count_judge_usage` is the `state.usage.add_judge(…)` call moved here.
 - `commit_judge_trace` is the `reserve_exact(0)` + `commit_in_task(…, CommitTarget { request_bytes: 0, … })` pair.
-- `job_judge_trace_id`: `TraceId::from_bytes` refuses all zeros; SHA-256 output is never all zeros in practice, but handle it: on `Err`, flip the last byte to 1 and build again (comment the invariant). Add the constant `const JUDGE_TRACE_TAG: &[u8] = b"llmobs.judge-trace.v1";` as a plain literal, like `DERIVE_TAG` in `scores.rs`, with the comment "A hash input, not an attribute name: the D46 rename must not change judge trace ids."
+- `job_judge_trace_id`: `TraceId::from_bytes` refuses all zeros; SHA-256 output is never all zeros in practice, but handle it: on `Err`, flip the last byte to 1 and build again (comment the invariant). Add the constant `const JUDGE_TRACE_TAG: &[u8] = b"cetra.judge-trace.v1";` as a plain literal, like `DERIVE_TAG` in `scores.rs`, with the comment "A hash input, not an attribute name: the D46 rename must not change judge trace ids."
 - `levenshtein_too_large` is `test_run.rs`'s check, moved; `render` moves with it if `test_run.rs` no longer needs it, else make it `pub(crate)` in `execute.rs` and import it.
 
 `test_run.rs` keeps its body rules, its answer building and its 4xx/503 mapping, and calls these functions. `ExecuteError::Panicked` maps to `ApiError::Internal`. The test-run tests must pass unchanged: that is the proof the move kept the behaviour.
@@ -1256,7 +1256,7 @@ Follow § Job execution step by step; write each step as a small private `async 
   - `score_id: None`; `target`: `ScoreTarget::Span { trace_id, span_id }` when `row.span_id` is set, else `ScoreTarget::Trace { trace_id }`;
   - `session_id` and `user_id`: the root span's (the first span of the loaded trace whose `parent_span_id` is `None`; `LoadedTrace.spans` puts the target first, so search, do not take index 0);
   - `name`: the evaluator's `output.name`; `value`, `reason`: the outcome's; `source: None`;
-  - `metadata`: the outcome's `metadata` (`judge.*`), plus `llmobs.eval.job_id` = the job id, `llmobs.eval.evaluator_version` = the evaluator row's `version`, and `llmobs.eval.truncated = "true"` when the load was truncated. Build the keys with `llmobs_core::llmobs_name!(".eval.job_id")` etc., as constants in `execute.rs`.
+  - `metadata`: the outcome's `metadata` (`judge.*`), plus `cetra.eval.job_id` = the job id, `cetra.eval.evaluator_version` = the evaluator row's `version`, and `cetra.eval.truncated = "true"` when the load was truncated. Build the keys with `cetra_core::cetra_name!(".eval.job_id")` etc., as constants in `execute.rs`.
   - `scores::write(state, &project, Writer::Evaluator { kind, evaluator_id, rule_id }, vec![item])`; the answer's single id is the `score_id`.
 - **Cost (D-I-15, D-I-18).** `actual = usage.cost_usd`, else the estimate when `usage` has tokens, else 0. `count_judge_usage` runs right after the call (step 13), before any write, as test runs do.
 - **The exit after the call.** Steps 12–15 end in one private `struct Ended { finish: Finish, reached_evaluator: bool, pause: Pause, actual: f64 }`, where `Pause` is `None`, `Connection { connection_id, error_text }`, `Evaluator { error_text }` or `MarkConnection { connection_id, error_text }` (a manual judge job). `reached_evaluator` follows § Job execution › The breaker.
@@ -1278,7 +1278,7 @@ Follow § Job execution step by step; write each step as a small private `async 
 
 Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time first, § Conventions; an org, a project, a mock-LLM connection on `MockLlm`, a judge evaluator whose prompt uses `{{ input }}` and `{{ output }}`, a stored target trace via `app.commit_spans` with a root span carrying `session_id` and `user_id`), `rule_job(…)` (inserts a rule and a job with `insert_job`, then `claim`s it and builds `ClaimedJob` with the connection row's current `updated_at`), and `job(app, id)` to read the row back. Use `MockLlm::start(vec![completion(…)])` as M2's test-run tests do, and `MockWebhook` for webhook cases.
 
-- `a_rule_job_writes_the_score_and_the_judge_trace`: `done`, 1 attempt, `judge_trace_id == job_judge_trace_id(id, 1)` (claims 1), `score_id` set; `GET /scores?rule_id=` returns one `llm_judge` score with `evaluator_id`, `rule_id`, the root's `session_id` and `user_id`, metadata `judge.trace_id` and `llmobs.eval.job_id`; `GET /traces/{judge trace}` finds the judge trace in `llmobs-eval`.
+- `a_rule_job_writes_the_score_and_the_judge_trace`: `done`, 1 attempt, `judge_trace_id == job_judge_trace_id(id, 1)` (claims 1), `score_id` set; `GET /scores?rule_id=` returns one `llm_judge` score with `evaluator_id`, `rule_id`, the root's `session_id` and `user_id`, metadata `judge.trace_id` and `cetra.eval.job_id`; `GET /traces/{judge trace}` finds the judge trace in `cetra-eval`.
 - `a_manual_job_has_no_rule_id_and_no_budget`.
 - `a_retryable_error_backs_off_then_fails_after_six_attempts`: mock 503 forever; run, re-claim (set `not_before` past with the manual clock: `app.state.clock.set(row.not_before)`), run again… after the 6th attempt the job is `failed`, `retryable`; each retry's `not_before` equals `now + backoff_ns(id, attempts)`.
 - `a_pause_error_pauses_the_connection_rules_and_requeues`: mock 401; two rules in two projects on the same connection; the job is `queued` with `attempts` 0 (the run's attempt was given back), both rules `paused_reason = 'connection'`, the connection `failing` with `provider status 401`.
@@ -1290,7 +1290,7 @@ Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time
 - `a_permanent_error_fails_at_once`: mock answers `"not json"` → `failed`, `permanent`.
 - `a_missing_trace_retries_three_times_then_fails`: `load_retries` 1, 2, 3, then `failed` with `trace not found`.
 - `no_load_permit_requeues_without_a_load_retry`: hold every `trace_loads` permit, run under `start_paused = true` → `queued`, `not_before = now + SATURATED_REQUEUE_NS`, `load_retries` 0.
-- `an_evaluation_trace_is_refused`: a target in `llmobs-eval` → `failed`, `target is an evaluation trace`, no judge trace.
+- `an_evaluation_trace_is_refused`: a target in `cetra-eval` → `failed`, `target is an evaluation trace`, no judge trace.
 - `a_mapping_error_writes_no_judge_trace`: `output` mapped to `span[name=nope].output` without `?` → `failed`, `judge_trace_id` NULL.
 - `a_definition_mismatch_fails`: a categorical live definition named like the numeric output.
 - `budget_over_pauses_and_skips`: budget 0.000001 USD; two queued jobs of the rule; running one → it is `skipped` (`budget`), the other is `skipped`, the rule is paused `budget`, the mock got no request.
@@ -1306,7 +1306,7 @@ Helpers in the test module: `seeded(app) -> Fixture` (the clock set to real time
 - `a_deleted_evaluator_ends_quietly`: delete the evaluator (cascades the job), run → `Ok(())`.
 - `a_rule_deleted_during_the_run_ends_quietly`: a **budgeted** rule, so `finish` reaches `add_spend` with `actual > 0`; delete the rule before step 16 (run the steps directly, then `finish_job`): the job row cascades, `finish` matches nothing, the result is `Ok(())`, and `rule_spend` has no row for the rule.
 - `a_check_job_runs_to_done` (a `contains` check, the `spawn_blocking` path) and `a_webhook_job_runs_to_done` (`MockWebhook`): each `done` with its source.
-- `a_truncated_trace_marks_the_score`: test the metadata helper directly: `truncated: true` adds `llmobs.eval.truncated = "true"`, `false` adds nothing (a real trace over `MAX_SPANS` is too slow to commit).
+- `a_truncated_trace_marks_the_score`: test the metadata helper directly: `truncated: true` adds `cetra.eval.truncated = "true"`, `false` adds nothing (a real trace over `MAX_SPANS` is too slow to commit).
 - `a_large_levenshtein_input_fails`: `output` over 64 KiB → `failed`, `levenshtein inputs must be at most 64 KiB each`, no judge trace.
 - `a_store_failure_does_not_count_for_the_breaker`: 20 `finish_job` calls with `Ended { reached_evaluator: false, … }` with `Failed { Permanent, "could not store the result" }` → the rule is not paused.
 - `judge_usage_and_score_units_are_counted`: after one done job and `state.usage.flush`, `usage_daily` has `judge_input_tokens = 10`, `judge_output_tokens = 3` (the mock's usage) and `scores = 1`, and `spans` counts none of the judge spans (D-I-31).
@@ -1519,7 +1519,7 @@ impl EvalTasks {
 
 ### Done when
 
-`just check` passes, and `shutdown_drains_then_aborts` and `the_dispatcher_wakes_on_notify` pass five runs in a row (`for i in 1 2 3 4 5; do cargo test -p llmobs-server <name> || break; done`): they use real time, so a flaky one must be fixed, not retried. I3.7 removes the I3.6 `dead_code` attributes of `run_job`, `ClaimedJob` and `EvalQueue::wake`; the `hourly` field keeps its attribute until I3.8.
+`just check` passes, and `shutdown_drains_then_aborts` and `the_dispatcher_wakes_on_notify` pass five runs in a row (`for i in 1 2 3 4 5; do cargo test -p cetra-server <name> || break; done`): they use real time, so a flaky one must be fixed, not retried. I3.7 removes the I3.6 `dead_code` attributes of `run_job`, `ClaimedJob` and `EvalQueue::wake`; the `hourly` field keeps its attribute until I3.8.
 
 ---
 
@@ -1607,7 +1607,7 @@ Routes (all `Access::Project`, `session_only: false`, `documented: true`):
 1. `principal::session_user` (as the evaluator routes); trim `name`.
 2. Load the evaluator row (`get_evaluator`; missing → check 2) and its `rule_check::Subject::from_row`, and for a judge read its connection row for the adapter: `Adapter::from_name(&row.adapter)` returns `Result<Adapter, UnknownName>`; an `Err` means a stored value that does not decode, so map it to `MetaError::Corrupt { table: "llm_connections", column: "adapter" }` (a 500 `corrupt`, as for any undecodable row). A missing connection row gives `adapter = None`.
 3. Run § Rule validation checks 1, 2, 4–7, 11–13, 16 here and checks 8–10, 14–15 with `rule_check::check_rule`; collect every error; a non-empty list is `400`.
-4. Check 3: when the filter is not blank, `open_query(state, project, None)` then `llmobs_storage::validate_filter(&ctx, view, text)?` (`view` is `ViewName::Traces` or `ViewName::Spans`; the `?` turns `RunError::Invalid` into the `invalid_filter` problem on field `filter`, as K's route does).
+4. Check 3: when the filter is not blank, `open_query(state, project, None)` then `cetra_storage::validate_filter(&ctx, view, text)?` (`view` is `ViewName::Traces` or `ViewName::Spans`; the `?` turns `RunError::Invalid` into the `invalid_filter` problem on field `filter`, as K's route does).
 5. One `MetaDb::write`, whose closure owns the evaluator row read in step 2: `get_evaluator_tx` again; missing → the outcome `EvaluatorGone` → 400 on `evaluator_id` with check 2's message; its `version` or `updated_at` differs from the row of step 2 → `Conflict("evaluator changed, retry")` (409), because the checks of step 3 ran against the old one; when `enabled`, `rule_limit::check(count_enabled_rules(conn, org)? + 1, limit)`, where `limit = rule_limit::limit(&state, org)` is read before the write (an `Outcome::OverLimit(RuleLimitError)` result, not an `Err`, so nothing is written); then `insert_rule`.
 6. Audit `tracing::info!(target: "audit", rule_id, project_id, user_id, "online rule created")`; `201` with `rule_json`.
 
@@ -1702,7 +1702,7 @@ Store the filter trimmed, `None` when blank; the mapping as `serde_json::to_stri
 
 ### Done when
 
-`just check` passes. Every documented M3 operation has a route. Temporarily delete the `#![cfg_attr(not(test), allow(dead_code))]` in `meta/mod.rs`, run `cargo clippy -p llmobs-server --all-targets -- -D warnings`, delete any unused `online_rules`/`eval_jobs`/`rule_spend` item it reports, then restore the attribute. Any item still unused has an item-level allow naming its M4 caller.
+`just check` passes. Every documented M3 operation has a route. Temporarily delete the `#![cfg_attr(not(test), allow(dead_code))]` in `meta/mod.rs`, run `cargo clippy -p cetra-server --all-targets -- -D warnings`, delete any unused `online_rules`/`eval_jobs`/`rule_spend` item it reports, then restore the attribute. Any item still unused has an item-level allow naming its M4 caller.
 
 ---
 

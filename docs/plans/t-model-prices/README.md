@@ -36,7 +36,7 @@ Each must print one line. Otherwise STOP and report.
 
 | File | Sub-phase |
 |---|---|
-| [01-layered-table.md](01-layered-table.md) | T1 `PriceTable::layered` in `llmobs-otel`: custom rows over a shared built-in table |
+| [01-layered-table.md](01-layered-table.md) | T1 `PriceTable::layered` in `cetra-otel`: custom rows over a shared built-in table |
 | [02-store.md](02-store.md) | T2 migration and the `meta::model_prices` store |
 | [03-registry.md](03-registry.md) | T3 `crate::prices::Prices`: load, per-project tables, reload; every caller prices with it; `replace_prices` removed |
 | [04-project-api.md](04-project-api.md) | T4 API types, validation, the rule guard, project routes (`/models`, `/models/resolve`), OpenAPI, fixtures |
@@ -141,7 +141,7 @@ These are written in `docs/mvp-decisions.md` § Track T and in specs 02, 04, 09 
 
 ## Conventions
 
-- **Time**: `i64` nanoseconds in Rust and `meta.db`; RFC 3339 strings with 9 fractional digits in JSON (`llmobs_core::time_serde`, as the existing API types).
+- **Time**: `i64` nanoseconds in Rust and `meta.db`; RFC 3339 strings with 9 fractional digits in JSON (`cetra_core::time_serde`, as the existing API types).
 - **IDs**: custom rows are UUIDv7 (`Uuid::now_v7()`), stored as `TEXT`.
 - **Errors**: problem+json through `crate::http::error::ApiError`. Field errors name the JSON field path, e.g. `tiers[2].min_input_tokens`.
 - **Privacy**: logs carry row, org, project and user ids, counts and error classes. Never a model name, a pattern or a provider: they are user input (AGENTS.md § Privacy). `PriceError` already carries only an index.
@@ -158,7 +158,7 @@ export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH
 just check
 ```
 
-`just check` must pass before every commit. When a sub-phase changes the API contract, run `just openapi` first and commit `crates/server/openapi.json` and `web/src/api/schema.gen.ts`; when it changes `fixtures/api/`, run `just api-examples` and commit `fixtures/api/manifest.json`. Focused runs while working: `cargo test -p llmobs-otel cost`, `cargo test -p llmobs-server prices`, `cargo test -p llmobs-server model_prices`, `pnpm --dir web test -- models`.
+`just check` must pass before every commit. When a sub-phase changes the API contract, run `just openapi` first and commit `crates/server/openapi.json` and `web/src/api/schema.gen.ts`; when it changes `fixtures/api/`, run `just api-examples` and commit `fixtures/api/manifest.json`. Focused runs while working: `cargo test -p cetra-otel cost`, `cargo test -p cetra-server prices`, `cargo test -p cetra-server model_prices`, `pnpm --dir web test -- models`.
 
 ## Report
 

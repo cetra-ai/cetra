@@ -11,7 +11,7 @@ it("shows the top bar without org controls", async () => {
   await renderApp("/account");
 
   expect(screen.getByRole("heading", { name: "Account", level: 1 })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "llmobs" })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "cetra" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Theme" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Ada Example" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Acme" })).toBeNull();

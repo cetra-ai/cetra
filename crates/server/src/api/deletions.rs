@@ -1,7 +1,7 @@
 //! Deletion request and response types (spec 09 § Pricing & GDPR, D-M-2).
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::time_serde;
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;

@@ -19,7 +19,7 @@ Sub-phases R3.1–R3.8, one commit each. R3.8 can produce several commits, one p
 
   R3.8 may fix bugs anywhere in `crates/storage/src/` and `crates/otel/src/` (D-R-2). It stops and reports instead when a fix would change a file format, a public API or a spec rule.
 - **Dependencies** (versions looked up on 2026-11-14 with `cargo info`):
-  - `arbitrary = { version = "1.5.0", features = ["derive"] }` in the root `[workspace.dependencies]` (MIT OR Apache-2.0; brings `derive_arbitrary` 1.5.0). `llmobs-storage` uses it as a `cfg(fuzzing)` target dependency and a dev-dependency (R3.4).
+  - `arbitrary = { version = "1.5.0", features = ["derive"] }` in the root `[workspace.dependencies]` (MIT OR Apache-2.0; brings `derive_arbitrary` 1.5.0). `cetra-storage` uses it as a `cfg(fuzzing)` target dependency and a dev-dependency (R3.4).
   - `libfuzzer-sys = "=0.4.13"` (an exact pin) in `fuzz/Cargo.toml` only (`(MIT OR Apache-2.0) AND NCSA`). It is outside the workspace, so the "versions once in the root" rule does not apply to it (D-R-7). Its dependencies (`arbitrary` 1.x, and `cc` with `jobserver`, `shlex` and `find-msvc-tools` at build time) are already in the root `Cargo.lock` once R3.4 adds `arbitrary`.
   - `cargo-fuzz` 0.13.2, installed by `just fuzz-tools`, not a dependency.
   - The fuzzing toolchain is `nightly-2026-11-03`, a `justfile` variable (`fuzz_toolchain`). Updated by hand, like `rust-toolchain.toml`. If that date does not install (`rustup toolchain install nightly-2026-11-03 --profile minimal`), take the newest date that does and say which in the report.
@@ -64,7 +64,7 @@ Sub-phases R3.1–R3.8, one commit each. R3.8 can produce several commits, one p
   - otel: R3.5 adds its own `runtime()` only if an otel entry needs one (they are synchronous, so normally not), and no `Cursor`.
 
   The same holds for every helper in this plan: it lands with its first caller.
-- **Scratch directories.** An entry that needs files creates `std::env::temp_dir().join(format!("llmobs-fuzz-{}", Uuid::now_v7()))` and removes it with `std::fs::remove_dir_all` before returning, on every path (a small guard struct with `Drop` is fine). The nightly sets `TMPDIR=/dev/shm` so this is tmpfs.
+- **Scratch directories.** An entry that needs files creates `std::env::temp_dir().join(format!("cetra-fuzz-{}", Uuid::now_v7()))` and removes it with `std::fs::remove_dir_all` before returning, on every path (a small guard struct with `Drop` is fine). The nightly sets `TMPDIR=/dev/shm` so this is tmpfs.
 - **Replay tests.** Each crate's `fuzz_entry.rs` ends with `#[cfg(test)] pub(crate) mod tests` (`pub(crate)` so R3.3's tests in `unwind.rs` can call its `pub(crate)` seed builders), holding one test per target and this helper:
 
   ```rust
@@ -206,7 +206,7 @@ fuzz-seed:
 
 ```bash
 just fuzz-seed
-cargo test -p llmobs-storage --all-features fuzz_entry
+cargo test -p cetra-storage --all-features fuzz_entry
 git status --short fuzz/
 ```
 
@@ -255,7 +255,7 @@ Byte 0 = view (`% 4`: `FilterView::Traces`, `Spans`, `Sessions`, `Scores`); the 
 Run on a thread with a 2 MiB stack, the size of a tokio worker's stack, where the server parses filters (`filter/mod.rs` has a test on the same stack size): `std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(...)`, then `join()`. A join error means a panic inside: `std::panic::resume_unwind(payload)`, so the fuzzer and the replay test see it. A stack overflow aborts the process; the fuzzer reports it as a crash, which is what we want.
 
 On that thread, inside `runtime().block_on`:
-1. Build a `ProjectQuery` over empty tables: `MemTable::try_new(schema, vec![vec![]])` for `llmobs_core::schema::{spans_schema, traces_schema, scores_schema}()`, `runtime: Arc::new(RuntimeEnv::default())`, `target_partitions: TWO`, `optimizer_rules: Vec::new()`, `suspects: Suspects::new(Arc::new(VerifyQueue::default()))`. Then `QueryContext::new(query, None)` (harness setup: `expect`).
+1. Build a `ProjectQuery` over empty tables: `MemTable::try_new(schema, vec![vec![]])` for `cetra_core::schema::{spans_schema, traces_schema, scores_schema}()`, `runtime: Arc::new(RuntimeEnv::default())`, `target_partitions: TWO`, `optimizer_rules: Vec::new()`, `suspects: Suspects::new(Arc::new(VerifyQueue::default()))`. Then `QueryContext::new(query, None)` (harness setup: `expect`).
 2. `ctx.parse_filter(view, text)`. On `Ok(filter)`: `ctx.session().table(name)` with the view's `ViewName` name (map the four `FilterView`s to `ViewName`s in the entry; `FilterView::as_str` is private to `filter`), then `filter.apply(frame, &ctx)`, then `.collect()`. Drop every result.
 
 ### Tests
@@ -270,7 +270,7 @@ On that thread, inside `runtime().block_on`:
 
 ```bash
 just fuzz-seed
-cargo test -p llmobs-storage --all-features fuzz_entry
+cargo test -p cetra-storage --all-features fuzz_entry
 ```
 
 Expected: the new tests pass; commit the new seed files.
@@ -400,7 +400,7 @@ If one fails only because it now meets a `GuardExec` where it expected the `Data
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features unwind
+cargo test -p cetra-storage --all-features unwind
 just check
 ```
 
@@ -553,7 +553,7 @@ pub fn otlp_grpc(data: &[u8]);            // decode_protobuf; on Ok, request.enc
 fn normalize_and_convert(request: &ExportTraceServiceRequest);
 ```
 
-`normalize_and_convert`: `let normalized = normalize(request, &context(), prices());`, then **property:** `llmobs_core::batch::spans_to_record_batch(&normalized.spans)` is `Ok`. The server converts accepted spans the same way before the append (`IngestError::Batch` answers 500), so a span that `normalize` accepts but core cannot convert is a finding. If it fails in R3.8 and the fix belongs in `llmobs-core`, stop and report (core is a shared contract).
+`normalize_and_convert`: `let normalized = normalize(request, &context(), prices());`, then **property:** `cetra_core::batch::spans_to_record_batch(&normalized.spans)` is `Ok`. The server converts accepted spans the same way before the append (`IngestError::Batch` answers 500), so a span that `normalize` accepts but core cannot convert is a finding. If it fails in R3.8 and the fix belongs in `cetra-core`, stop and report (core is a shared contract).
 
 Tests (`fuzz_entry::tests`; unit tests, because an integration test cannot see `cfg(test)` items):
 - `otlp_http_protobuf_corpus_replays`, `otlp_http_json_corpus_replays`, `otlp_grpc_corpus_replays`, with the same `replay` helper as storage (copy it; the crates share no test code).
@@ -562,14 +562,14 @@ Tests (`fuzz_entry::tests`; unit tests, because an integration test cannot see `
   - `otlp_http_json/seed-<group>-<case>`: the file's bytes;
   - `otlp_http_protobuf/seed-<group>-<case>` and `otlp_grpc/seed-<group>-<case>`: `decode_json(bytes)?.encode_to_vec()` (`prost::Message`; `prost` is already a dependency). Skip a fixture that does not decode.
 
-`fixtures/otlp/` is 2.5 MiB, over the per-target budget. **R3.5 commits only a handful of seeds per target**: the seeds of the first fixture of each group directory (`edge`, `genai`, `google_adk`, `laminar`, `langfuse`, `llmobs`, `openinference`, `openllmetry`, `vercel`), nine per target. Delete the other generated seed files before committing. R3.6 runs `just fuzz-seed` again before `just fuzz-all`, so every fixture seeds the first fuzz run, and `fuzz-cmin` keeps only what adds coverage; the minimized corpus is what R3.6 commits.
+`fixtures/otlp/` is 2.5 MiB, over the per-target budget. **R3.5 commits only a handful of seeds per target**: the seeds of the first fixture of each group directory (`edge`, `genai`, `google_adk`, `laminar`, `langfuse`, `cetra`, `openinference`, `openllmetry`, `vercel`), nine per target. Delete the other generated seed files before committing. R3.6 runs `just fuzz-seed` again before `just fuzz-all`, so every fixture seeds the first fuzz run, and `fuzz-cmin` keeps only what adds coverage; the minimized corpus is what R3.6 commits.
 
 ### Commands
 
 ```bash
 just fuzz-seed
 # keep the nine group seeds per otel target, delete the rest
-cargo test -p llmobs-otel --all-features fuzz_entry
+cargo test -p cetra-otel --all-features fuzz_entry
 ```
 
 Commit the kept seeds with this sub-phase.
@@ -598,7 +598,7 @@ fuzz/
 
 ```toml
 [package]
-name = "llmobs-fuzz"
+name = "cetra-fuzz"
 version = "0.0.0"
 edition = "2024"
 publish = false
@@ -613,8 +613,8 @@ cargo-fuzz = true
 [dependencies]
 # Exact pin: `just fuzz-lock` resolves it on top of the root lock, and Dependabot bumps it here.
 libfuzzer-sys = "=0.4.13"
-llmobs-otel = { path = "../crates/otel" }
-llmobs-storage = { path = "../crates/storage" }
+cetra-otel = { path = "../crates/otel" }
+cetra-storage = { path = "../crates/storage" }
 
 [[bin]]
 name = "wal_record"
@@ -632,7 +632,7 @@ Each target is three lines:
 ```rust
 #![no_main]
 
-libfuzzer_sys::fuzz_target!(|data: &[u8]| llmobs_storage::fuzz_entry::wal_record(data));
+libfuzzer_sys::fuzz_target!(|data: &[u8]| cetra_storage::fuzz_entry::wal_record(data));
 ```
 
 ### Toolchain
@@ -768,7 +768,7 @@ just check
 
 Commit: `ci: add the nightly fuzz, model, stress and LazyFS workflow (R3.7)`
 
-What runs nightly (user decision): the nine fuzz targets, `just model 5000` (M1, D-R-14), M6's stress test (`just stress 1800`, and `LLMOBS_STRESS_REMOTE=1 just stress 600` on the in-memory store with the read cache), and M2's `just lazyfs` if M2's probe showed `/dev/fuse` works on runners. M5's disk-full tests do **not** run nightly.
+What runs nightly (user decision): the nine fuzz targets, `just model 5000` (M1, D-R-14), M6's stress test (`just stress 1800`, and `CETRA_STRESS_REMOTE=1 just stress 600` on the in-memory store with the read cache), and M2's `just lazyfs` if M2's probe showed `/dev/fuse` works on runners. M5's disk-full tests do **not** run nightly.
 
 **Who adds the stress jobs.** Whichever of M3's R3.7 and M6's R6.7 lands second adds them, and only if they are absent. If R3.7 lands first and `just stress` doesn't exist yet, leave the two jobs out and say so in the report; R6.7 adds them (06-m6-concurrency.md § Nightly). If `just stress` exists, add them here, and R6.7 then finds them present.
 
@@ -840,7 +840,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      LLMOBS_STRESS_REMOTE: "1"
+      CETRA_STRESS_REMOTE: "1"
     steps:
       - checkout; ./.github/actions/rust (cache: "false")
       - run: just stress 600
@@ -867,7 +867,7 @@ jobs:
 The YAML abbreviates repeated steps; write them in full, as `ci.yml` does. `${{ matrix.target }}` in a `run:` line is a fixed list of our own names, not user input.
 
 - **`fuzz-ci target secs`** (recipe, `fuzz-ci target secs: fuzz-lock`): like `fuzz`, but it first runs `mkdir -p target/fuzz-new/<target>` (libFuzzer needs every corpus directory to exist), and that empty directory is the first corpus directory, followed by `fuzz/corpus/<target>`. Never `fuzz/regressions/` (R3.6 § Layout). libFuzzer writes new inputs into the first directory only, so the artifact holds exactly the new corpus entries and the checkout stays clean. A crash exits non-zero and leaves `fuzz/artifacts/<target>/crash-*`.
-- **Stress jobs.** Exactly M6's commands: `just stress 1800`, and `just stress 600` with `LLMOBS_STRESS_REMOTE=1` (set through `env:`). The remote mode uses an in-memory store, so no secrets are needed. The seed is printed in the log (`LLMOBS_STRESS_SEED`). A job timeout of 60 minutes each, as M6 sets. When the jobs are absent (see above), drop them from `report.needs` too.
+- **Stress jobs.** Exactly M6's commands: `just stress 1800`, and `just stress 600` with `CETRA_STRESS_REMOTE=1` (set through `env:`). The remote mode uses an in-memory store, so no secrets are needed. The seed is printed in the log (`CETRA_STRESS_SEED`). A job timeout of 60 minutes each, as M6 sets. When the jobs are absent (see above), drop them from `report.needs` too.
 - **`nightly-issue`** (recipe, bash): reads `RUN_URL`; finds an open issue labelled `nightly` (`gh issue list --label nightly --state open --json number --jq '.[0].number // empty'`); comments `"Nightly failed again: $RUN_URL"` on it, or creates one titled `Nightly run failed` with that body and `--label nightly` (create the label first with `gh label create nightly --force`). One open issue, updated each failing night. The run URL comes in through `env`, never through `${{ }}` inside the script (zizmor's template-injection rule).
 - **`model`** runs D-R-14's nightly 5,000 cases. If M1 measured `just model 5000` at over 4 hours, split it into a matrix of shards, each `just model <5000 / shards>` (each run draws its own random seed), and report the split.
 - **`lazyfs`.** M2 probes `/dev/fuse` on a throwaway branch and records the result. Read `docs/research/storage/hardening.md` § M2 (LazyFS) and M2's recipes:

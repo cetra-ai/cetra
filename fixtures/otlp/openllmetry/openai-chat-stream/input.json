@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "88a48dea034a590bde6518086cf636f1",
-              "spanId": "1a3f5ff51e30cc85",
+              "traceId": "89bdcb646bc3f0988d7126eb0cc4fe62",
+              "spanId": "723f10f6de8597ff",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "openai.chat",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590170000000",
+              "endTimeUnixNano": "1767225590238000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",
@@ -145,43 +145,43 @@
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590130000000",
+                  "timeUnixNano": "1767225590197000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590133000000",
+                  "timeUnixNano": "1767225590201000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590139000000",
+                  "timeUnixNano": "1767225590207000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590145000000",
+                  "timeUnixNano": "1767225590213000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590151000000",
+                  "timeUnixNano": "1767225590219000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590157000000",
+                  "timeUnixNano": "1767225590225000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0
                 },
                 {
-                  "timeUnixNano": "1767225590164000000",
+                  "timeUnixNano": "1767225590232000000",
                   "name": "gen_ai.content.completion.chunk",
                   "attributes": [],
                   "droppedAttributesCount": 0

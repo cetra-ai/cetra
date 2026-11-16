@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "3decc6e07c08ac7966cce113c713eaf4",
-              "spanId": "58a7e9e3b20182da",
+              "traceId": "0fbded341125bc88088b847e84268cc0",
+              "spanId": "33810cf70395ace6",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "ChatCompletion",
               "kind": 1,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590039000000",
+              "endTimeUnixNano": "1767225590041000000",
               "attributes": [
                 {
                   "key": "llm.system",
@@ -213,15 +213,15 @@
               }
             },
             {
-              "traceId": "12807cd60fe072ca994b6900babcfabf",
-              "spanId": "6f10b9b5a6c81071",
+              "traceId": "9af771153bc241b3b78dd5e2d4aa09fc",
+              "spanId": "2b3ee7b9cfc95e2f",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "ChatCompletion",
               "kind": 1,
-              "startTimeUnixNano": "1767225590041000000",
-              "endTimeUnixNano": "1767225590074000000",
+              "startTimeUnixNano": "1767225590043000000",
+              "endTimeUnixNano": "1767225590077000000",
               "attributes": [
                 {
                   "key": "llm.system",

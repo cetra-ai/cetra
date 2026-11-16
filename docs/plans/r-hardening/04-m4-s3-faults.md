@@ -85,7 +85,7 @@ So `Generic` is the variant that reaches the same code paths a real exhausted 5x
 
   R4.6 and R4.10 may fix bugs anywhere in `crates/storage/src/` (D-R-2). Each fix stops and is reported instead when it would change a file format, a public API or a spec rule.
 - **Dependencies.**
-  - **Rust:** one new dev-dependency, `reqwest = { workspace = true }` in `crates/storage/Cargo.toml` `[dev-dependencies]` (R4.7). The workspace pins `reqwest = "0.12.28"` with `rustls-tls` and `json` (root `Cargo.toml`), and the lockfile already has it through `llmobs-server`, so no version is added.
+  - **Rust:** one new dev-dependency, `reqwest = { workspace = true }` in `crates/storage/Cargo.toml` `[dev-dependencies]` (R4.7). The workspace pins `reqwest = "0.12.28"` with `rustls-tls` and `json` (root `Cargo.toml`), and the lockfile already has it through `cetra-server`, so no version is added.
   - **No random-number crate.** `chaos.rs` has its own 64-bit SplitMix generator (ten lines), seeded by proptest.
   - **External tools** (not in `just check`):
     - **Toxiproxy 2.13.0** (released 2026-10-14), either as the image `ghcr.io/shopify/toxiproxy:2.13.0` (the tag exists on GHCR as of 2026-11-15) or as the release binary `toxiproxy-server-linux-amd64` from `https://github.com/Shopify/toxiproxy/releases/tag/v2.13.0`;
@@ -276,8 +276,8 @@ Each test runs on `InMemory`:
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features test_support::chaos
-cargo test -p llmobs-storage --all-features
+cargo test -p cetra-storage --all-features test_support::chaos
+cargo test -p cetra-storage --all-features
 rg -n 'FaultStore|FaultKind' crates/ docs/   # nothing left, outside docs that describe history
 ```
 
@@ -656,7 +656,7 @@ In S3 mode, `check_full` asserts `chaos.count(Call::List) == lists_by_audits`, a
 
 ```rust
 fn s3_cases() -> u32 {
-    std::env::var("LLMOBS_MODEL_S3_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
+    std::env::var("CETRA_MODEL_S3_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(4)
 }
 
 proptest! {
@@ -684,8 +684,8 @@ Add `s3_mode_uses_both_upload_paths`, a unit test with a fixed op list: append 1
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features model_tests
-LLMOBS_MODEL_S3_CASES=100 cargo test --release -p llmobs-storage --all-features model_tests::storage_matches_the_model_on_s3
+cargo test -p cetra-storage --all-features model_tests
+CETRA_MODEL_S3_CASES=100 cargo test --release -p cetra-storage --all-features model_tests::storage_matches_the_model_on_s3
 ```
 
 Both pass. A failure without faults is a bug of the S3 path itself (cache, write-through, multipart). Record it with its shrunk ops for R4.10, and move the proptest seed file out of the tree as in M1's R1.3.
@@ -790,11 +790,11 @@ At the end of each case, add to a process-wide `static STATS: Mutex<S3Stats>`:
 - abandoned uploads;
 - `FaultyRead` errors.
 
-When `LLMOBS_MODEL_S3_STATS=1`, `run_case_s3` prints `STATS` every 50 cases. It is for `hardening.md`; don't build more than that.
+When `CETRA_MODEL_S3_STATS=1`, `run_case_s3` prints `STATS` every 50 cases. It is for `hardening.md`; don't build more than that.
 
 ### Budget
 
-Measure as M1 did: time `storage_matches_the_model_on_s3` in debug with `LLMOBS_MODEL_S3_CASES=2`. Then set the default in `s3_cases()` to the largest of 8, 4 or 2 that keeps the test under 60 s, and report the time and the value. Each failed flush costs at least 1 s of real backoff. If the budget is missed at 2 cases:
+Measure as M1 did: time `storage_matches_the_model_on_s3` in debug with `CETRA_MODEL_S3_CASES=2`. Then set the default in `s3_cases()` to the largest of 8, 4 or 2 that keeps the test under 60 s, and report the time and the value. Each failed flush costs at least 1 s of real backoff. If the budget is missed at 2 cases:
 1. first halve `Rates::MODEL.before` and `after`;
 2. then stop and report.
 
@@ -803,12 +803,12 @@ Measure as M1 did: time `storage_matches_the_model_on_s3` in debug with `LLMOBS_
 ```just
 # The storage model test on a remote store with S3 faults, in release mode (R4.5).
 model-s3 cases="200":
-    LLMOBS_MODEL_S3_CASES={{cases}} LLMOBS_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
+    CETRA_MODEL_S3_CASES={{cases}} CETRA_MODEL_S3_STATS=1 cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model_on_s3
 ```
 
 In `AGENTS.md`:
 - § Commands, table row: `just model-s3 [cases]` | the storage model test on a remote store with injected S3 faults, release mode (R M4);
-- § Tests, one bullet: `LLMOBS_MODEL_S3_CASES=N` sets the S3-mode model test's cases (default by measurement, R4.5).
+- § Tests, one bullet: `CETRA_MODEL_S3_CASES=N` sets the S3-mode model test's cases (default by measurement, R4.5).
 
 ### Docs
 
@@ -820,7 +820,7 @@ In `AGENTS.md`:
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features model_tests
+cargo test -p cetra-storage --all-features model_tests
 just model-s3 200
 ```
 
@@ -887,7 +887,7 @@ These are scenarios the model cannot reach, or reaches too rarely to rely on. Al
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features s3_fault_tests
+cargo test -p cetra-storage --all-features s3_fault_tests
 ```
 
 ---
@@ -899,25 +899,25 @@ Commit: `storage: add the S3 chaos suite through toxiproxy (R4.7)`
 ### Setup (documented in the test file's module doc, as `tests/s3.rs` does)
 
 ```text
-docker run --rm --name llmobs-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=4g -e ROOT_ACCESS_KEY=llmobs -e ROOT_SECRET_KEY=llmobs-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
-curl --aws-sigv4 "aws:amz:us-east-1:s3" --user llmobs:llmobs-secret -X PUT http://127.0.0.1:7070/llmobs-test
-docker run --rm --name llmobs-toxiproxy --net=host ghcr.io/shopify/toxiproxy:2.13.0 -host 127.0.0.1
+docker run --rm --name cetra-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=4g -e ROOT_ACCESS_KEY=cetra -e ROOT_SECRET_KEY=cetra-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
+curl --aws-sigv4 "aws:amz:us-east-1:s3" --user cetra:cetra-secret -X PUT http://127.0.0.1:7070/cetra-test
+docker run --rm --name cetra-toxiproxy --net=host ghcr.io/shopify/toxiproxy:2.13.0 -host 127.0.0.1
 ```
 
 Pass `-host 127.0.0.1` to the server (append it after the image name; the image's entrypoint is the server), so the API (`:8474`) and the proxies listen on loopback only. The image otherwise binds `0.0.0.0` under `--net=host`. Both settings were checked against v2.13.0:
 - the server's flags (`cmd/server/server.go`: `-host`, default `localhost`, and `-port`, default `8474`);
 - its README, which documents an optional `TOXIPROXY_AUTH_TOKEN` (every request then needs `Authorization: Bearer <token>`).
 
-With `-host 127.0.0.1` no token is needed. If one is used anyway, set the same value in `LLMOBS_TEST_TOXIPROXY_TOKEN`, and the test sends the header. Re-check both when M4 runs, together with the image tags. Without Docker, run the release binary `toxiproxy-server-linux-amd64` (v2.13.0) with `-host 127.0.0.1`.
+With `-host 127.0.0.1` no token is needed. If one is used anyway, set the same value in `CETRA_TEST_TOXIPROXY_TOKEN`, and the test sends the header. Re-check both when M4 runs, together with the image tags. Without Docker, run the release binary `toxiproxy-server-linux-amd64` (v2.13.0) with `-host 127.0.0.1`.
 
 ### `crates/storage/tests/s3_chaos.rs`
 
-Every test is `#[ignore = "needs toxiproxy and an S3 endpoint: just s3-chaos"]`, and also skips (prints and returns) when `LLMOBS_TEST_S3_ENDPOINT` or `LLMOBS_TEST_TOXIPROXY` is unset. Environment:
-- `LLMOBS_TEST_S3_ENDPOINT`: Versity's address (`http://127.0.0.1:7070`);
-- `LLMOBS_TEST_S3_BUCKET`;
+Every test is `#[ignore = "needs toxiproxy and an S3 endpoint: just s3-chaos"]`, and also skips (prints and returns) when `CETRA_TEST_S3_ENDPOINT` or `CETRA_TEST_TOXIPROXY` is unset. Environment:
+- `CETRA_TEST_S3_ENDPOINT`: Versity's address (`http://127.0.0.1:7070`);
+- `CETRA_TEST_S3_BUCKET`;
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`;
-- `LLMOBS_TEST_TOXIPROXY`: the API (`http://127.0.0.1:8474`);
-- `LLMOBS_TEST_TOXIPROXY_TOKEN` (optional).
+- `CETRA_TEST_TOXIPROXY`: the API (`http://127.0.0.1:8474`);
+- `CETRA_TEST_TOXIPROXY_TOKEN` (optional).
 
 A small client over `reqwest` (new dev-dependency, § Conventions):
 
@@ -938,7 +938,7 @@ impl Toxiproxy {
 }
 ```
 
-`upstream` is the endpoint's `host:port`. Each test uses its own proxy, `llmobs-<test name>`:
+`upstream` is the endpoint's `host:port`. Each test uses its own proxy, `cetra-<test name>`:
 - it first calls `delete(name)`, ignoring a 404, so a proxy left behind by an earlier failed run can't make `proxy()` fail with 409;
 - it creates the proxy, points the storage config's `s3.endpoint` at `http://<listen>`, and uses a fresh prefix `s3-chaos-<test>-<ms>`;
 - at the end it deletes the proxy, then the prefix, with `delete_prefix` copied from `tests/s3.rs`, calling Versity directly, not through the proxy.
@@ -947,7 +947,7 @@ The storage config is `tests/s3.rs::config` with `flush.max_age = 1 s`, `memtabl
 
 **Incomplete uploads.** `fn incomplete_uploads(endpoint, bucket, prefix) -> usize` runs `curl -s -K - --aws-sigv4 "aws:amz:<region>:s3" "<url>"` and counts `<Upload>` in the XML body. `ListMultipartUploads` is not in `object_store`'s API.
 - **The keys:** it writes `user = "<key>:<secret>"` to curl's stdin (`-K -`), so they never appear on a command line.
-- **The URL** follows `LLMOBS_TEST_S3_PATH_STYLE` (R4.8; default `true`):
+- **The URL** follows `CETRA_TEST_S3_PATH_STYLE` (R4.8; default `true`):
   - path style: `<endpoint>/<bucket>?prefix=<prefix>&uploads`;
   - virtual-hosted: `<scheme>://<bucket>.<endpoint host>/?prefix=<prefix>&uploads`.
 
@@ -996,15 +996,15 @@ Tests. Each one ends with `shutdown` (asserted to return within 75 s), then `inc
 
 ```just
 # S3 chaos through toxiproxy in front of an S3 endpoint (R M4). Needs
-# LLMOBS_TEST_S3_ENDPOINT, LLMOBS_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
-# AWS_SECRET_ACCESS_KEY and LLMOBS_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
+# CETRA_TEST_S3_ENDPOINT, CETRA_TEST_S3_BUCKET, AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY and CETRA_TEST_TOXIPROXY; see crates/storage/tests/s3_chaos.rs.
 s3-chaos:
     cargo test --release --workspace --all-features --test s3_chaos -- --ignored --test-threads 1 --nocapture
 ```
 
 In `AGENTS.md`:
 - § Commands: `just s3-chaos` | S3 fault tests through toxiproxy in front of an S3 endpoint (R M4);
-- § Tests: "`LLMOBS_TEST_TOXIPROXY` (with `LLMOBS_TEST_S3_*` and optionally `LLMOBS_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway."
+- § Tests: "`CETRA_TEST_TOXIPROXY` (with `CETRA_TEST_S3_*` and optionally `CETRA_TEST_TOXIPROXY_TOKEN`) runs `just s3-chaos`; `crates/storage/tests/s3_chaos.rs` shows how to start toxiproxy and Versity Gateway."
 
 ### Run
 
@@ -1026,16 +1026,16 @@ The user provides a bucket when M4 starts: location (`fsn1`, `nbg1` or `hel1`), 
 ### Settings the tests read
 
 `tests/s3.rs` hard-codes `region: "us-east-1"` and `force_path_style: true` (right for Versity). Add, in `tests/s3.rs::config` and `delete_prefix`:
-- `LLMOBS_TEST_S3_REGION` (default `us-east-1`);
-- `LLMOBS_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, as `docs/self-hosting/s3.md` says).
+- `CETRA_TEST_S3_REGION` (default `us-east-1`);
+- `CETRA_TEST_S3_PATH_STYLE` (default `true`; `false` for Hetzner, as `docs/self-hosting/s3.md` says).
 
-`s3_chaos.rs` and `s3_probe.rs` use the same two variables. `AGENTS.md` § Tests: extend the `LLMOBS_TEST_S3_ENDPOINT` bullet with "`LLMOBS_TEST_S3_REGION` and `LLMOBS_TEST_S3_PATH_STYLE` adapt it to a remote provider (R M4)".
+`s3_chaos.rs` and `s3_probe.rs` use the same two variables. `AGENTS.md` § Tests: extend the `CETRA_TEST_S3_ENDPOINT` bullet with "`CETRA_TEST_S3_REGION` and `CETRA_TEST_S3_PATH_STYLE` adapt it to a remote provider (R M4)".
 
 Hetzner settings: endpoint `https://<location>.your-objectstorage.com`, region `<location>`, path style `false`.
 
 ### The model against the real bucket
 
-`LLMOBS_MODEL_S3_REMOTE=1` makes `storage_matches_the_model_on_s3` build its `inner` from the `LLMOBS_TEST_S3_*` variables, instead of `InMemory`:
+`CETRA_MODEL_S3_REMOTE=1` makes `storage_matches_the_model_on_s3` build its `inner` from the `CETRA_TEST_S3_*` variables, instead of `InMemory`:
 - `AmazonS3Builder::from_env()` with bucket, endpoint, region and path style;
 - wrapped in `PrefixStore::new(store, format!("model-{ms}-{case}"))`;
 - with **remote part sizes**: `Harness::new_s3(inner, REMOTE_PUT_SIZES)`, where `pub(super) const REMOTE_PUT_SIZES: PutSizes = PutSizes { single_max: 16 * 1024, part: 5 * 1024 * 1024 };` is added in `harness.rs`, used only on this path.
@@ -1043,13 +1043,13 @@ Hetzner settings: endpoint `https://<location>.your-objectstorage.com`, region `
   - With these sizes, a file above 16 KiB still takes the multipart path, as one last part, which every provider accepts.
   - `InMemory` runs keep `MODEL_PUT_SIZES`, with its 8 KiB parts.
 
-At the end of each case it lists the prefix and deletes every object. Uploads that the case left incomplete (abandoned ones: a failed abort, a lost create answer, a cancellation) can't be listed through `object_store`. They stay on the bucket until the lifecycle rule removes them, a day later. That is expected, and the reason the rule is applied before R4.8 runs. The schedule still runs on top. Add `AGENTS.md` § Tests: "`LLMOBS_MODEL_S3_REMOTE=1` runs the S3-mode model test against the `LLMOBS_TEST_S3_*` bucket."
+At the end of each case it lists the prefix and deletes every object. Uploads that the case left incomplete (abandoned ones: a failed abort, a lost create answer, a cancellation) can't be listed through `object_store`. They stay on the bucket until the lifecycle rule removes them, a day later. That is expected, and the reason the rule is applied before R4.8 runs. The schedule still runs on top. Add `AGENTS.md` § Tests: "`CETRA_MODEL_S3_REMOTE=1` runs the S3-mode model test against the `CETRA_TEST_S3_*` bucket."
 
-Run `LLMOBS_MODEL_S3_REMOTE=1 just model-s3 20`. Network latency makes a case take tens of seconds; 20 cases is the target. Report the time.
+Run `CETRA_MODEL_S3_REMOTE=1 just model-s3 20`. Network latency makes a case take tens of seconds; 20 cases is the target. Report the time.
 
 ### Probes (`crates/storage/tests/s3_probe.rs`)
 
-Every test is skipped without `LLMOBS_TEST_S3_ENDPOINT`, like `tests/s3.rs`, and uses a prefix `probe-<ms>`, deleted at the end. Each test prints one line `probe <name>: <result>`, for `hardening.md`.
+Every test is skipped without `CETRA_TEST_S3_ENDPOINT`, like `tests/s3.rs`, and uses a prefix `probe-<ms>`, deleted at the end. Each test prints one line `probe <name>: <result>`, for `hardening.md`.
 
 What our code **relies on** is asserted. What is only information is printed.
 
@@ -1064,7 +1064,7 @@ What our code **relies on** is asserted. What is only information is printed.
 | `multipart_part_count` | an upload of 40 parts of 5 MiB (above our maximum: `compaction.target_file_size` 512 MiB / 16 MiB = 32 parts) | **assert** it completes |
 | `conditional_put` | `put_opts(PutMode::Create)` twice on one key (the builder's default is `S3ConditionalPut::ETagMatch`) | print: `AlreadyExists` on the second, or `NotImplemented`/other. Storage doesn't use it today; it's information for a future multi-node catalog (spec 03 §11) |
 | `incomplete_upload_is_listed` | start an upload, put one part, don't complete; `incomplete_uploads()` (curl, as R4.7) | **assert** it is listed; then abort it and assert it is gone |
-| `lifecycle_rule_present` | `GET ?lifecycle` through curl | print the rule; **assert** an `AbortIncompleteMultipartUpload` rule exists when `LLMOBS_TEST_S3_EXPECT_LIFECYCLE=1` |
+| `lifecycle_rule_present` | `GET ?lifecycle` through curl | print the rule; **assert** an `AbortIncompleteMultipartUpload` rule exists when `CETRA_TEST_S3_EXPECT_LIFECYCLE=1` |
 
 `lifecycle_rule_present` builds its `GET ?lifecycle` URL with the same path-style rule as `incomplete_uploads` (R4.7).
 
@@ -1084,9 +1084,9 @@ R4.8 does not apply it from the test (putting a lifecycle configuration needs a 
 With the Hetzner variables set:
 
 ```bash
-cargo test --release -p llmobs-storage --all-features --test s3 -- --nocapture
-cargo test --release -p llmobs-storage --all-features --test s3_probe -- --nocapture
-LLMOBS_MODEL_S3_REMOTE=1 just model-s3 20
+cargo test --release -p cetra-storage --all-features --test s3 -- --nocapture
+cargo test --release -p cetra-storage --all-features --test s3_probe -- --nocapture
+CETRA_MODEL_S3_REMOTE=1 just model-s3 20
 ```
 
 Don't run `just s3-chaos` against Hetzner. Pointing toxiproxy at `<location>.your-objectstorage.com:443` and the endpoint at the proxy would break the TLS host check, so toxiproxy runs against Versity only.
@@ -1106,7 +1106,7 @@ Add to `docs/self-hosting/s3.md`, before "Moving an existing installation…":
 ```markdown
 ## Incomplete uploads
 
-Large files are uploaded in parts. When an upload fails, llmobs aborts it, but an upload cut
+Large files are uploaded in parts. When an upload fails, cetra aborts it, but an upload cut
 short by a crash, a killed process or a lost network answer can stay on the bucket. Its parts are
 invisible and billed until something removes them. Add a lifecycle rule that aborts incomplete
 uploads after a day:
@@ -1117,7 +1117,7 @@ uploads after a day:
 Apply it with `aws s3api put-bucket-lifecycle-configuration --bucket <bucket>
 --lifecycle-configuration file://lifecycle.json` (add `--endpoint-url` for a provider other than
 AWS). Hetzner Object Storage, AWS S3, Cloudflare R2 and Garage support this rule. Use a prefix
-filter if the bucket is shared. Do not add an `Expiration` rule to the llmobs prefix: llmobs
+filter if the bucket is shared. Do not add an `Expiration` rule to the cetra prefix: cetra
 deletes its own files, and an expiring rule would delete data the catalog still needs.
 ```
 

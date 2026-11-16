@@ -12,13 +12,13 @@
               "endTimeUnixNano": "1767225591000000000",
               "attributes": [
                 {
-                  "key": "llmobs.input",
+                  "key": "cetra.input",
                   "value": {
                     "stringValue": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"rules\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"hello\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"one\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"two\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"end\"}]}]"
                   }
                 },
                 {
-                  "key": "llmobs.input.format",
+                  "key": "cetra.input.format",
                   "value": {
                     "stringValue": "messages"
                   }

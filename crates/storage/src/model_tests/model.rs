@@ -6,10 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use cetra_core::enums::{SpanKind, SpanStatus};
+use cetra_core::names::environment;
+use cetra_core::span::Span;
 use chrono::NaiveDate;
-use llmobs_core::enums::{SpanKind, SpanStatus};
-use llmobs_core::names::environment;
-use llmobs_core::span::Span;
 use uuid::Uuid;
 
 use super::shape::{

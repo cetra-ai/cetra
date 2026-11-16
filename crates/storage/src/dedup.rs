@@ -15,10 +15,10 @@ use crate::error::DedupError;
 /// Latest version of each span: the greatest `ingest_time` per `(trace_id, span_id)`.
 /// An equal `ingest_time` keeps the later row. Kept rows keep their input order.
 pub(crate) fn latest_spans(batch: &RecordBatch) -> Result<RecordBatch, DedupError> {
-    let trace = fixed(batch, llmobs_core::schema::spans::TRACE_ID)?;
-    let span = fixed(batch, llmobs_core::schema::spans::SPAN_ID)?;
+    let trace = fixed(batch, cetra_core::schema::spans::TRACE_ID)?;
+    let span = fixed(batch, cetra_core::schema::spans::SPAN_ID)?;
     let ingest = batch
-        .column_by_name(llmobs_core::schema::spans::INGEST_TIME)
+        .column_by_name(cetra_core::schema::spans::INGEST_TIME)
         .and_then(|column| column.as_primitive_opt::<TimestampNanosecondType>())
         .ok_or_else(|| DedupError::new("missing identity column"))?;
     let mut best: HashMap<(Vec<u8>, Vec<u8>), (i64, usize)> = HashMap::new();
@@ -65,13 +65,13 @@ pub(crate) fn latest_scores(
     drop_deleted: bool,
 ) -> Result<RecordBatch, DedupError> {
     let score_id = batch
-        .column_by_name(llmobs_core::schema::scores::SCORE_ID)
+        .column_by_name(cetra_core::schema::scores::SCORE_ID)
         .and_then(|column| column.as_string_opt::<i32>())
         .ok_or_else(|| DedupError::new("missing identity column"))?;
-    let updated = i64_column(batch, llmobs_core::schema::scores::UPDATED_AT)?;
-    let ingest = i64_column(batch, llmobs_core::schema::scores::INGEST_TIME)?;
+    let updated = i64_column(batch, cetra_core::schema::scores::UPDATED_AT)?;
+    let ingest = i64_column(batch, cetra_core::schema::scores::INGEST_TIME)?;
     let deleted = batch
-        .column_by_name(llmobs_core::schema::scores::DELETED)
+        .column_by_name(cetra_core::schema::scores::DELETED)
         .and_then(|column| column.as_boolean_opt())
         .ok_or_else(|| DedupError::new("missing identity column"))?;
     let mut best: HashMap<&str, (i64, i64, usize)> = HashMap::new();
@@ -119,7 +119,7 @@ fn i64_column<'a>(
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, AsArray, FixedSizeBinaryBuilder, RecordBatch};
-    use llmobs_core::schema::{spans, spans_schema};
+    use cetra_core::schema::{spans, spans_schema};
 
     use super::{latest_scores, latest_spans};
     use crate::wal::spans_keyed;
@@ -226,9 +226,9 @@ mod tests {
 
     /// `[(score_id, updated_at, ingest_time, name)]` as one scores batch.
     fn score_rows(rows: &[(u128, i64, i64, &str)]) -> RecordBatch {
-        use llmobs_core::batch::scores_to_record_batch;
-        use llmobs_core::enums::ScoreSource;
-        use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
+        use cetra_core::batch::scores_to_record_batch;
+        use cetra_core::enums::ScoreSource;
+        use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 
         let scores: Vec<Score> = rows
             .iter()

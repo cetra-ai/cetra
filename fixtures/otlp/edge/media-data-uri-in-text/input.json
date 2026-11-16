@@ -12,13 +12,13 @@
               "endTimeUnixNano": "1767225591000000000",
               "attributes": [
                 {
-                  "key": "llmobs.input",
+                  "key": "cetra.input",
                   "value": {
                     "stringValue": "look data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== now"
                   }
                 },
                 {
-                  "key": "llmobs.input.format",
+                  "key": "cetra.input.format",
                   "value": {
                     "stringValue": "text"
                   }

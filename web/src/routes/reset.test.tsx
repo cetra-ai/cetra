@@ -44,7 +44,7 @@ async function sendEmail(user: UserEvent, email = "ada@example.com") {
 it("explains how to reset without email", async () => {
   await renderApp("/reset");
   expect(await screen.findByRole("heading", { name: "Reset your password" })).toBeInTheDocument();
-  expect(screen.getByText(/llmobs admin reset-password --email <your email>/)).toBeInTheDocument();
+  expect(screen.getByText(/cetra admin reset-password --email <your email>/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Send reset link" })).toBeNull();
 });
 

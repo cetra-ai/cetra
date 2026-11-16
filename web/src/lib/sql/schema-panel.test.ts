@@ -4,7 +4,7 @@ import { readSchemaPanelOpen, writeSchemaPanelOpen } from "@/lib/sql/schema-pane
 it("is open with nothing stored and stores the closed choice", () => {
   expect(readSchemaPanelOpen()).toBe(true);
   writeSchemaPanelOpen(false);
-  expect(localStorage.getItem("llmobs.sql.schema")).toBe("closed");
+  expect(localStorage.getItem("cetra.sql.schema")).toBe("closed");
   expect(readSchemaPanelOpen()).toBe(false);
 });
 

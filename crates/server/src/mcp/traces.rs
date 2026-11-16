@@ -1,7 +1,7 @@
 //! MCP tools over traces and spans (D-H-9, D-H-10, D-H-11).
 
-use llmobs_core::ids::ProjectId;
-use llmobs_storage as storage;
+use cetra_core::ids::ProjectId;
+use cetra_storage as storage;
 use rmcp::model::JsonObject;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -523,7 +523,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::str::FromStr;
 
-    use llmobs_core::ids::{SpanId, TraceId};
+    use cetra_core::ids::{SpanId, TraceId};
     use serde_json::{Map, Value, json};
 
     use super::*;

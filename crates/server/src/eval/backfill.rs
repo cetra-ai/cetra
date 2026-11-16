@@ -4,12 +4,12 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use llmobs_core::ids::{OrgId, ProjectId};
-use llmobs_core::score::ScoreTarget;
-use llmobs_eval::OutputScore;
-use llmobs_otel::PriceRow;
-use llmobs_storage::error::QueryError;
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::score::ScoreTarget;
+use cetra_eval::OutputScore;
+use cetra_otel::PriceRow;
+use cetra_storage::error::QueryError;
+use cetra_storage::{
     ListScope, MAX_PAGE, QueryContext, RunError, SortOrder, SpanListRequest, SpanSort, TimeWindow,
     TraceListRequest, TraceSort, scores_by_id, span_list, trace_list,
 };
@@ -737,8 +737,8 @@ async fn finish(
 mod faults {
     use std::cell::{Cell, RefCell};
 
-    use llmobs_core::ids::ProjectId;
-    use llmobs_storage::RunError;
+    use cetra_core::ids::ProjectId;
+    use cetra_storage::RunError;
     use uuid::Uuid;
 
     use crate::http::AppState;
@@ -899,11 +899,11 @@ mod faults {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::{SpanKind, SpanStatus};
-    use llmobs_core::ids::{SpanId, TraceId};
-    use llmobs_core::score::ScoreValue;
-    use llmobs_core::span::Span;
-    use llmobs_otel::PriceScope;
+    use cetra_core::enums::{SpanKind, SpanStatus};
+    use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::score::ScoreValue;
+    use cetra_core::span::Span;
+    use cetra_otel::PriceScope;
 
     use super::*;
     use crate::api::scores::ScoreCreate;
@@ -1583,7 +1583,7 @@ mod tests {
         let seeded = app.seed().await;
         let start = NOW - 30 * SECOND;
         let mut judged = span(trace_id(3), 1, start, SpanStatus::Error);
-        judged.environment = Some(llmobs_core::names::environment::EVAL.to_owned());
+        judged.environment = Some(cetra_core::names::environment::EVAL.to_owned());
         app.commit_spans(
             &seeded.project,
             vec![
@@ -1610,7 +1610,7 @@ mod tests {
             seeded.project.id,
             seeded.org_id,
             RuleTarget::Trace,
-            Some("environment = 'llmobs-eval'"),
+            Some("environment = 'cetra-eval'"),
         );
         let rows = read_all(&mut Pager::new(&app.state, &evaluations, time, 10))
             .await
@@ -2147,13 +2147,13 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let mut eval = span(trace_id(1), 1, NOW - 40 * SECOND, SpanStatus::Ok);
-        eval.environment = Some("llmobs-eval".to_owned());
+        eval.environment = Some("cetra-eval".to_owned());
         app.commit_spans(&seeded.project, vec![eval]).await;
         let (rule, _) = online_rule(
             &app,
             seeded.project.id,
             "trace",
-            Some("environment = 'llmobs-eval'"),
+            Some("environment = 'cetra-eval'"),
             1.0,
         )
         .await;

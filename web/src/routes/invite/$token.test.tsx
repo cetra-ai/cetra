@@ -36,7 +36,7 @@ function signedInAsGuest() {
   server.use(http.get("/api/auth/me", () => HttpResponse.json({ user: GUEST, orgs: [] })));
 }
 
-const CLOUD = { id: "oidc:cloud", display_name: "llmobs Cloud" };
+const CLOUD = { id: "oidc:cloud", display_name: "cetra Cloud" };
 const START = authorizeHref("oidc:cloud", { redirect: URL_PATH });
 
 function onlyCloud(overrides: Partial<typeof authConfig> = {}) {
@@ -375,7 +375,7 @@ it("starts the only provider for a visitor without an account", async () => {
   const replaced = recordReplace();
   await renderApp(URL_PATH);
   await waitFor(() => expect(replaced).toEqual([START]));
-  expect(screen.getByText("Redirecting to llmobs Cloud…")).toBeInTheDocument();
+  expect(screen.getByText("Redirecting to cetra Cloud…")).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Join Acme" })).toBeInTheDocument();
 });
 
@@ -441,7 +441,7 @@ it("does not start the provider again after signing out of another account", asy
   const { user } = await renderApp(URL_PATH);
   await user.click(await screen.findByRole("button", { name: "Sign out" }));
   expect(
-    await screen.findByRole("link", { name: "Continue with llmobs Cloud" }),
+    await screen.findByRole("link", { name: "Continue with cetra Cloud" }),
   ).toBeInTheDocument();
   expect(screen.getByText(/^You're signed out here\./)).toBeInTheDocument();
   expect(replaced).toEqual([]);

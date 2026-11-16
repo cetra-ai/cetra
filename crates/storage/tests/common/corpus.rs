@@ -16,9 +16,9 @@ pub(crate) const CORPUS_FILE: &str = "oasst2-ready-messages.jsonl.gz";
 /// Longest message text kept, in bytes.
 pub(crate) const MAX_TEXT: usize = 4 * 1024;
 
-/// `LLMOBS_BENCH_CORPUS`, else `<CARGO_MANIFEST_DIR>/../../target/bench-corpus/<CORPUS_FILE>`.
+/// `CETRA_BENCH_CORPUS`, else `<CARGO_MANIFEST_DIR>/../../target/bench-corpus/<CORPUS_FILE>`.
 pub(crate) fn corpus_path() -> PathBuf {
-    match std::env::var("LLMOBS_BENCH_CORPUS") {
+    match std::env::var("CETRA_BENCH_CORPUS") {
         Ok(path) => PathBuf::from(path),
         Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/bench-corpus")
@@ -114,7 +114,7 @@ impl Corpus {
         let path = corpus_path();
         assert!(
             path.is_file(),
-            "corpus file missing: run `just fetch-corpus` or set LLMOBS_BENCH_CORPUS"
+            "corpus file missing: run `just fetch-corpus` or set CETRA_BENCH_CORPUS"
         );
         Self::load(&path).expect("the pinned corpus loads")
     }

@@ -1,4 +1,4 @@
-# GreptimeDB storage engine (mito2) — research notes for llmobs spec 03
+# GreptimeDB storage engine (mito2) — research notes for cetra spec 03
 
 Repo: `/home/sebastien/travaux/greptimedb`. Local checkout HEAD `edbcb8224` (2026-09-21, "fail startup on duplicate region engine configs"). Upstream `main` is ahead (to 2026-11-10); some lessons below come from upstream commits after the local checkout, marked "(upstream)".
 
@@ -175,7 +175,7 @@ Isolation is physical per table and region: own directory, manifest, memtables, 
 | `3131cdbcb` | Bound the decompressed size of compressed ingest requests (memory-admission gap). |
 | `f690bbb20` | They built a remote-WAL index for faster replay, then removed it (complexity not worth it). |
 
-## 13. Recommendations for llmobs spec 03
+## 13. Recommendations for cetra spec 03
 
 **§1 WAL**
 - Keep `wal.sync = always` with group commit. It is stricter than GreptimeDB's default, and their history shows how easily "periodic sync" turns into "no sync".

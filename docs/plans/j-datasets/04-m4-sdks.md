@@ -54,7 +54,7 @@ export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH
 
 ### `evaluate` flow (spec 06 § Protocol, as amended)
 
-1. **Checks before any request.** A running runtime (`llmobs.init()` was called with a key and not shut down), else `ConfigError("evaluate needs llmobs.init() with an API key")`. `concurrency` 1–64, `repetitions` 1–20, `experiment_name` 1–200 characters when given, else `ValueError`/`RangeError` naming the argument. Scorer names: each scorer's name (below) is non-empty, not `<lambda>`, and unique, else `ValueError`/`TypeError` naming `scorers[i]`. Python `evaluate` refuses a coroutine function as task or scorer (`TypeError`: "use aevaluate for async tasks and scorers").
+1. **Checks before any request.** A running runtime (`cetra.init()` was called with a key and not shut down), else `ConfigError("evaluate needs cetra.init() with an API key")`. `concurrency` 1–64, `repetitions` 1–20, `experiment_name` 1–200 characters when given, else `ValueError`/`RangeError` naming the argument. Scorer names: each scorer's name (below) is non-empty, not `<lambda>`, and unique, else `ValueError`/`TypeError` naming `scorers[i]`. Python `evaluate` refuses a coroutine function as task or scorer (`TypeError`: "use aevaluate for async tasks and scorers").
 2. **Client.** The `client` argument, else a `Client` built from the runtime's `api_key` and `base_url`.
 3. **Create.** `POST /experiments` with `{name, dataset, dataset_version?, description?, metadata?, repetitions}`. `name` defaults to `"<dataset name> <UTC time as YYYY-MM-DD HH:MM:SS>"`. `dataset` is the argument when it is a string (name or id); for a `Dataset` object it is its `id`, and `dataset_version` is the object's `version` unless the caller passed `dataset_version`. The answer is flat (D-J-10, `CreateExperimentResponse`): `{experiment, items: [DatasetItem], next_cursor}`, with `experiment` holding `dataset_id` and the pinned `dataset_version`, `items` the first page (up to 1,000) of the pinned version and `next_cursor` the cursor of the next page or `null`. There is no nested `items.data`. Sent once (no retry).
 4. **Items.** Starting from the create answer's top-level `next_cursor`, while it is not null, `GET /datasets/{dataset_id}/items?version=<pinned>&limit=1000&cursor=<cursor>`. All items are held in memory (at most 20,000 runs, D-J-10).
@@ -67,20 +67,20 @@ export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH
    - after the span ended, and only when the task succeeded, runs every scorer in the order given (§ Scorers) and queues one score per scorer value **when the run has a trace id** (a run without one keeps its scores in the local result only);
    - builds the result row `{dataset_item_id, repetition, trace_id?, output?, error?, latency_ns}` (§ Output).
 6. **Results.** Rows are posted with `POST /experiments/{id}/items` `{results: [...]}` in batches of at most 500 rows **and** at most 32 MiB of serialized outputs (the sum over the batch of the UTF-8 byte length of each row's JSON-encoded `output`, after § Output's truncation; D-J-10). A batch is sent as soon as 500 rows are waiting or adding the next row would pass 32 MiB, and once at the end. A single row never exceeds 32 MiB (its output is at most 256 KiB). Posts are retried (an upsert), from one sender at a time (Python: under a lock, from the worker that filled the batch; TypeScript: awaited by the run loop). An `ApiError` from a post stops new runs, waits for the runs in flight, calls finish with `{error: "results upload failed"}` (its own failure ignored and logged at debug level) and re-raises the first `ApiError`.
-7. **Flush and finish.** `llmobs.flush()` (spans and the score queue), then `POST /experiments/{id}/finish` with `{}`. Finish is retried like a `GET`: a retry after a lost answer gets `200` because a repeated finish with the same outcome is idempotent (D-J-10). An `ApiError` from finish is raised.
+7. **Flush and finish.** `cetra.flush()` (spans and the score queue), then `POST /experiments/{id}/finish` with `{}`. Finish is retried like a `GET`: a retry after a lost answer gets `200` because a repeated finish with the same outcome is idempotent (D-J-10). An `ApiError` from finish is raised.
 8. **Answer.** An `ExperimentResult` (§ Result) built from the local rows and scores; the server is not read back.
 
-**402 from the score queue.** Scores go through the existing score queue, which keeps its D-P-34 pause: after a `402` it drops scores for `Retry-After` and warns once. That pause covers scores only; `evaluate` keeps running the tasks, posting results and finishing, and logs one more warning (`warn_once`, key `"evaluate-score-pause"`): `"llmobs: the monthly units cap paused score uploads; experiment scores are being dropped"`, emitted when a run queues a score while the queue is paused (Python: `QuotaState` of the runtime's queue; TypeScript: the queue's pause state). The local `ExperimentResult` still holds every score.
+**402 from the score queue.** Scores go through the existing score queue, which keeps its D-P-34 pause: after a `402` it drops scores for `Retry-After` and warns once. That pause covers scores only; `evaluate` keeps running the tasks, posting results and finishing, and logs one more warning (`warn_once`, key `"evaluate-score-pause"`): `"cetra: the monthly units cap paused score uploads; experiment scores are being dropped"`, emitted when a run queues a score while the queue is paused (Python: `QuotaState` of the runtime's queue; TypeScript: the queue's pause state). The local `ExperimentResult` still holds every score.
 
-When `sample_rate < 1` the root spans of some runs are dropped and those runs have no trace id and send no score. `evaluate` logs one warning (`warn_once`, key `"evaluate-sample-rate"`): `"llmobs: sample_rate is below 1; some experiment runs will have no trace and no score"`.
+When `sample_rate < 1` the root spans of some runs are dropped and those runs have no trace id and send no score. `evaluate` logs one warning (`warn_once`, key `"evaluate-sample-rate"`): `"cetra: sample_rate is below 1; some experiment runs will have no trace and no score"`.
 
 ### Experiment scope
 
-Every span started inside a run must carry the experiment linkage, including spans of instrumentors (the OpenAI call inside the task), so the trace is excluded from the default lists (spec 05 tests `metadata['llmobs.experiment_id']` on the trace) and its environment is `experiment`.
+Every span started inside a run must carry the experiment linkage, including spans of instrumentors (the OpenAI call inside the task), so the trace is excluded from the default lists (spec 05 tests `metadata['cetra.experiment_id']` on the trace) and its environment is `experiment`.
 
 - The context values (`ContextValues`, the object under the SDK's one context key) gain a field `experiment`: `None`/`undefined`, or a pair `(experiment_id, dataset_item_id)` (two UUID strings). `context()` / `withContext()` copy it from the outer values unchanged (they cannot set it).
 - The scope is entered by a private helper that builds the context **from the empty OTel context** (Python `opentelemetry.context.Context()`, TypeScript `ROOT_CONTEXT`) with `ContextValues(experiment=(experiment_id, item_id))` and nothing else: no session, user, tags or metadata of the caller, no active span, no baggage.
-- The span processor's stamp, when `values.experiment` is set: sets `llmobs.experiment.id` and `llmobs.dataset_item.id` (the attribute names of spec 02 § Context fields; the server moves them into `metadata['llmobs.experiment_id']` / `metadata['llmobs.dataset_item_id']`), and sets `llmobs.environment` to `experiment` **instead of** the configured environment. `llmobs.release` stays as configured. Spans outside a scope are stamped exactly as today.
+- The span processor's stamp, when `values.experiment` is set: sets `cetra.experiment.id` and `cetra.dataset_item.id` (the attribute names of spec 02 § Context fields; the server moves them into `metadata['cetra.experiment_id']` / `metadata['cetra.dataset_item_id']`), and sets `cetra.environment` to `experiment` **instead of** the configured environment. `cetra.release` stays as configured. Spans outside a scope are stamped exactly as today.
 
 ### Task
 
@@ -92,14 +92,14 @@ Every span started inside a run must carry the experiment linkage, including spa
 - **Name.** Python: `scorer.__name__` (a `functools.partial` has none: `ValueError`). TypeScript: `scorer.name`.
 - **Arguments.** Python: keyword arguments, chosen by the scorer's parameter names among `input`, `output`, `expected`, `metadata`, `trace_id`, `item` (`expected` is `item.expected_output`, `metadata` is `item.metadata`, `trace_id` may be `None`). A scorer with `**kwargs` receives all six. A required parameter outside the six is a `ValueError` at step 1, naming `scorers[i]` and the parameter. TypeScript: one object `{input, output, expected, metadata, traceId, item}`.
 - **Return value.** `bool`/`boolean` → a `boolean` score; `int`/`float`/`number` (not `bool`, finite) → `numeric`; `str`/`string` → `categorical`; a `Score` → its value, `reason`, `data_type` and `metadata`; `None`/`undefined` → no score. Anything else, or a non-finite number, counts as a scorer error.
-- **Errors.** A scorer that raises (or returns a bad value) gives no score for that run; the result counts it in `scorer_errors[name]`, and the SDK logs one warning per scorer and `evaluate` call: `"llmobs: scorer <index> failed (<ExceptionTypeName>)"` (the index, never the name or the message).
+- **Errors.** A scorer that raises (or returns a bad value) gives no score for that run; the result counts it in `scorer_errors[name]`, and the SDK logs one warning per scorer and `evaluate` call: `"cetra: scorer <index> failed (<ExceptionTypeName>)"` (the index, never the name or the message).
 - **Queued score.** Through the runtime's score queue: target `trace` with the run's trace id, `name` = the scorer name, `source: "sdk"`, a fresh UUIDv7 `score_id`, `reason`/`metadata` from a `Score`, plus `experiment_id` and `dataset_item_id` (D-J-12). Masking applies to `reason` and `metadata` as in `score()`.
 
 `Score` is a small public type: Python `@dataclass(frozen=True, slots=True, kw_only=True) class Score: value: bool | int | float | str; reason: str | None = None; data_type: DataType | None = None; metadata: Mapping[str, object] | None = None` (validated like `score()`'s arguments when used; an invalid one counts as a scorer error). TypeScript `interface Score { value: boolean | number | string; reason?: string; dataType?: ScoreDataType; metadata?: Readonly<Record<string, unknown>> }`, recognised by `typeof value === "object" && value !== null && "value" in value`.
 
 ### Output
 
-The row's `output` is the task output converted to JSON (Python `to_jsonable` from `_serialize`, TypeScript the serializer's JSON conversion used for payloads) and serialized compactly. When the serialized UTF-8 text is over 262,144 bytes, `output` becomes a **string**: the first 260,000 bytes of that text (cut on a character boundary) followed by `"…[llmobs: truncated, original <n> bytes]"`. A task output of `None`/`undefined` leaves `output` out. A failed run has no `output`.
+The row's `output` is the task output converted to JSON (Python `to_jsonable` from `_serialize`, TypeScript the serializer's JSON conversion used for payloads) and serialized compactly. When the serialized UTF-8 text is over 262,144 bytes, `output` becomes a **string**: the first 260,000 bytes of that text (cut on a character boundary) followed by `"…[cetra: truncated, original <n> bytes]"`. A task output of `None`/`undefined` leaves `output` out. A failed run has no `output`.
 
 ### Result
 
@@ -137,17 +137,17 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
 ### Read first
 
-`sdks/python/src/llmobs/__init__.py`, `_config.py` (`resolve_config`, `ConfigError`, `Config`), `_scores.py` (`ScoreQueue._retry_delay`, `_post`, the constants), `_log.py`, `_runtime.py` (`current`), `tests/conftest.py` (all of it), `tests/test_scores.py` (helpers), `sdks/python/pyproject.toml`.
+`sdks/python/src/cetra/__init__.py`, `_config.py` (`resolve_config`, `ConfigError`, `Config`), `_scores.py` (`ScoreQueue._retry_delay`, `_post`, the constants), `_log.py`, `_runtime.py` (`current`), `tests/conftest.py` (all of it), `tests/test_scores.py` (helpers), `sdks/python/pyproject.toml`.
 
 ### Files
 
 | File | Change |
 |---|---|
-| `sdks/python/src/llmobs/_retry.py` | new: the shared retry delay |
-| `sdks/python/src/llmobs/_scores.py` | `ScoreQueue._retry_delay` calls `_retry.retry_delay` |
-| `sdks/python/src/llmobs/_client.py` | new: `ApiError`, `Client`, the HTTP layer |
-| `sdks/python/src/llmobs/_datasets.py` | new: `Datasets`, `Dataset`, `DatasetItem`, `DatasetInfo` |
-| `sdks/python/src/llmobs/__init__.py` | exports |
+| `sdks/python/src/cetra/_retry.py` | new: the shared retry delay |
+| `sdks/python/src/cetra/_scores.py` | `ScoreQueue._retry_delay` calls `_retry.retry_delay` |
+| `sdks/python/src/cetra/_client.py` | new: `ApiError`, `Client`, the HTTP layer |
+| `sdks/python/src/cetra/_datasets.py` | new: `Datasets`, `Dataset`, `DatasetItem`, `DatasetInfo` |
+| `sdks/python/src/cetra/__init__.py` | exports |
 | `sdks/python/tests/conftest.py` | the recorder answers `GET`, `PATCH`, `DELETE`; `respond_with` |
 | `sdks/python/tests/test_client.py` | new |
 | `sdks/python/tests/test_datasets.py` | new |
@@ -170,7 +170,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
    ```python
    class ApiError(Exception):
-       """An error answer from the llmobs API (a status outside 2xx, after retries).
+       """An error answer from the cetra API (a status outside 2xx, after retries).
 
        ``code`` is the problem's ``code``; ``errors`` its field errors as
        ``{"field": ..., "message": ...}`` dicts.
@@ -198,8 +198,8 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
    class Client:
        """REST client for datasets (spec 10 § Datasets and experiments).
 
-       Configuration resolves as for ``init()``: argument, then ``LLMOBS_API_KEY`` /
-       ``LLMOBS_BASE_URL``, then the default URL. Raises ``ConfigError`` without a key.
+       Configuration resolves as for ``init()``: argument, then ``CETRA_API_KEY`` /
+       ``CETRA_BASE_URL``, then the default URL. Raises ``ConfigError`` without a key.
        """
 
        def __init__(self, *, api_key: str | None = None, base_url: str | None = None) -> None: ...
@@ -304,9 +304,9 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
 `tests/test_client.py` (with `http_recorder`; replace `client._sleep` with a recorder of durations):
 
-1. `client_needs_a_key`: `Client(api_key=None)` with no env key raises `ConfigError` whose message is `api_key: required` (use `monkeypatch.delenv("LLMOBS_API_KEY", raising=False)`).
+1. `client_needs_a_key`: `Client(api_key=None)` with no env key raises `ConfigError` whose message is `api_key: required` (use `monkeypatch.delenv("CETRA_API_KEY", raising=False)`).
 2. `client_repr_hides_the_key`.
-3. `request_sends_the_bearer_and_json`: a `POST` records path `/api/v1/projects/current/datasets`, `Authorization: Bearer sk-llmobs-test`, `Content-Type: application/json`.
+3. `request_sends_the_bearer_and_json`: a `POST` records path `/api/v1/projects/current/datasets`, `Authorization: Bearer sk-cetra-test`, `Content-Type: application/json`.
 4. `retries_5xx_then_succeeds`: a `GET` gets 503, 429 (`Retry-After: 2`), 200; sleeps `[1.0, 2.0]`.
 5. `gives_up_after_three_retries`: a `GET` gets four 500s and raises `ApiError(status=500)`; sleeps `[1.0, 2.0, 4.0]`.
 5a. `create_is_not_retried`: `client.datasets.create("faq")` gets a 503: `ApiError(status=503)` is raised, exactly one request was recorded and no sleep happened. Same for a network error on create (`status=0`, one attempt, no sleep).
@@ -328,7 +328,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 ### Done when
 
 - `just check-py` and `just check` pass; `test_scores.py` is unchanged and green.
-- `python -c "import llmobs; llmobs.Client"` works in `sdks/python` (`uv run`).
+- `python -c "import cetra; cetra.Client"` works in `sdks/python` (`uv run`).
 
 ## J4.2 — Python: `evaluate` and `aevaluate`
 
@@ -342,11 +342,11 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
 | File | Change |
 |---|---|
-| `sdks/python/src/llmobs/_context.py` | `ContextValues.experiment`; `context()` copies it; `experiment_scope` |
-| `sdks/python/src/llmobs/_processor.py` | stamp the linkage and the `experiment` environment |
-| `sdks/python/src/llmobs/_scores.py` | `queue_experiment_score` |
-| `sdks/python/src/llmobs/_experiments.py` | new: `Score`, `Run`, `ExperimentResult`, `evaluate`, `aevaluate` |
-| `sdks/python/src/llmobs/__init__.py` | exports |
+| `sdks/python/src/cetra/_context.py` | `ContextValues.experiment`; `context()` copies it; `experiment_scope` |
+| `sdks/python/src/cetra/_processor.py` | stamp the linkage and the `experiment` environment |
+| `sdks/python/src/cetra/_scores.py` | `queue_experiment_score` |
+| `sdks/python/src/cetra/_experiments.py` | new: `Score`, `Run`, `ExperimentResult`, `evaluate`, `aevaluate` |
+| `sdks/python/src/cetra/__init__.py` | exports |
 | `sdks/python/tests/test_context.py` | scope tests |
 | `sdks/python/tests/test_experiments.py` | new |
 
@@ -381,11 +381,11 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
    ```python
    if values.experiment is not None:
-       span.set_attribute("llmobs.experiment.id", values.experiment.experiment_id)
-       span.set_attribute("llmobs.dataset_item.id", values.experiment.dataset_item_id)
-       span.set_attribute("llmobs.environment", "experiment")
+       span.set_attribute("cetra.experiment.id", values.experiment.experiment_id)
+       span.set_attribute("cetra.dataset_item.id", values.experiment.dataset_item_id)
+       span.set_attribute("cetra.environment", "experiment")
    elif self._environment is not None:
-       span.set_attribute("llmobs.environment", self._environment)
+       span.set_attribute("cetra.environment", self._environment)
    ```
 
    (replacing the current environment `if`). Release is unchanged.
@@ -474,7 +474,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
    ```
 
    - Follow § `evaluate` flow exactly. Implement the shared parts once: `_prepare(...)` (checks, client, create, items) returns a private `_Plan` with the experiment, items and the scorer table (`name`, callable, accepted parameter names); `_run_sync(plan, item, repetition)` and `async _run_async(...)` each do one run and return a `Run` plus the row dict; `_Uploader` holds the pending rows, a `threading.Lock`, and `add(row)` / `drain()` that post batches of at most 500 rows and 32 MiB of outputs (step 6) through the client with `retry=True`; the create is `_request("POST", "/experiments", "/experiments", body=..., retry=False)` and finish `_request(..., retry=True)`; `_finish(...)` flushes and finishes; `_result(...)` builds the `ExperimentResult`.
-   - `evaluate`: a `concurrent.futures.ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="llmobs-evaluate")`; submit every run, collect `Run`s by index so `runs` keeps the item order. On an upload `ApiError`, set a stop flag that makes pending runs return without running (they are left out of `runs`), then follow step 6.
+   - `evaluate`: a `concurrent.futures.ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="cetra-evaluate")`; submit every run, collect `Run`s by index so `runs` keeps the item order. On an upload `ApiError`, set a stop flag that makes pending runs return without running (they are left out of `runs`), then follow step 6.
    - `aevaluate`: an `asyncio.Semaphore(concurrency)` and `asyncio.gather`. An async task is awaited inside the scope and the span (`async with span(...)`); a sync task runs in `asyncio.to_thread` with `contextvars.copy_context()` (`to_thread` already copies the context). Scorers likewise. Uploads run in `asyncio.to_thread(uploader.drain_full)` so the event loop is not blocked.
    - The root span: `with span(experiment_name, kind="chain", input=item.input) as handle:`, call the task inside; `handle.set_output(output)` on success; on an exception, catch it **inside** the `with` after recording: let the exception propagate out of the `with` block (so `span.__exit__` records it), and catch it right outside. Then `handle.trace_id`.
    - Output conversion and truncation: § Output, with `json.dumps(to_jsonable(output), separators=(",", ":"), ensure_ascii=False, allow_nan=False)`; a conversion failure makes `output` the string `"<unserializable TypeName>"`.
@@ -495,13 +495,13 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 2. `bad_arguments_raise_before_any_request`: `concurrency=0`, `concurrency=65`, `repetitions=21`, a lambda scorer, two scorers named alike, a coroutine task (each a separate `pytest.mark.parametrize` case).
 3. `create_body`: `dataset="faq"`, `metadata={"model": "m"}`, `repetitions=2` → the recorded body; a `Dataset` object sends its id and version.
 4. `pages_items_with_the_pinned_version`: two pages; the `GET` query has `version=2&limit=1000&cursor=`.
-5. `each_run_is_its_own_trace_with_the_linkage`: two items, `repetitions=2`, a task that opens a child `llmobs.span("inner")`; the finished spans hold 4 roots named after the experiment (no parent), each with a child; every span has `llmobs.experiment.id == "e1"`, `llmobs.dataset_item.id` equal to its item, `llmobs.environment == "experiment"` even with `init(environment="prod")`; the root's `llmobs.input` is the item input and `llmobs.output` the task output.
-6. `caller_context_does_not_leak`: `evaluate` called inside `llmobs.context(session_id="s")` and an open span: the roots have no parent and no `llmobs.session.id`.
+5. `each_run_is_its_own_trace_with_the_linkage`: two items, `repetitions=2`, a task that opens a child `cetra.span("inner")`; the finished spans hold 4 roots named after the experiment (no parent), each with a child; every span has `cetra.experiment.id == "e1"`, `cetra.dataset_item.id` equal to its item, `cetra.environment == "experiment"` even with `init(environment="prod")`; the root's `cetra.input` is the item input and `cetra.output` the task output.
+6. `caller_context_does_not_leak`: `evaluate` called inside `cetra.context(session_id="s")` and an open span: the roots have no parent and no `cetra.session.id`.
 7. `task_with_item`: a two-parameter task receives the `DatasetItem`.
 8. `task_error_is_recorded`: a task raising `KeyError("x")` on one item: that row has `error == "KeyError: 'x'"`, no `output`; its root span has status ERROR and an `exception` event; scorers did not run for it; `evaluate` returns normally and `error_count == 1`.
 9. `scorer_arguments_by_name`: scorers `def exact(output, expected)`, `def uses_all(**kw)`, `def with_trace(trace_id, item)` receive the right values.
 10. `scorer_return_types`: `True`, `0.5`, `"good"`, `Score(value=1, reason="r", metadata={"k": "v"})` and `None` give boolean, numeric, categorical, numeric with reason, and no score; the score bodies have `target.type == "trace"`, the run's trace id, `experiment_id == "e1"`, `dataset_item_id` and `source == "sdk"`.
-11. `scorer_errors_are_counted_and_logged_once`: a scorer raising on every run → `scorer_errors == {"bad": 4}`, exactly one WARNING record `llmobs: scorer 0 failed (RuntimeError)`; a scorer returning `float("nan")` counts too.
+11. `scorer_errors_are_counted_and_logged_once`: a scorer raising on every run → `scorer_errors == {"bad": 4}`, exactly one WARNING record `cetra: scorer 0 failed (RuntimeError)`; a scorer returning `float("nan")` counts too.
 12. `results_are_batched_by_500`: 1,200 items with a trivial task → three `POST …/items` with 500, 500 and 200 results, then one `finish`, which comes after the last score post (check the recorded order); every recorded `repetition` is `0` (0-based).
 12a. `results_are_batched_by_bytes`: 300 items whose task returns `"x" * 200_000` (each output ≈ 200 KiB, under the 256 KiB cut) with `repetitions=1` → the batches each hold at most 32 MiB of outputs: the first post holds 167 rows (167 × 200,002 B ≤ 32 MiB < 168 × 200,002 B), and the row counts sum to 300. Assert with the computed byte sums, not the literal 167, if the marker or quoting changes the per-row size.
 12b. `repetitions_are_zero_based`: `repetitions=3` on one item → posted repetitions `[0, 1, 2]`.
@@ -512,7 +512,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 14. `upload_failure_finishes_with_an_error_and_raises`: the second items post answers 422 → `ApiError(status=422)` raised; one `finish` with `{"error": "results upload failed"}` was sent.
 15. `finish_failure_raises`.
 16. `summary_and_assert_min`: a fixed `ExperimentResult` built directly: `summary()` equals the expected text exactly; `assert_min("exact", 0.5)` passes; `assert_min("exact", 0.9)` raises with the message; `assert_min("missing", 0)` raises.
-17. `aevaluate_runs_async_tasks`: `asyncio.run(llmobs.aevaluate(...))` with an async task and an async scorer, `concurrency=2`, records the same rows and linkage as test 5.
+17. `aevaluate_runs_async_tasks`: `asyncio.run(cetra.aevaluate(...))` with an async task and an async scorer, `concurrency=2`, records the same rows and linkage as test 5.
 18. `sample_rate_warning`: `init(sample_rate=0.5)` → one warning with the exact text.
 19. `no_payload_in_logs`: run with a task that raises `ValueError("secret-canary")` and a scorer that raises `ValueError("secret-canary-2")`; no log record contains `secret-canary`.
 
@@ -542,8 +542,8 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 
 1. **README section.** Subsections: *Datasets* (`Client`, `create`, `add_items`, `get(version=)`, `list`, `delete`; one item = `input`, `expected_output`, `metadata`; every `add_items` batch of 1,000 is a new version; the dataset's JSON Schemas are checked by the server and a refused item raises `ApiError` with the field errors); *Experiments* (the spec 10 example without `server_evaluators`: task signature rules, scorer argument names and return types, `Score`, `concurrency` and `repetitions` ranges, `aevaluate`, what `summary()` prints, `assert_min` for CI); *What gets recorded* (one trace per run with environment `experiment`, excluded from the default trace lists; scores need a trace, so `sample_rate` below 1 loses some; results upload in batches; nothing is scored on the server, D-J-11); *Keys* (the key needs `ingest`, `read` and `write`); *Errors* (`ConfigError`, `ApiError` fields; task and scorer exceptions do not abort the run).
 2. Mark the experiments example `<!-- test -->` only if `test_readme.py` can run it against a fake API; read `test_readme.py` first. If it would need more than a `respond_with` fake added in that file's fixture, leave the block untested and say so in the report.
-3. **e2e test** `test_dataset_experiment_round_trip` in `test_e2e.py`: `llmobs.init(api_key=key, base_url=base_url)`; `client = llmobs.Client(api_key=key, base_url=base_url)`; create a dataset named `f"e2e-py-{llmobs.uuid7()}"`; `add_items` two items `{"input": {"q": "a"}, "expected_output": "A"}` and `{"input": {"q": "b"}, "expected_output": "B"}`; `evaluate(dataset=ds, task=lambda i: i["q"].upper(), scorers=[exact])` with `def exact(output, expected): return output == expected`; assert `result.error_count == 0` and `assert_min("exact", 1.0)`; `llmobs.shutdown()`; then `_poll` `GET {base_url}/api/v1/projects/current/experiments/{result.experiment_id}/results` until `summary.scores` holds `exact` with `count == 2` and `pass_rate == 1.0`, and its `experiment.status == "completed"`. Finally delete the dataset. (This runs only in `just e2e`, after M3.)
-4. **CHANGELOG** under `### Added`: `- Python SDK: \`llmobs.Client\` for datasets and \`llmobs.evaluate\` / \`aevaluate\` to run experiments on your machine (track J).`
+3. **e2e test** `test_dataset_experiment_round_trip` in `test_e2e.py`: `cetra.init(api_key=key, base_url=base_url)`; `client = cetra.Client(api_key=key, base_url=base_url)`; create a dataset named `f"e2e-py-{cetra.uuid7()}"`; `add_items` two items `{"input": {"q": "a"}, "expected_output": "A"}` and `{"input": {"q": "b"}, "expected_output": "B"}`; `evaluate(dataset=ds, task=lambda i: i["q"].upper(), scorers=[exact])` with `def exact(output, expected): return output == expected`; assert `result.error_count == 0` and `assert_min("exact", 1.0)`; `cetra.shutdown()`; then `_poll` `GET {base_url}/api/v1/projects/current/experiments/{result.experiment_id}/results` until `summary.scores` holds `exact` with `count == 2` and `pass_rate == 1.0`, and its `experiment.status == "completed"`. Finally delete the dataset. (This runs only in `just e2e`, after M3.)
+4. **CHANGELOG** under `### Added`: `- Python SDK: \`cetra.Client\` for datasets and \`cetra.evaluate\` / \`aevaluate\` to run experiments on your machine (track J).`
 
 ### Tests
 
@@ -673,7 +673,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
    export function experimentContext(experimentId: string, datasetItemId: string): Context;
    ```
 
-2. **`processor.ts`.** In `onStart`, after `stampContext`: read `currentValues(parentContext).experiment`; when set, set `llmobs.experiment.id`, `llmobs.dataset_item.id` and `llmobs.environment = "experiment"`; else the configured environment as today. Release unchanged.
+2. **`processor.ts`.** In `onStart`, after `stampContext`: read `currentValues(parentContext).experiment`; when set, set `cetra.experiment.id`, `cetra.dataset_item.id` and `cetra.environment = "experiment"`; else the configured environment as today. Release unchanged.
 
 3. **`scores.ts`.** `ScoreBody` gains `experiment_id?: string; dataset_item_id?: string`. Add `export function queueExperimentScore(runtime: Runtime, options: ScoreOptions & { traceId: string; experimentId: string; datasetItemId: string }): string | undefined`: `invalidReason`, a minted id, `buildBody`, the two fields, `runtime.scores.put`; one warning when invalid, as `score()`.
 
@@ -738,7 +738,7 @@ Scorers appear in the order given. `assert_min(name, threshold)` computes the me
 1. README: the same subsections as J4.3 step 1, in TypeScript.
 2. A tested `evaluateExample` (`<!-- readme:evaluateExample -->`) when the harness can give it a fake `RestFetch` through `client`; otherwise an untested block, reported.
 3. e2e `"runs an experiment and reads its results back"`: J4.3 step 3 in TypeScript (dataset name `e2e-ts-${uuid7()}`).
-4. CHANGELOG `### Added`: `- TypeScript SDK: \`new llmobs.Client()\` for datasets and \`llmobs.evaluate\` to run experiments on your machine (track J).`
+4. CHANGELOG `### Added`: `- TypeScript SDK: \`new cetra.Client()\` for datasets and \`cetra.evaluate\` to run experiments on your machine (track J).`
 
 ### Done when
 

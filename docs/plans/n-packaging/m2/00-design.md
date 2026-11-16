@@ -4,11 +4,11 @@ Track N's second milestone. M1 (`../README.md`) shipped the packaging and a docu
 (stop, copy, start; D-N-11). M2 adds what spec 12 § Backups promised and what track Q needs for its
 cells (Q's requests R9 and R10, `docs/plans/n-packaging/README.md` § Requests for Q):
 
-- `llmobs admin backup --to <dir> [--meta-only]`: a consistent backup of a **running** server, taken
+- `cetra admin backup --to <dir> [--meta-only]`: a consistent backup of a **running** server, taken
   without stopping it;
 - object retention long enough that a metadata-only backup of an S3-mode server stays restorable
   against the live bucket;
-- `llmobs admin gc-orphans`: after a restore, deletes the objects the restored catalog does not know
+- `cetra admin gc-orphans`: after a restore, deletes the objects the restored catalog does not know
   and reports the ones it needs but cannot find;
 - copies of `meta.db` and `catalog.db` taken automatically before migrations run.
 
@@ -28,7 +28,7 @@ phase file. Each phase ends with `just check` green and one commit.
 
 ## What exists (checked 2026-11-14 on `main` at `aa5527b`)
 
-**The lock.** `llmobs serve` holds `<data_dir>/LOCK` (`crates/storage/src/lib.rs`, `lock_dir`). Another
+**The lock.** `cetra serve` holds `<data_dir>/LOCK` (`crates/storage/src/lib.rs`, `lock_dir`). Another
 process cannot open the storage engine while the server runs, so an online backup has to be done
 *by* the server: the CLI only asks for it.
 
@@ -81,7 +81,7 @@ lists the store today.
 
 ### Trigger: a local control socket (D-N-17)
 
-`llmobs serve` listens on a Unix socket at `<data_dir>/admin.sock`, created with mode `0600`.
+`cetra serve` listens on a Unix socket at `<data_dir>/admin.sock`, created with mode `0600`.
 - At bind time it removes a stale file at that path. That is safe because `LOCK` is already held.
 - It removes the socket at shutdown.
 - The protocol is one request per connection: the client writes one JSON line and reads one JSON
@@ -95,11 +95,11 @@ lists the store today.
 {"ok":false,"code":"busy","message":"another backup is running"}
 ```
 
-`llmobs admin backup` reads the config to find `data_dir`, connects to `<data_dir>/admin.sock`, sends
+`cetra admin backup` reads the config to find `data_dir`, connects to `<data_dir>/admin.sock`, sends
 the request and prints the report. It is the only command on the socket in M2.
 
 Why a socket:
-- it works with `docker compose exec llmobs llmobs admin backup …` (Q's cells) and over SSH;
+- it works with `docker compose exec cetra cetra admin backup …` (Q's cells) and over SSH;
 - authentication: the server checks the connecting process's uid (`SO_PEERCRED`, through
   `UnixStream::peer_cred`) and accepts only its own uid or root. Its own uid is the owner of the
   socket file it just bound, not the data directory's owner: a Kubernetes PVC root stays root's under
@@ -111,7 +111,7 @@ The backup is written by the server, so `<dir>` is a path on the **server's** fi
 the server's user (uid 65532 in the image).
 
 If the socket cannot be bound (a Unix socket path is limited to 108 bytes), the server logs a
-warning and runs without it. `llmobs admin backup` then reports that no server answers.
+warning and runs without it. `cetra admin backup` then reports that no server answers.
 
 ### Consistency: flush, then snapshot under a pin (D-N-18)
 
@@ -168,8 +168,8 @@ warning and runs without it. `llmobs admin backup` then reports that no server a
    - **S3 mode:** objects are not copied. The backup is metadata-only and relies on `gc.grace`
      (D-N-20) and, optionally, bucket versioning. `meta_only: true` is accepted in S3 mode; it is an
      error in local mode (`meta_only_needs_s3`), where it would make an unrestorable backup.
-7. **`secret.key`:** if `<data_dir>/secret.key` exists (no `LLMOBS_ENCRYPTION_KEY`), it is copied to
-   `<dir>/secret.key` with mode `0600`. With `LLMOBS_ENCRYPTION_KEY` set, the manifest says
+7. **`secret.key`:** if `<data_dir>/secret.key` exists (no `CETRA_ENCRYPTION_KEY`), it is copied to
+   `<dir>/secret.key` with mode `0600`. With `CETRA_ENCRYPTION_KEY` set, the manifest says
    `"encryption_key": "environment"` and the operator keeps that key with the backup.
 8. **`manifest.json`** (D-N-19), written last through a temporary file, then `fsync` and rename. A
    backup without `manifest.json` is incomplete.
@@ -198,7 +198,7 @@ again (unlinking hard links is safe); a pre-existing empty `<dir>` is emptied. I
 ```json
 {
   "format": 1,
-  "llmobs_version": "0.1.0",
+  "cetra_version": "0.1.0",
   "created_at": "2026-11-14T21:04:05.123456789Z",
   "mode": "full",
   "object_store": "local",
@@ -254,7 +254,7 @@ stopped:
 2. Create an empty data directory. Copy `meta.db`, `catalog.db`, `secret.key` (if present) and, for a
    full backup, `objects/` into it (`cp -a` keeps the hard links' content). There is no `wal/` to
    copy: the server creates it, and the WAL resumes after the catalog's `flushed_seq`.
-3. Run **`llmobs admin gc-orphans`**, with the server still stopped. It opens the storage (which takes
+3. Run **`cetra admin gc-orphans`**, with the server still stopped. It opens the storage (which takes
    `LOCK`) and lists the store:
    - it deletes every object under `tables/` and `media/` that the catalog does not know and that is
      older than `--min-age` (default `1h`);
@@ -266,11 +266,11 @@ stopped:
 
    **In S3 mode this is a rollback of the live bucket.** Every object written after the backup is
    unknown to the restored catalog and is deleted permanently. Run it with `--dry-run` first.
-4. If the backup is from an older version, run **`llmobs admin migrate`**: with the server stopped,
+4. If the backup is from an older version, run **`cetra admin migrate`**: with the server stopped,
    it migrates `meta.db` and `catalog.db` and exits (added by B8).
-5. Run `llmobs admin reapply-deletions --from <kept data directory>` (D-M-9). It re-opens every
+5. Run `cetra admin reapply-deletions --from <kept data directory>` (D-M-9). It re-opens every
    deletion the restored `meta.db` lacks, with its scope.
-6. Only now start `llmobs serve`. The deletion worker registers the re-opened deletions with storage
+6. Only now start `cetra serve`. The deletion worker registers the re-opened deletions with storage
    within seconds of the start. Starting before reapply would serve, evaluate and alert on erased
    data in that window (cross-track review X15). How evaluation results produced from restored data
    are cascaded is track M's (M7, M8).
@@ -299,7 +299,7 @@ Spec 12 § Upgrades already describes this; M2 builds it.
 
 ### What M2 does not do
 
-- No built-in schedule: cron, systemd timers or Q's own scheduler call `llmobs admin backup`
+- No built-in schedule: cron, systemd timers or Q's own scheduler call `cetra admin backup`
   (D-N-23).
 - No restore command (D-N-21).
 - No backup over HTTP and no remote target such as `s3://` for `--to`. Operators copy `<dir>` with
@@ -311,12 +311,12 @@ Spec 12 § Upgrades already describes this; M2 builds it.
 
 | # | Decision |
 |---|---|
-| D-N-17 | **Online backups go through a Unix control socket** `<data_dir>/admin.sock` (mode 0600; one JSON line each way); `llmobs admin backup --to <dir> [--meta-only]` asks the running server, which writes the backup (user). |
+| D-N-17 | **Online backups go through a Unix control socket** `<data_dir>/admin.sock` (mode 0600; one JSON line each way); `cetra admin backup --to <dir> [--meta-only]` asks the running server, which writes the backup (user). |
 | D-N-18 | **Flush, then a pinned snapshot.** Force-flush both tables and wait; `VACUUM INTO` `meta.db`, then `catalog.db` under the committer lock while cloning the catalog and taking an `object_gc_gate` (before the committer lock) that obsolete-file GC, media GC and dropped-project media deletion respect; hard-link (or copy) the snapshot's objects in local mode; copy `secret.key`; write `manifest.json` last. Compaction, deletion and retention keep running (user). |
 | D-N-19 | **Backup layout:** `manifest.json` (format 1, version, time, mode, store kind, key source, flushed sequences, `gc_grace_secs`, `restorable_until`, SHA-256 of the database and key files, object count and bytes), `meta.db`, `catalog.db`, `secret.key`, `objects/`. One backup at a time (`busy`); the target must be absent or empty and outside `data_dir`. |
 | D-N-20 | **`gc.grace` may be up to 30 days** (was 24 h), and is the retention that keeps a meta-only S3 backup restorable; no separate `gc.object_retention` key. Erased data stays in obsolete files for up to `gc.grace` (user). |
-| D-N-21 | **Restore is documented, plus `llmobs admin gc-orphans [--min-age 1h] [--dry-run]`** (server stopped): it deletes unknown objects older than the minimum age and reports catalog data files missing from the store (exit 1) and missing media (a warning); in S3 mode it rolls the live bucket back to the backup (user). |
-| D-N-22 | **Pre-migration copies:** `meta.db.pre-m<applied>` and `catalog.db.pre-m<applied>` (the highest migration applied before the upgrade; not the package version, which stays `0.0.0` between releases) by `VACUUM INTO` before migrations run; an existing copy of that name is kept; only the last pair remains. Restores re-apply deletions before the first start (`llmobs admin migrate` for older backups). |
+| D-N-21 | **Restore is documented, plus `cetra admin gc-orphans [--min-age 1h] [--dry-run]`** (server stopped): it deletes unknown objects older than the minimum age and reports catalog data files missing from the store (exit 1) and missing media (a warning); in S3 mode it rolls the live bucket back to the backup (user). |
+| D-N-22 | **Pre-migration copies:** `meta.db.pre-m<applied>` and `catalog.db.pre-m<applied>` (the highest migration applied before the upgrade; not the package version, which stays `0.0.0` between releases) by `VACUUM INTO` before migrations run; an existing copy of that name is kept; only the last pair remains. Restores re-apply deletions before the first start (`cetra admin migrate` for older backups). |
 | D-N-23 | **No built-in backup schedule;** external schedulers call the command (user). |
 | D-N-24 | **`--meta-only` is S3-mode only, and S3-mode backups are always meta-only;** a local-mode `--meta-only` is refused because it would not be restorable. |
 
@@ -330,8 +330,8 @@ Spec 12 § Upgrades already describes this; M2 builds it.
 | B4 | [`04-copy-objects.md`](04-copy-objects.md) | `Storage::copy_objects` | storage | B3 |
 | B5 | [`05-orphans.md`](05-orphans.md) | `Storage::collect_orphans` | storage | B3 |
 | B6 | [`06-backup.md`](06-backup.md) | `server::backup::run`, `BackupReport`, the manifest | server | B2, B3, B4 |
-| B7 | [`07-admin-socket.md`](07-admin-socket.md) | the control socket in `llmobs serve` | server | B6 |
-| B8 | [`08-cli.md`](08-cli.md) | `llmobs admin backup`, `llmobs admin gc-orphans` | cli, server | B5, B7 |
+| B7 | [`07-admin-socket.md`](07-admin-socket.md) | the control socket in `cetra serve` | server | B6 |
+| B8 | [`08-cli.md`](08-cli.md) | `cetra admin backup`, `cetra admin gc-orphans` | cli, server | B5, B7 |
 | B9 | [`09-pre-migration.md`](09-pre-migration.md) | pre-migration copies | server, storage | — |
 | B10 | [`10-docs.md`](10-docs.md) | self-hosting docs, spec 12, roadmap, changelog | docs | B1–B9 |
 
@@ -361,9 +361,9 @@ first.
 
 1. `just check` passes after every phase.
 2. After B8, by hand, with a release build (`just build-release`):
-   1. Start `./target/release/llmobs serve` on a temporary data dir with `LLMOBS_INIT_*` set.
+   1. Start `./target/release/cetra serve` on a temporary data dir with `CETRA_INIT_*` set.
    2. Send spans (`tools/packaging/smoke.sh`).
-   3. Run `./target/release/llmobs admin backup --to <tmp>/b1` while it runs.
+   3. Run `./target/release/cetra admin backup --to <tmp>/b1` while it runs.
    4. Stop the server and restore `<tmp>/b1` into a new data dir as § Restore says (`gc-orphans`
       reports 0 missing).
    5. Start it and read the trace back.

@@ -184,7 +184,7 @@ pub enum DeletionStatus {
 }
 ```
 
-`TraceId` is `llmobs_core::ids::TraceId` (`as_bytes()` gives the 16 bytes). Every public item and field gets a doc comment (`#![warn(missing_docs)]`).
+`TraceId` is `cetra_core::ids::TraceId` (`as_bytes()` gives the 16 bytes). Every public item and field gets a doc comment (`#![warn(missing_docs)]`).
 
 Internal types:
 
@@ -252,7 +252,7 @@ pub enum DeletionError {
 }
 ```
 
-Don't re-export it from `lib.rs`: like `AppendError` and `StorageError`, callers reach it as `llmobs_storage::error::DeletionError` (`error` is a public module).
+Don't re-export it from `lib.rs`: like `AppendError` and `StorageError`, callers reach it as `cetra_storage::error::DeletionError` (`error` is a public module).
 
 ### Committer
 
@@ -349,7 +349,7 @@ pub(crate) fn covered_predicate(
 - **For `Traces`:** `T` only, with no `ingest_time` term.
 - A deletion whose terms are all absent for this table contributes nothing. If no deletion contributes, return `None`.
 - The result is the `OR` of the per-deletion expressions, built left to right in `seq` order.
-- **Nulls.** Every `IN` term is guarded by `IS NOT NULL`, whatever the column's nullability, so the expression is never null (`FALSE AND NULL` is `FALSE`). This matters: `scores.trace_id`, `scores.user_id`, `scores.session_id`, `spans.user_id` and `traces.user_id` are nullable (`llmobs-core/src/schema.rs`; a session-target score has no `trace_id`). An unguarded `IN` on a null would make the whole expression null, and both `FilterExec` and `filter_record_batch` drop a row whose predicate is null: a session score would be lost by any `Traces` deletion. `ingest_time` is non-null in `spans` and `scores`.
+- **Nulls.** Every `IN` term is guarded by `IS NOT NULL`, whatever the column's nullability, so the expression is never null (`FALSE AND NULL` is `FALSE`). This matters: `scores.trace_id`, `scores.user_id`, `scores.session_id`, `spans.user_id` and `traces.user_id` are nullable (`cetra-core/src/schema.rs`; a session-target score has no `trace_id`). An unguarded `IN` on a null would make the whole expression null, and both `FilterExec` and `filter_record_batch` drop a row whose predicate is null: a session score would be lost by any `Traces` deletion. `ingest_time` is non-null in `spans` and `scores`.
 - **Literals:**
   - `trace_id`: `ScalarValue::FixedSizeBinary(16, Some(bytes.to_vec()))`;
   - `user_id`, `session_id`: `ScalarValue::Utf8(Some(..))`;
@@ -452,7 +452,7 @@ When `deletions` is empty, nothing is copied: the providers get the snapshots as
 
 ### Tests (`deletion.rs` unit tests, and `lib.rs` or a new `src/deletion_tests.rs` module for the end-to-end ones)
 
-Use `test_support::span_row` and `span_rows`. For scores, move `score_version` from the `compaction/job.rs` tests to `test_support.rs` as `pub(crate) fn score_row(id: u128, trace: u16, created_at: i64, updated_at: i64, ingest: i64, deleted: bool, name: &str) -> Score`: the body of `score_version`, with `created_at` taken from the argument and the trace id built from `trace` exactly like `span_row` builds it (`(trace + 1)` big-endian, repeated). Update the `compaction/job.rs` call sites to `score_row(id, 0, at(10, 0, 0), updated_at, ingest, deleted, name)`. Leave `compaction/merge.rs`'s own `score_version` helper alone. Add a `pub(crate) fn score_rows(scores: &[Score]) -> RecordBatch` next to `span_rows` if none exists (`scores_to_record_batch`, unwrapped). Set `session_id`, `user_id` or `target` on the returned value where a test needs them; a session score has `target: ScoreTarget::Session { .. }` (check the variant in `llmobs-core/src/score.rs`) and no trace id.
+Use `test_support::span_row` and `span_rows`. For scores, move `score_version` from the `compaction/job.rs` tests to `test_support.rs` as `pub(crate) fn score_row(id: u128, trace: u16, created_at: i64, updated_at: i64, ingest: i64, deleted: bool, name: &str) -> Score`: the body of `score_version`, with `created_at` taken from the argument and the trace id built from `trace` exactly like `span_row` builds it (`(trace + 1)` big-endian, repeated). Update the `compaction/job.rs` call sites to `score_row(id, 0, at(10, 0, 0), updated_at, ingest, deleted, name)`. Leave `compaction/merge.rs`'s own `score_version` helper alone. Add a `pub(crate) fn score_rows(scores: &[Score]) -> RecordBatch` next to `span_rows` if none exists (`scores_to_record_batch`, unwrapped). Set `session_id`, `user_id` or `target` on the returned value where a test needs them; a session score has `target: ScoreTarget::Session { .. }` (check the variant in `cetra-core/src/score.rs`) and no trace id.
 
 1. **`covered_predicate` unit tests**, on hand-built batches:
    - `Traces` scope on spans: a row of a listed trace with `ingest_time` equal to the cut-off is covered; one nanosecond later is not; another trace is not;

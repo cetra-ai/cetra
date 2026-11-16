@@ -18,7 +18,7 @@ Sub-phases R1.1–R1.8, one commit each. R1.8 can produce several commits, one p
   R1.7 also deletes `crates/storage/src/compaction/model.rs`, its `mod` line in `compaction/mod.rs`, and `crates/storage/proptest-regressions/compaction/model.txt`.
 
   R1.8 may fix bugs anywhere in `crates/storage/src/` (D-R-2). It stops and reports instead when a fix would change a file format, a public API or a spec rule.
-- **No new dependency.** Everything needed is already a dependency or dev-dependency of `llmobs-storage`: `proptest`, `tokio`, `tempfile`, `uuid`, `chrono`, `arrow`, `datafusion`. Don't add `proptest-state-machine`; ops are a plain `Vec<Op>` resolved against the model at run time, as `compaction/model.rs` does (D-R-3).
+- **No new dependency.** Everything needed is already a dependency or dev-dependency of `cetra-storage`: `proptest`, `tokio`, `tempfile`, `uuid`, `chrono`, `arrow`, `datafusion`. Don't add `proptest-state-machine`; ops are a plain `Vec<Op>` resolved against the model at run time, as `compaction/model.rs` does (D-R-3).
 - **All new code is test code.** `lib.rs` gets `#[cfg(test)] mod model_tests;` next to `mod crash_tests;`. Nothing changes outside `cfg(test)` until R1.8. `test_support.rs` is not edited: what it keeps private (`trace_id_of`) is re-implemented in `shape.rs`. Private `#[cfg(test)]` methods of `Storage` such as `staged_paths` are callable from `model_tests`, a child module of the crate root, as they are.
 - **Dead code between sub-phases.** `just check-rust` runs clippy with `-D warnings`, and R1.1–R1.6 add items that a later sub-phase calls first. R1.1 puts `#![allow(dead_code)] // removed in R1.7, once every item is used` as the first line of `model_tests/mod.rs`. R1.7 removes it and deletes whatever is still unused.
 - **The oracle is independent.** `model.rs` re-implements only the spec rules it needs, in plain Rust over plain structs. It must not call `partials.rs`, `TraceMerger`, `test_support::trace_batch`, `test_support::live_scores`, any `views`/`reads`/`query` function, or DataFusion. A model that reuses the engine's code checks nothing.
@@ -35,7 +35,7 @@ Sub-phases R1.1–R1.8, one commit each. R1.8 can produce several commits, one p
 - **Report at the end of each sub-phase:**
   - what was done;
   - any deviation from this plan, and why;
-  - how long `cargo test -p llmobs-storage model_tests` took in debug;
+  - how long `cargo test -p cetra-storage model_tests` took in debug;
   - anything left undone or unverified.
 
 ### Names used throughout
@@ -169,7 +169,7 @@ Use `crate::test_support::{span_row, span_rows}` and `project()` = `PROJECT_A` p
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features model_tests::harness
+cargo test -p cetra-storage --all-features model_tests::harness
 ```
 
 Expected: 3 passed.
@@ -226,7 +226,7 @@ pub(super) fn span(project: P, trace: u8, span: u8, ingest: i64) -> Span;
 | `has_root` | `t % 3 != 2` |
 | `user` | `["u0", "u1", none][(k / 2) % 3]` as `Option<String>` |
 | `session` | `Some(format!("s{}", k % 4))` when `k % 5 != 4`, else `None` |
-| `environment` | `[None, Some("production"), Some(environment::EVAL)][(k / 3) % 3]`, with `environment` from `llmobs_core::names` |
+| `environment` | `[None, Some("production"), Some(environment::EVAL)][(k / 3) % 3]`, with `environment` from `cetra_core::names` |
 
 `span(project, t, s, ingest)`. Start from `test_support::span_row(u16::from(t), s, start, ingest)` (it sets every field), then override:
 - `project_id = project.id()`;
@@ -248,7 +248,7 @@ pub(super) fn span(project: P, trace: u8, span: u8, ingest: i64) -> Span;
 - `session_id`, `user_id`, `environment` from the shape (the same on every span: no known limit);
 - every other field stays as `span_row` set it.
 
-**Score shapes.** A score is identified by `ScoreKey { project: P, target: Target, name: u8 }`. `Target` is the model's own enum, `Trace(u8)` or `Session(u8)`, named so that it doesn't clash with `llmobs_core::score::ScoreTarget`. A `Trace(t)` score copies the trace's `session` and `user`. A `Session(n)` score has session `format!("s{n}")`, no trace and no user.
+**Score shapes.** A score is identified by `ScoreKey { project: P, target: Target, name: u8 }`. `Target` is the model's own enum, `Trace(u8)` or `Session(u8)`, named so that it doesn't clash with `cetra_core::score::ScoreTarget`. A `Trace(t)` score copies the trace's `session` and `user`. A `Session(n)` score has session `format!("s{n}")`, no trace and no user.
 
 ```rust
 pub(super) fn score_id(key: &ScoreKey) -> Uuid;  // Uuid::from_u128 of a packed (salt, kind, target, name)
@@ -444,7 +444,7 @@ pub(super) fn observe_span_detail(h: &Harness, project: P, trace: u8, span: u8) 
 ```
 
 - **`observe_spans`.** `span_list` returns `SPAN_LIST_COLUMNS` (`reads/traces.rs`), which has no `ingest_time`. Read its `trace_id` and `span_id` (hex `Utf8`). The ingest checks use `observe_span_detail`, which returns every column. Use `ListScope { window: None, include_eval: true, include_experiments: true }`, `sort: SpanSort::StartTime`, `order: SortOrder::Asc`, no filter, no search.
-- **`observe_traces`.** Calls `trace_list` with `sort: TraceSort::StartTime`, `order: SortOrder::Desc`, no filter or search, and converts each row into an `ExpectedTrace`. Read the columns by name with `RecordBatch::column_by_name` and `arrow::array::AsArray`; the names are the constants in `llmobs_core::schema::traces`, and the types are those of spec 01 with hex `Utf8` ids (`views/traces.rs`). Sort `tags` and `models` before returning.
+- **`observe_traces`.** Calls `trace_list` with `sort: TraceSort::StartTime`, `order: SortOrder::Desc`, no filter or search, and converts each row into an `ExpectedTrace`. Read the columns by name with `RecordBatch::column_by_name` and `arrow::array::AsArray`; the names are the constants in `cetra_core::schema::traces`, and the types are those of spec 01 with hex `Utf8` ids (`views/traces.rs`). Sort `tags` and `models` before returning.
 - **`observe_trace_detail`.** Calls `trace_detail(ctx, &hex(trace_id), timeout)`. It returns the trace row (same conversion) and the `span_id`s of its spans, in the returned order.
 - **`observe_span_detail`.** Calls `span_detail` and returns its `ingest_time`.
 
@@ -484,7 +484,7 @@ proptest prints the shrunk op list.
 
 ```rust
 fn cases() -> u32 {
-    std::env::var("LLMOBS_MODEL_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+    std::env::var("CETRA_MODEL_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
 }
 
 proptest! {
@@ -521,13 +521,13 @@ fn run_case(ops: &[Op]) {
 
 `Op::project(&self) -> Option<P>` returns the op's project, `None` for ops without one.
 
-**Budget (D-R-14).** Measure first: run `cargo test -p llmobs-storage --all-features model_tests::storage_matches_the_model` in debug with `LLMOBS_MODEL_CASES=4`, and time it. Set the default in `cases()` to the largest of 16, 8 or 4 that keeps the test under 60 s, and report the time and the value chosen. R1.4–R1.6 add reads: re-measure at the end of each, lower the default when needed, and report. Below 4 cases, stop and report: the checks then need to be cut further.
+**Budget (D-R-14).** Measure first: run `cargo test -p cetra-storage --all-features model_tests::storage_matches_the_model` in debug with `CETRA_MODEL_CASES=4`, and time it. Set the default in `cases()` to the largest of 16, 8 or 4 that keeps the test under 60 s, and report the time and the value chosen. R1.4–R1.6 add reads: re-measure at the end of each, lower the default when needed, and report. Below 4 cases, stop and report: the checks then need to be cut further.
 
 ### Commands
 
 ```bash
-cargo test -p llmobs-storage --all-features model_tests
-LLMOBS_MODEL_CASES=200 cargo test --release -p llmobs-storage --all-features model_tests::storage_matches_the_model
+cargo test -p cetra-storage --all-features model_tests
+CETRA_MODEL_CASES=200 cargo test --release -p cetra-storage --all-features model_tests::storage_matches_the_model
 ```
 
 Both pass. A failure in the 200-case run is a finding for R1.8: write it down in the report with the shrunk ops, but don't fix it in R1.3. proptest writes its seed to `crates/storage/proptest-regressions/model_tests/mod.txt`, and a file left there is replayed by every later `just check`. Move it out of the tree (to the scratchpad) and name its path in the report; R1.8 brings it back.
@@ -601,7 +601,7 @@ Weights: `DeleteTraces 3`, `DeleteUser 2`, `ApplyDeletions 2`, `Retention 1`, `D
 
 - **`keep` never equals `D + 2`.** Class-2 traces have rows on days `D + 1` and `D + 2` whose partition depends on the anchor (spec 03 § Trace anchor). Every allowed `keep` treats both days alike, so the model needs no anchor logic (D-R-3).
 - **Deletion ids** are `Uuid::now_v7()`; the cutoff is `clock` after the op's tick.
-- **Evaluation traces (shape change in this sub-phase).** In `shape.rs::span`, every span of a trace whose environment is `environment::EVAL` gets `metadata = {metadata_key::EVAL_TARGET_TRACE_ID: hex(trace_id((t + 1) % 12))}` (`llmobs_core::names::metadata_key`). The value is the same on every span of the trace, so no known limit is hit. The model doesn't compare `metadata`.
+- **Evaluation traces (shape change in this sub-phase).** In `shape.rs::span`, every span of a trace whose environment is `environment::EVAL` gets `metadata = {metadata_key::EVAL_TARGET_TRACE_ID: hex(trace_id((t + 1) % 12))}` (`cetra_core::names::metadata_key`). The value is the same on every span of the trace, so no known limit is hit. The model doesn't compare `metadata`.
 - **Resolution goes through the real reads (D-M-3, D-M-6).** The server resolves a deletion's scope with `crate::reads::{user_deletion_scope, eval_trace_ids}` before it calls `register_deletion`. The op does the same, on a `QueryContext` of the project, and first checks each read against the oracle:
   - `DeleteUser`: `user_deletion_scope(ctx, "u<n>", cutoff, timeout)` must return:
     - as `trace_ids`, the traces whose shape has `user == Some(u)` and that have at least one **visible** copy (all copies are ≤ the cutoff, since the cutoff is the op's ingest time), sorted by bytes;
@@ -710,14 +710,14 @@ Add, after `test:`:
 ```just
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":
-    LLMOBS_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
+    CETRA_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
 ```
 
 ### Docs
 
 - **`AGENTS.md`.**
   - § Commands: add a row for `just model [cases]`: "the storage model test with more cases, in release mode (D-R-14)".
-  - § Tests: add a bullet: "`LLMOBS_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default set in R1.3); `just model N` runs it in release mode. It is separate from `LLMOBS_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable."
+  - § Tests: add a bullet: "`CETRA_MODEL_CASES=N` sets the case count of the storage model test (`model_tests::storage_matches_the_model`, default set in R1.3); `just model N` runs it in release mode. It is separate from `CETRA_PROPTEST_CASES`, which sets the count of the cheap property tests of otel and eval: one model case costs about a second, so one variable for both would make a high count unusable."
 - **`docs/research/storage/hardening.md`** (new). Title `# Storage hardening — findings`, then a one-paragraph intro: track R, `docs/plans/r-hardening/`. Then `## M1 — Model-based correctness` with:
   - what the test covers, in one list;
   - `### Runs`: a table of date, commit, cases, mode, duration and result, with R1.7's own `just model 500` run as the first row;

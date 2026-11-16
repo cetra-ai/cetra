@@ -597,6 +597,7 @@ mod tests {
     use crate::query_error::RunError;
     use crate::test_support::{dataset_spans, example_query};
     use crate::views::{QueryContext, SqliteView, TimeWindow};
+    use cetra_core::time_serde::parse_rfc3339;
     use datafusion::arrow::array::{Int64Array, ListArray, StringArray};
     use datafusion::arrow::buffer::OffsetBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -607,7 +608,6 @@ mod tests {
     use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::UnboundedMemoryPool;
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
-    use llmobs_core::time_serde::parse_rfc3339;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use serde_json::Value;
 

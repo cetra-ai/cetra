@@ -25,11 +25,11 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
-import llmobs
-from llmobs import __version__
-from llmobs._config import ConfigError
-from llmobs._processor import LlmobsSpanProcessor
-from llmobs._runtime import Runtime, current
+import cetra
+from cetra import __version__
+from cetra._config import ConfigError
+from cetra._processor import CetraSpanProcessor
+from cetra._runtime import Runtime, current
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -42,42 +42,42 @@ class Recorder(Protocol):
     requests: list[tuple[str, str, dict[str, str], bytes]]
 
 
-INIT_TWICE_MESSAGE = "llmobs: init() was already called; this call is ignored"
+INIT_TWICE_MESSAGE = "cetra: init() was already called; this call is ignored"
 MISSING_KEY_MESSAGE = (
-    "llmobs: no API key; set LLMOBS_API_KEY, or LLMOBS_ENABLED=false to silence this; "
+    "cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; "
     "tracing is disabled"
 )
 
 
 def test_init_disabled_installs_nothing() -> None:
-    llmobs.init(enabled=False)
-    assert isinstance(llmobs.tracer_provider(), NoOpTracerProvider)
-    assert llmobs.span_processor() is None
+    cetra.init(enabled=False)
+    assert isinstance(cetra.tracer_provider(), NoOpTracerProvider)
+    assert cetra.span_processor() is None
     assert current() is None
 
 
 def test_init_without_api_key_warns_and_runs_disabled(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        llmobs.init()
-    records = [record for record in caplog.records if record.name == "llmobs"]
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        cetra.init()
+    records = [record for record in caplog.records if record.name == "cetra"]
     assert [record.getMessage() for record in records] == [MISSING_KEY_MESSAGE]
-    assert isinstance(llmobs.tracer_provider(), NoOpTracerProvider)
-    assert llmobs.span_processor() is None
+    assert isinstance(cetra.tracer_provider(), NoOpTracerProvider)
+    assert cetra.span_processor() is None
     assert current() is None
 
 
 def test_init_installs_own_provider_not_global(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
     global_before = trace.get_tracer_provider()
-    llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    provider = llmobs.tracer_provider()
+    cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    provider = cetra.tracer_provider()
     assert isinstance(provider, TracerProvider)
     assert trace.get_tracer_provider() is global_before
     assert trace.get_tracer_provider() is not provider
-    assert isinstance(llmobs.span_processor(), LlmobsSpanProcessor)
+    assert isinstance(cetra.span_processor(), CetraSpanProcessor)
 
 
 def test_span_carries_scope_and_resource(memory: Memory, spans: Spans) -> None:
@@ -87,10 +87,10 @@ def test_span_carries_scope_and_resource(memory: Memory, spans: Spans) -> None:
         pass
     span = spans(exporter)[0]
     assert span.instrumentation_scope is not None
-    assert span.instrumentation_scope.name == "llmobs"
+    assert span.instrumentation_scope.name == "cetra"
     assert span.instrumentation_scope.version == __version__
     resource = span.resource.attributes
-    assert resource["telemetry.distro.name"] == "llmobs"
+    assert resource["telemetry.distro.name"] == "cetra"
     assert resource["telemetry.distro.version"] == __version__
     assert resource["service.name"] == "conformance"
 
@@ -102,8 +102,8 @@ def test_environment_and_release_stamped(memory: Memory, spans: Spans) -> None:
         pass
     attributes = spans(exporter)[0].attributes
     assert attributes is not None
-    assert attributes["llmobs.environment"] == "staging"
-    assert attributes["llmobs.release"] == "1.2.3"
+    assert attributes["cetra.environment"] == "staging"
+    assert attributes["cetra.release"] == "1.2.3"
 
 
 def test_no_environment_attributes_by_default(memory: Memory, spans: Spans) -> None:
@@ -113,8 +113,8 @@ def test_no_environment_attributes_by_default(memory: Memory, spans: Spans) -> N
         pass
     attributes = spans(exporter)[0].attributes
     assert attributes is not None
-    assert "llmobs.environment" not in attributes
-    assert "llmobs.release" not in attributes
+    assert "cetra.environment" not in attributes
+    assert "cetra.release" not in attributes
 
 
 def test_sample_rate_zero_drops_roots(memory: Memory, spans: Spans) -> None:
@@ -148,25 +148,25 @@ def test_sampled_remote_parent_is_recorded(memory: Memory, spans: Spans) -> None
 def test_second_init_warns_once_and_keeps_the_first(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    first = llmobs.tracer_provider()
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    records = [record for record in caplog.records if record.name == "llmobs"]
+    cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    first = cetra.tracer_provider()
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    records = [record for record in caplog.records if record.name == "cetra"]
     assert [record.getMessage() for record in records] == [INIT_TWICE_MESSAGE]
-    assert llmobs.tracer_provider() is first
+    assert cetra.tracer_provider() is first
 
 
 def test_disabled_first_init_blocks_the_second(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    llmobs.init(enabled=False)
-    with caplog.at_level(logging.WARNING, logger="llmobs"):
-        llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    records = [record for record in caplog.records if record.name == "llmobs"]
+    cetra.init(enabled=False)
+    with caplog.at_level(logging.WARNING, logger="cetra"):
+        cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    records = [record for record in caplog.records if record.name == "cetra"]
     assert [record.getMessage() for record in records] == [INIT_TWICE_MESSAGE]
-    assert isinstance(llmobs.tracer_provider(), NoOpTracerProvider)
-    assert llmobs.span_processor() is None
+    assert isinstance(cetra.tracer_provider(), NoOpTracerProvider)
+    assert cetra.span_processor() is None
     assert current() is None
 
 
@@ -175,8 +175,8 @@ def test_shutdown_is_idempotent_and_drops_after(memory: Memory, spans: Spans) ->
     runtime = start()
     with runtime.tracer.start_as_current_span("one"):
         pass
-    llmobs.shutdown()
-    llmobs.shutdown()
+    cetra.shutdown()
+    cetra.shutdown()
     assert current() is None
     with runtime.tracer.start_as_current_span("two"):
         pass
@@ -188,45 +188,45 @@ def test_every_public_call_noops_after_shutdown(memory: Memory, spans: Spans) ->
     creates nothing (the no-runtime path): no span, no score, no raise."""
     exporter, start = memory
     start()
-    llmobs.shutdown()
+    cetra.shutdown()
 
-    @llmobs.observe(name="after")
+    @cetra.observe(name="after")
     def after(x: int) -> int:
         return x
 
     assert after(1) == 1
-    with llmobs.span("manual") as handle:
+    with cetra.span("manual") as handle:
         handle.set_output("late")
-    with llmobs.llm_span("call", provider="p", model="m") as llm_handle:
+    with cetra.llm_span("call", provider="p", model="m") as llm_handle:
         llm_handle.set_output_messages([{"role": "user", "content": "late"}])
-    with llmobs.context(session_id="late"):
+    with cetra.context(session_id="late"):
         pass
-    assert llmobs.score(name="late", value=1, session_id="s") is None
-    llmobs.flush()
-    assert llmobs.current_trace_id() is None
-    assert llmobs.span_processor() is None
+    assert cetra.score(name="late", value=1, session_id="s") is None
+    cetra.flush()
+    assert cetra.current_trace_id() is None
+    assert cetra.span_processor() is None
     assert spans(exporter) == []
 
 
 def test_otlp_exporter_request(http_recorder: Recorder) -> None:
-    llmobs.init(api_key="sk-llmobs-test", base_url=http_recorder.url)
+    cetra.init(api_key="sk-cetra-test", base_url=http_recorder.url)
     runtime = current()
     assert runtime is not None
     with runtime.tracer.start_as_current_span("hello"):
         pass
-    llmobs.flush()
+    cetra.flush()
     assert len(http_recorder.requests) == 1
     method, path, headers, body = http_recorder.requests[0]
     assert method == "POST"
     assert path == "/v1/traces"
     lower = {name.lower(): value for name, value in headers.items()}
-    assert lower["authorization"] == "Bearer sk-llmobs-test"
+    assert lower["authorization"] == "Bearer sk-cetra-test"
     assert lower["content-encoding"] == "gzip"
     assert lower["content-type"] == "application/x-protobuf"
     request = ExportTraceServiceRequest()
     request.ParseFromString(gzip.decompress(body))
     scope_spans = request.resource_spans[0].scope_spans[0]
-    assert scope_spans.scope.name == "llmobs"
+    assert scope_spans.scope.name == "cetra"
     assert len(scope_spans.spans) == 1
     assert scope_spans.spans[0].name == "hello"
 
@@ -241,18 +241,18 @@ def test_atexit_registered_once(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(atexit, "register", fake_register)
     # The atexit flag is process-global (reset() never clears it, D-F-15);
     # simulate a fresh process so this test does not depend on test order.
-    monkeypatch.setattr(llmobs._runtime, "_atexit_registered", False)
-    llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    llmobs.init(api_key="sk-llmobs-test", base_url="http://127.0.0.1:9")
-    ours = [call for call in registered if call and call[0] is llmobs.shutdown]
+    monkeypatch.setattr(cetra._runtime, "_atexit_registered", False)
+    cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    cetra.init(api_key="sk-cetra-test", base_url="http://127.0.0.1:9")
+    ours = [call for call in registered if call and call[0] is cetra.shutdown]
     assert len(ours) == 1
 
 
 GLOBAL_SAMPLE_RATE_MESSAGE = (
-    "llmobs: sample_rate is ignored with use_global_provider=True and an existing provider"
+    "cetra: sample_rate is ignored with use_global_provider=True and an existing provider"
 )
 GLOBAL_PROVIDER_MESSAGE = (
-    "llmobs: the global tracer provider cannot take span processors; llmobs keeps its own provider"
+    "cetra: the global tracer provider cannot take span processors; cetra keeps its own provider"
 )
 
 # OTel allows setting the global tracer provider once per process, so every
@@ -262,8 +262,8 @@ import json, logging
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-from llmobs._config import resolve_config
-from llmobs._runtime import Runtime, flush, install, shutdown
+from cetra._config import resolve_config
+from cetra._runtime import Runtime, flush, install, shutdown
 
 class _H(logging.Handler):
     def __init__(self):
@@ -273,12 +273,12 @@ class _H(logging.Handler):
         self.records.append(record.getMessage())
 
 _handler = _H()
-logging.getLogger("llmobs").addHandler(_handler)
+logging.getLogger("cetra").addHandler(_handler)
 exporter = InMemorySpanExporter()
 
 def make_runtime(**options):
     config = resolve_config(
-        api_key="sk-llmobs-test",
+        api_key="sk-cetra-test",
         base_url="http://127.0.0.1:9",
         use_global_provider=True,
         env={},
@@ -297,11 +297,11 @@ def result(**extra):
 
 
 def _run_script(code: str) -> dict[str, Any]:
-    """Run ``code`` in a subprocess with a clean OTEL/LLMOBS environment."""
+    """Run ``code`` in a subprocess with a clean OTEL/CETRA environment."""
     env = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "LLMOBS_"))
+        if not name.startswith(("OTEL_", "CETRA_"))
     }
     env["OTEL_SERVICE_NAME"] = "conformance"
     run = subprocess.run(  # noqa: S603  # the command is test-authored, not input
@@ -316,23 +316,23 @@ def _run_script(code: str) -> dict[str, Any]:
 
 
 def test_init_accepts_the_global_mode_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
-    llmobs.init(
-        api_key="sk-llmobs-test",
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
+    cetra.init(
+        api_key="sk-cetra-test",
         base_url="http://127.0.0.1:9",
         use_global_provider=False,
         export_filter=lambda span: True,
     )
-    assert isinstance(llmobs.span_processor(), LlmobsSpanProcessor)
+    assert isinstance(cetra.span_processor(), CetraSpanProcessor)
     assert current() is not None
 
 
 def test_init_rejects_a_non_bool_use_global_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("LLMOBS_API_KEY", raising=False)
+    monkeypatch.delenv("CETRA_API_KEY", raising=False)
     with pytest.raises(ConfigError, match="use_global_provider: must be a boolean"):
-        llmobs.init(api_key="sk-llmobs-test", use_global_provider="yes")  # type: ignore[arg-type]
+        cetra.init(api_key="sk-cetra-test", use_global_provider="yes")  # type: ignore[arg-type]
     assert current() is None
 
 

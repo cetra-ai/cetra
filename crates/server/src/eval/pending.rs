@@ -4,9 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use llmobs_core::ids::{ProjectId, TraceId};
-use llmobs_core::names::{environment, metadata_key};
-use llmobs_core::span::Span;
+use cetra_core::ids::{ProjectId, TraceId};
+use cetra_core::names::{environment, metadata_key};
+use cetra_core::span::Span;
 
 /// Most traces held at once (D-I-8).
 pub(crate) const MAX_PENDING: usize = 200_000;
@@ -441,7 +441,7 @@ fn scan_cap(limit: usize) -> usize {
 mod tests {
     use super::*;
     use crate::test_support::{capture_logs, dataset_span};
-    use llmobs_core::ids::SpanId;
+    use cetra_core::ids::SpanId;
 
     const SECOND: i64 = 1_000_000_000;
 

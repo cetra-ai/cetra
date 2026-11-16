@@ -20,11 +20,11 @@ pub struct EndUserSummary {
     /// End-user id.
     pub user_id: String,
     /// Earliest trace start, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub first_seen: i64,
     /// Latest trace end, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub last_seen: i64,
     /// Number of traces.
@@ -105,8 +105,8 @@ pub struct UserListParams {
 
 #[cfg(test)]
 mod tests {
-    use llmobs_core::enums::ScoreSource;
-    use llmobs_core::score::ScoreValue;
+    use cetra_core::enums::ScoreSource;
+    use cetra_core::score::ScoreValue;
     use uuid::Uuid;
 
     use super::{EndUserDetail, EndUserSummary};

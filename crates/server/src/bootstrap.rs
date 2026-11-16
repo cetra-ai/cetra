@@ -24,7 +24,7 @@ use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{
     NewUser, UserRow, count_users, count_users_tx, insert_user, normalize_email,
 };
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 const FULL_SCOPES: [KeyScope; 3] = [KeyScope::Ingest, KeyScope::Read, KeyScope::Write];
 
@@ -152,7 +152,7 @@ pub(crate) async fn prepare(state: &AppState) -> Result<(), BootstrapError> {
 /// # Errors
 ///
 /// Returns [`BootstrapError::Init`] for a bad email, name, password, or secret
-/// key. The reason names the rule or `LLMOBS_INIT_SECRET_KEY`, not the value.
+/// key. The reason names the rule or `CETRA_INIT_SECRET_KEY`, not the value.
 pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
     let init = state.config.init.clone();
     let email = init
@@ -299,7 +299,7 @@ fn required_name(value: Option<&str>, key: &'static str) -> Result<String, Boots
 
 fn provided_key(plaintext: &str) -> Result<KeyMaterial, BootstrapError> {
     if parse_key(plaintext) != Some(KeyKind::Secret) {
-        return Err(init_error("LLMOBS_INIT_SECRET_KEY is not a secret key"));
+        return Err(init_error("CETRA_INIT_SECRET_KEY is not a secret key"));
     }
     Ok(KeyMaterial {
         name: "init".to_owned(),
@@ -403,7 +403,7 @@ mod tests {
         let app = TestApp::with_config(|config| {
             config.init = init(serde_json::json!({
                 "admin_email": "Ada@Example.com",
-                "admin_password": "llmobs-ok1",
+                "admin_password": "cetra-ok-1",
                 "org": " Acme ",
                 "project": "Support bot",
                 "secret_key": key.plaintext.clone(),
@@ -443,7 +443,7 @@ mod tests {
         let bad_key = TestApp::with_config(|config| {
             config.init = init(serde_json::json!({
                 "admin_email": "ada@example.com",
-                "admin_password": "llmobs-ok1",
+                "admin_password": "cetra-ok-1",
                 "org": "Acme",
                 "project": "Support bot",
                 "secret_key": "not-a-secret-key",
@@ -452,7 +452,7 @@ mod tests {
         .await;
         let error = prepare(&bad_key.state).await.unwrap_err();
         let text = error.to_string();
-        assert!(text.contains("LLMOBS_INIT_SECRET_KEY"), "{text}");
+        assert!(text.contains("CETRA_INIT_SECRET_KEY"), "{text}");
         assert!(!text.contains("not-a-secret-key"), "{text}");
         assert_eq!(count_users(bad_key.state.meta.reader()).await.unwrap(), 0);
 

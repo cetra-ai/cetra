@@ -19,7 +19,7 @@ use crate::meta::members::count_owners;
 use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::{self, normalize_email, user_by_email, user_by_id};
 use crate::meta::web_sessions::delete_user_sessions;
-use llmobs_core::ids::OrgId;
+use cetra_core::ids::OrgId;
 
 /// The internal user routes. The control plane holds a `control_plane` token with scope `users`.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -561,7 +561,7 @@ mod tests {
                             kind: "secret",
                             scopes: vec![crate::auth::roles::KeyScope::Read],
                             name: Some("made by the user".to_owned()),
-                            prefix: "sk-llmobs-keep".to_owned(),
+                            prefix: "sk-cetra-keep".to_owned(),
                             hash: "key-hash-keep".to_owned(),
                             created_by: user.id,
                             expires_at: None,
@@ -592,7 +592,7 @@ mod tests {
         .unwrap();
         assert_eq!(rows, vec![None]);
         let created: Vec<Option<String>> =
-            sqlx::query_scalar("SELECT created_by FROM api_keys WHERE prefix = 'sk-llmobs-keep'")
+            sqlx::query_scalar("SELECT created_by FROM api_keys WHERE prefix = 'sk-cetra-keep'")
                 .fetch_all(app.state.meta.reader())
                 .await
                 .unwrap();

@@ -35,7 +35,7 @@ Open-source Opik has **no user management**. The docs say self-hosting gives all
 - GHSA-2xwj-cg3g-7hxg: incomplete escaping in a ClickHouse `log_comment` string built from user input.
 - GHSA-5mc6-2qfj-59cg: SDKs rendered Jinja2/Nunjucks prompt templates without a sandbox (RCE in the SDK user's process).
 
-## Takeaways for llmobs
+## Takeaways for cetra
 
 - An "auth disabled" mode turns every missing-authz bug into an unauthenticated one. Do not offer one; keep auth always on, even on localhost.
 - Never ship a default encryption key. Generate per install (our spec already does) and refuse known/placeholder values.

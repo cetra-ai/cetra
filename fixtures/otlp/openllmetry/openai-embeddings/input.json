@@ -41,15 +41,15 @@
           },
           "spans": [
             {
-              "traceId": "a9a442bd759b5c6f123bff9ac4c04332",
-              "spanId": "88d9dbade2f0782d",
+              "traceId": "8a8ab2a41b264d8ca0e3e61d69688cd8",
+              "spanId": "2b57a90ead52398a",
               "traceState": "",
               "parentSpanId": "",
               "flags": 256,
               "name": "openai.embeddings",
               "kind": 3,
               "startTimeUnixNano": "1767225590000000000",
-              "endTimeUnixNano": "1767225590036000000",
+              "endTimeUnixNano": "1767225590096000000",
               "attributes": [
                 {
                   "key": "gen_ai.operation.name",

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use llmobs_storage::StorageHealth;
+use cetra_storage::StorageHealth;
 use serde::Serialize;
 use tokio::time::Instant;
 
@@ -140,7 +140,7 @@ mod tests {
 
     use axum::http::Method;
     use bytesize::ByteSize;
-    use llmobs_storage::StorageHealth;
+    use cetra_storage::StorageHealth;
     use tokio::time::Instant;
 
     use super::{PROBE_TTL, ReadyCache, sticky_failures};

@@ -12,12 +12,12 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use datafusion::datasource::TableProvider;
-use datafusion::datasource::memory::MemTable;
-use llmobs_core::ids::{OrgId, ProjectId, SpanId, TraceId};
-use llmobs_storage::{
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
+use cetra_storage::{
     ColumnInfo, ColumnKind, QueryContext, RunError, SqliteView, TimeWindow, ViewColumns, ViewName,
 };
+use datafusion::datasource::TableProvider;
+use datafusion::datasource::memory::MemTable;
 
 use crate::http::AppState;
 use crate::http::error::ApiError;

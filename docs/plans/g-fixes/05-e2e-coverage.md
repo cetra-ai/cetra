@@ -3,7 +3,7 @@
 Read [README.md](README.md) first. Runs **after F1** (it asserts F1's dotted deep link).
 
 **Goal:**
-- The CI `e2e` job builds the web first, so its server has the UI embedded. The Rust e2e test runs there and must take its "UI embedded" branch (it refuses to pass on the `503` branch when `E2E_REQUIRE_UI` is set; no `LLMOBS_` prefix, because `ServerConfig::load` rejects unknown `LLMOBS_` variables), and the debug binary must report `ui: embedded`. The `rust-test` job keeps running the same test without a web build (the `503` branch), as today.
+- The CI `e2e` job builds the web first, so its server has the UI embedded. The Rust e2e test runs there and must take its "UI embedded" branch (it refuses to pass on the `503` branch when `E2E_REQUIRE_UI` is set; no `CETRA_` prefix, because `ServerConfig::load` rejects unknown `CETRA_` variables), and the debug binary must report `ui: embedded`. The `rust-test` job keeps running the same test without a web build (the `503` branch), as today.
 - A second Rust e2e test covers what the first does not: both SSE streams over real HTTP (a `trace` event, a `span` event, `resync` for `Last-Event-ID`), and one read each of sessions, users, scores (after a score write), metrics, schema and media.
 - D-G-18 stops saying that release CI checks the UI: the `e2e` job checks the debug build; `check-release` stays track N's (m-10).
 
@@ -26,17 +26,17 @@ No headless browser (user's choice).
       bash tools/e2e/run.sh
   ```
 
-  `tools/e2e/run.sh` runs `cargo build -p llmobs-cli`, starts `target/debug/llmobs serve` and runs the Python and TypeScript SDK suites against it. The CI `e2e` job (`.github/workflows/ci.yml`) runs `just e2e` then `just assert-clean`; it already installs Rust, Node, pnpm and uv. `web/dist` is git-ignored. `llmobs-ui`'s build script embeds `web/dist` when it exists at build time.
+  `tools/e2e/run.sh` runs `cargo build -p cetra-cli`, starts `target/debug/cetra serve` and runs the Python and TypeScript SDK suites against it. The CI `e2e` job (`.github/workflows/ci.yml`) runs `just e2e` then `just assert-clean`; it already installs Rust, Node, pnpm and uv. `web/dist` is git-ignored. `cetra-ui`'s build script embeds `web/dist` when it exists at build time.
 - `crates/cli/tests/e2e.rs` has one test, `every_sdk_fixture_round_trips_over_every_transport`. It:
-  1. reserves three ports, writes `llmobs.toml` (data dir, the three addresses, `public_url = ORIGIN`, `[init]` with `ADMIN_EMAIL`, `ADMIN_PASSWORD`, org `Acme`, project `Proto`, `secret_key = INIT_KEY`), loads it with `ServerConfig::load`, and calls `llmobs_server::serve::bind(config, Some(llmobs_ui::router()))`;
+  1. reserves three ports, writes `cetra.toml` (data dir, the three addresses, `public_url = ORIGIN`, `[init]` with `ADMIN_EMAIL`, `ADMIN_PASSWORD`, org `Acme`, project `Proto`, `secret_key = INIT_KEY`), loads it with `ServerConfig::load`, and calls `cetra_server::serve::bind(config, Some(cetra_ui::router()))`;
   2. derives `http`, `otlp`, `grpc` base URLs and a `reqwest::Client` with a 30 s timeout;
-  3. checks `GET /` (`200 text/html` if `llmobs_ui::embedded()`, else `503`) and `GET /api/v1/nope` (`404` problem);
+  3. checks `GET /` (`200 text/html` if `cetra_ui::embedded()`, else `503`) and `GET /api/v1/nope` (`404` problem);
   4. logs in and builds `let api = Api { client, base, cookie }`;
   5. finds the `Proto` project's id in `GET /api/v1/orgs/acme/projects`, creates two more projects, sends every `sdk-*` fixture, reads back and snapshots.
 - Helpers: `Api::{get, post}` (JSON, cookie, `Origin` on POST), `read_json`, `sdk_fixtures()`, `trace_id_for(index) -> Vec<u8>` (fifteen zeros then `index + 1`), `post_otlp_http(client, url, key, content_type, body)`.
 - Fixture facts:
-  - `fixtures/otlp/llmobs/sdk-context/input.json`: spans with `session_id` `chat-42` and `user_id` `u-17`, start times on 2025-12-31.
-  - `fixtures/otlp/llmobs/sdk-media-bytes/input.json`: one blob, sha256 `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581`, 70 bytes, `application/octet-stream`.
+  - `fixtures/otlp/cetra/sdk-context/input.json`: spans with `session_id` `chat-42` and `user_id` `u-17`, start times on 2025-12-31.
+  - `fixtures/otlp/cetra/sdk-media-bytes/input.json`: one blob, sha256 `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581`, 70 bytes, `application/octet-stream`.
 - Score write: `POST /api/v1/scores` with `Authorization: Bearer <secret key>` and body `{"scores":[{"target":{"type":"trace","trace_id":"<32 hex>"},"name":"e2e","value":{"data_type":"numeric","value":1.0}}]}` answers `200`. The init key has the ingest, read and write scopes.
 - Read routes, all under `/api/v1/projects/{project}`: `/sessions`, `/sessions/{session_id}`, `/users`, `/users/{user_id}`, `/scores?trace_id=…`, `/metrics?from=…&to=…`, `/schema`, `/media/{sha256}`, `/traces/stream`, `/traces/{trace_id}/stream`. Session list items have `session_id`, user list items have `user_id`. Lists default to the last 24 h, so pass `from=2025-12-31T00:00:00Z&to=2026-01-02T00:00:00Z`.
 - The two fixtures use environment `staging` and no experiment, so the default exclusions keep them; no `include_eval` is needed.
@@ -54,10 +54,10 @@ e2e: js-install
     pnpm --dir web run build
     E2E_REQUIRE_UI=1 cargo test --workspace --all-features --test e2e
     bash tools/e2e/run.sh
-    ./target/debug/llmobs version | grep -qx 'ui: embedded'
+    ./target/debug/cetra version | grep -qx 'ui: embedded'
 ```
 
-The existing comment line above the recipe, `# Run both SDKs against a real llmobs serve (D-G-20)`, is replaced by the comment above.
+The existing comment line above the recipe, `# Run both SDKs against a real cetra serve (D-G-20)`, is replaced by the comment above.
 
 ### 2. `e2e.rs`: a shared start
 
@@ -66,7 +66,7 @@ Move steps 1, 2 and 4 of the existing test, and the `Proto` id lookup of step 5,
 ```rust
 /// A running server with the admin signed in.
 struct Server {
-    running: llmobs_server::serve::Running,
+    running: cetra_server::serve::Running,
     http: String,
     otlp: String,
     grpc: String,
@@ -81,7 +81,7 @@ struct Server {
 async fn start(dir: &Path, extra_config: &str) -> Server { … }
 ```
 
-The body is the existing code, unchanged, in the same order, except the written TOML ends with `{extra_config}` after the `[init]` table. The first test passes `""`, so its config, behaviour and snapshots stay exactly as before; the second test appends a `[media]` table (step 1). Step 3 (the `GET /` and `/api/v1/nope` checks) stays in the first test, right after `let server = start(dir.path(), "").await;`. Rewrite the first test to use `server.http`, `server.api`, etc.; its behaviour and its snapshots must not change (`cargo insta test` reports no change). `bind` returns `Result<llmobs_server::serve::Running, ServeError>`.
+The body is the existing code, unchanged, in the same order, except the written TOML ends with `{extra_config}` after the `[init]` table. The first test passes `""`, so its config, behaviour and snapshots stay exactly as before; the second test appends a `[media]` table (step 1). Step 3 (the `GET /` and `/api/v1/nope` checks) stays in the first test, right after `let server = start(dir.path(), "").await;`. Rewrite the first test to use `server.http`, `server.api`, etc.; its behaviour and its snapshots must not change (`cargo insta test` reports no change). `bind` returns `Result<cetra_server::serve::Running, ServeError>`.
 
 ### 3. `e2e.rs`: require the UI when asked
 
@@ -90,13 +90,13 @@ In the first test, right after `start`, add:
 ```rust
     if std::env::var_os("E2E_REQUIRE_UI").is_some() {
         assert!(
-            llmobs_ui::embedded(),
+            cetra_ui::embedded(),
             "E2E_REQUIRE_UI is set, but web/dist was not embedded: build the web first"
         );
     }
 ```
 
-and inside the existing `if llmobs_ui::embedded() {` branch of the `GET /` check, add: `GET {http}/acme/proto/users/alice%40example.com` answers `200` with a `content-type` starting with `text/html` (an app deep link whose last segment has a dot, F1).
+and inside the existing `if cetra_ui::embedded() {` branch of the `GET /` check, add: `GET {http}/acme/proto/users/alice%40example.com` answers `200` with a `content-type` starting with `text/html` (an app deep link whose last segment has a dot, F1).
 
 ### 4. `e2e.rs`: the new test
 
@@ -171,11 +171,11 @@ Replace `` `just build-release` builds the web first and release CI checks the U
 
 ### `AGENTS.md`
 
-In the commands table, set the `just e2e` row's description to `build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `llmobs serve``. Keep the row where it is.
+In the commands table, set the `just e2e` row's description to `build the web, run the Rust e2e tests with the UI embedded, then the Python and TypeScript SDK suites against a real `cetra serve``. Keep the row where it is.
 
 ## Done when
 
-- `cargo test -p llmobs-cli --test e2e` passes (both tests). Whether `web/dist` exists decides which `GET /` branch the first test takes; CI's `rust-test` job has none.
+- `cargo test -p cetra-cli --test e2e` passes (both tests). Whether `web/dist` exists decides which `GET /` branch the first test takes; CI's `rust-test` job has none.
 - `just e2e` passes (it builds `web/dist`).
-- `cargo insta test -p llmobs-cli --test e2e` reports no snapshot change.
+- `cargo insta test -p cetra-cli --test e2e` reports no snapshot change.
 - `just check` passes, and `just assert-clean` after it.

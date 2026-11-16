@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use arrow::array::RecordBatch;
-use llmobs_core::ids::ProjectId;
+use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -956,8 +956,8 @@ mod tests {
     use std::time::Duration;
 
     use arrow::array::TimestampNanosecondArray;
-    use llmobs_core::ids::ProjectId;
-    use llmobs_core::schema::spans::START_TIME;
+    use cetra_core::ids::ProjectId;
+    use cetra_core::schema::spans::START_TIME;
 
     use super::*;
     use crate::config::WalSync;

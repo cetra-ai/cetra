@@ -274,17 +274,17 @@ Keep the code that builds a range-mode plan in one function, so `scan` and list 
 `#[ignore]` integration test, run by hand on the same server as S1b:
 
 ```bash
-LLMOBS_TRACE_BENCH_DIR=/path/to/data cargo test --release -p llmobs-storage --test trace_bench -- --ignored --nocapture
+CETRA_TRACE_BENCH_DIR=/path/to/data cargo test --release -p cetra-storage --test trace_bench -- --ignored --nocapture
 ```
 
 ### Data
 
-- If `LLMOBS_TRACE_BENCH_DIR` holds no `catalog.db`, generate into it. Otherwise reuse it.
+- If `CETRA_TRACE_BENCH_DIR` holds no `catalog.db`, generate into it. Otherwise reuse it.
 - **One project.** Seeded xorshift RNG, seed 1, so two generations are identical.
-- **Traces:** `LLMOBS_TRACE_BENCH_TRACES` (default 5,000,000), 10 spans each, root span plus 9 children, over 7 days from 2026-03-02 00:00 UTC.
+- **Traces:** `CETRA_TRACE_BENCH_TRACES` (default 5,000,000), 10 spans each, root span plus 9 children, over 7 days from 2026-03-02 00:00 UTC.
   - Trace start times: uniform, at twice the rate between 08:00 and 20:00 UTC.
   - Duration: log-normal, median 2 s, p99 60 s. Children start inside it.
-  - `environment`: `production` 80%, `staging` 15%, `llmobs-eval` 5%, the same on every span of the trace.
+  - `environment`: `production` 80%, `staging` 15%, `cetra-eval` 5%, the same on every span of the trace.
   - `session_id` on 30% of traces, from 50,000 values. `user_id` on 60%, from 20,000 values. Same on every span.
   - `release`: 5 values. `tags`: 0–3 of 10 values per span.
   - Root names: 30 values.

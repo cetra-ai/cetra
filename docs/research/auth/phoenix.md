@@ -54,7 +54,7 @@ Python (Starlette/FastAPI + Strawberry GraphQL), SQLite or Postgres. Auth added 
 - API keys cannot mint other keys. Through Phoenix 18 GraphQL allowed a key to create keys; from 19, creation requires a browser session.
 - Client env var `PHOENIX_API_KEY`, header `Authorization: Bearer`.
 
-## Takeaways for llmobs
+## Takeaways for cetra
 
 - Copy: refuse to link an IdP identity onto an account that has a password unless explicitly allowed; role/group mapping from IdP claims with strict mode; "credentials cannot mint credentials"; HKDF purpose labels for every derived key.
 - Avoid: auth off by default, default `admin/admin`, CSRF opt-in, PKCE opt-in, non-Secure cookies by default, 4-char passwords, a static admin bearer secret in env, signed-JWT API keys (master-key compromise = key forgery; opaque random keys have no such failure mode).

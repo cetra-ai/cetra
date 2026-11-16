@@ -47,7 +47,7 @@ H6–H8 reuse these, so keep the names and signatures.
 pub(crate) struct Member {
     /// `users.id`.
     pub(crate) id: Uuid,
-    /// `llmobs_session=…`, ready for a `cookie` header.
+    /// `cetra_session=…`, ready for a `cookie` header.
     pub(crate) cookie: String,
 }
 
@@ -324,11 +324,11 @@ The authorization suite (`access_suite.rs`) picks the four routes up by itself a
 
 ```bash
 export PATH="$HOME/.local/share/nvm/v26.13.0/bin:$PATH"
-cargo test -p llmobs-server saved_views
-cargo test -p llmobs-server access
-cargo test -p llmobs-server --test openapi
+cargo test -p cetra-server saved_views
+cargo test -p cetra-server access
+cargo test -p cetra-server --test openapi
 just openapi
-cargo test -p llmobs-server --test api_examples
+cargo test -p cetra-server --test api_examples
 just check
 ```
 

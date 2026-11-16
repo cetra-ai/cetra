@@ -1,4 +1,4 @@
-# I · M6 — Backfill, the `llmobs serve` end-to-end test, and the closeout of track I
+# I · M6 — Backfill, the `cetra serve` end-to-end test, and the closeout of track I
 
 Implementation plan for milestone M6 of track I. It has 8 sub-phases, I6.1 to I6.8. **Haiku** implements each one in one go, with no context beyond this plan and the files it names. Sub-phases that do not depend on each other run in parallel worktrees (§ Parallel waves). Each sub-phase ends with `just check` green and one commit. Sonnet reviews the code after every three or four sub-phases.
 
@@ -24,7 +24,7 @@ When M6 is done:
 - a **backfill runner** (one more eval loop) pages `trace_list` or `span_list` over the window with the rule's filter and strict exclusions, samples each target, skips the targets this rule already scored, and enqueues backfill jobs (priority 2) with D-I-11's re-queue rule. The M3 dispatcher runs them like rule jobs.
 - startup marks a backfill left `running` by a stop or a crash `failed` (`interrupted`).
 - the rule page has a **Backfills** section and a **"Run on existing data"** dialog with the estimate.
-- a Rust test starts a real `llmobs serve` (in-process `serve::bind`, as `crates/cli/tests/e2e.rs` does), sends OTLP, and reads back a judge score written by the live trigger and one written by a backfill, against the capture tool's mock provider.
+- a Rust test starts a real `cetra serve` (in-process `serve::bind`, as `crates/cli/tests/e2e.rs` does), sends OTLP, and reads back a judge score written by the live trigger and one written by a backfill, against the capture tool's mock provider.
 - specs 04, 06, 09, 11 and 12 describe backfill; `00-design.md`, `docs/mvp-decisions.md` and the roadmap's track I row are closed out.
 
 **Out of scope:** the annotation panel and score ownership (M5, planned in parallel); a cancel button for a running backfill (D-I-25: there is none; disabling the rule stops its jobs); pruning `backfills` rows (they go with their rule); experiments (track J).
@@ -36,7 +36,7 @@ When M6 is done:
 | # | Summary |
 |---|---|
 | D-I-6 | Strict priority manual, rule, backfill; backfill can wait behind live load. |
-| D-I-10 | Sampling: SHA-256(`llmobs.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes BE, below `(rate · 2^64) as u64`. |
+| D-I-10 | Sampling: SHA-256(`cetra.sample.v1` ‖ rule id ‖ trace id ‖ span id for span rules), first 8 bytes BE, below `(rate · 2^64) as u64`. |
 | D-I-11 | `dedup_key` `rule:<rule>:<trace>:<span or ->` for rule **and** backfill jobs. A backfill enqueue is `ON CONFLICT DO UPDATE … WHERE status IN ('failed','skipped')`: it re-queues a failed or skipped target and leaves done, queued and running ones alone. The update's column list is exact (§ I6.1). Backfill has its own cap, `max_targets`, not the hourly cap. |
 | D-I-14 | Paused rules keep their queued jobs; the dispatcher does not claim a paused or disabled rule's jobs. |
 | D-I-15 | Backfill jobs spend the rule's budget when they run, and can pause the live rule. |
@@ -57,7 +57,7 @@ When M6 is done:
 | D-I-40 | **What a backfill reads and enqueues.** Pages of at most 1 000 rows of `trace_list` (trace rules) or `span_list` (span rules), `start_time ∈ [from, to)`, newest first, with the rule's current filter and strict exclusions. The first `max_targets` rows are the backfill's targets (`matched`); the estimate reads up to `max_targets + 1` to say "more than". Each target is sampled with D-I-10's function, the rule's id and the backfill's `sample_rate` (default: the rule's), so a backfill at the rule's rate picks the targets live sampling would have picked. A span rule's backfill does not apply the live 50-spans-per-trace cut; `max_targets` bounds it. Targets that already have this rule's score are skipped: per page, the derived score ids (D-G-28: the rule as author, the evaluator kind's source, the evaluator's current output name) are looked up with one `scores_by_id` read. This replaces D-I-25's "the `rule_id` score filter", which would read every score of the rule; a score written under an older output name does not count. Each page is one `meta.db` write: the rule must still exist and be enabled, then every job is upserted (D-I-11) and `matched` and `enqueued` are updated. |
 | D-I-41 | **Failures during a run.** A storage read that fails fails the backfill: `storage unavailable` for `QueryError::Busy` and `RunError::Timeout`, `invalid filter` for `RunError::Invalid` (the rule's stored filter no longer parses), `storage read failed` for anything else (another `RunError`, a `QueryError`, a row that does not convert). The jobs already enqueued stay; there is no retry, and running the backfill again is cheap (dedup keys and the scored check). A rule disabled during a run fails it (`rule disabled`). A rule deleted during a run deletes its backfills (`ON DELETE CASCADE`) and the runner stops at its next write: D-I-25's "marks the backfill failed" can only hold for a rule that still exists. A rule paused during a run does not stop it (D-I-14). A stored rule, project or evaluator that does not decode (`MetaError::Corrupt`) fails the backfill (`rule could not be read`, or `evaluator could not be read`). Any other `meta.db` error (`MetaError::Db`) leaves the backfill `running`: the runner logs it, goes on to the next backfill, and runs this one again from the start at its next pass. An undecodable `backfills` row fails the whole pass (accepted: status is constrained and rows are written only by this code). A rule whose filter, variable mapping, sample rate, target or evaluator changes during a run fails it (`rule changed`); a pause, resume or budget change does not. An edit to the evaluator itself (its template or output) during a run is not detected. |
 | D-I-42 | **Limits and the list.** `from < to`, `to ≤ now − 5 min`, `to − from ≤ 30 days`, `max_targets` 1–10 000, `sample_rate` in `(0, 1]`; every failing field is reported (`400`). Creating checks, in one write, that the rule exists in the project (`404`), is enabled and unpaused (`409`), and has no running backfill (`409`). The estimate's cost is for judges only: per target `ceil((template chars + 2 000 × mapped variables) / 4)` input tokens and `max_output_tokens` output tokens; the cost is absent when the model has no price. The estimate does not subtract already-scored targets: it is an upper bound. `GET /online-rules/{id}/backfills` answers the newest 50 (`BackfillPage`, `next_cursor` always `null`, as alert rules are not paged); rows are kept until their rule is deleted. A backfill's start is an audit event. |
-| D-I-43 | **A tool crate as a test dependency.** A `tools/` crate may be a dev-dependency of a shipped crate, for tests only: `llmobs-capture`'s mock provider serves the judge in `llmobs-cli`'s `llmobs serve` end-to-end test. A `tools/` crate is never a normal dependency of a shipped crate. AGENTS.md § Layout's crate graph says so. |
+| D-I-43 | **A tool crate as a test dependency.** A `tools/` crate may be a dev-dependency of a shipped crate, for tests only: `cetra-capture`'s mock provider serves the judge in `cetra-cli`'s `cetra serve` end-to-end test. A `tools/` crate is never a normal dependency of a shipped crate. AGENTS.md § Layout's crate graph says so. |
 
 **This plan also reads the design as follows** (no new decision needed):
 - The migration is `00MM_backfills.sql`, the next free number on `origin/main` when I6.1 starts (`0014` when this plan was written; § The migration number), not the design's original `0012`. It adds an index `backfills_rule(rule_id, created_at)` for the list.
@@ -68,10 +68,10 @@ When M6 is done:
 ## Versions
 
 No new external dependency. I6.7 adds the workspace's own capture tool as a test dependency:
-- root `Cargo.toml` `[workspace.dependencies]`: `llmobs-capture = { path = "tools/capture" }` (a path dependency; `deny.toml` already has `allow-wildcard-paths = true`);
-- `crates/cli/Cargo.toml` `[dev-dependencies]`: `llmobs-capture.workspace = true` and `axum.workspace = true` (already a workspace dependency, `0.8.9`).
+- root `Cargo.toml` `[workspace.dependencies]`: `cetra-capture = { path = "tools/capture" }` (a path dependency; `deny.toml` already has `allow-wildcard-paths = true`);
+- `crates/cli/Cargo.toml` `[dev-dependencies]`: `cetra-capture.workspace = true` and `axum.workspace = true` (already a workspace dependency, `0.8.9`).
 
-`llmobs-capture` is never a normal dependency of a shipped crate (D-I-43; I6.7 updates AGENTS.md's crate graph to say so).
+`cetra-capture` is never a normal dependency of a shipped crate (D-I-43; I6.7 updates AGENTS.md's crate graph to say so).
 
 ## Conventions for every sub-phase
 
@@ -110,7 +110,7 @@ Each wave starts when the waves before it are merged into the M6 integration bra
 | 1 | I6.1 `backfills` table and rows · I6.2 API contract · I6.3 backfill reads, sampling, scored check and estimate | M4 | none (I6.3 adds a module line to `eval/mod.rs`; I6.1 and I6.2 do not touch it) |
 | 2 | I6.4 the runner, startup recovery, spec 06 and 12 · I6.6 web: backfills section and dialog, spec 11 | I6.1 and I6.3 (I6.4); I6.2 (I6.6) | none |
 | 3 | I6.5 the routes, spec 09 | I6.1, I6.2, I6.3, I6.4 (it edits the allow lines of `eval/backfill.rs`, `eval/mod.rs` and `meta/backfills.rs` after I6.4 did) | none |
-| 4 | I6.7 the `llmobs serve` end-to-end test | I6.4, I6.5 | none |
+| 4 | I6.7 the `cetra serve` end-to-end test | I6.4, I6.5 | none |
 | 5 | I6.8 closeout: specs check, `00-design.md`, roadmap | every other sub-phase | none |
 
 I6.5 runs after I6.4, not beside it, because both edit the allow lines of the same three files. The Sonnet code reviews: after wave 1 (I6.1–I6.3), after waves 2–3 (I6.4–I6.6), and after waves 4–5 (I6.7, I6.8).
@@ -122,7 +122,7 @@ Contract files (`openapi.json`, `schema.gen.ts`, `fixtures/api/manifest.json`) a
 ## Final layout after M6
 
 ```
-Cargo.toml                                  llmobs-capture path dependency (I6.7)
+Cargo.toml                                  cetra-capture path dependency (I6.7)
 crates/server/migrations/meta/00MM_backfills.sql            (I6.1; 0014 today)
 crates/server/src/
   meta/backfills.rs                         BackfillRow, NewBackfill, insert, list, running, write_page, finish, fail_running (I6.1)
@@ -176,7 +176,7 @@ The rule, evaluator, user and job ids are M3's (`03-m3-queue-rules.md` § Fixed 
 
 ### Backfill contract
 
-JSON field names are exact. Times are RFC 3339 (`llmobs_core::time_serde`; optional times as `OnlineRule.paused_at` declares them). Every `Option` field of a response has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`.
+JSON field names are exact. Times are RFC 3339 (`cetra_core::time_serde`; optional times as `OnlineRule.paused_at` declares them). Every `Option` field of a response has `#[serde(default, skip_serializing_if = "Option::is_none")]`. Requests are `#[serde(deny_unknown_fields)]`.
 
 - **`BackfillStatus`**: `"running"` | `"done"` | `"failed"`. `snake_case`, `Copy`, with `as_str` and `from_name -> Option<Self>` like `PauseReason`.
 - **`CreateBackfillRequest`** (body of both POSTs; **`Deserialize` only**, because `TimeParam` has no `Serialize`; `Debug` derived): `from` (`TimeParam`, required), `to` (`TimeParam`, required), `max_targets` (`u32`, required), `sample_rate?` (`f64`; absent means the rule's; `null` is refused with `super::online_rules::present`, as `UpdateOnlineRuleRequest` does).
@@ -251,7 +251,7 @@ CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'runn
 CREATE INDEX backfills_rule ON backfills(rule_id, created_at);
 ```
 
-**Existing tests:** only the `meta_schema` snapshot changes. Regenerate it with `INSTA_UPDATE=always cargo test -p llmobs-server schema_matches_the_snapshot`. Its diff must add only the table, its two indexes and SQLite's automatic index of its primary key. Say so in the report.
+**Existing tests:** only the `meta_schema` snapshot changes. Regenerate it with `INSTA_UPDATE=always cargo test -p cetra-server schema_matches_the_snapshot`. Its diff must add only the table, its two indexes and SQLite's automatic index of its primary key. Say so in the report.
 
 ### `meta/backfills.rs`
 
@@ -435,7 +435,7 @@ Every call in these tests passes `&job`.
 //! Online rule backfill API types (spec 09 § Evaluation & alerts; D-I-25, D-I-38 to D-I-42).
 ```
 
-`CreateBackfillRequest`, `BackfillStatus`, `Backfill` and `BackfillEstimate`, exactly as § Backfill contract. Copy the time attributes of `OnlineRulePreview` (`#[serde(with = "llmobs_core::time_serde")]` and `#[schema(value_type = String, format = DateTime)]`) for `from`, `to` and `created_at`, and those of `OnlineRule.paused_at` for `finished_at`. `CreateBackfillRequest` derives `Debug, Deserialize, ToSchema` with `#[serde(deny_unknown_fields)]`; its `sample_rate` is `#[serde(default, deserialize_with = "super::online_rules::present")] pub sample_rate: Option<f64>`. Doc every field with the § Backfill contract text. `max_targets` doc: "Most targets the backfill reads, 1 to 10 000 (D-I-25)."
+`CreateBackfillRequest`, `BackfillStatus`, `Backfill` and `BackfillEstimate`, exactly as § Backfill contract. Copy the time attributes of `OnlineRulePreview` (`#[serde(with = "cetra_core::time_serde")]` and `#[schema(value_type = String, format = DateTime)]`) for `from`, `to` and `created_at`, and those of `OnlineRule.paused_at` for `finished_at`. `CreateBackfillRequest` derives `Debug, Deserialize, ToSchema` with `#[serde(deny_unknown_fields)]`; its `sample_rate` is `#[serde(default, deserialize_with = "super::online_rules::present")] pub sample_rate: Option<f64>`. Doc every field with the § Backfill contract text. `max_targets` doc: "Most targets the backfill reads, 1 to 10 000 (D-I-25)."
 
 Unit tests in the file: `Backfill` round-trips `static/backfill.json` and omits `error` and `finished_at` when absent; `CreateBackfillRequest` parses the request fixture, refuses an unknown field (`dry_run`) and `"sample_rate": null`; `BackfillStatus::from_name` is the inverse of `as_str` for the three values and `None` for `paused`.
 
@@ -550,7 +550,7 @@ In the test `direct_storage_reads_are_listed`, add `"eval/backfill.rs"` to the a
 //! already-scored check and the estimate. I6.4 adds the runner.
 
 /// Most rows one page reads (storage's `MAX_PAGE`).
-const PAGE: usize = llmobs_storage::MAX_PAGE;
+const PAGE: usize = cetra_storage::MAX_PAGE;
 /// Time allowed for one page read or one scored-ids read.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most targets one backfill reads (D-I-25).
@@ -688,8 +688,8 @@ impl<'a> Pager<'a> {
 2. `#[cfg(test)] if let Some(error) = faults::take_read() { return Err(error.into()); }` (§ Tests).
 3. `let source = self.state.storage.query(self.rule.project, query_options(Visibility::window(self.state, self.rule.org), None)).await?;` then `let ctx = QueryContext::new(source, None)?;` (as `eval/trigger.rs` opens its reads).
 4. The read, with `scope = ListScope { window: Some(self.window), include_eval: false, include_experiments: false }`, `strict_exclusions: true`, `search: None`, `filter: self.rule.filter.as_deref()`, `limit: ask`, `cursor: self.cursor.as_deref()`, `timeout: READ_TIMEOUT`:
-   - `RuleTarget::Trace` → `llmobs_storage::trace_list(&ctx, TraceListRequest { …, sort: TraceSort::StartTime, order: SortOrder::Desc })`;
-   - `RuleTarget::Span` → `llmobs_storage::span_list(&ctx, SpanListRequest { …, sort: SpanSort::StartTime, order: SortOrder::Desc })`.
+   - `RuleTarget::Trace` → `cetra_storage::trace_list(&ctx, TraceListRequest { …, sort: TraceSort::StartTime, order: SortOrder::Desc })`;
+   - `RuleTarget::Span` → `cetra_storage::span_list(&ctx, SpanListRequest { …, sort: SpanSort::StartTime, order: SortOrder::Desc })`.
    (Use the storage crate's `TraceSort`, `SpanSort` and `SortOrder`, not the API's.)
 5. `rows = convert::match_rows(&page.batches, rule.target == RuleTarget::Span)?` (it reads `trace_id`, `span_id` and `start_time` by name, so list batches work). `self.read += rows.len(); self.cursor = page.next_cursor; self.done = self.cursor.is_none() || rows.is_empty();`.
 6. `Ok(Some(TargetPage { ctx, rows }))`.
@@ -730,7 +730,7 @@ pub(crate) async fn unscored(ctx: &QueryContext, rule: &BackfillRule, scoring: &
 ```
 
 - `Scoring::from_row`: `kind = EvaluatorKind::from_name(&row.kind)?`; the name is the `name` of the output score parsed from `row.output_score` with the type `eval/evaluator.rs`'s `load` parses it into (`rg -n "output_score" crates/server/src/eval/evaluator.rs`).
-- `unscored`: for each row, `target` is `ScoreTarget::Span { trace_id, span_id }` when `span_id` is `Some`, else `ScoreTarget::Trace { trace_id }`; `id = scores::rule_score_id(rule.project, &target, &scoring.name, scoring.kind, rule.id)`. Collect the ids as hyphenated strings, `llmobs_storage::scores_by_id(ctx, &refs, READ_TIMEOUT).await?`, then `convert::scores(&batches, rule.project)?` into a `HashSet<Uuid>` of `score_id`s; keep the rows whose id is not in it, in order. A page holds at most `PAGE` = 1 000 rows, which is `scores_by_id`'s limit.
+- `unscored`: for each row, `target` is `ScoreTarget::Span { trace_id, span_id }` when `span_id` is `Some`, else `ScoreTarget::Trace { trace_id }`; `id = scores::rule_score_id(rule.project, &target, &scoring.name, scoring.kind, rule.id)`. Collect the ids as hyphenated strings, `cetra_storage::scores_by_id(ctx, &refs, READ_TIMEOUT).await?`, then `convert::scores(&batches, rule.project)?` into a `HashSet<Uuid>` of `score_id`s; keep the rows whose id is not in it, in order. A page holds at most `PAGE` = 1 000 rows, which is `scores_by_id`'s limit.
 
 **The estimate.**
 
@@ -795,7 +795,7 @@ Pure:
 With `TestApp` (copy `set_clock`, `trace_id`, `span_id`, `span` and their imports, `dataset_span` included, from `eval/trigger.rs`'s tests; rules with M3's `insert_rule` on a check evaluator; spans committed with `app.commit_spans`; windows built around the committed `start_time`s):
 - `pages_walk_newest_first_until_the_limit`: five traces → `Pager::new(…, limit 4).with_page(2)` returns pages of 2 and 2, newest first by `start_time`, then `None`; with limit 10: 2, 2, 1, then `None`.
 - `the_window_is_half_open`: a trace at `from` is read, one at `to` is not.
-- `pages_use_the_rule_filter_and_strict_exclusions`: filter `status = 'error'` over an ok trace, an error trace and an `llmobs-eval` error trace → one row; a rule filtered on `environment = 'llmobs-eval'` → no row.
+- `pages_use_the_rule_filter_and_strict_exclusions`: filter `status = 'error'` over an ok trace, an error trace and a`cetra-eval` error trace → one row; a rule filtered on `environment = 'cetra-eval'` → no row.
 - `a_span_rule_pages_spans`: a trace with three spans, rule filter `span_kind = 'llm'` on two → two rows with their `span_id`s.
 - `a_failed_read_is_a_read_error`: `faults::fail_next_read(RunError::Timeout)` → `Err`, `stored()` is `storage unavailable`.
 - `sampled_rows_match_the_live_sampler`: 20 traces at rate 0.5 → exactly the rows for which `sampling::sampled(0.5, rule, trace, None)` is true.
@@ -902,7 +902,7 @@ Helpers: the same copied trigger helpers as I6.3 (`set_clock`, `trace_id`, `span
 - `a_backfill_queues_its_window`: three traces, two inside the window and one after `to` → `backfill_once` returns 1; the row is `done` with `matched 2, enqueued 2, finished_at` set; two jobs `kind backfill`, `priority 2`, `status queued`, `dedup_key rule:<rule>:<trace>:-`, `trace_start_ns` = each trace's `start_time`.
 - `max_targets_keeps_the_newest`: five traces, `max_targets` 2 → the two newest traces have jobs; `matched 2`.
 - `a_span_rule_queues_spans`: filter `span_kind = 'llm'`, two matching spans in one trace → two jobs with their `span_id`s.
-- `evaluation_traces_are_never_targets`: an `llmobs-eval` trace and a rule filtered on `environment = 'llmobs-eval'` → `done`, `matched 0`, no job.
+- `evaluation_traces_are_never_targets`: a`cetra-eval` trace and a rule filtered on `environment = 'cetra-eval'` → `done`, `matched 0`, no job.
 - `sampling_matches_the_live_sampler`: 20 traces at backfill rate 0.5 → the job set equals the traces for which `sampling::sampled(0.5, rule, trace, None)` is true.
 - `scored_targets_are_skipped`: write this rule's score on one of three traces (`scores::write`, `Writer::Evaluator { rule_id: Some(rule), .. }`) → two jobs; `matched 3, enqueued 2`.
 - `a_failed_job_is_requeued_and_a_done_one_is_not`: insert rule jobs for traces 1 and 2, set trace 1's to `failed` and trace 2's to `done` by SQL → after the run, trace 1's row is `queued`, `kind backfill`; trace 2's stays `done`, `kind rule`; `enqueued 1`.
@@ -1086,7 +1086,7 @@ Render through `renderApp` on `/acme/support-bot/online-rules/01900000-0000-7000
 
 ---
 
-## I6.7 — The `llmobs serve` end-to-end test
+## I6.7 — The `cetra serve` end-to-end test
 
 **Goal:** one Rust test takes a trace from OTLP to a judge score through a real server (D-G-20's harness): the live trigger scores a new trace, and a backfill scores a trace that was stored before the rule existed, against the capture tool's mock provider.
 
@@ -1096,11 +1096,11 @@ Render through `renderApp` on `/acme/support-bot/online-rules/01900000-0000-7000
 
 ### Dependencies
 
-§ Versions: `llmobs-capture = { path = "tools/capture" }` in the root `[workspace.dependencies]`, next to the other `llmobs-*` path entries; `axum.workspace = true` and `llmobs-capture.workspace = true` in `crates/cli/Cargo.toml` `[dev-dependencies]`, in alphabetical order. Run `just deny`; if cargo-deny refuses the path dependency, STOP and report.
+§ Versions: `cetra-capture = { path = "tools/capture" }` in the root `[workspace.dependencies]`, next to the other `cetra-*` path entries; `axum.workspace = true` and `cetra-capture.workspace = true` in `crates/cli/Cargo.toml` `[dev-dependencies]`, in alphabetical order. Run `just deny`; if cargo-deny refuses the path dependency, STOP and report.
 
 `AGENTS.md` § Layout, **Crate dependency graph (enforced)**: after the bullet "- `ui` depends on no workspace crate.", add exactly:
 
-"- A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `llmobs-cli`'s end-to-end test uses `llmobs-capture`'s mock provider (D-I-43)."
+"- A `tools/` crate is never a dependency of a shipped crate. It may be a dev-dependency, for tests only: `cetra-cli`'s end-to-end test uses `cetra-capture`'s mock provider (D-I-43)."
 
 ### The test (`crates/cli/tests/e2e.rs`)
 
@@ -1111,7 +1111,7 @@ Read the whole file first: `start`, `Api`, `fixture_request`, `post_otlp_http` a
 const JUDGE_PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
 
 /// One chat turn of the mock provider: the judge's numeric answer.
-fn judge_turn() -> llmobs_capture::Turn {
+fn judge_turn() -> cetra_capture::Turn {
     serde_json::from_value(json!({
         "api": "openai.chat",
         "model": "gpt-test",
@@ -1134,7 +1134,7 @@ fn now_ns() -> i64;
 `timed_request`: `fixture_request("sdk-generator-text", trace)`, then set the span's `start_time_unix_nano` to `start_ns` and `end_time_unix_nano` to `start_ns + 998_000_000` (both `u64::try_from(…).unwrap()`).
 
 `#[tokio::test(flavor = "multi_thread")] async fn online_rules_and_backfill_end_to_end()`, step by step:
-1. **Mock provider.** `let mock = llmobs_capture::Mock::new(vec![judge_turn(), judge_turn()]);` bind `tokio::net::TcpListener` on `127.0.0.1:0`, keep its address, `let router = mock.router();` and `let provider = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });`.
+1. **Mock provider.** `let mock = cetra_capture::Mock::new(vec![judge_turn(), judge_turn()]);` bind `tokio::net::TcpListener` on `127.0.0.1:0`, keep its address, `let router = mock.router();` and `let provider = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });`.
 2. **Server.** `start(dir.path(), "\n[security]\nallow_private_network_egress = true\n")`. `project = format!("/api/v1/projects/{}", server.proto_id)`.
 3. **An old trace, before any rule.** `old = format!("{:032x}", 31)`; send `timed_request(&old, now_ns() − 20 min)` with `post_otlp_http` (`INIT_KEY`, protobuf). No rule exists, so the trigger does not track it.
 4. **Connection, judge and rule**, over HTTP with the admin's session (`server.api.post`):
@@ -1152,7 +1152,7 @@ fn now_ns() -> i64;
 
 If the mock refuses the judge's request (an error in `log.errors` naming the request), read `read_facts` and the judge's request body (`crates/eval/src/judge/`), and STOP and report: the fix belongs to the capture tool's owner, not to this test.
 
-Run it five times in a row (`for i in 1 2 3 4 5; do cargo test -p llmobs-cli --test e2e online_rules_and_backfill_end_to_end || break; done`); a flaky run must be fixed, not retried.
+Run it five times in a row (`for i in 1 2 3 4 5; do cargo test -p cetra-cli --test e2e online_rules_and_backfill_end_to_end || break; done`); a flaky run must be fixed, not retried.
 
 ### Done when
 
@@ -1186,7 +1186,7 @@ The coordinator already updated the header, the plan links, § Scope, the migrat
 Read the row first and keep what is still true.
 - The plans cell: "design doc, then one plan per milestone (M1–M6 written)".
 - The status cell:
-  - when M5 is already merged on `main`: "**Done.** M1 (#63), M2 (#76), M3 (#100), M4 (#…), M5 (#…) and M6 (#…) are merged: LLM connections and secret encryption, evaluators and test runs, score definitions, online rules with the durable queue, budgets and pauses, the completion trigger with sampling, manual runs, backfill, the annotation panel, and an `llmobs serve` end-to-end test. D-I-1 to D-I-43." (fill in the PR numbers from `git log --oneline origin/main` merges; use the M5 and M6 PR numbers once known, else "PR pending");
+  - when M5 is already merged on `main`: "**Done.** M1 (#63), M2 (#76), M3 (#100), M4 (#…), M5 (#…) and M6 (#…) are merged: LLM connections and secret encryption, evaluators and test runs, score definitions, online rules with the durable queue, budgets and pauses, the completion trigger with sampling, manual runs, backfill, the annotation panel, and a`cetra serve` end-to-end test. D-I-1 to D-I-43." (fill in the PR numbers from `git log --oneline origin/main` merges; use the M5 and M6 PR numbers once known, else "PR pending");
   - when M5 is not merged yet: "**In progress.** M1–M4 and M6 (backfill, the end-to-end test, the closeout) are merged or in PR; M5 (annotation panel, score ownership) is pending. The track is done when M5 merges." The session that merges the last of M5 and M6 sets the **Done** text above.
 
 ### Done when
@@ -1208,4 +1208,4 @@ Report: the eight commits, the migration number you used, deviations, and anythi
 5. **A failed read** (D-I-41). Default: the backfill fails at once, with no retry; running it again is cheap. A retry loop (like the trigger's five failed reads) would add state to a rare path.
 6. **A rule deleted during a run.** Default: the backfill rows go with the rule (`ON DELETE CASCADE`, as the design's table says), so "marked failed" (D-I-25) cannot be observed; the runner just stops.
 7. **The dialog's windows.** Default: three presets ending 6 minutes ago (24 h, 7 days, 30 days); the API takes any window. A custom range can come later with the shared time-range picker.
-8. **The capture mock in a shipped crate's tests** (D-I-43). Default: `llmobs-capture` becomes a dev-dependency of `llmobs-cli` for I6.7; it is never a normal dependency. The alternative, a small hand-written OpenAI mock in `e2e.rs`, would duplicate `test_support/mock_llm.rs`, which the CLI crate cannot use (it is `#[cfg(test)]` in the server).
+8. **The capture mock in a shipped crate's tests** (D-I-43). Default: `cetra-capture` becomes a dev-dependency of `cetra-cli` for I6.7; it is never a normal dependency. The alternative, a small hand-written OpenAI mock in `e2e.rs`, would duplicate `test_support/mock_llm.rs`, which the CLI crate cannot use (it is `#[cfg(test)]` in the server).

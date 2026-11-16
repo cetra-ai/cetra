@@ -1,6 +1,6 @@
 # 05 — Query: filter DSL, SQL console, search, metrics
 
-Everything compiles to DataFusion plans over the project-scoped providers of 03 §6. Those providers expose the stored schemas (binary IDs, `project_id`); the views below are built on top of them by the query layer (`llmobs-storage` `filter/` and `sql/` modules, D89), which also rewrites hex-literal ID comparisons to binary ones and adds the default exclusions. `QueryContext::new` (in `llmobs-storage`) builds the DataFusion session from the `ProjectQuery` that `Storage::query` returns (D91): the raw providers, the per-query runtime (memory pool, spill directory) and `target_partitions`.
+Everything compiles to DataFusion plans over the project-scoped providers of 03 §6. Those providers expose the stored schemas (binary IDs, `project_id`); the views below are built on top of them by the query layer (`cetra-storage` `filter/` and `sql/` modules, D89), which also rewrites hex-literal ID comparisons to binary ones and adds the default exclusions. `QueryContext::new` (in `cetra-storage`) builds the DataFusion session from the `ProjectQuery` that `Storage::query` returns (D91): the raw providers, the per-query runtime (memory pool, spill directory) and `target_partitions`.
 
 ## Logical views exposed to users
 
@@ -25,11 +25,11 @@ Column reference for each view is generated from the Arrow schemas and served at
 
 ## Default exclusions
 
-Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM 'llmobs-eval'` and exclude experiment traces (`metadata['llmobs.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `llmobs-eval` exclusion is not added; the experiment exclusion still is.
+Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM 'cetra-eval'` and exclude experiment traces (`metadata['cetra.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `cetra-eval` exclusion is not added; the experiment exclusion still is.
 
 The exclusions apply to the view the request reads: `traces` and `spans` directly; session and user lists through the traces they aggregate; span-based and score-based metrics through a semi-join on the excluded traces.
 
-**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'llmobs-eval' OR metadata['llmobs.experiment_id'] IS NOT NULL)`.
+**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'cetra-eval' OR metadata['cetra.experiment_id'] IS NOT NULL)`.
 
 **Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show "10 000 or more" without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window. On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded. With strict exclusions, `trace_refresh` returns only `trace_id` and `start_time`, the two columns the trigger needs.
 
@@ -136,7 +136,7 @@ Returns time series:
 | cost | `sum(cost_total)` on `traces` (total) and on spans grouped by model, as `Decimal128(38, 18)` |
 | top models by cost | `llm` spans with a non-null model, at most 10, by their `Decimal128(38, 18)` cost sum descending (nulls last), then model ascending |
 | scores | `avg(value_num)` per score name per bucket on `scores` |
-| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'llmobs-eval'`, as `Decimal128(38, 18)` |
+| evaluation cost | `sum(cost_total)` on `traces WHERE environment = 'cetra-eval'`, as `Decimal128(38, 18)` |
 | TTFT p50/p95 | spans `ttft_ns` |
 
 Every cost series and KPI above (total, by model, top models, evaluation) and the alert cost value (`cost`, spec 07) are summed as `Decimal128(38, 18)` (D-A2-4). A non-finite or out-of-range trace cost fails the query with `query_failed`; it is not skipped.
@@ -151,7 +151,7 @@ All series honor the filter DSL and the default exclusions (applied as above). R
 
 ## Trace and span APIs
 
-These queries are `llmobs_storage::reads` (D92).
+These queries are `cetra_storage::reads` (D92).
 
 | Operation | Plan |
 |---|---|

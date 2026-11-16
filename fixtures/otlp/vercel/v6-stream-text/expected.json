@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "9655257f7c68d7fe324e9f47397de1ae",
-      "span_id": "1612fb66634068a2",
+      "trace_id": "d90013b352faee6913fa0b9fc9e6f5a6",
+      "span_id": "89ecdc6a2581aa4d",
       "name": "ai.streamText",
       "span_kind": "chain",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.201000000Z",
+      "end_time": "2025-12-31T23:59:50.203000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {
@@ -56,13 +56,13 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "9655257f7c68d7fe324e9f47397de1ae",
-      "span_id": "734a75bf3bf67508",
-      "parent_span_id": "1612fb66634068a2",
+      "trace_id": "d90013b352faee6913fa0b9fc9e6f5a6",
+      "span_id": "a0b709b1fd77630c",
+      "parent_span_id": "89ecdc6a2581aa4d",
       "name": "ai.streamText.doStream",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.005000000Z",
-      "end_time": "2025-12-31T23:59:50.196000000Z",
+      "start_time": "2025-12-31T23:59:50.006000000Z",
+      "end_time": "2025-12-31T23:59:50.197000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "metadata": {
@@ -80,7 +80,7 @@
       "cost_output": 0.000032,
       "cost_total": 0.000052000000000000004,
       "cost_source": "computed",
-      "ttft_ns": 155908406,
+      "ttft_ns": 155237763,
       "request_params": "{\"maxRetries\":0}",
       "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Describe the harbor in a few words.\"}]}]",
       "input_format": "messages",
@@ -92,12 +92,12 @@
         "ai.model.id": "gpt-4o-mini-2024-07-18",
         "ai.model.provider": "openai.chat",
         "ai.operationId": "ai.streamText.doStream",
-        "ai.response.avgOutputTokensPerSecond": "42.137273735876256",
+        "ai.response.avgOutputTokensPerSecond": "42.14026752559208",
         "ai.response.finishReason": "stop",
         "ai.response.id": "chatcmpl-capture-1",
         "ai.response.model": "gpt-4o-mini-2024-07-18",
-        "ai.response.msToFinish": "189.855662",
-        "ai.response.msToFirstChunk": "155.908406",
+        "ai.response.msToFinish": "189.84217399999997",
+        "ai.response.msToFirstChunk": "155.237763",
         "ai.response.providerMetadata": "{\"openai\":{\"acceptedPredictionTokens\":0,\"rejectedPredictionTokens\":0}}",
         "ai.response.timestamp": "2026-01-01T00:00:00.000Z",
         "ai.settings.maxRetries": "0",
@@ -131,10 +131,10 @@
         {
           "time": "2025-12-31T23:59:50.161000000Z",
           "name": "ai.stream.firstChunk",
-          "attributes": "{\"ai.response.msToFirstChunk\":155.908406}"
+          "attributes": "{\"ai.response.msToFirstChunk\":155.237763}"
         },
         {
-          "time": "2025-12-31T23:59:50.195000000Z",
+          "time": "2025-12-31T23:59:50.196000000Z",
           "name": "ai.stream.finish"
         }
       ],

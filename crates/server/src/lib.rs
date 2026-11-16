@@ -1,10 +1,10 @@
 //! HTTP API types, server configuration, metadata DB, and the OpenAPI document.
 //!
-//! [`config`] loads `ServerConfig` from defaults, `llmobs.toml`, and `LLMOBS_*`
+//! [`config`] loads `ServerConfig` from defaults, `cetra.toml`, and `CETRA_*`
 //! (spec 12). [`meta`] opens `meta.db` (spec 04). [`api`] holds the request and
 //! response types for the observability read API (`docs/spec/09-api.md`).
 //! [`api::openapi::openapi`] is the contract written to `crates/server/openapi.json`.
-//! `http` is the axum router. [`serve`] binds it for `llmobs serve`.
+//! `http` is the axum router. [`serve`] binds it for `cetra serve`.
 
 pub mod admin;
 pub mod admin_socket;

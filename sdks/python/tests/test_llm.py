@@ -14,10 +14,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import StatusCode
 from opentelemetry.util.types import AnyValue
 
-import llmobs
-from llmobs import _llm
-from llmobs._llm import to_canonical_messages
-from llmobs._runtime import Runtime
+import cetra
+from cetra import _llm
+from cetra._llm import to_canonical_messages
+from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
 Spans = Callable[[InMemorySpanExporter], list[ReadableSpan]]
@@ -40,7 +40,7 @@ def attrs(span: ReadableSpan) -> Mapping[str, AnyValue]:
 def test_llm_span_scenario_attributes(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "chat",
         provider="openai",
         model="gpt-4o-mini",
@@ -57,7 +57,7 @@ def test_llm_span_scenario_attributes(memory: Memory, spans: Spans) -> None:
         handle.set_usage(input_tokens=12, output_tokens=3)
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4o-mini",
@@ -73,9 +73,9 @@ def test_llm_span_scenario_attributes(memory: Memory, spans: Spans) -> None:
 def test_system_instructions_string_and_parts(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span("a", provider="openai", model="m", system_instructions="Be kind."):
+    with cetra.llm_span("a", provider="openai", model="m", system_instructions="Be kind."):
         pass
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "b",
         provider="openai",
         model="m",
@@ -101,11 +101,11 @@ def test_params_filtering(memory: Memory, spans: Spans) -> None:
         "seed": math.nan,
         "penalty": math.inf,
     }
-    with llmobs.llm_span("s", provider="openai", model="gpt", params=params):
+    with cetra.llm_span("s", provider="openai", model="gpt", params=params):
         pass
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt",
@@ -119,7 +119,7 @@ def test_params_filtering(memory: Memory, spans: Spans) -> None:
 def test_usage_all_keys(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span("s", provider="p", model="m") as handle:
+    with cetra.llm_span("s", provider="p", model="m") as handle:
         handle.set_usage(
             input_tokens=100,
             output_tokens=50,
@@ -129,7 +129,7 @@ def test_usage_all_keys(memory: Memory, spans: Spans) -> None:
         )
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "p",
         "gen_ai.request.model": "m",
@@ -145,8 +145,8 @@ def test_usage_edge_cases(memory: Memory, spans: Spans, caplog: pytest.LogCaptur
     exporter, start = memory
     start()
     with (
-        caplog.at_level(logging.DEBUG, logger="llmobs"),
-        llmobs.llm_span("s", provider="p", model="m") as handle,
+        caplog.at_level(logging.DEBUG, logger="cetra"),
+        cetra.llm_span("s", provider="p", model="m") as handle,
     ):
         handle.set_usage(
             input_tokens=10,
@@ -162,22 +162,22 @@ def test_usage_edge_cases(memory: Memory, spans: Spans, caplog: pytest.LogCaptur
     assert "gen_ai.usage.cache_read.input_tokens" not in attributes
     assert "gen_ai.usage.cache_creation.input_tokens" not in attributes
     assert "gen_ai.usage.reasoning.output_tokens" not in attributes
-    assert "llmobs: skipped 3 usage values" in caplog.text
+    assert "cetra: skipped 3 usage values" in caplog.text
 
 
 def test_set_cost(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span("a", provider="p", model="m") as handle:
+    with cetra.llm_span("a", provider="p", model="m") as handle:
         handle.set_cost(0.0015)
         handle.set_cost(-1.0)
         handle.set_cost(math.nan)
         handle.set_cost(math.inf)
-    with llmobs.llm_span("b", provider="p", model="m") as handle:
+    with cetra.llm_span("b", provider="p", model="m") as handle:
         handle.set_cost(2)
     span_a, span_b = spans(exporter)
-    assert attrs(span_a)["llmobs.cost.total"] == 0.0015
-    cost_b = attrs(span_b)["llmobs.cost.total"]
+    assert attrs(span_a)["cetra.cost.total"] == 0.0015
+    cost_b = attrs(span_b)["cetra.cost.total"]
     assert cost_b == 2.0
     assert isinstance(cost_b, float)
 
@@ -189,11 +189,11 @@ def test_record_first_token_once(
     start()
     now = count(1)  # an increasing fake clock: a second write would use 2
     monkeypatch.setattr(_llm, "time", SimpleNamespace(time_ns=lambda: next(now)))
-    with llmobs.llm_span("s", provider="p", model="m") as handle:
+    with cetra.llm_span("s", provider="p", model="m") as handle:
         handle.record_first_token()
         handle.record_first_token()
     [span] = spans(exporter)
-    ttft = attrs(span)["llmobs.ttft_ns"]
+    ttft = attrs(span)["cetra.ttft_ns"]
     assert isinstance(ttft, int)
     assert span.start_time is not None
     assert ttft == 1 - span.start_time
@@ -232,7 +232,7 @@ def test_to_canonical_messages_shapes() -> None:
 def test_capture_content_false_keeps_model_and_usage(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start(capture_content=False)
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "chat",
         provider="openai",
         model="gpt-4o-mini",
@@ -246,13 +246,13 @@ def test_capture_content_false_keeps_model_and_usage(memory: Memory, spans: Span
         handle.set_cost(0.01)
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "openai",
         "gen_ai.request.model": "gpt-4o-mini",
         "gen_ai.request.temperature": 0.5,
         "gen_ai.usage.input_tokens": 5,
-        "llmobs.cost.total": 0.01,
+        "cetra.cost.total": 0.01,
     }
 
 
@@ -276,7 +276,7 @@ def test_mask_over_messages(memory: Memory, spans: Spans) -> None:
         return _redact(value)
 
     start(mask=mask)
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "s",
         provider="p",
         model="m",
@@ -300,13 +300,13 @@ def test_mask_over_messages(memory: Memory, spans: Spans) -> None:
 
 def test_invalid_provider_or_model_raises() -> None:
     with pytest.raises(ValueError, match=r"^provider: must be a non-empty string$"):
-        llmobs.llm_span("s", provider="", model="gpt")
+        cetra.llm_span("s", provider="", model="gpt")
     with pytest.raises(ValueError, match=r"^model: must be a non-empty string$"):
-        llmobs.llm_span("s", provider="openai", model="")
+        cetra.llm_span("s", provider="openai", model="")
     with pytest.raises(ValueError, match=r"^provider:"):
-        llmobs.llm_span("s", provider=cast("str", 3), model="gpt")
+        cetra.llm_span("s", provider=cast("str", 3), model="gpt")
     with pytest.raises(ValueError, match=r"^model:"):
-        llmobs.llm_span("s", provider="openai", model=cast("str", None))
+        cetra.llm_span("s", provider="openai", model=cast("str", None))
 
 
 def test_exception_in_body_recorded_and_reraised(memory: Memory, spans: Spans) -> None:
@@ -317,7 +317,7 @@ def test_exception_in_body_recorded_and_reraised(memory: Memory, spans: Spans) -
         pass
 
     def call() -> None:
-        with llmobs.llm_span("s", provider="p", model="m") as handle:
+        with cetra.llm_span("s", provider="p", model="m") as handle:
             handle.set_usage(input_tokens=1)
             raise ScenarioError("boom")
 
@@ -336,7 +336,7 @@ def test_exception_in_body_recorded_and_reraised(memory: Memory, spans: Spans) -
 
 
 def test_no_runtime_yields_noop_handle() -> None:
-    with llmobs.llm_span(
+    with cetra.llm_span(
         "s", provider="p", model="m", input_messages=[{"role": "user", "content": "hi"}]
     ) as handle:
         assert handle.trace_id is None
@@ -352,27 +352,25 @@ def test_async_llm_span_with_metadata(memory: Memory, spans: Spans) -> None:
     start()
 
     async def run() -> None:
-        async with llmobs.llm_span(
-            "s", provider="p", model="m", metadata={"plan": "pro"}
-        ) as handle:
+        async with cetra.llm_span("s", provider="p", model="m", metadata={"plan": "pro"}) as handle:
             handle.set_usage(input_tokens=2)
 
     asyncio.run(run())
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "p",
         "gen_ai.request.model": "m",
         "gen_ai.usage.input_tokens": 2,
-        "llmobs.metadata.plan": "pro",
+        "cetra.metadata.plan": "pro",
     }
 
 
 def test_handle_after_end_ignores_setters(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span("s", provider="p", model="m") as handle:
+    with cetra.llm_span("s", provider="p", model="m") as handle:
         pass
     handle.set_usage(input_tokens=1)
     handle.set_output_messages([{"role": "assistant", "content": "yo"}])
@@ -381,7 +379,7 @@ def test_handle_after_end_ignores_setters(memory: Memory, spans: Spans) -> None:
     handle.set_metadata(plan="pro")
     [span] = spans(exporter)
     assert dict(attrs(span)) == {
-        "llmobs.span.kind": "llm",
+        "cetra.span.kind": "llm",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "p",
         "gen_ai.request.model": "m",
@@ -391,15 +389,15 @@ def test_handle_after_end_ignores_setters(memory: Memory, spans: Spans) -> None:
 def test_inherited_set_input_and_set_output(memory: Memory, spans: Spans) -> None:
     exporter, start = memory
     start()
-    with llmobs.llm_span("s", provider="p", model="m") as handle:
+    with cetra.llm_span("s", provider="p", model="m") as handle:
         handle.set_input("raw-in")
         handle.set_output("raw-out")
     [span] = spans(exporter)
     attributes = attrs(span)
-    assert attributes["llmobs.input"] == "raw-in"
-    assert attributes["llmobs.input.format"] == "text"
-    assert attributes["llmobs.output"] == "raw-out"
-    assert attributes["llmobs.output.format"] == "text"
+    assert attributes["cetra.input"] == "raw-in"
+    assert attributes["cetra.input.format"] == "text"
+    assert attributes["cetra.output"] == "raw-out"
+    assert attributes["cetra.output.format"] == "text"
 
 
 def test_body_return_value_not_recorded(memory: Memory, spans: Spans) -> None:
@@ -407,10 +405,10 @@ def test_body_return_value_not_recorded(memory: Memory, spans: Spans) -> None:
     start()
 
     def call() -> str:
-        with llmobs.llm_span("s", provider="p", model="m"):
+        with cetra.llm_span("s", provider="p", model="m"):
             return "the-answer"
 
     assert call() == "the-answer"
     [span] = spans(exporter)
-    assert "llmobs.output" not in attrs(span)
+    assert "cetra.output" not in attrs(span)
     assert "gen_ai.output.messages" not in attrs(span)

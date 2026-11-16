@@ -83,7 +83,7 @@ The dataset traces are all on 2026-01-01 between 10:00 and 10:30 (fixture README
    - empty buckets have `None`.
 3. Latency: in a bucket with one trace, p50 = p95 = p99 = its `duration_ns`. In a multi-trace bucket, the value lies within the bucket's min and max.
 4. `group_by = Model`: every group is a model from the traces' `models`. Per bucket, the sum of `Traces` over groups equals the count of `(trace, model)` pairs.
-5. `group_by = Environment` with `include_eval`: groups include `llmobs-eval`. Traces with a null environment are absent.
+5. `group_by = Environment` with `include_eval`: groups include `cetra-eval`. Traces with a null environment are absent.
 6. `EvalCost` sums trace 5's cost. It is unaffected by `include_eval`, and is 0 or `None` under a filter that excludes it (state which in the test).
 7. A filter `status = 'error'` changes `Traces` to the error traces only. A filter with a parse error gives `RunError::Invalid`.
 8. 2,001 buckets give `InvalidRequest`.
@@ -128,7 +128,7 @@ Over `spans` with `start_time` in the window, bucketed on the span's `start_time
 | `LlmLatencyP50`, `LlmLatencyP95` | `span_kind = 'llm'`, `model IS NOT NULL` | `approx_percentile_cont(duration_ns, q)` | always the model; `group_by` ignored |
 | `CostByModel` | `span_kind = 'llm'`, `model IS NOT NULL` | `sum(cost_total)` | always the model |
 
-Take the span kind strings from `llmobs_core::enums::SpanKind`.
+Take the span kind strings from `cetra_core::enums::SpanKind`.
 
 ### Score series
 

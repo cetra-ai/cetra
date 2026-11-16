@@ -118,7 +118,7 @@ Also `refuse_outbound_passes_without_restore_mode`: a unit test in `restore.rs` 
 ## Verify
 
 ```bash
-cargo test -p llmobs-server --all-features restore_mode
+cargo test -p cetra-server --all-features restore_mode
 just openapi && git diff --stat   # only if ProblemCode is in the schema
 just check
 ```

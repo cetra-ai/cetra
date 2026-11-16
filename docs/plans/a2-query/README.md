@@ -6,7 +6,7 @@ Implementation plan for track A2 (Wave 1). It covers:
 - the SQL console sandbox;
 - the queries behind the read endpoints (lists, details, scores, metrics).
 
-All of it lives in `llmobs-storage` and is tested on in-memory tables, so it does not wait for A1.
+All of it lives in `cetra-storage` and is tested on in-memory tables, so it does not wait for A1.
 
 The work is split into 20 sub-phases, Q1–Q20. Each is done by one agent, in order, and each ends with `just check` green and one commit. A sub-phase is self-contained: it lists the files it may edit, the exact behaviour, the tests and the commit subject. Do the sub-phase you were given, nothing more.
 
@@ -35,7 +35,7 @@ These go into `docs/mvp-decisions.md` in Q1. **The numbers may need rebasing:** 
 | # | Topic | Decision |
 |---|---|---|
 | D91 | Query context | A2 builds the DataFusion `SessionContext`. `Storage::query` (A1) returns a `ProjectQuery`: the three raw providers (`spans`, `traces`, `scores`, stored schemas, D89), the per-query `RuntimeEnv` (memory pool, spill directory) and `target_partitions`. `QueryContext::new` builds the session from that:<ul><li>an explicit function registry: DataFusion's built-in scalar, nested, aggregate and window functions, but no table functions and no higher-order (lambda) functions;</li><li>no `information_schema`, no URL tables, recursive CTEs off;</li><li>parser recursion limit 50, source spans collected;</li><li>the hex-ID optimizer rule;</li><li>only the views registered.</li></ul> |
-| D92 | Read queries | The queries behind the read endpoints live in A2 (`llmobs_storage::reads`): trace, span, session, user and score lists with sort and cursor; trace, span, session and user detail; latest scores per row; dashboard metrics. They return Arrow batches with documented columns, or plain structs for metrics. The server maps them to API types and does HTTP. Cursors are encoded and checked by A2. |
+| D92 | Read queries | The queries behind the read endpoints live in A2 (`cetra_storage::reads`): trace, span, session, user and score lists with sort and cursor; trace, span, session and user detail; latest scores per row; dashboard metrics. They return Arrow batches with documented columns, or plain structs for metrics. The server maps them to API types and does HTTP. Cursors are encoded and checked by A2. |
 | D93 | SQLite views | `experiment_items` and `dataset_items` belong to the server: their schema, their rows (a `MemTable` of at most 1M rows built per query) and their column catalog. The server registers them through `QueryContext::register_sqlite_view`. A2's sandbox only knows their names. |
 | D94 | Query errors | Filter, SQL and execution error messages go back to the caller (capped at 2 KiB): the caller is querying their own project. They are never logged; logs carry the error kind, text lengths and the duration. Codes:<ul><li>`invalid_filter` (400) for filter and SQL text;</li><li>`query_failed` (400) for execution errors (bad cast, regex too big, division by zero);</li><li>`query_timeout` (422);</li><li>`query_too_large` (422) for the memory cap;</li><li>`busy` (503) when A1's admission control refuses the query.</li></ul> |
 | D95 | Input limits | Filter DSL: at most 4 KiB and 128 operator tokens. SQL: at most 64 KiB and 512 operator tokens. Parser recursion limit 50. Checked on the token stream before parsing. Without these, about 3,000 `OR` terms overflow a 2 MiB stack while DataFusion plans the query (measured on 55.2 release; about 1,000 in a debug build), and the overflow aborts the process. |
@@ -49,8 +49,8 @@ These go into `docs/mvp-decisions.md` in Q1. **The numbers may need rebasing:** 
 ## Boundaries
 
 ```
-llmobs-server ──Storage::query(project, options)──▶ A1 ──▶ ProjectQuery { spans, traces, scores, runtime, target_partitions, optimizer_rules }
-llmobs-server ──QueryContext::new(ProjectQuery, window)──▶ A2: views, hex rule, physical optimizer rules, sandbox
+cetra-server ──Storage::query(project, options)──▶ A1 ──▶ ProjectQuery { spans, traces, scores, runtime, target_partitions, optimizer_rules }
+cetra-server ──QueryContext::new(ProjectQuery, window)──▶ A2: views, hex rule, physical optimizer rules, sandbox
               ──reads::* (lists, details, metrics)──▶ Arrow batches / structs ──▶ server maps to API types
               ──QueryContext::sql_json / sql_export──▶ JSON rows / byte stream
               ──QueryContext::register_sqlite_view──▶ experiment_items, dataset_items (server-built MemTables)
@@ -58,7 +58,7 @@ llmobs-server ──QueryContext::new(ProjectQuery, window)──▶ A2: views, 
 
 **A1 (storage engine)**
 - It owns the raw providers, their pushdown, trace merging, tombstones, score last-writer-wins, the memory pool and admission.
-- A2 never relies on how a provider works inside, only on its schema (`llmobs_core::schema`) and on the filters it receives.
+- A2 never relies on how a provider works inside, only on its schema (`cetra_core::schema`) and on the filters it receives.
 - Time hints (`?around=`) go through A1's `QueryOptions` when the server calls `Storage::query` (D154). A2 does not see them.
 - The "latest N traces" fast path is a physical optimizer rule that A1 puts in `ProjectQuery.optimizer_rules`. `session_state` appends those rules to the session without looking inside them (D153, A1 M3.7).
 - Q14 documents the exact plan shape of the trace list (`ORDER BY start_time DESC, trace_id DESC LIMIT n+1` over the `traces` view), so A1's M3 can recognise it.
@@ -197,7 +197,7 @@ crates/storage/src/
 
 ## Public API
 
-The A2 part of `llmobs-storage`'s public surface. Names may be adjusted in the sub-phase that adds them, as long as this section is updated in the same commit.
+The A2 part of `cetra-storage`'s public surface. Names may be adjusted in the sub-phase that adds them, as long as this section is updated in the same commit.
 
 ```rust
 // views (Q2, Q5)

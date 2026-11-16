@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use cetra_core::ids::{ProjectId, TraceId};
 use futures::TryStreamExt;
-use llmobs_core::ids::{ProjectId, TraceId};
 use sqlx::{AssertSqlSafe, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -970,7 +970,7 @@ mod tests {
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::insert_project;
     use crate::meta::{MetaDb, MetaError};
-    use llmobs_core::ids::OrgId;
+    use cetra_core::ids::OrgId;
 
     const NOW: i64 = 1_000;
 

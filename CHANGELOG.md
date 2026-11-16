@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to llmobs are listed here. The format follows
+All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
 with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
@@ -22,8 +22,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   recorded as failed. Change the recipients, or use `invite_only` signup.
 - A trace `latency_p95` alert rule whose threshold is at or above its window is refused on its next
   edit; lower the threshold or widen the window.
-- An `LLMOBS_AUTH__OIDC__*` environment variable other than
-  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
+- A`CETRA_AUTH__OIDC__*` environment variable other than
+  `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
   server at start; such variables used to be ignored. Remove them.
 - `/readyz` can now fail on a full disk or an unreachable object store. Keep liveness probes on
   `/healthz`; the Helm chart already does.
@@ -37,21 +37,21 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
 - Datasets: import items from CSV (with a column mapping) or JSONL, export a version as JSONL or CSV, and add an item from a trace or a span (track J).
 - Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
-- Python SDK: `llmobs.Client` for datasets and `llmobs.evaluate` / `aevaluate` to run experiments on your machine (track J).
-- TypeScript SDK: `new llmobs.Client()` for datasets and `llmobs.evaluate` to run experiments on your machine (track J).
+- Python SDK: `cetra.Client` for datasets and `cetra.evaluate` / `aevaluate` to run experiments on your machine (track J).
+- TypeScript SDK: `new cetra.Client()` for datasets and `cetra.evaluate` to run experiments on your machine (track J).
 - Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
 - Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
 - Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
 - Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from
-  `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
-  `llmobs.toml` (D-S-2).
+  `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET`, and `client_secret` may then be left out of
+  `cetra.toml` (D-S-2).
 - Storage: a failed fsync of a local object stops local object writes until a restart, and `StorageHealth::objects_sync_failed` reports it (D-R-6). New error `ObjectError::SyncFailed`.
 - Storage: a `catalog.db` commit that fails with an I/O error stops the catalog until a restart, and `StorageHealth::catalog_failed` reports it (D-R-6). New errors `CatalogError::Stopped` and `CommitError::Stopped`.
 - The S3 self-hosting guide recommends a lifecycle rule that aborts incomplete multipart uploads (track R).
 - Storage: a warning at start when the storage's memory budgets add up to more than the memory limit.
 - Per-org single sign-on (enterprise): an org's own OIDC provider, DNS-verified email domains,
-  email-first login, just-in-time membership and SSO enforcement; `llmobs admin org-sso disable`.
+  email-first login, just-in-time membership and SSO enforcement; `cetra admin org-sso disable`.
 - Release archives for Linux x86_64 and aarch64 (static) and macOS arm64, an install script, a
   Docker image on GHCR, docker-compose files (local volume, or S3 with Garage) and a Helm chart,
   with checksums, build provenance attestations, SBOMs and third-party licence notices (track N).
@@ -62,10 +62,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - `email_verified` and `has_password` on the `User` returned by `GET /api/auth/me`, signup and
   setup.
 - `GET /api/v1/projects/{project}/saved-views/{id}` returns one saved view by id.
-- `llmobs admin backup` takes a consistent backup of a running server (local mode: hard-linked
+- `cetra admin backup` takes a consistent backup of a running server (local mode: hard-linked
   objects; S3 mode: metadata, restorable for `storage.gc.grace`, which may now be up to 30 days).
-- `llmobs admin gc-orphans` cleans the object store after a restore and reports missing objects.
-- `llmobs admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
+- `cetra admin gc-orphans` cleans the object store after a restore and reports missing objects.
+- `cetra admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
@@ -74,9 +74,14 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Changed
 
+- The product is renamed from the working name `llmobs` to cetra (cetra.sh, D46): the binary and crates,
+  the `CETRA_*` environment variables, the `cetra.*` span attributes, the `sk-cetra-`, `pk-cetra-` and
+  `pat-cetra-` key prefixes, the `ghcr.io/cetra-ai/cetra` image, the `cetra` Helm chart, and the
+  SDK packages (`cetra-sdk` on PyPI, imported as `cetra`, and `@cetra-ai/sdk` on npm). Update config files, environment
+  variables and SDK code to the new names.
 - Auth: with `auth.disable_password = true`, instance admins can still sign in with their
   password at `/login?password=1`, change it, and set it from a reset link
-  (`llmobs admin reset-password`) (D-S-3).
+  (`cetra admin reset-password`) (D-S-3).
 - Deletion, project and organization drop dialogs no longer promise erasure within 24 hours: data is hidden within seconds, removed within 24 hours, and its stored copies are purged after the storage grace period (`storage.gc.grace`, D181).
 - Alert email is capped at 1,000 messages per org per UTC day, "Send test" is limited to 5 a minute
   per user and per channel, and when signup is open an email channel may only list verified
@@ -87,9 +92,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   update is nullable in the OpenAPI contract, from 1 to 36500; `null` keeps data forever.
 - A read that makes several storage calls (a list with scores, a session or user detail) has 30 s
   in total, not 30 s per call.
-- `llmobs login` receives the token from the browser as a form POST, not in the callback URL, so
+- `cetra login` receives the token from the browser as a form POST, not in the callback URL, so
   the token stays out of browser history. A token created by the sign-in page expires after 90
-  days; run `llmobs login` again when it does.
+  days; run `cetra login` again when it does.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
   `api_key` again (400 on `api_key`), so a new host never receives the stored key.
 - Web UI: with password sign-in off and exactly one sign-in provider, the login page and, for a
@@ -153,7 +158,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Usage counts are no longer lost when shutdown cuts a usage flush short.
 - Identical dashboard metric requests that miss the cache together run the query once, and a full
   cache drops its oldest answers instead of all of them.
-- `llmobs login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
+- `cetra login` exits at once when the sign-in is cancelled in the browser, instead of waiting five
   minutes for a callback that never comes.
 - A password reset (forgot-password link or admin reset link) now revokes the user's personal
   access tokens as well as their web sessions, as a password change already did.
@@ -174,7 +179,7 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - Deleted spans and the spans of a dropped project leave the WAL by the end of the next flush cycle,
   not when the newest WAL segment fills (64 MiB): each committed flush starts a new segment when
   the open one holds records, and deletes the segments it has flushed (D-A1-14).
-- `llmobs query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
+- `cetra query` finds `{name:Type}` placeholders after a nested `/* … /* … */ … */` comment, as the
   server does, instead of reading the rest of the statement as a string.
 - An export whose client stops reading for 30 s releases its query, and its memory admission, instead
   of holding them until the connection closes.

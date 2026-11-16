@@ -2,12 +2,12 @@
   "spans": [
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "d9d9c189eaa0ec8147cea85213e9707c",
-      "span_id": "ff98c084107a0eba",
+      "trace_id": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+      "span_id": "384c3dceaa131168",
       "name": "invoke_agent claude-sonnet-4-5",
       "span_kind": "agent",
       "start_time": "2025-12-31T23:59:50.000000000Z",
-      "end_time": "2025-12-31T23:59:50.067000000Z",
+      "end_time": "2025-12-31T23:59:50.072000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "provider": "anthropic",
@@ -44,13 +44,40 @@
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "d9d9c189eaa0ec8147cea85213e9707c",
-      "span_id": "96d0fd75732c4b70",
-      "parent_span_id": "e2db95979d64f8ae",
+      "trace_id": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+      "span_id": "6f99384cb361dbed",
+      "parent_span_id": "384c3dceaa131168",
+      "name": "step 1",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.070000000Z",
+      "status": "unset",
+      "service_name": "capture-app",
+      "operation": "agent_step",
+      "attributes": {
+        "gen_ai.operation.name": "agent_step"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "nodejs",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "2.12.0"
+      },
+      "scope_name": "gen_ai",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 1
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2d24270ed80451e51b7fb7cfa8a1c6ee",
+      "span_id": "cf41d3c1135239ee",
+      "parent_span_id": "6f99384cb361dbed",
       "name": "chat claude-sonnet-4-5",
       "span_kind": "llm",
-      "start_time": "2025-12-31T23:59:50.002000000Z",
-      "end_time": "2025-12-31T23:59:50.061000000Z",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.067000000Z",
       "status": "unset",
       "service_name": "capture-app",
       "provider": "anthropic",
@@ -73,7 +100,7 @@
       "input_preview": "What's the weather in Paris?",
       "output_preview": "It is 18 °C and sunny in Paris.",
       "attributes": {
-        "gen_ai.client.operation.duration": "0.05808278399999998",
+        "gen_ai.client.operation.duration": "0.06309165100000001",
         "gen_ai.operation.name": "chat",
         "gen_ai.provider.name": "anthropic",
         "gen_ai.request.model": "claude-sonnet-4-5",
@@ -84,33 +111,6 @@
         "gen_ai.usage.cache_read.input_tokens": "1800",
         "gen_ai.usage.input_tokens": "2100",
         "gen_ai.usage.output_tokens": "40"
-      },
-      "resource_attributes": {
-        "telemetry.sdk.language": "nodejs",
-        "telemetry.sdk.name": "opentelemetry",
-        "telemetry.sdk.version": "2.12.0"
-      },
-      "scope_name": "gen_ai",
-      "conventions": [
-        "genai"
-      ],
-      "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
-    },
-    {
-      "project_id": "01900000-0000-7000-8000-000000000001",
-      "trace_id": "d9d9c189eaa0ec8147cea85213e9707c",
-      "span_id": "e2db95979d64f8ae",
-      "parent_span_id": "ff98c084107a0eba",
-      "name": "step 1",
-      "span_kind": "span",
-      "start_time": "2025-12-31T23:59:50.002000000Z",
-      "end_time": "2025-12-31T23:59:50.064000000Z",
-      "status": "unset",
-      "service_name": "capture-app",
-      "operation": "agent_step",
-      "attributes": {
-        "gen_ai.operation.name": "agent_step"
       },
       "resource_attributes": {
         "telemetry.sdk.language": "nodejs",

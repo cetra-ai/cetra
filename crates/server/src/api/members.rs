@@ -31,7 +31,7 @@ pub struct OrgMember {
     /// Org role.
     pub role: OrgRole,
     /// When the user joined the org, nanoseconds since the Unix epoch. JSON is RFC 3339.
-    #[serde(with = "llmobs_core::time_serde")]
+    #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub joined_at: i64,
 }

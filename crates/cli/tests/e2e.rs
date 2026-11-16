@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use llmobs_core::ids::TraceId;
+use cetra_core::ids::TraceId;
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, trace_service_client::TraceServiceClient,
 };
@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 
 const ORIGIN: &str = "http://127.0.0.1:8080";
 const ADMIN_EMAIL: &str = "ada@example.com";
-const ADMIN_PASSWORD: &str = "llmobs-e2e-1";
-const INIT_KEY: &str = "sk-llmobs-0123456789ABCDEFGHIJKLMNOPQRSTUV";
+const ADMIN_PASSWORD: &str = "cetra-e2e-1";
+const INIT_KEY: &str = "sk-cetra-0123456789ABCDEFGHIJKLMNOPQRSTUV";
 /// Fields that differ between runs or between projects, replaced at any depth.
 const REDACTED_KEYS: &[&str] = &["ingest_time", "project_id", "score_id"];
 
@@ -121,7 +121,7 @@ async fn read_until(response: &mut reqwest::Response, needle: &str, wait: Durati
 
 /// A running server with the admin signed in.
 struct Server {
-    running: llmobs_server::serve::Running,
+    running: cetra_server::serve::Running,
     http: String,
     otlp: String,
     grpc: String,
@@ -134,7 +134,7 @@ struct Server {
 /// Writes the config plus `extra_config` (after the `[init]` table) into `dir`, starts the
 /// server with the embedded UI and signs in.
 async fn start(dir: &Path, extra_config: &str) -> Server {
-    let config_path = dir.join("llmobs.toml");
+    let config_path = dir.join("cetra.toml");
     let data_dir = dir.join("data");
     fs::write(
         &config_path,
@@ -144,8 +144,8 @@ async fn start(dir: &Path, extra_config: &str) -> Server {
         ),
     )
     .unwrap();
-    let config = llmobs_server::config::ServerConfig::load(Some(&config_path)).unwrap();
-    let running = llmobs_server::serve::bind(config, Some(llmobs_ui::router()))
+    let config = cetra_server::config::ServerConfig::load(Some(&config_path)).unwrap();
+    let running = cetra_server::serve::bind(config, Some(cetra_ui::router()))
         .await
         .unwrap();
     let http = format!("http://{}", running.local_addr);
@@ -207,11 +207,11 @@ struct Project {
     key: String,
 }
 
-/// The `fixtures/otlp/llmobs` directory.
+/// The `fixtures/otlp/cetra` directory.
 fn fixtures_root() -> PathBuf {
     PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/otlp/llmobs"
+        "/../../fixtures/otlp/cetra"
     ))
 }
 
@@ -329,7 +329,7 @@ async fn every_sdk_fixture_round_trips_over_every_transport() {
 
     if std::env::var_os("E2E_REQUIRE_UI").is_some() {
         assert!(
-            llmobs_ui::embedded(),
+            cetra_ui::embedded(),
             "E2E_REQUIRE_UI is set, but web/dist was not embedded: build the web first"
         );
     }
@@ -341,7 +341,7 @@ async fn every_sdk_fixture_round_trips_over_every_transport() {
         .send()
         .await
         .unwrap();
-    if llmobs_ui::embedded() {
+    if cetra_ui::embedded() {
         assert_eq!(root.status(), 200);
         let content_type = root.headers()["content-type"].to_str().unwrap().to_owned();
         assert!(content_type.starts_with("text/html"), "{content_type}");
@@ -817,7 +817,7 @@ const JUDGE_PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 
 /// One chat turn of the mock provider: the judge's numeric answer.
-fn judge_turn() -> llmobs_capture::Turn {
+fn judge_turn() -> cetra_capture::Turn {
     serde_json::from_value(json!({
         "api": "openai.chat",
         "model": "gpt-test",
@@ -872,7 +872,7 @@ async fn rows_until(api: &Api, path: &str, count: usize, wait: Duration) -> (Val
 #[tokio::test(flavor = "multi_thread")]
 async fn online_rules_and_backfill_end_to_end() {
     // The mock provider answers the judge twice: once for the live trace, once for the backfill.
-    let mock = llmobs_capture::Mock::new(vec![judge_turn(), judge_turn()]);
+    let mock = cetra_capture::Mock::new(vec![judge_turn(), judge_turn()]);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let provider_addr = listener.local_addr().unwrap();
     let router = mock.router();
