@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "imported": 2,
+  "error_count": 1,
+  "errors": [
+    {
+      "row": 2,
+      "message": "the row has no input"
+    }
+  ]
+}

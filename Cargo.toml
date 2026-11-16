@@ -98,6 +98,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 # RFC 9535 JSONPath on mapping expressions (D162).
 serde_json_path = "0.7.2"
+# Dataset CSV import and export (track J, D-J-6). `csv` is already in the lock as a dependency of arrow-csv.
+csv = "1.4.0"
 # Judge prompt templates (D163) and email templates (spec 08; `.html` names auto-escape).
 # Self-contained templates: no macros, imports, or debug.
 minijinja = { version = "3.1.0", default-features = false, features = [
@@ -129,6 +131,7 @@ axum = { version = "0.8.9", default-features = false, features = [
     "http1",
     "json",
     "matched-path",
+    "multipart",
     "query",
     "tokio",
 ] }
@@ -221,6 +224,8 @@ hmac = "0.13.0"
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 # Constant-time compare of token hashes.
 subtle = "2.6.1"
+# Prometheus metrics on `metrics_addr` (N M3, D-N-28). OpenMetrics text. Apache-2.0 OR MIT.
+prometheus-client = "0.26.0"
 # OpenAPI 3.1 schemas. `uuid` enables the `format: uuid` schema. Do not enable
 # `preserve_order` or `preserve_path_order`: default `BTreeMap`s keep the document sorted.
 utoipa = { version = "6.0.0", features = ["uuid"] }

@@ -93,6 +93,7 @@ fn project() -> ProjectId {
 
 fn quiet_config(dir: &Path) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store: None,
@@ -302,7 +303,7 @@ async fn child() {
 }
 
 /// Lossy seeds per crash point: `LLMOBS_LOSSY_SEEDS`, default 1 (R2.10).
-fn seeds() -> u64 {
+pub(crate) fn seeds() -> u64 {
     std::env::var("LLMOBS_LOSSY_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())

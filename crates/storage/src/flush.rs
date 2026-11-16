@@ -182,6 +182,7 @@ async fn run(mut params: FlushParams) {
                 }
             }
         }
+        let started = std::time::Instant::now();
         match flush_once(&params).await {
             Ok(None) => {
                 backoff = INITIAL_BACKOFF;
@@ -192,6 +193,8 @@ async fn run(mut params: FlushParams) {
             }
             Ok(Some(seq)) => {
                 backoff = INITIAL_BACKOFF;
+                let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                params.committer.counters().flush_ok(params.table, nanos);
                 match truncate_flushed(&params, seq).await {
                     Ok(()) => {}
                     Err(error) => {
@@ -201,6 +204,7 @@ async fn run(mut params: FlushParams) {
                 }
             }
             Err(_) => {
+                params.committer.counters().flush_failed(params.table);
                 // After a failed local fsync or a fatal catalog I/O error, no retry can
                 // succeed until a restart (D-R-6). At shutdown, stop instead of retrying
                 // for the grace period.
@@ -813,6 +817,7 @@ mod tests {
 
     fn anchor_config(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -835,6 +840,7 @@ mod tests {
     /// register a deletion before the flush starts.
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -1219,11 +1225,10 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        assert!(
-            std::fs::read(wal.join(crate::wal::segment_name(2)))
-                .unwrap()
-                .is_empty(),
-            "the new segment starts empty"
+        assert_eq!(
+            std::fs::read(wal.join(crate::wal::segment_name(2))).unwrap(),
+            crate::wal::segment::segment_header(),
+            "the new segment holds only its header"
         );
         for entry in std::fs::read_dir(dir.path().join("wal")).unwrap() {
             let bytes = std::fs::read(entry.unwrap().path()).unwrap_or_default();

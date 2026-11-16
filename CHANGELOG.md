@@ -25,11 +25,22 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - An `LLMOBS_AUTH__OIDC__*` environment variable other than
   `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
   server at start; such variables used to be ignored. Remove them.
+- `/readyz` can now fail on a full disk or an unreachable object store. Keep liveness probes on
+  `/healthz`; the Helm chart already does.
+- `/healthz` now fails on a storage failure that a restart clears (a WAL, object fsync or catalog
+  failure), so a liveness probe on it restarts the server.
 
 ### Added
 
-- OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0017` adds `usage_daily.genai_log_events`.
+- OTLP: `POST /v1/logs` and `POST /v1/metrics` (HTTP) and the gRPC `LogsService` and `MetricsService` are accepted and dropped instead of answering 404 (D-G-40). GenAI content sent as log events is counted per project; `GET /api/v1/projects/{project}` returns it as `genai_log_events`, and the UI tells the project's users once that the content was dropped. Migration `0018` adds `usage_daily.genai_log_events`.
 - Alerts: a `no_data` event kind, shown in the history, and a "No data" notification on Slack, email and webhooks (`alert.no_data`) (D-K-20).
+- Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
+- Datasets: import items from CSV (with a column mapping) or JSONL, export a version as JSONL or CSV, and add an item from a trace or a span (track J).
+- Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
+- Python SDK: `llmobs.Client` for datasets and `llmobs.evaluate` / `aevaluate` to run experiments on your machine (track J).
+- TypeScript SDK: `new llmobs.Client()` for datasets and `llmobs.evaluate` to run experiments on your machine (track J).
+- Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
+- Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
 - Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
 - Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from
@@ -58,6 +69,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
+- Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
+- Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.
 
 ### Changed
 
@@ -173,6 +186,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 ### Changed
 
 - A dropped organization's daily usage is kept 40 days after the drop, for billing, then deleted.
+- `/readyz` also checks the object store, free disk and storage failures; a full disk or an
+  unreachable bucket now makes the server not ready. `/healthz` is the liveness check and fails on
+  the storage failures a restart clears.
 
 ### Upgrade notes
 

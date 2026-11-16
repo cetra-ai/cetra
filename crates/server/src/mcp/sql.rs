@@ -105,6 +105,15 @@ pub(crate) async fn query_sql(
         Some(window),
     )
     .await?;
+    crate::datasets::sql_views::register(
+        state,
+        &ctx,
+        access.project.org_id,
+        access.project.id,
+        &args.query,
+        Some(window),
+    )
+    .await?;
     run_query(
         &ctx,
         &args.query,
@@ -646,6 +655,31 @@ mod tests {
         )
         .await;
         assert_eq!(body["rows"], json!([{"n": 6}]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn query_sql_sees_the_dataset_views() {
+        let (app, seeded, tok) = app_with_token().await;
+        let project = seeded.project.id.to_string();
+        // An empty project: the views are registered and hold no rows.
+        let (is_error, body) = sql(
+            &app,
+            &tok,
+            &project,
+            json!({"query": "SELECT count(*) AS n FROM dataset_items"}),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+        assert_eq!(body["rows"], json!([{"n": 0}]));
+        let (is_error, body) = sql(
+            &app,
+            &tok,
+            &project,
+            json!({"query": "SELECT count(*) AS n FROM experiment_items"}),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+        assert_eq!(body["rows"], json!([{"n": 0}]));
     }
 
     #[tokio::test(flavor = "multi_thread")]

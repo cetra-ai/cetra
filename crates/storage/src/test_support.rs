@@ -149,6 +149,24 @@ pub(crate) fn traces_table(spans: &[Span]) -> Arc<MemTable> {
     mem_table(traces_schema(), batch)
 }
 
+/// Copies the directory `from` to `to` (which may not exist), every file and subdirectory of it.
+pub(crate) fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("create the copy of a directory");
+    for entry in fs::read_dir(from).expect("list a directory to copy") {
+        let entry = entry.expect("read a directory entry");
+        let target = to.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("the type of a directory entry")
+            .is_dir()
+        {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("copy a file of a directory");
+        }
+    }
+}
+
 /// One span of the fixed test project, with the other fields as `wal::spans_keyed`
 /// sets them.
 ///

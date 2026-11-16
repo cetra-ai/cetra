@@ -844,6 +844,9 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
     )
     .await;
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    state
+        .telemetry
+        .eval_run(eval_kind_of(&kind), started.elapsed().as_secs_f64());
     // The call can take seconds: the retry, the writes and the finish use the time after it.
     let now = state.clock.now_ns();
     let run = match run {
@@ -940,6 +943,8 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                 reason,
                 source: None,
                 metadata: score_metadata(metadata, row.id, evaluator_version, truncated),
+                experiment_id: None,
+                dataset_item_id: None,
             };
             let writer = Writer::Evaluator {
                 kind,
@@ -1147,6 +1152,7 @@ async fn finish_job(
     // downgraded to none is not a result of the evaluator (§ Job execution › The breaker).
     let counts = reached_evaluator && matches!(finish, Finish::Done { .. } | Finish::Failed { .. });
     let label = finish_label(&finish);
+    let counted = eval_outcome(&finish);
     // Only a budgeted job holds a reservation, and its spend goes to its rule (D-I-15).
     let spend = match (&reservation, row.rule_id) {
         (Some(_), Some(rule)) if actual > 0.0 => Some((rule, budget::day_start(now), actual)),
@@ -1169,6 +1175,11 @@ async fn finish_job(
         reservation.settle(actual);
     }
     let settled = result?;
+    if settled.matched
+        && let Some(outcome) = counted
+    {
+        state.telemetry.finish_eval(outcome);
+    }
     tracing::debug!(
         job_id = %row.id,
         kind = %row.kind,
@@ -1538,6 +1549,28 @@ fn score_metadata(
         metadata.insert(TRUNCATED_KEY.to_owned(), "true".to_owned());
     }
     metadata
+}
+
+/// The telemetry outcome of a finish that leaves the job in a final status (phase 06). `None`
+/// for a finish that puts the job back in the queue. A deleted job ends as `skipped`.
+fn eval_outcome(finish: &Finish) -> Option<crate::telemetry::EvalOutcome> {
+    use crate::telemetry::EvalOutcome as Counted;
+    match finish {
+        Finish::Done { .. } => Some(Counted::done),
+        Finish::Failed { .. } => Some(Counted::failed),
+        Finish::Skipped { .. } | Finish::Deleted { .. } => Some(Counted::skipped),
+        _ => None,
+    }
+}
+
+/// The `kind` label of an evaluator's run time (phase 06).
+fn eval_kind_of(kind: &EvaluatorKind) -> crate::telemetry::EvalKind {
+    use crate::telemetry::EvalKind as Counted;
+    match kind {
+        EvaluatorKind::LlmJudge => Counted::llm_judge,
+        EvaluatorKind::Check => Counted::check,
+        EvaluatorKind::Webhook => Counted::webhook,
+    }
 }
 
 fn kind_of(config: &EvaluatorConfig) -> EvaluatorKind {
@@ -4120,6 +4153,8 @@ mod job_tests {
             reason: None,
             source: None,
             metadata: BTreeMap::new(),
+            experiment_id: None,
+            dataset_item_id: None,
         };
         let writer = Writer::Evaluator {
             kind: EvaluatorKind::LlmJudge,

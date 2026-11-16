@@ -8,7 +8,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 chart=deploy/helm/llmobs
 
-for values in "" "$chart/ci/s3-values.yaml" "$chart/ci/full-values.yaml"; do
+for values in "" "$chart/ci/s3-values.yaml" "$chart/ci/full-values.yaml" "$chart/ci/metrics-values.yaml"; do
   args=()
   if [[ -n "$values" ]]; then
     args=(-f "$values")

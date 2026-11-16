@@ -167,6 +167,7 @@ fn egress_error(error: &EgressError) -> SendError {
         ),
         EgressError::Scheme => (false, "unsupported URL scheme"),
         EgressError::TooLarge { .. } => (false, "the response was too large"),
+        EgressError::RestoreMode => (false, "outbound calls are off: restore mode"),
     };
     SendError {
         retryable: retry,
@@ -330,7 +331,11 @@ async fn attempt_of(state: &AppState, due: &DueDelivery, now: i64) -> Attempt {
         };
     };
     let notice = notice_of(state, due);
-    match Box::pin(send_one(state, due.org_id, &config, &notice, due.id, now)).await {
+    let result = Box::pin(send_one(state, due.org_id, &config, &notice, due.id, now)).await;
+    state
+        .telemetry
+        .alert_delivered(due.channel_kind, result.is_ok());
+    match result {
         Ok(()) => Attempt::Sent,
         Err(error) if error.retryable && due.attempts + 1 < MAX_ATTEMPTS => Attempt::Retry {
             error: error.message,

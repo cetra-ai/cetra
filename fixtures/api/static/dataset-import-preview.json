@@ -1,0 +1,22 @@
+{
+  "format": "csv",
+  "columns": [
+    "question",
+    "answer",
+    "topic"
+  ],
+  "rows": [
+    [
+      "What is the refund window?",
+      "30 days.",
+      "billing"
+    ],
+    [
+      "How do I reset my password?",
+      "Use the reset link on the login page.",
+      "account"
+    ]
+  ],
+  "errors": [],
+  "truncated": false
+}

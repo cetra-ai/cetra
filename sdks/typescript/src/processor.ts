@@ -56,7 +56,13 @@ export class LlmobsSpanProcessor implements SpanProcessor {
   onStart(span: Span, parentContext: Context): void {
     try {
       stampContext(span, parentContext);
-      if (this.environment !== undefined) {
+      const experiment = currentValues(parentContext).experiment;
+      if (experiment !== undefined) {
+        // An experiment run's spans carry the linkage and the `experiment` environment (D-J-16).
+        span.setAttribute("llmobs.experiment.id", experiment.experimentId);
+        span.setAttribute("llmobs.dataset_item.id", experiment.datasetItemId);
+        span.setAttribute("llmobs.environment", "experiment");
+      } else if (this.environment !== undefined) {
         span.setAttribute("llmobs.environment", this.environment);
       }
       if (this.release !== undefined) {

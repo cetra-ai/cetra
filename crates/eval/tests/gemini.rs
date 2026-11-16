@@ -20,6 +20,7 @@ const PATH: &str = "/v1beta/models/gemini-2.5-flash:generateContent";
 fn client() -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client")
 }

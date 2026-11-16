@@ -6,6 +6,7 @@ import {
   canHaveOverride,
   canManageAlerts,
   canManageConnections,
+  canManageDatasets,
   canManageEvaluation,
   canRemoveMember,
   grantableRoles,
@@ -75,6 +76,14 @@ it("lets members and above manage alerts", () => {
   expect(canManageAlerts("member")).toBe(true);
   expect(canManageAlerts("viewer")).toBe(false);
   expect(canManageAlerts(undefined)).toBe(false);
+});
+
+it("lets members and above manage datasets", () => {
+  expect(canManageDatasets("owner")).toBe(true);
+  expect(canManageDatasets("admin")).toBe(true);
+  expect(canManageDatasets("member")).toBe(true);
+  expect(canManageDatasets("viewer")).toBe(false);
+  expect(canManageDatasets(undefined)).toBe(false);
 });
 
 it("overrides only members and viewers", () => {

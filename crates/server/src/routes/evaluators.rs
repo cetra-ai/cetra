@@ -31,6 +31,7 @@ use crate::eval::test_run;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::connections;
 use crate::meta::evaluators::{self as store, EvaluatorFields, EvaluatorRow};
@@ -434,6 +435,7 @@ async fn test_evaluator(
     Extension(access): Extension<ProjectAccess>,
     error::Json(body): error::Json<EvaluatorTestRequest>,
 ) -> Result<error::Json<EvaluatorTestResult>, ApiError> {
+    refuse_outbound(&state, "evaluator test")?;
     let user = principal::session_user(&principal)?;
     let result = test_run::run(&state, &access.project, user.id, body).await?;
     Ok(error::Json(result))
@@ -2744,5 +2746,17 @@ mod tests {
                 "webhook_secret is required".to_owned()
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn test_evaluator_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let seeded = app.seed().await;
+        let body = json!({
+            "evaluator": judge_on(Uuid::nil()),
+            "variables": {"input": "a literal question", "output": "a literal answer"}
+        });
+        let response = run_test(&app, &seeded, &seeded.cookie, &body).await;
+        crate::http::restore::tests::assert_refused(&response, "evaluator test");
     }
 }

@@ -25,7 +25,7 @@ use crate::hooks::{HookPoint, Hooks};
 use crate::memtable::Memtable;
 use crate::read_state::{Published, ReadState};
 use crate::wal::record::encode;
-use crate::wal::segment::SegmentWriter;
+use crate::wal::segment::{SEGMENT_HEADER_LEN, SegmentWriter};
 use crate::wal::{Table, segment_name};
 
 /// Queue depth for appends waiting on the writer.
@@ -507,7 +507,7 @@ fn remove_stray_segment(dir: &Path, name: &str, hooks: &Hooks) -> Result<(), Wal
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(WalError::io("removing WAL segment", &path, source)),
     };
-    if len != 0 {
+    if len > SEGMENT_HEADER_LEN as u64 {
         return Err(WalError::io(
             "removing WAL segment",
             &path,
@@ -562,7 +562,7 @@ async fn run(
             rotate_now = Some(request);
         }
         if let Some(request) = rotate_now.take() {
-            let wanted = segment.len() > 0;
+            let wanted = segment.has_records();
             if !wanted {
                 let _ = request.ack.send(Ok(false));
                 continue;
@@ -1324,7 +1324,9 @@ mod tests {
             let entry = entry.unwrap();
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if parse_segment_name(&name).is_some() && entry.metadata().unwrap().len() > 0 {
+            if parse_segment_name(&name).is_some()
+                && entry.metadata().unwrap().len() > SEGMENT_HEADER_LEN as u64
+            {
                 nonempty.push(name.into_owned());
             }
         }
@@ -1439,7 +1441,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn rotation_declines_an_empty_segment() {
+    async fn rotation_wants_a_segment_with_records() {
         let running = open_writer(
             WalSync::Always,
             u64::MAX,

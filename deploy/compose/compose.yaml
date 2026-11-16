@@ -22,6 +22,8 @@ services:
     env_file:
       - path: llmobs.env
         required: false
+    # Prometheus metrics (docs/self-hosting/monitoring.md): set LLMOBS_METRICS_ADDR in llmobs.env,
+    # for example 0.0.0.0:9464, and publish that port.
     volumes:
       - llmobs-data:/data
     healthcheck:

@@ -12,7 +12,7 @@ pub(crate) mod state_cookie;
 use std::time::Duration;
 
 use crate::api::account::AuthProvider;
-use crate::config::AuthSettings;
+use crate::config::{AuthSettings, ServerConfig};
 
 pub(crate) use github::GithubProvider;
 pub(crate) use provider::{IdpHttp, OidcProvider};
@@ -111,6 +111,25 @@ impl Providers {
         Ok(Self { github, oidc })
     }
 
+    /// The providers of `config`. None in restore mode (N M3, D-N-27): no external sign-in,
+    /// and the client is not used.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OidcError::Invalid`] as [`Self::from_config`] does.
+    pub(crate) fn for_config(
+        config: &ServerConfig,
+        http: &reqwest::Client,
+    ) -> Result<Self, OidcError> {
+        if config.restore_mode {
+            return Ok(Self {
+                github: None,
+                oidc: Vec::new(),
+            });
+        }
+        Self::from_config(&config.auth, http)
+    }
+
     /// `github`, `google`, or `oidc:<name>`.
     pub(crate) fn get(&self, id: &str) -> Option<ProviderRef<'_>> {
         if id == "github" {
@@ -182,6 +201,20 @@ pub(crate) fn identity_client() -> Result<reqwest::Client, OidcError> {
 mod tests {
     use super::*;
     use crate::config::{AutoProvision, GithubAuth, GoogleAuth, OidcAuth, Secret};
+
+    #[test]
+    fn restore_mode_builds_no_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let http = identity_client().expect("client");
+        let mut config = crate::test_support::config(dir.path());
+        config.auth = settings();
+        let providers = Providers::for_config(&config, &http).expect("providers");
+        assert_eq!(providers.list().len(), 3);
+
+        config.restore_mode = true;
+        let providers = Providers::for_config(&config, &http).expect("providers");
+        assert!(providers.list().is_empty());
+    }
 
     fn secret(value: &str) -> Secret<String> {
         serde_json::from_str(&format!("\"{value}\"")).expect("secret")

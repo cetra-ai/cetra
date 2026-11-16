@@ -1213,6 +1213,62 @@ mod tests {
         assert_eq!((stats.hits, stats.misses), (3, 0));
     }
 
+    /// The golden directories' cache entries (R8.7): each one, copied and opened, records its size,
+    /// and an empty inner store serves every range of it from the cache alone, with the pattern.
+    #[test]
+    fn the_golden_cache_entry_is_served() {
+        let mut dirs = crate::golden_tests::committed_dirs();
+        dirs.insert(0, crate::golden_tests::fresh_golden_dir().to_path_buf());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut served = 0;
+        for dir in dirs.iter().filter(|dir| dir.join("cache").is_dir()) {
+            let recorded: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(dir.join("expected.json")).unwrap())
+                    .unwrap();
+            let size = recorded["cache"]["size"].as_u64().unwrap();
+            assert_eq!(recorded["cache"]["name"], crate::golden_tests::CACHE_NAME);
+
+            let temp = tempfile::tempdir().unwrap();
+            let copy = temp.path().join("golden");
+            crate::test_support::copy_dir(dir, &copy);
+            let spill_dir = tempfile::tempdir().unwrap();
+            let disk = Arc::new(
+                Disk::open(
+                    vec![copy.clone()],
+                    0,
+                    crate::disk::test_spill(spill_dir.path()),
+                )
+                .unwrap(),
+            );
+            let cache = Arc::new(ReadCache::open(copy.join("cache"), 64 * MIB, disk, 0).unwrap());
+            assert_eq!(
+                cache.size(crate::golden_tests::CACHE_NAME),
+                Some(size),
+                "the golden cache entry's size"
+            );
+            let store = CacheStore {
+                inner: Arc::new(InMemory::new()),
+                cache: Arc::clone(&cache),
+            };
+            runtime.block_on(async {
+                for range in [0..size, 0..1, 1..2, 4_000..size] {
+                    let bytes = read(&store, crate::golden_tests::CACHE_LOCATION, range.clone())
+                        .await
+                        .expect("a golden range is served from the cache");
+                    assert_eq!(bytes, expected(size, range));
+                }
+            });
+            let stats = cache.stats();
+            assert_eq!(stats.misses, 0, "the golden cache entry missed");
+            assert!(stats.hits > 0, "the golden cache entry served no block");
+            served += 1;
+        }
+        eprintln!("the_golden_cache_entry_is_served: {served} cache entries");
+    }
+
     #[tokio::test]
     async fn a_size_file_that_does_not_parse_drops_its_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -1311,6 +1367,23 @@ mod tests {
         flipped[3] ^= 0x10;
         flipped[11] ^= 0x01;
         assert_eq!(parse_size(&flipped), None, "a flipped bit in the CRC");
+    }
+
+    #[test]
+    fn the_cache_layout_is_pinned() {
+        assert_eq!(
+            BLOCK,
+            1 << 20,
+            "BLOCK is part of the cache layout: blocks are addressed as offset / BLOCK. Changing it makes every stored block serve wrong bytes with a valid CRC. If it must change, the cache must be wiped at open first (spec 03 § 12)."
+        );
+        assert_eq!(
+            SIZE_FILE, "size",
+            "the size file's name is part of the cache layout (spec 03 § 12)"
+        );
+        assert_eq!(
+            SIZE_FILE_LEN, 12,
+            "the size file's length is part of the cache layout (spec 03 § 12)"
+        );
     }
 
     #[tokio::test]

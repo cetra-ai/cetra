@@ -342,6 +342,7 @@ mod tests {
         use crate::config::{CompactionConfig, FlushConfig, MemtableConfig, QueryConfig, S3Config};
         use bytesize::ByteSize;
         StorageConfig {
+            delete_objects: true,
             data_dir: std::path::PathBuf::from("unused"),
             min_free_bytes: ByteSize::b(0),
             object_store: None,

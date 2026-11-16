@@ -56,6 +56,8 @@ Because rows may sit in the day before or after their own date, day pruning (§6
 
 One WAL per table (`spans`, `scores`), each a sequence of segment files. A segment is named with the seq of its first record, zero-padded to 20 digits, plus `.wal`. Segments rotate at `storage.wal.segment_bytes` (default 64 MiB). Rotation happens between groups, so one group can make a segment larger than the limit.
 
+Each segment starts with an 8-byte header (§ 12): the magic `LWAL`, the format version as a `u16`, and a `u16` of flags that must be 0. The header is written and fsynced when the segment is created, before any record, so no crash leaves a record behind a torn header. Records follow it; offsets in errors count from the start of the file.
+
 Record format. Every integer is little-endian. The checksum covers `seq` as 8 little-endian bytes, then `kind` as 1 byte, then the payload. A payload longer than 256 MiB is rejected. The writer rejects a batch whose decoded size exceeds 1 GiB. Before decoding, a reader checks that every IPC buffer lies inside its message body, that the codec is LZ4 frame (any other codec is corrupt), and each LZ4 buffer's size prefix: -1 is stored raw, 0 is empty, and any other size must be at most 256 times its compressed length plus 64 bytes and must equal what its LZ4 frame decodes to. The decoded size of a record, stored-raw buffers included, is at most 1 GiB; a record that breaks any of these is corrupt.
 
 ```
@@ -89,6 +91,7 @@ A segment is fsynced before a newer one is created, at rotation and at open, so 
 - read segments in order, skip records with seq ≤ `flushed_seq`, and insert the rest into the memtable;
 - a record with a bad CRC or short read at the **tail** of the last segment is a torn write: truncate the segment there;
 - a bad record anywhere else is corruption: refuse to start unless `--wal-skip-corrupt`;
+- a segment whose header is not this build's (an unknown magic, a newer version or flags) refuses the open, is never truncated, and is not skipped by `--wal-skip-corrupt`; a segment shorter than the header that is a prefix of it holds no records (a torn creation): it is truncated to empty when it is the last one and skipped when it is not;
 - the next seq is `max(last valid record's seq, flushed_seq) + 1`, so a sequence number is never reused, even when `every_ms` lost a tail.
 
 ## 2. Memtable
@@ -142,7 +145,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 | Bloom filters | `trace_id`, `session_id`, `user_id` (fpp 0.01) on `spans`; `trace_id`, `session_id`, `user_id` on `traces`; `trace_id`, `score_id` on `scores` |
 | Sort order (within a file) | `spans`: `trace_id, start_time` · `traces`: `start_time, trace_id` (the `trace_id` tie-break makes files byte-identical across runs) · `scores`: `created_at` (declared in file metadata so DataFusion can exploit it; declared only because the writer sorted) |
 | Time slicing (across files) | every file covers a contiguous `[min_time, max_time]` slice; see below |
-| KV metadata | `llmobs.table`, `llmobs.schema_version`, `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time` |
+| KV metadata | `llmobs.table`, `llmobs.schema_version`, `llmobs.format_version`, `llmobs.level`, `llmobs.min_time`, `llmobs.max_time`, `llmobs.min_ingest_time`, `llmobs.max_ingest_time`. `llmobs.schema_version` is the row normalization version; `llmobs.format_version` is the file format (§ 12). |
 
 **Time-sliced files, trace-sorted rows** (same pattern as Opik, LangWatch and Laminar, which partition by time and sort by trace ID inside the partition):
 
@@ -156,7 +159,7 @@ A failure in steps 2–5 keeps `frozen` and retries that same view under new fil
 
 ## 4. Catalog
 
-`catalog.db` belongs to `llmobs-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards).
+`catalog.db` belongs to `llmobs-storage` (D83): its own migrations (`sqlx::migrate!`, forward-only), its own writer connection, `journal_mode=WAL`, `synchronous=FULL` (a commit that advances `flushed_seq` must survive a power loss, since the WAL segments it covers are deleted afterwards). `PRAGMA user_version` holds the data directory's format version (§ 12); `open` refuses a newer one before it migrates.
 
 ```sql
 CREATE TABLE data_files (
@@ -172,9 +175,9 @@ CREATE TABLE data_files (
   min_time INTEGER NOT NULL, max_time INTEGER NOT NULL,
   min_ingest_time INTEGER NOT NULL, max_ingest_time INTEGER NOT NULL,
   fully_merged INTEGER NOT NULL DEFAULT 0,
-  deletions_applied_seq INTEGER NOT NULL,  -- §7
   state TEXT NOT NULL DEFAULT 'active',    -- 'active' | 'obsolete' | 'quarantined'
-  created_at INTEGER NOT NULL, obsoleted_at INTEGER
+  created_at INTEGER NOT NULL, obsoleted_at INTEGER,
+  deletions_applied_seq INTEGER NOT NULL DEFAULT 0  -- §7 (added by migration 0003)
 );
 CREATE INDEX data_files_lookup ON data_files(table_name, project_id, day) WHERE state = 'active';
 CREATE INDEX data_files_gc ON data_files(obsoleted_at) WHERE state = 'obsolete';
@@ -216,6 +219,7 @@ CREATE TABLE deletions (               -- §7; the request itself is in meta.db 
   status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'applied'
   registered_at INTEGER NOT NULL, applied_at INTEGER
 );
+CREATE INDEX deletions_pending ON deletions (deletion_seq) WHERE status = 'pending';
 CREATE TABLE deletion_traces (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
                               trace_id BLOB NOT NULL, PRIMARY KEY (deletion_id, trace_id));
 CREATE TABLE deletion_users (deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
@@ -284,6 +288,8 @@ Times below are wall-clock nanoseconds (`now`). A file's age is `now` minus its 
 
 **Crash safety:** an output written but never committed is still in `staged_objects`. GC deletes staged objects older than 1 h and their rows, so the bucket is never listed. Startup removes leftover temp files: in the object directories in local mode, and in `<data_dir>/tmp/compaction/` in S3 mode. A job interrupted by a crash or a conflict is redone by a later pass.
 
+A server in restore mode opens the storage with object deletion off (`StorageConfig::delete_objects`, N M3, D-N-34): every object deletion fails and is retried by a later server, so GC, media collection and project drops remove nothing. `gc-orphans` still deletes.
+
 ## 6. Query path
 
 For each request, `Storage::query` returns a `ProjectQuery`: the project's `TableProvider`s, all bound to one `ReadState` (catalog, memtable and tombstones, §4), plus a `RuntimeEnv` of the query's own, built from the process one at open (object store, metadata cache and spill directory) with a memory pool of its own (§ Resource limits, D-A1-8), `target_partitions`, and the physical optimizer rules the session appends (the trace list fast path, D153). `Storage::query` takes `QueryOptions::new(around, visible_from)`: `around` (D154), and `visible_from`, the org's data-window bound, which the base views of 05 apply to `start_time` (`spans`, `traces`) and `created_at` (`scores`) (D-P-21, D-P-47); the providers themselves are unfiltered, for storage's own reads. The query layer (05, D91) builds the DataFusion session from it. The providers expose the stored Arrow schemas of 01 (binary IDs, `project_id`). They don't register themselves: the query layer (05) registers the user-facing views over them (hex IDs, hidden `project_id`, `sessions`, default exclusions, D89). Because each provider is constructed for a single project, the user cannot name another project's data. A dropped project (§7) gets empty tables.
@@ -348,6 +354,8 @@ With an S3 object store, every page read is a ranged GET. The S3 store is wrappe
 - verification of a suspect file (§10) reads the S3 store directly, never the cache, and a file found healthy has its cached blocks dropped, so a bad block cannot outlive the check.
 
 There is no custom `ParquetFileReaderFactory`; the metadata cache is DataFusion's built-in one (§4). With a local object store there is no cache.
+
+The cache is not a durable format (§ 12): a layout change must either make old entries fail their checks or wipe `cache/` at open. The block size is pinned by a test.
 
 ## 7. Deletion (GDPR)
 
@@ -471,6 +479,8 @@ A dropped project's media is deleted by `drop_project` (§7).
 | Out of file descriptors (`EMFILE`) | The step that opened the file fails as for an I/O error: a query fails, and a flush or compaction is retried. *(Provisional, pending the coordinator's decision on WAL rotation: until it is recorded, an append is refused when a WAL segment cannot be created, then `WalFailed`, §1. Once it is recorded, the writer keeps the current segment instead.)* Nothing is quarantined |
 | Memory limit | Below the documented minimum (§ Resource needs) the kernel can kill the process. At or above it, the budgets refuse work instead: `Backpressure` (503), `Busy` (503), too large (422) |
 
+The server reads free disk (`StorageHealth::disk_low`, `disk_free_bytes`) for `/readyz` and `/metrics`. It probes the object store by HEADing the marker `_probe/readyz` and, if that fails, writing it (`Storage::probe_objects`, D-N-36; no `s3:ListBucket` needed). It reads monotonic counters (`Storage::stats`) for `/metrics` (N M3, D-N-30, D-N-31).
+
 The model test (`crates/storage/src/model_tests/`, track R M1) checks every read against an in-memory model through restarts and crashes.
 
 ### Resource needs
@@ -496,11 +506,11 @@ Every write path, what it syncs and in what order. "fsync dir" is an fsync of th
 |---|---|---|---|---|
 | Data directory layout | `lib.rs` `prepare_layout`, `ensure_dir` | `mkdir` (or it exists) → fsync parent, at every open | open fails | `the_data_dir_layout_is_durable_after_a_crash_before_its_sync` |
 | Lock | `lib.rs` `lock_dir` | create `LOCK` → `flock` → fsync data dir | open fails | `a_second_open_is_locked_until_shutdown` (the lock; the fsync is not tested) |
-| WAL segment creation | `wal/segment.rs` `SegmentWriter::create` | create the file → fsync `wal/<table>/` | at open: open fails; at rotation: the writer stops | model (`LossyCrash`), crash children |
+| WAL segment creation | `wal/segment.rs` `SegmentWriter::create` | create the file, write the header, `fdatasync` the file, `fsync` `wal/<table>/` | at open: open fails; at rotation: the writer stops | `a_created_segment_keeps_its_header_through_a_lossy_crash`, `a_lossy_crash_after_an_interval_rotation_reopens`, model (`LossyCrash`), crash children |
 | WAL group, `"always"` | `wal/writer.rs` `IoJob::commit`, `SegmentWriter::sync` | `write_all` → `fdatasync` → memtable → publish → ack | the writer stops; the group stays as written; `WalFailed` | `a_failed_sync_leaves_the_group_and_does_not_sync_again`, `a_failed_sync_group_is_lost_on_power_loss`, model (`LossyCrash`) |
 | WAL group, interval | `wal/writer.rs` `IoJob::commit`, `run` | `write_all` → ack. `fdatasync` at the first group after the interval, at the idle timer, at shutdown, and before rotation | as above | `interval_rotation_syncs_the_old_segment`, `storage_matches_the_model_in_interval_mode` |
 | WAL rotation | `wal/writer.rs` `IoJob::commit` | `fdatasync` the old segment (interval mode) → create the new one (fsync dir) | the writer stops | `interval_rotation_syncs_the_old_segment` |
-| WAL replay | `wal/replay.rs` `recover_table`, `truncate_tail` | torn tail: `set_len` → fsync the file. The replayed segment is fsynced at open | open fails | `a_torn_tail_truncates_to_the_last_full_record`, `reopen_syncs_the_replayed_segment` |
+| WAL replay | `wal/replay.rs` `recover_table`, `truncate_tail` | torn tail: `set_len` → fsync the file. A segment shorter than the header that is a prefix of it holds no records: truncated to empty when last, skipped when not. The replayed segment is fsynced at open | open fails | `a_torn_tail_truncates_to_the_last_full_record`, `a_torn_header_is_a_torn_creation`, `reopen_syncs_the_replayed_segment` |
 | Discarded group | `wal/writer.rs` `discard_unacked` | `set_len(mark)` → fsync the file; unlink the new segment → fsync dir | logged; the writer is stopping anyway | `a_discarded_segment_stays_removed_after_a_lossy_crash` |
 | WAL truncation | `wal/mod.rs` `truncate_segments`, `flush.rs` `truncate_flushed` | unlink covered segments → fsync dir | logged and **retried** by the next flush. Not fatal, and why (below) | which segments go: `truncation_keeps_the_newest_segment_and_unflushed_records`. The retry: not tested |
 | Local object publish (flush, compaction, rewrite, media) | `objects.rs` `put_local`, `publish_local` | each new directory: fsync parent → temp file → write → fsync file → rename → fsync dir → the caller's catalog commit | the store stops (`SyncFailed`) | `a_failed_object_fsync_refuses_later_writes_and_deletes`, `a_failed_sync_of_a_new_day_directory_stops_the_store`, `an_outside_object_root_under_an_unsynced_ancestor_survives_a_lossy_crash`, crash children |
@@ -538,3 +548,36 @@ At 50k spans/s with an average normalized span of about 3 KiB (LLM spans 10–50
 - With zstd at roughly 5–8× on JSON-heavy text, compressed output is about 20–30 MiB/s, or 2–2.5 TiB/day.
 
 Sustained use at this rate needs S3 and a bigger box. The target box (8 cores, 32 GiB) is sized for bursts at that rate and sustained ingest about an order of magnitude lower.
+
+## 12. Format versions (D-R-12, D-R-26 to D-R-32)
+
+From the first public release (D185), a data directory written by any release must open with every later one, and a directory written by a newer binary must be refused by an older one without being changed. Before that release there is no constraint.
+
+**One number.** `FORMAT_VERSION` (`crates/storage/src/format.rs`, a `u16`, 1 at the first release) is the format version of the whole data directory. It is stored in three places:
+
+| Surface | Where the number is | A reader that finds a newer one |
+|---|---|---|
+| Data directory | `catalog.db` `PRAGMA user_version`: the highest format any file of the directory may use. Written before a binary first writes anything in a newer format, never lowered. | `open` fails with `FormatTooNew` before it migrates, copies or writes anything. |
+| WAL | an 8-byte header at the start of every segment (§1) | `open` fails (`WalError::Header`); the segment is not truncated, and `--wal-skip-corrupt` does not apply. |
+| Parquet | KV key `llmobs.format_version` in every file (§3) | not read at query time: the directory marker comes first. Checked by the golden tests. |
+
+`llmobs.schema_version` in the Parquet metadata is the row normalization version (spec 01), not a format version. The S3 read cache (§6) and `tmp/` hold no durable data and carry no version.
+
+**What is a format change.** Not one: a new nullable Parquet column (§3), a `catalog.db` migration that only adds (`CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE … ADD COLUMN` that is nullable or has a default), a new config key. Every other change is one: a new or changed WAL `kind`, segment header, compression or payload schema; a changed Parquet column type, sort order or file layout; a renamed or re-typed catalog column, a dropped table, an `UPDATE` of existing rows, a new value in a TEXT enum column (`data_files.state`, `table_name`, `deletions.kind`, `projects.state`); a changed object path layout; a changed checksum; a changed read-cache block size.
+
+A released migration file is never edited; the golden catalogs enforce it.
+
+**A release that changes a format** bumps `FORMAT_VERSION`, keeps a reader for what the previous release wrote (older WAL segments are replayed before the new format is written; older Parquet files are read, not rewritten at upgrade; a catalog migration runs at open), has tests that open the previous releases' golden directories, and adds a line under `### Upgrade notes` in `CHANGELOG.md`.
+
+**Opening.** `catalog.db` is opened first. Its `user_version`: above `FORMAT_VERSION` is refused; `0` with an empty catalog is a new directory and is stamped; `0` with data is a pre-release directory and is refused (`PreFormat`). A migration the binary does not know (`_sqlx_migrations` has a version it lacks) is refused (`SchemaTooNew`). These checks run on a read-only connection, followed by a read of every WAL segment's header (§ 1), before anything is migrated, stamped, replayed or written: a refused open changes no existing file's content (`open` may create missing directories and `LOCK`). Downgrading is not supported: the way back is the backup taken before the upgrade (12 § Upgrades).
+
+**Golden directories.** `fixtures/storage/golden/<version>/` is a small data directory written by the release's own build (`just golden-dir <version>`), with `expected.json`: the answers of the public reads. A test opens a copy of every one with the current code and compares; none is committed before the first stable release, and until then the same test generates a directory into a temp dir and checks it. `fixtures/storage/golden/RELEASES` lists the released versions. Each stable release adds its directory and keeps the old ones: every 0.x directory until 1.0, every release's directory from 1.0 on (D-R-12). `just check-golden` fails a change that deletes a released directory.
+
+**At a release.**
+- `just release-prep X.Y.Z`, then `just golden-dir X.Y.Z` (writes `fixtures/storage/golden/X.Y.Z/` and appends to `RELEASES`).
+- Commit both with `Release X.Y.Z`.
+- A pre-release (`X.Y.Z-rc.N`) has no directory.
+
+**Amending a released `expected.json`.** A released directory and its `expected.json` are never rewritten, with one exception: a released build's answer is proven wrong (a bug in a read), so the recorded value was wrong. The amendment is its own commit, explains the bug, and adds a line under `### Upgrade notes` in `CHANGELOG.md` when the answer a user sees changes.
+
+**Not covered here:** `meta.db`, `secret.key`, `admin.sock` and the backup `manifest.json`. They belong to the server (04) and to online backups (12).

@@ -14,7 +14,7 @@ use crate::fs::{File, OpenOptions};
 use std::io;
 use std::num::NonZeroUsize;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -47,12 +47,14 @@ pub(crate) mod anchor;
 pub(crate) mod catalog;
 mod compaction;
 pub mod config;
+pub(crate) mod counters;
 pub(crate) mod dedup;
 pub(crate) mod deletion;
 pub(crate) mod disk;
 pub mod error;
 mod filter;
 pub(crate) mod flush;
+pub(crate) mod format;
 pub(crate) mod fs;
 pub(crate) mod gc;
 mod maintenance;
@@ -77,7 +79,7 @@ pub use crate::compaction::job::CompactionReport;
 pub use crate::compaction::rewrite::DeletionReport;
 pub use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 pub use crate::error::{
-    CompactionError, CopyObjectsError, FlushNowError, OrphanError, SnapshotError,
+    CompactionError, CopyObjectsError, FlushNowError, OrphanError, ProbeError, SnapshotError,
 };
 pub use crate::gc::{ObsoleteReport, OrphanReport};
 pub use crate::maintenance::Maintenance;
@@ -92,8 +94,9 @@ pub use crate::media::{MediaBlob, MediaRead, MediaReport};
 pub use crate::read_cache::ReadCacheStats;
 pub use query_error::{InvalidQuery, Position, RunError};
 pub use reads::{
-    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, FilterDeletionRequest, Kpi,
-    KpiName, LATEST_SCORE_COLUMNS, ListScope, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
+    AlertMeasure, AlertValue, AlertValueRequest, Bucket, BucketWidth, ExperimentScore,
+    ExperimentTrace, FilterDeletionRequest, Kpi, KpiName, LATEST_SCORE_COLUMNS, ListScope,
+    MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, MAX_FILTER_DELETION_TRACES, MAX_MATCH_COUNT,
     MAX_PAGE, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TRACE_SPANS,
     MAX_USER_SESSIONS, MatchCountRequest, MetricsData, MetricsGroupBy, MetricsRequest,
     ModelUsageRow, Page, Point, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest,
@@ -101,10 +104,10 @@ pub use reads::{
     SortOrder, SpanListRequest, SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS,
     TraceDetailData, TraceListRequest, TraceRefreshRequest, TraceSort, TraceSpansData,
     TraceSpansRequest, USER_COLUMNS, UserDeletionScope, UserDetailData, UserListRequest, UserSort,
-    alert_value, eval_trace_ids, filter_trace_ids, latest_scores, match_count, metrics::metrics,
-    score_list, scores_by_id, session_detail, session_list, span_detail, span_list, span_refresh,
-    trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans, user_deletion_scope,
-    user_detail, user_list, validate_filter,
+    alert_value, eval_trace_ids, experiment_scores, experiment_traces, filter_trace_ids,
+    latest_scores, match_count, metrics::metrics, score_list, scores_by_id, session_detail,
+    session_list, span_detail, span_list, span_refresh, trace_detail, trace_list, trace_list_plan,
+    trace_refresh, trace_spans, user_deletion_scope, user_detail, user_list, validate_filter,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
@@ -133,6 +136,8 @@ mod crash_tests;
 mod deletion_tests;
 #[cfg(test)]
 mod drop_tests;
+#[cfg(test)]
+mod golden_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(test)]
@@ -173,6 +178,38 @@ pub struct StorageHealth {
     pub memtable_bytes: u64,
     /// `storage.memtable.hard_limit`. Each table is checked against this on its own.
     pub memtable_hard_limit: u64,
+    /// Free disk is under `storage.min_free_bytes`: ingestion is refused (spec 03 §10).
+    pub disk_low: bool,
+    /// The least free space of the data directory and the local object root, from the last
+    /// measurement (at open, then every second).
+    pub disk_free_bytes: u64,
+    /// `storage.min_free_bytes`.
+    pub disk_min_free_bytes: u64,
+}
+
+/// Monotonic counters since open, and the WAL size now (`/metrics`, D-N-31).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StorageStats {
+    /// Bytes of WAL segment files on disk: spans, then scores.
+    pub wal_bytes: [u64; 2],
+    /// Flushes committed, per table (spans, scores).
+    pub flushes_ok: [u64; 2],
+    /// Flush attempts that failed, per table.
+    pub flushes_failed: [u64; 2],
+    /// Wall time of committed flushes, nanoseconds, per table.
+    pub flush_nanos: [u64; 2],
+    /// Compaction jobs committed.
+    pub compactions_ok: u64,
+    /// Compaction jobs that failed.
+    pub compactions_failed: u64,
+    /// Compaction jobs deferred for lack of free disk.
+    pub compactions_deferred: u64,
+    /// Compaction jobs that lost a commit conflict (a later pass redoes them).
+    pub compactions_conflict: u64,
+    /// Bytes of Parquet objects written by compaction jobs.
+    pub compaction_bytes_written: u64,
+    /// Obsolete data files and staged objects (including staged media uploads); media blobs collected by media GC are not counted.
+    pub gc_objects_deleted: u64,
 }
 
 /// What [`Storage::apply_retention`] removed.
@@ -227,6 +264,8 @@ pub struct Storage {
     objects: Arc<Objects>,
     /// Read by [`Self::flush_now`] and the tests. The flush tasks hold their own clones.
     committer: Arc<Committer>,
+    /// `wal/spans` and `wal/scores` under the data directory, measured by [`Self::stats`].
+    wal_dirs: [PathBuf; 2],
     runtime: Arc<RuntimeEnv>,
     /// Process-wide query memory (spec 03 §6). Each query's pool takes from it.
     memory: Arc<memory::SharedPool>,
@@ -311,6 +350,9 @@ impl Storage {
         config: StorageConfig,
         remote: Option<(Arc<dyn object_store::ObjectStore>, PutSizes)>,
     ) -> Result<Self, OpenError> {
+        if !config.delete_objects {
+            tracing::warn!("object deletion is off (restore mode)");
+        }
         let data_dir = config.data_dir.clone();
         let hard_limit = config.memtable.hard_limit.0;
         // `validate` rejects 0. A missed check still yields one partition.
@@ -593,6 +635,10 @@ impl Storage {
             verify,
             objects,
             committer,
+            wal_dirs: [
+                data_dir.join("wal").join(Table::Spans.name()),
+                data_dir.join("wal").join(Table::Scores.name()),
+            ],
             runtime,
             memory,
             query_memory,
@@ -870,7 +916,8 @@ impl Storage {
         self.objects.read_cache().map(|cache| cache.stats())
     }
 
-    /// Writer flags and memtable accounting. Does not touch the disk.
+    /// Writer flags, memtable accounting and free disk. Does not touch the disk: the
+    /// free bytes are the last measurement.
     pub fn health(&self) -> StorageHealth {
         let spans = self.spans.shared().memtable_bytes();
         let scores = self.scores.shared().memtable_bytes();
@@ -881,7 +928,31 @@ impl Storage {
             catalog_failed: self.committer.stopped(),
             memtable_bytes: spans.saturating_add(scores),
             memtable_hard_limit: self.hard_limit,
+            disk_low: self.disk.low(),
+            disk_free_bytes: self.disk.free(),
+            disk_min_free_bytes: self.disk.min_free(),
         }
+    }
+
+    /// HEADs the marker `_probe/readyz` and, if that fails, writes it (D-N-36): the store
+    /// answered and accepted the credentials. Needs no `s3:ListBucket`. No timeout here; the
+    /// caller sets one. Writes the marker even when object deletion is off: it adds an object,
+    /// it deletes none.
+    pub async fn probe_objects(&self) -> Result<(), ProbeError> {
+        self.objects.probe().await
+    }
+
+    /// Monotonic counters since open, and the WAL size now (`/metrics`, D-N-31). The WAL
+    /// files are measured on a blocking task; a file or directory that cannot be read counts
+    /// as 0.
+    pub async fn stats(&self) -> StorageStats {
+        let mut stats = self.committer.counters().snapshot();
+        let dirs = self.wal_dirs.clone();
+        stats.wal_bytes =
+            tokio::task::spawn_blocking(move || [wal_bytes(&dirs[0]), wal_bytes(&dirs[1])])
+                .await
+                .unwrap_or_default();
+        stats
     }
 
     /// Flushes both tables up to what was acknowledged before this call and
@@ -1633,6 +1704,36 @@ fn replay_batch(memtable: &mut Memtable, seq: u64, batch: RecordBatch) -> Result
         .map_err(|err| memtable_to_wal(&err))
 }
 
+/// Bytes of the regular files in `dir` (a WAL directory, for [`Storage::stats`]). An
+/// unreadable directory or file counts as 0 and is logged without its path.
+fn wal_bytes(dir: &Path) -> u64 {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::debug!(kind = ?error.kind(), "reading the WAL directory failed");
+            return 0;
+        }
+    };
+    let mut total = 0_u64;
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(error) => {
+                tracing::debug!(kind = ?error.kind(), "reading a WAL entry failed");
+                continue;
+            }
+        };
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => total = total.saturating_add(meta.len()),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::debug!(kind = ?error.kind(), "reading a WAL file's metadata failed");
+            }
+        }
+    }
+    total
+}
+
 /// The steps [`Storage::open`] and [`Maintenance::open`] share: validates `config`,
 /// takes `LOCK`, migrates `catalog.db` (after its pre-migration copy) and opens the
 /// object store. Nothing is replayed, collected or started here.
@@ -1653,6 +1754,14 @@ async fn open_shared(
                 io::Error::other("open task panicked"),
             )
         })??;
+    // Refusals come before anything in the directory is written (spec 03
+    // § 12): the catalog's marker and migrations, then every WAL segment
+    // header, all read-only.
+    catalog::check_catalog(&data_dir).await?;
+    let wal_dir = data_dir.join("wal");
+    for table in [Table::Spans, Table::Scores] {
+        wal::check_headers(&wal_dir.join(table.name()), table).map_err(replay_error)?;
+    }
     let committer = Committer::open(&data_dir, share_hooks(hooks)).await?;
     let objects = open_objects(config, hooks, remote).await?;
     Ok((lock, committer, objects))
@@ -1920,19 +2029,22 @@ mod tests {
     use llmobs_core::schema::{spans, spans_schema};
     use llmobs_core::score::{Score, ScoreTarget, ScoreValue};
     use object_store::ObjectStoreExt;
-    use sqlx::ConnectOptions;
     use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::{ConnectOptions, Connection};
 
     use super::*;
     use crate::catalog::FileTable;
     use crate::compaction::job::tests as jobs;
     use crate::config::{FlushConfig, MemtableConfig, QueryConfig, S3Config, WalConfig};
-    use crate::error::StorageError;
+    use crate::error::{CatalogError, StorageError};
+    use crate::format::tests_support;
     use crate::hooks::HookPoint;
     use crate::media::MediaBlob;
+    use crate::objects::PutSizes;
     use crate::partials::partials_from_spans;
-    use crate::test_support::{span_row, span_rows};
+    use crate::test_support::{Call, ChaosStore, span_row, span_rows};
     use crate::views::QueryContext;
+    use crate::wal::segment::SEGMENT_HEADER_LEN;
     use crate::wal::{parse_segment_name, segment_name, spans_at, spans_keyed, spans_named};
 
     fn project() -> ProjectId {
@@ -1945,6 +2057,7 @@ mod tests {
 
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -1958,6 +2071,126 @@ mod tests {
             compaction: Default::default(),
             deletion: Default::default(),
         }
+    }
+
+    /// The free-disk fields of `health` follow the measurement (D-N-31).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn health_reports_low_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.min_free_bytes = ByteSize::b(100);
+        let storage = Storage::open(config).await.unwrap();
+
+        storage.disk().set_free_for_test(Some(0));
+        let low = storage.health();
+        assert!(low.disk_low);
+        assert_eq!(low.disk_free_bytes, 0);
+        assert_eq!(low.disk_min_free_bytes, 100);
+
+        storage.disk().set_free_for_test(Some(u64::MAX));
+        let high = storage.health();
+        assert!(!high.disk_low);
+        assert_eq!(high.disk_free_bytes, u64::MAX);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// The first probe writes the marker in local mode; the next one finds it (D-N-36).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn probe_objects_writes_the_marker_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+
+        storage.probe_objects().await.unwrap();
+        assert!(dir.path().join("objects/_probe/readyz").is_file());
+        storage.probe_objects().await.unwrap();
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A store that refuses every HEAD and PUT makes the probe `Unreachable` (D-N-36).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn probe_objects_fails_when_the_store_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let chaos = ChaosStore::new(inner);
+        let storage =
+            Storage::open_with_store(config_in(dir.path()), Arc::new(chaos.clone()), PutSizes::S3)
+                .await
+                .unwrap();
+
+        chaos.hold(&[Call::Head, Call::Put]);
+        assert!(matches!(
+            storage.probe_objects().await,
+            Err(ProbeError::Unreachable)
+        ));
+        chaos.release();
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A HEAD refused for want of `s3:ListBucket` (403) still passes: the PUT answers (D-N-36).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn probe_objects_writes_when_head_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let chaos = ChaosStore::new(inner);
+        let storage =
+            Storage::open_with_store(config_in(dir.path()), Arc::new(chaos.clone()), PutSizes::S3)
+                .await
+                .unwrap();
+
+        chaos.hold(&[Call::Head]);
+        storage.probe_objects().await.unwrap();
+        chaos.release();
+        storage.shutdown().await.unwrap();
+    }
+
+    /// A committed flush counts, with its time, and no failed flush is counted (D-N-31).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stats_count_a_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        // The flush task bumps the counters just after its commit returns.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while storage.stats().await.flushes_ok[0] == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let stats = storage.stats().await;
+        assert!(stats.flushes_ok[0] >= 1, "{stats:?}");
+        assert!(stats.flush_nanos[0] > 0, "{stats:?}");
+        assert_eq!(stats.flushes_failed[0], 0, "{stats:?}");
+        storage.shutdown().await.unwrap();
+    }
+
+    /// The spans WAL has bytes on disk after an append, before any flush (D-N-31).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stats_report_wal_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+
+        assert!(storage.stats().await.wal_bytes[0] > 0);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// `delete_objects` is not a TOML key: a file cannot turn object deletion off (D-N-34).
+    #[test]
+    fn delete_objects_is_not_a_toml_key() {
+        let base = "data_dir = \"data\"\n";
+        let config: StorageConfig = toml::from_str(base).unwrap();
+        assert!(config.delete_objects);
+        assert!(
+            toml::from_str::<StorageConfig>(&format!("{base}delete_objects = false\n")).is_err()
+        );
     }
 
     /// Three distinct traces spread over two UTC days (one partition per day).
@@ -2226,7 +2459,7 @@ mod tests {
         drop(storage);
         let segment = span_segments(dir.path())
             .into_iter()
-            .find(|path| path.metadata().unwrap().len() > 0)
+            .find(|path| path.metadata().unwrap().len() > SEGMENT_HEADER_LEN as u64)
             .unwrap();
         let len = segment.metadata().unwrap().len();
         let file = OpenOptions::new().write(true).open(&segment).unwrap();
@@ -2261,7 +2494,7 @@ mod tests {
         drop(storage);
 
         let mut segments = span_segments(dir.path());
-        segments.retain(|path| path.metadata().unwrap().len() > 0);
+        segments.retain(|path| path.metadata().unwrap().len() > SEGMENT_HEADER_LEN as u64);
         segments.sort();
         assert!(segments.len() >= 3, "{segments:?}");
         let middle = &segments[1];
@@ -2326,7 +2559,11 @@ mod tests {
             .query(project(), QueryOptions::new(None, None))
             .await
             .unwrap();
-        let ctx = datafusion::execution::context::SessionContext::new();
+        // The query's runtime has the object store that flushed files are read from.
+        let ctx = datafusion::execution::context::SessionContext::new_with_config_rt(
+            datafusion::execution::context::SessionConfig::new(),
+            query.runtime,
+        );
         ctx.register_table("spans_t", query.spans).unwrap();
         let batches = ctx
             .sql("SELECT span_id FROM spans_t")
@@ -2717,6 +2954,208 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn open_refuses_a_newer_directory_and_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = dir.path().join("wal").join("spans");
+        std::fs::create_dir_all(&wal).unwrap();
+        std::fs::write(wal.join("00000000000000000001.wal"), b"a newer segment").unwrap();
+        let mut connection = SqliteConnectOptions::new()
+            .filename(dir.path().join("catalog.db"))
+            .create_if_missing(true)
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let before = tests_support::dir_digest(dir.path());
+
+        let Err(error) = Storage::open(config_in(dir.path())).await else {
+            panic!("Storage::open should refuse a newer directory");
+        };
+        assert!(matches!(
+            error,
+            OpenError::Catalog(CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            })
+        ));
+        assert_eq!(tests_support::dir_digest(dir.path()), before);
+
+        let Err(error) = Maintenance::open(config_in(dir.path())).await else {
+            panic!("Maintenance::open should refuse a newer directory");
+        };
+        assert!(matches!(
+            error,
+            OpenError::Catalog(CatalogError::FormatTooNew {
+                found: 2,
+                supported: 1
+            })
+        ));
+        assert_eq!(tests_support::dir_digest(dir.path()), before);
+        let copies = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".pre-"))
+            .count();
+        assert_eq!(copies, 0);
+    }
+
+    /// A segment this build cannot read refuses the open and is left as it is,
+    /// whether it has a newer format or no header at all (spec 03 § 1, § 12),
+    /// in either table. The other table's WAL holds unflushed records, so a
+    /// replay that ran before the refusal would change it.
+    #[test]
+    fn open_refuses_a_segment_it_cannot_read_and_leaves_it_alone() {
+        let mut newer = b"LWAL".to_vec();
+        newer.extend_from_slice(&2_u16.to_le_bytes());
+        newer.extend_from_slice(&0_u16.to_le_bytes());
+        wal::encode(9, &spans_at(&[2]), &mut newer).unwrap();
+        let mut headerless = Vec::new();
+        wal::push_framed(&mut headerless, 9, b"not ipc");
+        let cases = [
+            (
+                newer,
+                error::HeaderProblem::NewerFormat {
+                    found: 2,
+                    supported: 1,
+                },
+            ),
+            (headerless, error::HeaderProblem::NotAWalSegment),
+        ];
+        for (bytes, expected) in cases {
+            for bad in [Table::Spans, Table::Scores] {
+                let dir = tempfile::tempdir().unwrap();
+                let config = config_in(dir.path());
+                // Unflushed records in both tables: a crash after the appends.
+                test_support::crashed_life(&config, async |storage: &Storage| {
+                    storage
+                        .append_spans(project(), spans_at(&[1]))
+                        .await
+                        .unwrap();
+                    storage
+                        .append_scores(
+                            project(),
+                            test_support::score_rows(&[test_support::score_row(
+                                1, 1, 1, 1, 1, false, "q",
+                            )]),
+                        )
+                        .await
+                        .unwrap();
+                });
+                settle_catalog(dir.path());
+                let wal = dir.path().join("wal").join(bad.name());
+                std::fs::write(wal.join(segment_name(9)), &bytes).unwrap();
+                let before = tests_support::dir_digest(dir.path());
+
+                let error = refused_open(&config);
+                match error {
+                    OpenError::WalReplay(WalError::Header { problem, table, .. }) => {
+                        assert_eq!(problem, expected);
+                        assert_eq!(table, bad.name());
+                    }
+                    other => panic!("expected a header refusal, got {other}"),
+                }
+                assert_eq!(
+                    tests_support::dir_digest(dir.path()),
+                    before,
+                    "a refused open changed the directory ({})",
+                    bad.name()
+                );
+            }
+        }
+    }
+
+    /// A directory from before format versions whose catalog holds no data but
+    /// whose WAL is headerless is refused before the catalog is stamped.
+    #[test]
+    fn a_pre_format_wal_is_refused_before_the_catalog_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path());
+        test_support::clean_life(&config, async |_: &Storage| {});
+        settle_catalog(dir.path());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut connection = SqliteConnectOptions::new()
+                .filename(dir.path().join("catalog.db"))
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA user_version = 0")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+        });
+        let mut headerless = Vec::new();
+        wal::push_framed(&mut headerless, 9, b"not ipc");
+        std::fs::write(
+            dir.path().join("wal").join("spans").join(segment_name(9)),
+            &headerless,
+        )
+        .unwrap();
+        let before = tests_support::dir_digest(dir.path());
+
+        let error = refused_open(&config);
+        assert!(
+            matches!(
+                error,
+                OpenError::WalReplay(WalError::Header {
+                    problem: error::HeaderProblem::NotAWalSegment,
+                    ..
+                })
+            ),
+            "expected NotAWalSegment, got {error}"
+        );
+        assert_eq!(tests_support::dir_digest(dir.path()), before);
+        let marker: i64 = runtime.block_on(async {
+            let mut connection = SqliteConnectOptions::new()
+                .filename(dir.path().join("catalog.db"))
+                .read_only(true)
+                .connect()
+                .await
+                .unwrap();
+            let marker = sqlx::query_scalar("PRAGMA user_version")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+            marker
+        });
+        assert_eq!(marker, 0, "the refused open stamped the catalog");
+    }
+
+    /// Opens `config` on a runtime of its own and returns the refusal.
+    fn refused_open(config: &StorageConfig) -> OpenError {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        match runtime.block_on(Storage::open(config.clone())) {
+            Ok(_) => panic!("Storage::open should refuse the directory"),
+            Err(error) => error,
+        }
+    }
+
+    /// Waits for the previous life's catalog connection to close (sqlx closes
+    /// it on a worker thread), then checkpoints what is left, so the digest
+    /// taken next sees a settled `catalog.db`.
+    fn settle_catalog(dir: &Path) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut connection = SqliteConnectOptions::new()
+                .filename(dir.join("catalog.db"))
+                .connect()
+                .await
+                .unwrap();
+            sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+        });
+    }
+
     #[test]
     fn the_budget_warning_needs_a_detected_limit_that_is_exceeded() {
         // A detected limit of 0 means the OS reported nothing: no warning.
@@ -2934,13 +3373,13 @@ mod tests {
     async fn a_flush_retries_failed_uploads_without_duplicating_rows() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        let fault = ChaosStore::new(Arc::clone(&inner) as _);
         fault.push(
-            test_support::Call::Put,
+            Call::Put,
             test_support::Fault::Before(test_support::Status::SlowDown),
         );
         fault.push(
-            test_support::Call::Put,
+            Call::Put,
             test_support::Fault::Before(test_support::Status::SlowDown),
         );
         let mut config = config_in(dir.path());
@@ -2970,9 +3409,9 @@ mod tests {
     async fn an_ambiguous_upload_is_retried_under_a_new_name() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        let fault = ChaosStore::new(Arc::clone(&inner) as _);
         fault.push(
-            test_support::Call::Put,
+            Call::Put,
             test_support::Fault::After(test_support::Status::SlowDown),
         );
         let mut config = config_in(dir.path());
@@ -3045,15 +3484,12 @@ mod tests {
     async fn an_ambiguous_traces_upload_is_retried_under_new_names() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
+        let fault = ChaosStore::new(Arc::clone(&inner) as _);
         // Serial uploads: the spans upload consumes the delay, the traces
         // upload writes the object and then fails ambiguously.
+        fault.push(Call::Put, test_support::Fault::Delay(Duration::ZERO));
         fault.push(
-            test_support::Call::Put,
-            test_support::Fault::Delay(Duration::ZERO),
-        );
-        fault.push(
-            test_support::Call::Put,
+            Call::Put,
             test_support::Fault::After(test_support::Status::SlowDown),
         );
         let mut config = config_in(dir.path());
@@ -3108,8 +3544,8 @@ mod tests {
     async fn failed_uploads_backpressure_until_the_store_recovers() {
         let dir = tempfile::tempdir().unwrap();
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let fault = test_support::ChaosStore::new(Arc::clone(&inner) as _);
-        fault.hold(&[test_support::Call::Put, test_support::Call::MultipartStart]);
+        let fault = ChaosStore::new(Arc::clone(&inner) as _);
+        fault.hold(&[Call::Put, Call::MultipartStart]);
         let mut config = config_in(dir.path());
         config.memtable.hard_limit = ByteSize::mib(16);
         config.flush.max_bytes = ByteSize::mib(1);
@@ -3159,7 +3595,7 @@ mod tests {
         out
     }
 
-    fn span_segments(data_dir: &Path) -> Vec<std::path::PathBuf> {
+    fn span_segments(data_dir: &Path) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         for entry in std::fs::read_dir(data_dir.join("wal/spans")).unwrap() {
             let entry = entry.unwrap();
@@ -3378,6 +3814,94 @@ mod tests {
                     ids.contains(&big_id),
                     "seed {seed}: the big span is gone after the crash ({} spans stored)",
                     ids.len()
+                );
+            });
+        }
+    }
+
+    /// A lossy crash that keeps part of the unsynced tail after an interval
+    /// rotation: the segment the rotation synced is whole, and the store reopens.
+    /// Sixteen seeds per `LLMOBS_LOSSY_SEEDS`.
+    #[test]
+    fn a_lossy_crash_after_an_interval_rotation_reopens() {
+        for seed in 0..16 * crash_tests::seeds() {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let lossy = fs::lossy::Lossy::enable(&data, &dir.path().join("shadow"));
+            let config = interval_wal_config(&data);
+            let big_id = span_row(1, 0, 1_000, 1_000).span_id.as_bytes().to_vec();
+
+            test_support::crashed_life(&config, async |storage| {
+                storage
+                    .append_spans(project(), test_support::big_span_batch(1, 1_572_864))
+                    .await
+                    .unwrap();
+                assert_eq!(span_segments(&data).len(), 2, "the group rotated the WAL");
+                storage
+                    .append_spans(project(), span_rows(&[span_row(2, 0, 2_000, 2_000)]))
+                    .await
+                    .unwrap();
+            });
+            lossy.crash_with(fs::lossy::CrashMode::KeepRandom, seed);
+
+            test_support::clean_life(&config, async |storage| {
+                let ids = span_ids(storage).await;
+                assert!(
+                    ids.contains(&big_id),
+                    "seed {seed}: the big span is gone after the crash ({} spans stored)",
+                    ids.len()
+                );
+            });
+        }
+    }
+
+    /// The last segment cut to each length of a torn header, after an interval
+    /// rotation. The rows of the synced segment read back, and the store reopens
+    /// and keeps appending. A header cut short cannot happen once it is synced,
+    /// but a torn one must still be handled (spec 03 § 1).
+    #[test]
+    fn a_torn_last_header_keeps_the_rows_before_it() {
+        for cut in 0..=SEGMENT_HEADER_LEN {
+            let dir = tempfile::tempdir().unwrap();
+            let data = dir.path().join("data");
+            let config = interval_wal_config(&data);
+            let big_id = span_row(1, 0, 1_000, 1_000).span_id.as_bytes().to_vec();
+
+            test_support::crashed_life(&config, async |storage| {
+                storage
+                    .append_spans(project(), test_support::big_span_batch(1, 1_572_864))
+                    .await
+                    .unwrap();
+                // Unsynced, in the last segment: the cut below may take it too.
+                storage
+                    .append_spans(project(), span_rows(&[span_row(2, 0, 2_000, 2_000)]))
+                    .await
+                    .unwrap();
+            });
+            let mut segments = span_segments(&data);
+            segments.sort();
+            let last = segments.last().expect("the group rotated the WAL").clone();
+            assert_eq!(segments.len(), 2, "cut {cut}");
+            OpenOptions::new()
+                .write(true)
+                .open(&last)
+                .unwrap()
+                .set_len(cut as u64)
+                .unwrap();
+
+            test_support::clean_life(&config, async |storage| {
+                let ids = span_ids(storage).await;
+                assert!(ids.contains(&big_id), "cut {cut}: the synced rows are gone");
+                storage
+                    .append_spans(project(), span_rows(&[span_row(3, 0, 3_000, 3_000)]))
+                    .await
+                    .unwrap();
+            });
+            test_support::clean_life(&config, async |storage| {
+                let ids = span_ids(storage).await;
+                assert!(
+                    ids.contains(&big_id),
+                    "cut {cut}: reopen lost the synced rows"
                 );
             });
         }
@@ -3717,6 +4241,7 @@ mod tests {
     /// and 1 MiB of size. Only [`Storage::flush_now`] flushes.
     fn quiet_config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             flush: FlushConfig {
                 max_age: Duration::from_secs(3600),
                 max_bytes: ByteSize::mib(1),

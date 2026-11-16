@@ -79,6 +79,11 @@ export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::ManageDatasets`: project members and above write datasets and experiments (D-J-5). */
+export function canManageDatasets(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Overrides apply only to org members and viewers (D139). */
 export function canHaveOverride(orgRole: OrgRole): boolean {
   return orgRole === "member" || orgRole === "viewer";

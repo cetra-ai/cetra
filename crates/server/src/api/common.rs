@@ -70,6 +70,15 @@ where
     }
 }
 
+/// The OpenAPI schema of a field that holds any JSON value (D-J-2): `AnyValue`, as
+/// `api::payload`'s `json` branch. Use it with `#[schema(schema_with = any_json)]`.
+pub(crate) fn any_json() -> RefOr<utoipa::openapi::schema::Schema> {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::AnyValue)
+        .description(Some("Any JSON value."))
+        .into()
+}
+
 /// RFC 7807 problem document.
 ///
 /// Spec 09 § Conventions.
@@ -126,6 +135,8 @@ pub enum ProblemCode {
     TooManyTraces,
     /// Admission control refused the query.
     Busy,
+    /// The server runs in restore mode: outbound calls are off (D-N-26).
+    RestoreMode,
     /// No credentials, or the credentials are invalid.
     Unauthorized,
     /// The credentials do not allow this operation.
@@ -184,7 +195,7 @@ impl ProblemCode {
             Self::QuotaExceeded => 402,
             Self::RateLimited => 429,
             Self::Internal => 500,
-            Self::Busy => 503,
+            Self::Busy | Self::RestoreMode => 503,
         }
     }
 
@@ -211,7 +222,7 @@ impl ProblemCode {
             Self::QuotaExceeded => "Payment Required",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",
-            Self::Busy => "Service Unavailable",
+            Self::Busy | Self::RestoreMode => "Service Unavailable",
         }
     }
 }

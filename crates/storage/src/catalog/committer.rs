@@ -25,6 +25,7 @@ use super::db::{
 };
 use super::{Catalog, FileId, FileMeta, FileState, FileTable, table_index};
 use crate::RetentionReport;
+use crate::counters::Counters;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus, PendingDeletion, Tombstones};
 use crate::error::{
     CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError, OrphanError,
@@ -108,6 +109,9 @@ pub(crate) struct Committer {
     /// Held for read by every media deletion and for write by a catalog snapshot
     /// (N M2, D-N-18). Take it before `inner`, never while holding `inner`.
     pub(crate) object_gc_gate: Arc<tokio::sync::RwLock<()>>,
+    /// The storage's monotonic counters (`Storage::stats`, N M3). Flush, compaction and
+    /// GC reach them through this committer.
+    counters: Arc<Counters>,
 }
 
 impl std::fmt::Debug for Committer {
@@ -117,6 +121,11 @@ impl std::fmt::Debug for Committer {
 }
 
 impl Committer {
+    /// The storage's monotonic counters (N M3, D-N-31).
+    pub(crate) fn counters(&self) -> &Counters {
+        &self.counters
+    }
+
     /// Open `catalog.db`, migrate, and load the active files and tombstones.
     pub(crate) async fn open(data_dir: &Path, hooks: Hooks) -> Result<Self, CatalogError> {
         let mut connection = open_catalog_db(data_dir).await?;
@@ -137,6 +146,7 @@ impl Committer {
             }),
             stopped,
             object_gc_gate: Arc::new(tokio::sync::RwLock::new(())),
+            counters: Arc::new(Counters::default()),
         })
     }
 

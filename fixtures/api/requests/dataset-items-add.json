@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "input": {
+        "question": "Do you support Gemini?"
+      },
+      "expected_output": {
+        "answer": "Yes, through the OpenAI-compatible or Gemini adapters."
+      },
+      "metadata": {
+        "topic": "integrations"
+      }
+    },
+    {
+      "input": "What is the free plan's data window?",
+      "expected_output": "30 days"
+    }
+  ]
+}

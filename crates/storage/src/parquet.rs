@@ -24,14 +24,18 @@ use parquet::schema::types::{ColumnPath, SchemaDescriptor};
 
 use crate::catalog::FileTable;
 use crate::error::ParquetWriteError;
+use crate::format::FORMAT_VERSION;
 
-/// `llmobs.schema_version` written into every file.
+/// `llmobs.schema_version` written into every file: the row normalization
+/// version (spec 01), **not** the file format version (`llmobs.format_version`,
+/// spec 03 § 12).
 ///
 /// It follows the stored row `schema_version` (spec 01). Rows are version 1.
 const SCHEMA_VERSION: &str = "1";
 
 const KEY_TABLE: &str = "llmobs.table";
 const KEY_SCHEMA_VERSION: &str = "llmobs.schema_version";
+const KEY_FORMAT_VERSION: &str = "llmobs.format_version";
 const KEY_LEVEL: &str = "llmobs.level";
 const KEY_MIN_TIME: &str = "llmobs.min_time";
 const KEY_MAX_TIME: &str = "llmobs.max_time";
@@ -465,6 +469,7 @@ fn file_metadata(table: FileTable, level: u8, bounds: &Bounds) -> Vec<KeyValue> 
     let pairs = [
         (KEY_TABLE, table.as_str().to_owned()),
         (KEY_SCHEMA_VERSION, SCHEMA_VERSION.to_owned()),
+        (KEY_FORMAT_VERSION, FORMAT_VERSION.to_string()),
         (KEY_LEVEL, level.to_string()),
         (KEY_MIN_TIME, bounds.min_time.to_string()),
         (KEY_MAX_TIME, bounds.max_time.to_string()),
@@ -475,6 +480,26 @@ fn file_metadata(table: FileTable, level: u8, bounds: &Bounds) -> Vec<KeyValue> 
         .into_iter()
         .map(|(key, value)| KeyValue::new(key.to_owned(), value))
         .collect()
+}
+
+/// The `llmobs.format_version` of a file, if it has one that parses.
+///
+/// Only tests read it (golden tests, the compaction tests). No production path
+/// checks it (D-R-26): the directory marker comes first, and a file the marker
+/// admits has this or an older version.
+#[cfg(test)]
+pub(crate) fn file_format_version(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+) -> Option<u16> {
+    metadata
+        .file_metadata()
+        .key_value_metadata()?
+        .iter()
+        .find(|pair| pair.key == KEY_FORMAT_VERSION)?
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
 }
 
 fn footer_size(bytes: &[u8]) -> Result<u64, ParquetWriteError> {
@@ -555,10 +580,12 @@ mod tests {
 
     use super::{
         FileWriter, SCHEMA_VERSION, SCORES_DICTIONARY_COLUMNS, SPANS_DICTIONARY_COLUMNS,
-        TRACES_DICTIONARY_COLUMNS, footer_size, footer_size_from_tail, write_file,
+        TRACES_DICTIONARY_COLUMNS, file_format_version, footer_size, footer_size_from_tail,
+        write_file,
     };
     use crate::catalog::FileTable;
     use crate::error::ParquetWriteError;
+    use crate::format::FORMAT_VERSION;
     use crate::wal::spans_named;
 
     fn project() -> ProjectId {
@@ -1137,6 +1164,8 @@ mod tests {
         };
         assert_eq!(value("llmobs.table"), table);
         assert_eq!(value("llmobs.schema_version"), SCHEMA_VERSION);
+        assert_eq!(value("llmobs.format_version"), FORMAT_VERSION.to_string());
+        assert_eq!(file_format_version(&file), Some(FORMAT_VERSION));
         assert_eq!(value("llmobs.level"), level);
         assert_eq!(value("llmobs.min_time"), written.min_time.to_string());
         assert_eq!(value("llmobs.max_time"), written.max_time.to_string());

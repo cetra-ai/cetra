@@ -1,5 +1,15 @@
 [
   {
+    "operation_id": "compare_experiments",
+    "path_params": {},
+    "query": {
+      "ids": "01900000-0000-7000-8000-000000000e01,01900000-0000-7000-8000-000000000e02"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-comparison.json"
+  },
+  {
     "operation_id": "create_deletion",
     "path_params": {},
     "query": {},
@@ -60,6 +70,27 @@
     "file": "static/auth-config.json"
   },
   {
+    "operation_id": "get_dataset",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01.json"
+  },
+  {
+    "operation_id": "get_dataset_item",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01",
+      "item_id": "01900000-0000-7000-8000-000000000d02"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json"
+  },
+  {
     "operation_id": "get_deletion",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000902"
@@ -88,6 +119,26 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluator.json"
+  },
+  {
+    "operation_id": "get_experiment",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000e01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment.json"
+  },
+  {
+    "operation_id": "get_experiment_results",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000e01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiment-results.json"
   },
   {
     "operation_id": "get_invite_preview",
@@ -553,6 +604,46 @@
     "file": "static/channels.json"
   },
   {
+    "operation_id": "list_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {
+      "version": "1"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items-v1.json"
+  },
+  {
+    "operation_id": "list_dataset_items",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/items.json"
+  },
+  {
+    "operation_id": "list_dataset_versions",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json"
+  },
+  {
+    "operation_id": "list_datasets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/datasets.json"
+  },
+  {
     "operation_id": "list_deletions",
     "path_params": {},
     "query": {},
@@ -583,6 +674,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluators.json"
+  },
+  {
+    "operation_id": "list_experiments",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/experiments.json"
   },
   {
     "operation_id": "list_llm_connections",
@@ -807,6 +906,46 @@
     "file": "static/backfill-estimate.json"
   },
   {
+    "operation_id": "post_dataset",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/datasets/01900000-0000-7000-8000-000000000c01.json"
+  },
+  {
+    "operation_id": "post_dataset_import",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dataset-import-result.json"
+  },
+  {
+    "operation_id": "post_dataset_import_preview",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {
+      "format": "csv"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/dataset-import-preview.json"
+  },
+  {
+    "operation_id": "post_dataset_item_from_trace",
+    "path_params": {
+      "dataset": "01900000-0000-7000-8000-000000000c01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/dataset-item-from-trace.json"
+  },
+  {
     "operation_id": "post_evaluator",
     "path_params": {},
     "query": {},
@@ -831,6 +970,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/evaluator-test-result.json"
+  },
+  {
+    "operation_id": "post_experiment",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/experiment-created.json"
   },
   {
     "operation_id": "post_llm_connection",

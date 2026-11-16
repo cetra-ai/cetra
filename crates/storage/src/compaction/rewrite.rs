@@ -1138,6 +1138,15 @@ mod tests {
             vec![trace_bytes(2)],
             "the other user's span of the session stays"
         );
+        let bytes = std::fs::read(dir.path().join("objects").join(&spans_files[0].path)).unwrap();
+        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(bytes))
+            .unwrap();
+        assert_eq!(
+            crate::parquet::file_format_version(&metadata),
+            Some(crate::format::FORMAT_VERSION),
+            "the rewritten file carries the format version"
+        );
         let stored = score_file_rows(dir.path(), &storage);
         assert_eq!(stored.len(), 1, "{stored:?}");
         assert!(

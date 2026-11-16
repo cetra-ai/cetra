@@ -1,7 +1,7 @@
-import { context, diag, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
+import { context, diag, propagation, ROOT_CONTEXT, trace } from "@opentelemetry/api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CONTEXT_KEY, currentValues, withContext } from "./context.js";
+import { CONTEXT_KEY, currentValues, experimentContext, withContext } from "./context.js";
 import { resetForTests } from "./runtime.js";
 import { finished, startMemory } from "./testing.test-helpers.js";
 
@@ -233,6 +233,37 @@ describe("metadata attributes", () => {
     });
     const [span] = await finished(exporter);
     expect(span?.attributes["llmobs.metadata.note"]).toBe("QUIET");
+  });
+});
+
+describe("experiment context", () => {
+  it("experimentContextHasOnlyTheLink", () => {
+    startMemory();
+    withContext({ sessionId: "s", metadata: { a: 1 } }, () => {
+      context.with(experimentContext("e1", "i1"), () => {
+        expect(currentValues()).toMatchObject({
+          sessionId: undefined,
+          userId: undefined,
+          tags: [],
+          metadata: {},
+          experiment: { experimentId: "e1", datasetItemId: "i1" },
+        });
+        expect(trace.getActiveSpan()).toBeUndefined();
+      });
+      expect(currentValues().sessionId).toBe("s");
+    });
+  });
+
+  it("withContextInsideAnExperimentKeepsTheLink", () => {
+    startMemory();
+    context.with(experimentContext("e1", "i1"), () => {
+      withContext({ userId: "u-1" }, () => {
+        expect(currentValues()).toMatchObject({
+          userId: "u-1",
+          experiment: { experimentId: "e1", datasetItemId: "i1" },
+        });
+      });
+    });
   });
 });
 

@@ -106,7 +106,8 @@ There is no Prometheus code and no metrics dependency. `routes/metrics.rs` (`Met
 5. **Loops not started:**
    - the alert **evaluation** and **delivery** loops (the history-prune loop still runs);
    - the eval **dispatcher** and **backfill runner** (the janitor, prune, flusher, sweeper and budget ticker still run: they only touch `meta.db`);
-   - `spawn_notices` (usage notices send email).
+   - `spawn_notices` (usage notices send email);
+   - the org-SSO domain recheck (`spawn_org_sso_recheck`, a DNS TXT lookup per pass).
 
    `spawn_org_sso` keeps running: it only reloads from `meta.db`.
 
@@ -232,7 +233,7 @@ Per-tenant numbers stay in the usage API (P) and the control plane. This keeps c
 | `llmobs_storage_flush_seconds_total` | counter | `table` | `StorageStats` (sum; rate ÷ flushes gives the mean) |
 | `llmobs_storage_compactions_total` | counter | `outcome` (`ok`, `failed`, `deferred`, `conflict`) | `StorageStats` |
 | `llmobs_storage_compaction_bytes_written_total` | counter | — | `StorageStats` |
-| `llmobs_storage_gc_objects_deleted_total` | counter | — | `StorageStats` (data files and staged objects; media blobs not counted) |
+| `llmobs_storage_gc_objects_deleted_total` | counter | — | `StorageStats` (obsolete data files and staged objects, including staged media uploads; media blobs collected by media GC are not counted) |
 | `llmobs_storage_read_cache_hits_total` / `_misses_total` | counter | — | `read_cache_stats()` (absent in local mode) |
 | `llmobs_storage_read_cache_bytes` | gauge | — | `read_cache_stats()` |
 | `llmobs_eval_jobs` | gauge | `status` (`queued`, `running`) | `meta.db` count, cached 10 s |

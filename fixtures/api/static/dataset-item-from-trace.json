@@ -1,0 +1,11 @@
+{
+  "id": "01900000-0000-7000-8000-000000000d04",
+  "revision_id": "01900000-0000-7000-8000-000000000d15",
+  "version": 4,
+  "input": "My order 1234 hasn't arrived.",
+  "expected_output": "Your order 1234 shipped and arrives tomorrow.",
+  "metadata": {},
+  "source_trace_id": "a1000000000000000000000000000001",
+  "source_span_id": "b100000000000011",
+  "created_at": "2026-01-01T00:00:00.000000000Z"
+}

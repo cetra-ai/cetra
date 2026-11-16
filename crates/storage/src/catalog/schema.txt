@@ -1,0 +1,15 @@
+table | data_files | data_files | CREATE TABLE data_files ( id TEXT PRIMARY KEY, table_name TEXT NOT NULL, project_id TEXT NOT NULL, day TEXT NOT NULL, level INTEGER NOT NULL, path TEXT NOT NULL, size_bytes INTEGER NOT NULL, footer_size INTEGER NOT NULL, row_count INTEGER NOT NULL, min_time INTEGER NOT NULL, max_time INTEGER NOT NULL, min_ingest_time INTEGER NOT NULL, max_ingest_time INTEGER NOT NULL, fully_merged INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT 'active', created_at INTEGER NOT NULL, obsoleted_at INTEGER , deletions_applied_seq INTEGER NOT NULL DEFAULT 0)
+index | data_files_gc | data_files | CREATE INDEX data_files_gc ON data_files (obsoleted_at) WHERE state = 'obsolete'
+index | data_files_lookup | data_files | CREATE INDEX data_files_lookup ON data_files (table_name, project_id, day) WHERE state = 'active'
+table | deletion_sessions | deletion_sessions | CREATE TABLE deletion_sessions ( deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE, session_id TEXT NOT NULL, PRIMARY KEY (deletion_id, session_id) )
+table | deletion_traces | deletion_traces | CREATE TABLE deletion_traces ( deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE, trace_id BLOB NOT NULL, PRIMARY KEY (deletion_id, trace_id) )
+table | deletion_users | deletion_users | CREATE TABLE deletion_users ( deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE, user_id TEXT NOT NULL, PRIMARY KEY (deletion_id, user_id) )
+table | deletions | deletions | CREATE TABLE deletions ( id TEXT PRIMARY KEY, deletion_seq INTEGER NOT NULL UNIQUE, project_id TEXT NOT NULL, kind TEXT NOT NULL, cutoff INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', registered_at INTEGER NOT NULL, applied_at INTEGER )
+index | deletions_pending | deletions | CREATE INDEX deletions_pending ON deletions (deletion_seq) WHERE status = 'pending'
+table | file_sources | file_sources | CREATE TABLE file_sources ( traces_file_id TEXT NOT NULL REFERENCES data_files(id) ON DELETE CASCADE, spans_file_id TEXT NOT NULL REFERENCES data_files(id) ON DELETE CASCADE, PRIMARY KEY (traces_file_id, spans_file_id) )
+index | file_sources_by_spans | file_sources | CREATE INDEX file_sources_by_spans ON file_sources (spans_file_id)
+table | media | media | CREATE TABLE media ( project_id TEXT NOT NULL, sha256 TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, newest_span_start INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (project_id, sha256) )
+table | projects | projects | CREATE TABLE projects ( project_id TEXT PRIMARY KEY, state TEXT NOT NULL, dropped_at INTEGER NOT NULL )
+table | retention_watermarks | retention_watermarks | CREATE TABLE retention_watermarks ( project_id TEXT PRIMARY KEY, keep_from TEXT NOT NULL )
+table | staged_objects | staged_objects | CREATE TABLE staged_objects ( path TEXT PRIMARY KEY, created_at INTEGER NOT NULL )
+table | table_state | table_state | CREATE TABLE table_state ( table_name TEXT PRIMARY KEY, flushed_seq INTEGER NOT NULL )

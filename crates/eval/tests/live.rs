@@ -109,6 +109,7 @@ async fn provider(
         .unwrap_or_else(|| default_model.to_owned());
     let runner = EvalRunner::new(EgressPolicy {
         allow_private_network: false,
+        restore_mode: false,
     })
     .expect("runner");
     let connection = JudgeConnection {

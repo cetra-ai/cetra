@@ -18,6 +18,7 @@ async fn posts_through_the_public_client() {
     });
     let client = EgressClient::new(EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("client");
     let mut url = mock.origin();
@@ -46,6 +47,7 @@ async fn posts_through_the_public_client() {
 async fn the_public_client_keeps_the_guard() {
     let client = EgressClient::new(EgressPolicy {
         allow_private_network: false,
+        restore_mode: false,
     })
     .expect("client");
     let url = reqwest::Url::parse("http://127.0.0.1:9/webhook").expect("url");

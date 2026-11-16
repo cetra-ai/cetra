@@ -24,7 +24,8 @@ Then:
 
 - [configuration.md](configuration.md): settings, secrets, TLS.
 - [s3.md](s3.md): Parquet files and media in an S3-compatible bucket.
-- [backup.md](backup.md): back up and restore.
+- [backup.md](backup.md): back up and restore, and restore mode for restore drills.
+- [monitoring.md](monitoring.md): health checks, Prometheus metrics and alert examples.
 - [upgrade.md](upgrade.md): upgrade to a new release.
 
 Licences: the core is MIT; the `ee` directories are under the Elastic License 2.0 and their

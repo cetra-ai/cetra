@@ -13,7 +13,8 @@ import { currentValues } from "./context.js";
 import { debug, warn, warnOnce } from "./log.js";
 import { applyMask } from "./mask.js";
 import { QuotaState } from "./quota.js";
-import { currentRuntime } from "./runtime.js";
+import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
+import { currentRuntime, type Runtime } from "./runtime.js";
 import { serialize } from "./serialize.js";
 import { uuid7 } from "./uuid.js";
 import { type FetchLike, getFetch, runtimeGlobals, timeoutSignal } from "./web.js";
@@ -21,15 +22,11 @@ import { type FetchLike, getFetch, runtimeGlobals, timeoutSignal } from "./web.j
 const TRACE_ID = /^[0-9a-f]{32}$/;
 const SPAN_ID = /^[0-9a-f]{16}$/;
 const SCORE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NON_NEGATIVE_INTEGER = /^[0-9]+$/;
 const MAX_BUFFER = 10_000;
 const BATCH_SIZE = 1_000;
 const TICK_MILLIS = 1_000;
 const ATTEMPT_TIMEOUT_MILLIS = 10_000;
-const RETRY_AFTER_MAX_MILLIS = 30_000;
 const DROP_WARN_INTERVAL_MILLIS = 60_000;
-/** 1 attempt plus 3 retries. */
-const MAX_ATTEMPTS = 4;
 
 export type ScoreDataType = "numeric" | "boolean" | "categorical" | "text";
 
@@ -58,6 +55,32 @@ export type ScoreTarget =
   | { type: "trace"; trace_id: string }
   | { type: "session"; session_id: string };
 
+/**
+ * Queue one experiment score (D-J-12): a `score()` item plus the experiment
+ * and dataset item ids. Returns its id, or `undefined` when nothing was queued
+ * (invalid input, with one warning, or a full buffer). Internal.
+ */
+export function queueExperimentScore(
+  runtime: Runtime,
+  options: ScoreOptions & { traceId: string; experimentId: string; datasetItemId: string },
+): string | undefined {
+  const failure = invalidReason(options);
+  if (failure !== undefined) {
+    warn(`llmobs: score not queued: ${failure}`);
+    return undefined;
+  }
+  const scoreId = mintScoreId();
+  if (scoreId === undefined) {
+    return undefined;
+  }
+  const body: ScoreBody = {
+    ...buildBody(options, scoreId),
+    experiment_id: options.experimentId,
+    dataset_item_id: options.datasetItemId,
+  };
+  return runtime.scores.put(body) ? scoreId : undefined;
+}
+
 /** One item of the `scores` array in a § Score request body. Internal. */
 export interface ScoreBody {
   score_id: string;
@@ -68,6 +91,9 @@ export interface ScoreBody {
   reason?: string;
   user_id?: string;
   metadata?: Record<string, string>;
+  /** Experiment scores only (D-J-12). */
+  experiment_id?: string;
+  dataset_item_id?: string;
 }
 
 /**
@@ -119,10 +145,18 @@ function invalidReason(options: ScoreOptions): string | undefined {
   if (options.scoreId !== undefined && !SCORE_ID.test(options.scoreId)) {
     return "invalid score_id";
   }
-  if (typeof options.value === "number" && !Number.isFinite(options.value)) {
+  return valueReason(options.value, options.dataType);
+}
+
+/** Why a value cannot be scored: a non-finite number, or a forced `dataType` that does not match. */
+export function valueReason(
+  value: boolean | number | string,
+  dataType: ScoreDataType | undefined,
+): string | undefined {
+  if (typeof value === "number" && !Number.isFinite(value)) {
     return "non-finite value";
   }
-  if (dataTypeMismatch(options.value, options.dataType)) {
+  if (dataTypeMismatch(value, dataType)) {
     return "data_type mismatch";
   }
   return undefined;
@@ -255,6 +289,11 @@ export class ScoreQueue {
     this.sleep = options.sleep ?? defaultSleep;
     this.now = options.now ?? Date.now;
     this.quota = options.quota ?? new QuotaState(this.now);
+  }
+
+  /** True while a 402 pause (D-P-34) drops the score batches. */
+  paused(): boolean {
+    return this.quota.paused();
   }
 
   /** Queue one score; `false` when it was dropped (buffer full, or stopped). */
@@ -410,36 +449,4 @@ export class ScoreQueue {
       debug(`llmobs: score batch dropped: ${error instanceof Error ? error.name : typeof error}`);
     }
   }
-}
-
-/** Backoff after the attempt with index `attempt` (0-based): 1 s, 2 s, 4 s. */
-function backoffMillis(attempt: number): number {
-  switch (attempt) {
-    case 0:
-      return 1_000;
-    case 1:
-      return 2_000;
-    default:
-      return 4_000;
-  }
-}
-
-/** `Retry-After` seconds when a non-negative integer (capped at 30 s), else the backoff. */
-function waitMillis(retryAfter: string | null, attempt: number): number {
-  const header = retryAfter === null ? undefined : retryAfter.trim();
-  if (header !== undefined && NON_NEGATIVE_INTEGER.test(header)) {
-    return Math.min(Number(header) * 1000, RETRY_AFTER_MAX_MILLIS);
-  }
-  return backoffMillis(attempt);
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  const { setTimeout } = runtimeGlobals();
-  if (setTimeout === undefined) {
-    // No timers in this runtime: continue without the wait.
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }

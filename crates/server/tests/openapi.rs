@@ -514,6 +514,121 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/score-definitions/{id}",
         "delete_score_definition",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets",
+        "list_datasets",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets",
+        "post_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "get_dataset",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "patch_dataset",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}",
+        "delete_dataset",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/versions",
+        "list_dataset_versions",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "list_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items",
+        "post_dataset_items",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "get_dataset_item",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "patch_dataset_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/{item_id}",
+        "delete_dataset_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/items/from-trace",
+        "post_dataset_item_from_trace",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import/preview",
+        "post_dataset_import_preview",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/datasets/{dataset}/import",
+        "post_dataset_import",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/datasets/{dataset}/export",
+        "get_dataset_export",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments",
+        "list_experiments",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments",
+        "post_experiment",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/{id}",
+        "get_experiment",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/{id}/results",
+        "get_experiment_results",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/experiments/compare",
+        "compare_experiments",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/experiments/{id}",
+        "delete_experiment",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments/{id}/items",
+        "post_experiment_results",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/experiments/{id}/finish",
+        "post_experiment_finish",
+    ),
     ("get", "/api/v1/projects/{project}/models", "list_models"),
     (
         "get",
@@ -570,6 +685,12 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_org_deletions",
     "list_evaluators",
     "list_score_definitions",
+    "list_datasets",
+    "list_dataset_versions",
+    "list_dataset_items",
+    "get_dataset_item",
+    "list_experiments",
+    "get_experiment",
     "list_models",
     "resolve_model_price",
     "list_org_model_prices",
@@ -592,6 +713,8 @@ const READ_OPERATIONS: &[&str] = &[
     "get_user",
     "list_scores",
     "get_metrics",
+    "get_experiment_results",
+    "compare_experiments",
 ];
 
 const TAGS: &[&str] = &[
@@ -607,6 +730,8 @@ const TAGS: &[&str] = &[
     "scores",
     "evaluation",
     "score_definitions",
+    "datasets",
+    "experiments",
     "model_prices",
     "schema",
     "saved_views",
@@ -896,6 +1021,26 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
+        } else if *id == "patch_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "delete_dataset_item" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_dataset_item_from_trace" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_dataset_import_preview" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_dataset_import" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "get_dataset_export" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_experiment_finish" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "post_experiment" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_experiment_results" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if READ_OPERATIONS.contains(id)
             || *id == "preview_deletion"
             || *id == "post_online_rule_preview"
@@ -985,6 +1130,10 @@ fn document_lint() {
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
         ("ScoreDefinitionPage", "ScoreDefinition"),
+        ("DatasetPage", "Dataset"),
+        ("DatasetVersionPage", "DatasetVersion"),
+        ("DatasetItemPage", "DatasetItem"),
+        ("ExperimentPage", "Experiment"),
         ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
@@ -1214,6 +1363,10 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
+        (
+            "UpdateDatasetRequest",
+            &["description", "input_schema", "expected_schema"],
+        ),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()
@@ -1259,6 +1412,10 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DeletionPage",
         "EvaluatorPage",
         "ScoreDefinitionPage",
+        "DatasetPage",
+        "DatasetVersionPage",
+        "DatasetItemPage",
+        "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",
         "AlertRulePage",
@@ -1269,10 +1426,14 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "InternalUsagePage",
         "InternalDropPage",
     ];
-    let expected: BTreeSet<String> = pages
+    let mut expected: BTreeSet<String> = pages
         .iter()
         .map(|page| format!("{page}.next_cursor"))
         .collect();
+    // Answers that are not pages, with an always-present cursor (D-J-10, D-J-13).
+    expected.insert("CreateExperimentResponse.next_cursor".to_owned());
+    expected.insert("ExperimentResults.next_cursor".to_owned());
+    expected.insert("ExperimentComparison.next_cursor".to_owned());
     assert_eq!(required_nullable, expected);
 }
 

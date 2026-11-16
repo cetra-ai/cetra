@@ -94,7 +94,11 @@ class LlmobsSpanProcessor(SpanProcessor):
         if values.tags:
             span.set_attribute("llmobs.tags", list(values.tags))
         self._stamp_metadata(span, values.metadata)
-        if self._environment is not None:
+        if values.experiment is not None:
+            span.set_attribute("llmobs.experiment.id", values.experiment.experiment_id)
+            span.set_attribute("llmobs.dataset_item.id", values.experiment.dataset_item_id)
+            span.set_attribute("llmobs.environment", "experiment")
+        elif self._environment is not None:
             span.set_attribute("llmobs.environment", self._environment)
         if self._release is not None:
             span.set_attribute("llmobs.release", self._release)

@@ -16,6 +16,7 @@ use crate::catalog::{CatalogEdit, Committer, FileId, FileMeta, FileState, FileTa
 use crate::compaction::merge::{MergeContext, merge_slice};
 use crate::compaction::plan::{Job, JobKind, Policy, plan};
 use crate::compaction::slice::{slice_count, slices, time_values};
+use crate::counters::CompactionOutcome;
 use crate::deletion::covered_predicate;
 use crate::disk::Disk;
 use crate::error::{CommitError, CompactionError, ObjectError};
@@ -269,6 +270,10 @@ impl Compactor {
                 }
                 Err(_) => {
                     report.failed += 1;
+                    // A panicked job never returned from `run`, so it is counted here.
+                    self.committer
+                        .counters()
+                        .compaction(CompactionOutcome::Failed, 1);
                     tracing::warn!("compaction task failed");
                 }
             }
@@ -309,6 +314,18 @@ impl Compactor {
             && may_be_corrupt(source)
         {
             self.verify.suspect(inputs, now_ns());
+        }
+        let counters = self.committer.counters();
+        match &outcome {
+            Ok(report) => {
+                counters.compaction(CompactionOutcome::Ok, report.jobs);
+                counters.compaction_bytes(report.output_bytes);
+            }
+            Err(CompactionError::Commit(CommitError::Conflict { .. })) => {
+                counters.compaction(CompactionOutcome::Conflict, 1);
+            }
+            Err(CompactionError::DiskFull) => counters.compaction(CompactionOutcome::Deferred, 1),
+            Err(_) => counters.compaction(CompactionOutcome::Failed, 1),
         }
         outcome
     }
@@ -713,6 +730,7 @@ pub(crate) mod tests {
         flush_age: Duration,
     ) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -950,6 +968,10 @@ pub(crate) mod tests {
             (1, 0, 6, 2),
             "{report:?}"
         );
+        let stats = storage.stats().await;
+        assert!(stats.compactions_ok >= 1, "{stats:?}");
+        assert!(stats.compaction_bytes_written > 0, "{stats:?}");
+        assert_eq!(stats.compactions_failed, 0, "{stats:?}");
 
         let spans_files = storage.catalog_files(crate::wal::Table::Spans);
         assert_eq!(spans_files.len(), 1);
@@ -975,6 +997,38 @@ pub(crate) mod tests {
         drop(storage);
         let storage = Storage::open(config).await.unwrap();
         assert_eq!(storage.catalog_files(crate::wal::Table::Spans).len(), 1);
+        storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn compacted_files_carry_the_format_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_in(dir.path(), quiet_compaction(2), Duration::from_secs(3_600));
+        let mut storage = Storage::open(config.clone()).await.unwrap();
+        for index in 0..2_u8 {
+            let base = at(10, 0, 0) + i64::from(index) * 60 * 1_000_000_000;
+            storage = flush_cycle(
+                &config,
+                storage,
+                span_rows(&[span_row(1, index, base, base + 1_000_000_000)]),
+            )
+            .await;
+        }
+        let report = storage.compact(at(11, 0, 0)).await.unwrap();
+        assert_eq!((report.jobs, report.failed), (1, 0), "{report:?}");
+        let files = storage.catalog_files(crate::wal::Table::Spans);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].level, 1);
+
+        let bytes = std::fs::read(dir.path().join("objects").join(&files[0].path)).unwrap();
+        let metadata = parquet::file::metadata::ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(bytes))
+            .unwrap();
+        assert_eq!(
+            crate::parquet::file_format_version(&metadata),
+            Some(crate::format::FORMAT_VERSION),
+            "the L1 output carries the format version"
+        );
         storage.shutdown().await.unwrap();
     }
 
