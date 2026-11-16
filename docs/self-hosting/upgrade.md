@@ -16,10 +16,14 @@ What happens on upgrade:
   like a backup, and count against your backup retention (GDPR).
 - Parquet files are never rewritten for an upgrade; new columns are added, old files stay readable.
 - The new version replays a WAL written by the previous one.
-- Downgrading is not supported: after a new version has started on the data, the old version
-  may refuse it. To go back, restore the pre-upgrade backup, or the `*.pre-m*` copies, and run the old
-  binary. Deletions requested after the upgrade are not in that copy, and `reapply-deletions` cannot
-  read a newer database: repeat those deletions by hand after a rollback.
+- Downgrading is not supported. An older version refuses data written by a newer one before it
+  changes anything, with one of these messages: `meta.db has format version N…`,
+  `meta.db has applied migration N, which this build does not have…`,
+  `this data directory has format version N…`, `WAL segment … format N…`,
+  `catalog.db has applied migration N…`. To go back, restore the pre-upgrade backup (or the
+  `*.pre-m*` copies) and run the old binary. Deletions requested after the upgrade are not in that
+  copy, and `reapply-deletions` reads a newer `meta.db` only when its format did not change: repeat
+  those deletions by hand after a rollback.
 
 Procedure:
 

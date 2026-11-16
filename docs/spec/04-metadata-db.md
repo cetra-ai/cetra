@@ -641,7 +641,7 @@ A sealed value is `0x01` ‖ key id (4 bytes) ‖ nonce (12) ‖ AES-256-GCM cip
 
 ## Format versions (D-R-33 to D-R-38)
 
-From the first public release (D185), a `meta.db`, `secret.key` and backup written by any release must open with every later one, and an older binary must refuse a newer one without changing it. Before that release there is no constraint. The storage side (`catalog.db`, WAL, Parquet) is 03 § 12. Markers "(SF<n>)" name the sub-phase of `docs/plans/server-format/` that makes a sentence true.
+From the first public release (D185), a `meta.db`, `secret.key` and backup written by any release must open with every later one, and an older binary must refuse a newer one without changing it. Before that release there is no constraint. The storage side (`catalog.db`, WAL, Parquet) is 03 § 12. Before the first public release `META_FORMAT_VERSION` stays 1: a format change then needs no bump (D185).
 
 **Two numbers.** The applied migrations (`_sqlx_migrations`) are the schema. `PRAGMA user_version` holds `META_FORMAT_VERSION` (`crates/server/src/meta/mod.rs`, a `u16`, 1 at the first release): the format of what `meta.db` means, and of `secret.key` and the sealed envelope (§ Encryption of secrets). It is the high-water mark: a binary writes it before it first writes anything in a newer format, and never lowers it. `VACUUM INTO` keeps it, so pre-migration copies and backups carry it.
 

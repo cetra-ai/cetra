@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15; SF1–SF8 not started
+Status: done (SF1–SF8), 2026-11-16
 
 # Server format stability (D185, track R extension)
 
