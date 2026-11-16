@@ -464,6 +464,35 @@ async fn all_users(storage: &Storage, project: ProjectId) -> Vec<Value> {
     }
 }
 
+/// Whether `trace` (hex) has a detail on `project` now: a read of one trace by id.
+pub(super) async fn has_detail(storage: &Storage, project: ProjectId, trace: &str) -> bool {
+    let ctx = context(storage, project).await;
+    trace_detail(&ctx, trace, TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("trace_detail of a golden trace: {error}"))
+        .is_some()
+}
+
+/// The KPIs of `expected` plus the contribution of the probe trace row `probe`: one trace, its
+/// cost and its tokens. The probe has no error and lasts as long as every golden trace (3 ms), so
+/// ErrorRate and LatencyP95 do not change.
+pub(super) fn kpis_with_probe(expected: &Value, probe: &Value) -> Value {
+    let cost = probe["cost_total"].as_f64().expect("the probe's cost");
+    let tokens = probe["total_tokens"].as_f64().expect("the probe's tokens");
+    let mut kpis = expected.clone();
+    for kpi in kpis.as_array_mut().expect("the KPIs are a list") {
+        let value = kpi["value"].as_f64().expect("a golden KPI has a value");
+        let added = match kpi["name"].as_str().expect("a KPI name") {
+            "Traces" => 1.0,
+            "CostTotal" => cost,
+            "TotalTokens" => tokens,
+            _ => continue,
+        };
+        kpi["value"] = Value::from(value + added);
+    }
+    kpis
+}
+
 /// A current-thread runtime for the catalog reads, which are not async in this module.
 pub(super) fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()

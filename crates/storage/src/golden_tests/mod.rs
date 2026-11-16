@@ -15,11 +15,16 @@ use std::time::Instant;
 
 use chrono::NaiveDate;
 use serde_json::Value;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
+use crate::Storage;
+use crate::error::{CatalogError, HeaderProblem, OpenError, WalError};
 use crate::format::FORMAT_VERSION;
 use crate::format::tests_support::dir_digest;
-use crate::test_support::copy_dir;
+use crate::test_support::{copy_dir, span_rows};
+use dump::block_on;
 
 /// The version of the scenario and of this file's format. Frozen from the first release on: a
 /// later change to what `build` writes is a new number, with its code path beside the old one.
@@ -81,8 +86,10 @@ struct Fresh {
 
 static FRESH: OnceLock<Fresh> = OnceLock::new();
 
-/// The fresh golden directory. Never write into it: copy it first.
-fn fresh_golden_dir() -> &'static Path {
+/// The fresh golden directory. Never write into it: copy it first. Not inside a tokio runtime:
+/// building it runs its lives on runtimes of their own.
+#[cfg(test)]
+pub(crate) fn fresh_golden_dir() -> &'static Path {
     &FRESH
         .get_or_init(|| {
             let dir = tempfile::tempdir().expect("a temp dir for the fresh golden directory");
@@ -264,12 +271,16 @@ fn write_golden_dir() {
     fs::create_dir_all(out.parent().expect("LLMOBS_GOLDEN_OUT has a parent"))
         .expect("create the parent of LLMOBS_GOLDEN_OUT");
     generate(&out);
-    let size = dir_bytes(&out);
-    println!("golden directory {}: {size} bytes", out.display());
+    let (files, bytes) = dir_size(&out);
+    println!(
+        "golden directory {}: {files} files, {bytes} bytes",
+        out.display()
+    );
 }
 
-/// The total size of the regular files under `dir`.
-fn dir_bytes(dir: &Path) -> u64 {
+/// The number of regular files under `dir` and their total size in bytes.
+fn dir_size(dir: &Path) -> (usize, u64) {
+    let mut files = 0;
     let mut total = 0;
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
@@ -279,9 +290,460 @@ fn dir_bytes(dir: &Path) -> u64 {
             if path.is_dir() {
                 pending.push(path);
             } else {
+                files += 1;
                 total += entry.metadata().expect("the size of a file").len();
             }
         }
     }
-    total
+    (files, total)
+}
+
+/// The bound on the total size of a golden directory (R8.7): it grows the repository by its size
+/// for every release.
+const GOLDEN_MAX_BYTES: u64 = 1 << 20;
+
+/// The golden directories committed under `fixtures/storage/golden/`, sorted. Plain files such as
+/// `RELEASES` are skipped.
+pub(crate) fn committed_dirs() -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/storage/golden");
+    let mut dirs: Vec<PathBuf> = fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("list {}: {error}", root.display()))
+        .map(|entry| entry.expect("read a golden directory entry").path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The basename of a golden directory, for assertion messages.
+fn name_of(dir: &Path) -> String {
+    dir.file_name().map_or_else(
+        || dir.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// `expected.json` of `dir`, which must name a generator this build knows (step 1).
+fn read_expected(dir: &Path) -> Value {
+    let name = name_of(dir);
+    let text = fs::read_to_string(dir.join("expected.json"))
+        .unwrap_or_else(|error| panic!("{name}: step 1: read expected.json: {error}"));
+    let expected: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{name}: step 1: expected.json is not JSON: {error}"));
+    let generator = expected["generator"].as_u64();
+    assert_eq!(
+        generator,
+        Some(GENERATOR),
+        "{name}: step 1: expected.json names generator {generator:?}, which this build does not know"
+    );
+    expected
+}
+
+/// `PRAGMA user_version` of the catalog file `file`.
+async fn user_version(file: &Path) -> i64 {
+    let mut connection = SqliteConnectOptions::new()
+        .filename(file)
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("open a copy of catalog.db: {error}"));
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap_or_else(|error| panic!("read PRAGMA user_version: {error}"));
+    connection
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("close a copy of catalog.db: {error}"));
+    version
+}
+
+/// Sets `PRAGMA user_version` of the catalog file `file` (of a copy only).
+async fn set_user_version(file: &Path, version: i64) {
+    let mut connection = SqliteConnectOptions::new()
+        .filename(file)
+        .connect()
+        .await
+        .unwrap_or_else(|error| panic!("open a copy of catalog.db: {error}"));
+    // The version is a number of this test, not data: a PRAGMA takes no bind parameter.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {version}"
+    )))
+    .execute(&mut connection)
+    .await
+    .unwrap_or_else(|error| panic!("set PRAGMA user_version: {error}"));
+    connection
+        .close()
+        .await
+        .unwrap_or_else(|error| panic!("close a copy of catalog.db: {error}"));
+}
+
+/// Every WAL segment under `copy/wal/<table>/`, for each table directory, sorted.
+fn all_wal_segments(copy: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for table in fs::read_dir(copy.join("wal")).expect("list the wal directory") {
+        let table = table.expect("read the wal directory").path();
+        found.extend(wal_segments(&table));
+    }
+    found.sort();
+    found
+}
+
+/// The first 8 bytes of the segment `path` (fewer if the file is shorter).
+fn segment_header(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let file = fs::File::open(path).expect("open a WAL segment");
+    let mut header = Vec::new();
+    file.take(8)
+        .read_to_end(&mut header)
+        .expect("read a WAL segment header");
+    header
+}
+
+/// Rows of `sql` on the catalog of `file`, read on a blocking thread (the reader of `catalog_rows`
+/// starts a runtime, which an async test may not).
+async fn catalog_rows_of(file: PathBuf, sql: &'static str) -> Vec<Value> {
+    tokio::task::spawn_blocking(move || dump::catalog_rows(&file, sql))
+        .await
+        .expect("the catalog query task")
+}
+
+/// Checks the golden directory `dir` against the current build (R8.7, plan § check_dir). `dir` is
+/// never written: everything runs on a copy, and the open (step 6) runs after the catalog and the
+/// file checks (steps 3 to 5), which see the directory as it was written: the open collects the
+/// obsolete files older than `gc.grace`, and an aged directory's obsolete files all are.
+async fn check_dir(dir: &Path) {
+    let started = Instant::now();
+    let name = name_of(dir);
+
+    // 1. expected.json.
+    let expected = read_expected(dir);
+    let format = expected["format_version"]
+        .as_u64()
+        .and_then(|version| u16::try_from(version).ok())
+        .unwrap_or_else(|| panic!("{name}: step 1: expected.json has no format_version"));
+
+    // 2. A copy, in a temp directory.
+    let temp = tempfile::tempdir().expect("a temp dir for the copy");
+    let copy = temp.path().join("golden");
+    copy_dir(dir, &copy);
+
+    // 3. The marker, and every WAL segment's header.
+    let marker = user_version(&copy.join("catalog.db")).await;
+    assert_eq!(
+        marker,
+        i64::from(format),
+        "{name}: step 3: PRAGMA user_version of catalog.db"
+    );
+    for segment in all_wal_segments(&copy) {
+        let header = segment_header(&segment);
+        assert!(
+            header.len() == 8 && header[..4] == *b"LWAL",
+            "{name}: step 3: a WAL segment does not start with the LWAL header"
+        );
+        assert_eq!(
+            u16::from_le_bytes([header[4], header[5]]),
+            format,
+            "{name}: step 3: the format version of a WAL segment"
+        );
+    }
+
+    // 4. The catalog summary.
+    let summary = tokio::task::spawn_blocking({
+        let copy = copy.clone();
+        move || dump::catalog_summary(&copy)
+    })
+    .await
+    .expect("the catalog summary task");
+    assert_eq!(
+        summary, expected["catalog"],
+        "{name}: step 4: the catalog summary differs from expected.json"
+    );
+
+    // 5. The data files: every active or obsolete object is present, and every active Parquet
+    // file's footer carries the format version.
+    let files = catalog_rows_of(
+        copy.join("catalog.db"),
+        "SELECT path, state FROM data_files WHERE state IN ('active', 'obsolete')",
+    )
+    .await;
+    let mut missing = 0;
+    let mut footers = 0;
+    for row in &files {
+        let path = copy
+            .join("objects")
+            .join(row[0].as_str().expect("a data file path"));
+        if !path.is_file() {
+            missing += 1;
+            continue;
+        }
+        if row[1] == "active" {
+            use parquet::file::reader::FileReader as _;
+            let reader = parquet::file::reader::SerializedFileReader::new(
+                fs::File::open(&path).expect("open an active data file"),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{name}: step 5: read an active Parquet footer: {error}")
+            });
+            assert_eq!(
+                crate::parquet::file_format_version(reader.metadata()),
+                Some(format),
+                "{name}: step 5: the format version of an active Parquet file"
+            );
+            footers += 1;
+        }
+    }
+    assert_eq!(
+        missing, 0,
+        "{name}: step 5: data_files rows whose object is missing under objects/"
+    );
+    assert!(
+        footers > 0,
+        "{name}: step 5: the directory has active Parquet files"
+    );
+
+    // 6. The open, with the config of `build`.
+    let storage = Storage::open(build::golden_config(&copy))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 6: Storage::open: {error}"));
+
+    // 7. The reads answer what expected.json records (the catalog, and the format and workspace
+    // versions, are not reads).
+    let first = dump::dump(&storage).await;
+    for (key, value) in expected.as_object().expect("expected.json is an object") {
+        if matches!(
+            key.as_str(),
+            "format_version" | "workspace_version" | "catalog"
+        ) {
+            continue;
+        }
+        assert_eq!(
+            first.get(key),
+            Some(value),
+            "{name}: step 7: the read {key} differs from expected.json"
+        );
+    }
+
+    // 8. New writes on the old directory: one probe trace, flushed, compacted, deletions applied.
+    let p1: llmobs_core::ids::ProjectId = P1.parse().expect("a golden project id");
+    let probe_start = expected["write_probe"]["start_time"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("{name}: step 8: expected.json has no write_probe.start_time"));
+    let probe = build::probe(probe_start);
+    let probe_trace = probe[0].trace_id.to_string();
+    storage
+        .append_spans(p1, span_rows(&probe))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 8: append the probe trace: {error}"));
+    storage
+        .flush_now(std::time::Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 8: flush: {error}"));
+    storage
+        .compact(ns_at("2026-02-12", 0))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 8: compact: {error}"));
+    storage
+        .apply_deletions(ns_at("2026-02-12", 0))
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 8: apply deletions: {error}"));
+    let second = dump::dump(&storage).await;
+
+    let second_p1 = &second["projects"][P1];
+    let probe_detail = &second_p1["trace_details"][&probe_trace];
+    assert_eq!(
+        probe_detail["spans"].as_array().map(Vec::len),
+        Some(2),
+        "{name}: step 8: the probe trace is readable with its two spans"
+    );
+    for project in [P1, P2] {
+        let old = expected["projects"][project]["trace_details"]
+            .as_object()
+            .expect("expected trace_details");
+        for (id, detail) in old {
+            assert_eq!(
+                second["projects"][project]["trace_details"].get(id),
+                Some(detail),
+                "{name}: step 8: the trace_detail of an old trace differs from expected.json"
+            );
+        }
+    }
+    let mut listed = second_p1["traces"].as_array().expect("trace rows").clone();
+    let probes = listed
+        .iter()
+        .filter(|row| row["trace_id"] == probe_trace.as_str())
+        .count();
+    assert_eq!(probes, 1, "{name}: step 8: the probe trace is listed once");
+    listed.retain(|row| row["trace_id"] != probe_trace.as_str());
+    assert_eq!(
+        Value::Array(listed),
+        expected["projects"][P1]["traces"],
+        "{name}: step 8: trace_list is not expected.json's plus exactly the probe trace"
+    );
+    // The second dump is the first plus exactly the probe, with two exceptions the probe and the
+    // applied deletion explain: the user deletion of u-2 is now applied (only its status changes),
+    // and the KPIs are aggregates over the traces, so they change by the probe's contribution.
+    let probe_row = second_p1["traces"]
+        .as_array()
+        .expect("trace rows")
+        .iter()
+        .find(|row| row["trace_id"] == probe_trace.as_str())
+        .expect("the probe trace row")
+        .clone();
+    let mut want = expected.clone();
+    let want_map = want.as_object_mut().expect("expected.json is an object");
+    for key in ["format_version", "workspace_version", "catalog"] {
+        want_map.remove(key);
+    }
+    want["deletions"][DELETION_USER.to_string()] = Value::from("applied");
+    want["projects"][P1]["kpis"] =
+        dump::kpis_with_probe(&expected["projects"][P1]["kpis"], &probe_row);
+    let mut got = without_probe(second.clone(), &probe_trace);
+    got.as_object_mut()
+        .expect("the dump is an object")
+        .remove("format_version");
+    assert_eq!(
+        got, want,
+        "{name}: step 8: the second dump is not expected.json plus exactly the probe trace, with the u-2 deletion applied"
+    );
+
+    // The applied user deletion took effect: a trace of u-2 has no detail now.
+    for trace in [build::trace_hex(2), build::trace_hex(4)] {
+        assert!(
+            !dump::has_detail(&storage, p1, &trace).await,
+            "{name}: step 8: a trace of the applied user deletion of u-2 is still readable"
+        );
+    }
+
+    // 9. Shutdown.
+    storage
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("{name}: step 9: shutdown: {error}"));
+    eprintln!("check_dir {name}: {:?}", started.elapsed());
+}
+
+/// A dump without the probe trace: its row, its detail, its spans, and its user and session.
+fn without_probe(mut dump: Value, probe_trace: &str) -> Value {
+    let project = &mut dump["projects"][P1];
+    if let Some(rows) = project["traces"].as_array_mut() {
+        rows.retain(|row| row["trace_id"] != probe_trace);
+    }
+    if let Some(details) = project["trace_details"].as_object_mut() {
+        details.remove(probe_trace);
+    }
+    if let Some(rows) = project["spans"].as_array_mut() {
+        rows.retain(|row| row["trace_id"] != probe_trace);
+    }
+    if let Some(rows) = project["sessions"].as_array_mut() {
+        rows.retain(|row| row["session_id"] != "s-probe");
+    }
+    if let Some(rows) = project["users"].as_array_mut() {
+        rows.retain(|row| row["user_id"] != "u-probe");
+    }
+    dump
+}
+
+#[test]
+fn a_fresh_golden_directory_opens() {
+    block_on(check_dir(fresh_golden_dir()));
+}
+
+#[test]
+fn the_committed_golden_directories_open() {
+    let dirs = committed_dirs();
+    if dirs.is_empty() {
+        eprintln!("the_committed_golden_directories_open: no golden directory is committed yet");
+        return;
+    }
+    for dir in dirs {
+        block_on(check_dir(&dir));
+    }
+}
+
+#[test]
+fn golden_directories_stay_small() {
+    let started = Instant::now();
+    let mut dirs = committed_dirs();
+    dirs.push(fresh_golden_dir().to_path_buf());
+    for dir in dirs {
+        let name = name_of(&dir);
+        let (files, bytes) = dir_size(&dir);
+        eprintln!("golden_directories_stay_small: {name}: {files} files, {bytes} bytes");
+        assert!(
+            bytes <= GOLDEN_MAX_BYTES,
+            "{name}: {bytes} bytes, over {GOLDEN_MAX_BYTES}: a golden directory grows the repository by its size for every release: shrink the scenario in golden_tests/build.rs; do not raise the limit without the coordinator"
+        );
+    }
+    eprintln!("golden_directories_stay_small: {:?}", started.elapsed());
+}
+
+#[test]
+fn a_newer_golden_directory_is_refused() {
+    let started = Instant::now();
+    let mut dirs = committed_dirs();
+    if dirs.is_empty() {
+        dirs.push(fresh_golden_dir().to_path_buf());
+    }
+    for dir in dirs {
+        let name = name_of(&dir);
+        let temp = tempfile::tempdir().expect("a temp dir for the copy");
+        let copy = temp.path().join("golden");
+        copy_dir(&dir, &copy);
+        let catalog = copy.join("catalog.db");
+
+        // A newer marker: refused by the catalog check, before anything is written.
+        block_on(set_user_version(&catalog, i64::from(FORMAT_VERSION) + 1));
+        let before = dir_digest(&copy);
+        let refused = block_on(Storage::open(build::golden_config(&copy)));
+        let Err(error) = refused else {
+            panic!("{name}: a directory with a newer marker opened");
+        };
+        assert!(
+            matches!(
+                error,
+                OpenError::Catalog(CatalogError::FormatTooNew { found, .. })
+                    if found == i64::from(FORMAT_VERSION) + 1
+            ),
+            "{name}: a newer marker is refused with FormatTooNew, got {error}"
+        );
+        assert_eq!(
+            dir_digest(&copy),
+            before,
+            "{name}: a refused open changed the directory (marker)"
+        );
+
+        // A newer first WAL segment, with the marker restored: refused by the WAL check.
+        block_on(set_user_version(&catalog, i64::from(FORMAT_VERSION)));
+        let segment = wal_segments(&copy.join("wal").join("spans"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{name}: the spans WAL has a segment"));
+        let mut bytes = fs::read(&segment).expect("read the first WAL segment");
+        bytes[4..6].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+        fs::write(&segment, bytes).expect("write the first WAL segment");
+        let before = dir_digest(&copy);
+        let refused = block_on(Storage::open(build::golden_config(&copy)));
+        let Err(error) = refused else {
+            panic!("{name}: a directory with a newer WAL segment opened");
+        };
+        assert!(
+            matches!(
+                error,
+                OpenError::WalReplay(WalError::Header {
+                    problem: HeaderProblem::NewerFormat { found, .. },
+                    ..
+                }) if found == FORMAT_VERSION + 1
+            ),
+            "{name}: a newer WAL segment is refused with NewerFormat, got {error}"
+        );
+        assert_eq!(
+            dir_digest(&copy),
+            before,
+            "{name}: a refused open changed the directory (WAL header)"
+        );
+    }
+    eprintln!(
+        "a_newer_golden_directory_is_refused: {:?}",
+        started.elapsed()
+    );
 }

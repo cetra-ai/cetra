@@ -682,6 +682,32 @@ async fn wal_tail(storage: &Storage) {
     append_scores(storage, p1, &[quality, label]).await;
 }
 
+/// The hex trace id of the scenario's trace number `trace` (as `trace_list` writes it).
+pub(super) fn trace_hex(trace: u16) -> String {
+    trace_id(trace).to_string()
+}
+
+/// The write probe of `check_dir` step 8 (R8.7): one trace of two spans in P1 starting at `start`,
+/// with a user and a session of its own, built by the scenario's own `chat`.
+pub(super) fn probe(start: i64) -> Vec<Span> {
+    chat(
+        project(P1),
+        11,
+        start,
+        ingest_at(29),
+        "u-probe",
+        "s-probe",
+        Call {
+            input: 2,
+            output: 1,
+            cost: 0.25,
+            status: SpanStatus::Ok,
+            text: None,
+        },
+        false,
+    )
+}
+
 /// Waits up to 5 s for the catalog's WAL and shared memory files to go (a closed connection
 /// removes them); if one stays, checkpoints it through a connection of its own. Asserts that
 /// both are gone.
