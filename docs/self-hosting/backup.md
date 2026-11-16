@@ -55,8 +55,10 @@ took: 4.2 s
 The command fails with `backup failed (<code>): <message>` when the server refuses or cannot finish.
 The codes are `bad_request`, `target_not_empty`, `target_inside_data_dir`, `meta_only_needs_s3`,
 `busy`, `flush_failed`, `meta_copy_failed`, `snapshot_failed`, `objects_failed`, `forbidden` (the
-caller is neither the server's user nor root) and `io`. When no server answers, the command
-says so and names the socket.
+caller is neither the server's user nor root), `unknown_command` and `unsupported_protocol` (the
+command and the server are different releases: run the command of the server's release, e.g.
+through `docker compose exec`) and `io`. When no server answers, the command says so and names the
+socket.
 
 What the server does:
 
