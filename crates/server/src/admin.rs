@@ -1373,6 +1373,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rotation_keeps_the_formats() {
+        let (dir, config) = ready_config().await;
+        // The public test key of crypto's known-answer tests: bytes 0 to 31.
+        let golden: [u8; 32] = core::array::from_fn(|index| index as u8);
+        let golden_box = SecretBox::new(&golden);
+        crypto::write_key_file(&crypto::key_path(dir.path()), &golden).unwrap();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        {
+            let db = MetaDb::open(&config.data_dir).await.unwrap();
+            crypto::verify_or_record(&db, &golden_box, &crypto::key_path(dir.path()))
+                .await
+                .unwrap();
+            seed_org(&db).await;
+            seed_connection(&db, &first, &golden_box, true).await;
+            seed_connection(&db, &second, &golden_box, false).await;
+            db.close().await;
+        }
+
+        let rotated = rotate_encryption_key(&config, None).await.unwrap();
+        assert_eq!(rotated.values, 3);
+
+        // The key file is one line of base64 (44 characters) and a newline.
+        let text = std::fs::read_to_string(crypto::key_path(dir.path())).unwrap();
+        assert_eq!(text.len(), 45);
+        assert!(text.ends_with('\n'));
+        let new_key = crypto::decode_key(text.trim_end(), "test").unwrap();
+        assert_ne!(new_key, golden);
+        let new_box = SecretBox::new(&new_key);
+
+        // Every sealed value starts with 0x01 and the new key id. The id is compared with
+        // a value sealed by the new key, since the id itself is private to `crypto`.
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        for (id, column) in [
+            (&first, "secret_enc"),
+            (&first, "extra_headers_enc"),
+            (&second, "secret_enc"),
+        ] {
+            let sealed = stored_column(&db, id, column).await.unwrap();
+            let aad = connection_aad(column, id);
+            let probe = new_box.seal(b"probe", aad).unwrap();
+            assert_eq!(sealed[0], 0x01);
+            assert_eq!(&sealed[1..5], &probe[1..5]);
+        }
+        let check = stored_check(&db).await;
+        db.close().await;
+        assert_eq!(check, new_box.check_value());
+    }
+
+    #[tokio::test]
     async fn rotation_reencrypts_evaluator_secrets() {
         let (dir, config) = ready_config().await;
         let old = crypto::load_key(None, dir.path(), false).unwrap();
