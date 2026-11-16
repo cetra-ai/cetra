@@ -16,7 +16,8 @@ ENV LLMOBS_DATA_DIR=/data
 USER 65532:65532
 VOLUME ["/data"]
 # 8080: UI, API, OTLP/HTTP, MCP. 4317: OTLP/gRPC. 4318: OTLP/HTTP (S11).
-EXPOSE 8080 4317 4318
+# 9464: Prometheus /metrics. Only used when LLMOBS_METRICS_ADDR is set (D-N-32).
+EXPOSE 8080 4317 4318 9464
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD ["/usr/local/bin/llmobs", "health"]
 ENTRYPOINT ["/usr/local/bin/llmobs"]

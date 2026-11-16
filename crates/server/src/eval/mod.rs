@@ -233,25 +233,51 @@ pub(crate) struct EvalTasks {
 /// sweeper and backfill runner. Each runs one
 /// pass as soon as it starts (the first tick of its interval is not skipped), so a restart prunes
 /// and clears at once.
+///
+/// In restore mode the dispatcher and the backfill runner are not started (N M3, D-N-25): they
+/// run judges and webhooks. The other five only touch `meta.db`.
 pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
     let stop = state.eval.stopped();
-    let handles = vec![
-        tokio::spawn(run_dispatcher(state.clone(), stop.clone(), timing)),
-        tokio::spawn(run_janitor(
+    let mut handles = Vec::new();
+    if !state.config.restore_mode {
+        handles.push(tokio::spawn(run_dispatcher(
             state.clone(),
             stop.clone(),
-            timing.janitor_every,
-        )),
-        tokio::spawn(run_prune(state.clone(), stop.clone(), timing.prune_every)),
-        tokio::spawn(run_flusher(state.clone(), stop.clone(), timing.flush_every)),
-        tokio::spawn(run_sweeper(state.clone(), stop.clone(), timing.sweep_every)),
-        tokio::spawn(run_backfills(
+            timing,
+        )));
+    }
+    handles.push(tokio::spawn(run_janitor(
+        state.clone(),
+        stop.clone(),
+        timing.janitor_every,
+    )));
+    handles.push(tokio::spawn(run_prune(
+        state.clone(),
+        stop.clone(),
+        timing.prune_every,
+    )));
+    handles.push(tokio::spawn(run_flusher(
+        state.clone(),
+        stop.clone(),
+        timing.flush_every,
+    )));
+    handles.push(tokio::spawn(run_sweeper(
+        state.clone(),
+        stop.clone(),
+        timing.sweep_every,
+    )));
+    if !state.config.restore_mode {
+        handles.push(tokio::spawn(run_backfills(
             state.clone(),
             stop.clone(),
             timing.backfill_every,
-        )),
-        tokio::spawn(run_budget(state.clone(), stop, timing.budget_every)),
-    ];
+        )));
+    }
+    handles.push(tokio::spawn(run_budget(
+        state.clone(),
+        stop,
+        timing.budget_every,
+    )));
     EvalTasks { handles, timing }
 }
 
@@ -440,5 +466,24 @@ async fn run_budget(state: AppState, mut stop: watch::Receiver<bool>, every: Dur
         if let Err(error) = dispatch::budget_once(&state, now).await {
             tracing::error!(error = %error, "eval budget pass failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::EvalTiming;
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn restore_mode_spawns_no_dispatcher() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let tasks = super::spawn(&app.state, EvalTiming::TEST);
+        assert_eq!(tasks.handles.len(), 5);
+        let limit = EvalTiming::TEST.drain + Duration::from_secs(5);
+        tokio::time::timeout(limit, tasks.shutdown(&app.state))
+            .await
+            .expect("the loops stop in time");
     }
 }

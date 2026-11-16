@@ -36,6 +36,7 @@ fn webhook_url(mock: &Mock) -> String {
 fn client(allow_private_network: bool) -> EgressClient {
     EgressClient::new(EgressPolicy {
         allow_private_network,
+        restore_mode: false,
     })
     .expect("client")
 }

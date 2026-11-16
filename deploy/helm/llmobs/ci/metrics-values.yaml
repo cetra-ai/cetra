@@ -1,0 +1,3 @@
+# Renders the metrics.enabled path: the metrics env var, the container port and the scrape annotations.
+metrics:
+  enabled: true

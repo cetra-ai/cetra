@@ -313,21 +313,25 @@ impl TestApp {
         let eval_runner = Arc::new(
             llmobs_eval::EvalRunner::new(llmobs_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
             })
             .expect("eval runner"),
         );
+        let telemetry = crate::telemetry::Telemetry::new(config.restore_mode);
         let mailer = if stub_mailer {
             let from = format!("{PRODUCT} <noreply@example.com>");
-            Some(Arc::new(crate::email::Mailer::stub(&from)))
+            Some(Arc::new(crate::email::Mailer::stub(
+                &from,
+                telemetry.emails.clone(),
+            )))
         } else {
-            crate::email::Mailer::from_config(&config)
+            crate::email::Mailer::from_config(&config, telemetry.emails.clone())
                 .expect("smtp settings build a mailer")
                 .map(Arc::new)
         };
         let mut providers = {
             let http = crate::auth::oidc::identity_client().expect("identity client");
-            crate::auth::oidc::Providers::from_config(&config.auth, &http)
-                .expect("identity providers")
+            crate::auth::oidc::Providers::for_config(&config, &http).expect("identity providers")
         };
         if let Some(base) = github_base {
             providers.retarget_github(base);
@@ -359,6 +363,7 @@ impl TestApp {
         let org_sso = crate::ee::org_sso::OrgSso::new(
             llmobs_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
+                restore_mode: config.restore_mode,
             },
             crate::ee::org_sso::dns::TxtResolver::fixed(),
         )
@@ -367,6 +372,7 @@ impl TestApp {
             config,
             meta,
             storage: Arc::new(storage),
+            ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
             limits: Limits::new(),
             key_cache: crate::auth::principal::ApiKeyCache::new(),
@@ -397,6 +403,7 @@ impl TestApp {
             backup_slot: tokio::sync::Mutex::new(()),
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
+            telemetry,
         });
         state
             .org_sso
@@ -884,7 +891,10 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         otlp_http_addr: None,
         // Tests must not bind the gRPC port (4317).
         grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -1432,7 +1442,10 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         trusted_proxies: Vec::new(),
         otlp_http_addr: None,
         grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,

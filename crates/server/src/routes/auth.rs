@@ -881,6 +881,37 @@ mod tests {
 
     const PASSWORD: &str = "llmobs-ok1";
 
+    #[tokio::test]
+    async fn restore_mode_lists_no_identity_providers() {
+        let base = "http://127.0.0.1:9";
+        let github = |config: &mut crate::config::ServerConfig| {
+            config.auth.github = Some(crate::config::GithubAuth {
+                client_id: "gh".to_owned(),
+                client_secret: Secret::new("gh-secret".to_owned()),
+                link_existing_by_email: true,
+            });
+        };
+        let app = TestApp::with_github(base, github).await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert_eq!(config.providers.len(), 1);
+
+        let app = TestApp::with_github(base, |config| {
+            github(config);
+            config.restore_mode = true;
+        })
+        .await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(config.providers.is_empty());
+    }
+
     fn body(token: &str, password: &str) -> serde_json::Value {
         serde_json::json!({
             "setup_token": token,

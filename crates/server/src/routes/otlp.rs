@@ -21,6 +21,7 @@ use crate::ingest::body::{body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
 use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
+use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
 /// The OTLP/HTTP route. Undocumented, so it stays out of `openapi.json` (D-G-6).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -43,6 +44,9 @@ async fn export(
 ) -> Result<Response, ApiError> {
     let started = Instant::now();
     if let Err(cap) = check_cap(&state, access.project.org_id).await {
+        state
+            .telemetry
+            .refuse_ingest(Protocol::otlp_http, IngestOutcome::quota);
         tracing::debug!(
             target: "ingest",
             project_id = %access.project.id,
@@ -54,6 +58,9 @@ async fn export(
     match export_body(&state, &access.project, &headers, body, started).await {
         Ok(response) => Ok(response),
         Err(error) => {
+            state
+                .telemetry
+                .refuse_ingest(Protocol::otlp_http, ingest_outcome(&error));
             log_refusal(access.project.id, &error, started);
             Err(error.into())
         }
@@ -103,6 +110,11 @@ async fn export_body(
         now_ns,
     };
     let receipt = commit_in_task(state, target, normalized, reservation).await?;
+    state.telemetry.accept_ingest(
+        Protocol::otlp_http,
+        u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
+        request_bytes,
+    );
     tracing::info!(
         target: "ingest",
         project_id = %project.id,
@@ -930,5 +942,79 @@ mod tests {
         assert_eq!(response.header("retry-after"), Some("1"));
         assert_eq!(response.problem().code, ProblemCode::RateLimited);
         assert_eq!(stored_spans(&app, seeded.project.id).await, 2);
+    }
+
+    fn has_line(text: &str, line: &str) -> bool {
+        text.lines().any(|candidate| candidate == line)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn accepted_otlp_request_is_counted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let body = plain_export(2);
+        let len = body.len();
+        let response = post_traces(&app, &seeded.ingest_key, "application/json", body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
+        assert!(
+            has_line(
+                &text,
+                "llmobs_ingest_requests_total{protocol=\"otlp_http\",outcome=\"ok\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            has_line(&text, "llmobs_ingest_spans_total{protocol=\"otlp_http\"} 2"),
+            "{text}"
+        );
+        assert!(
+            has_line(
+                &text,
+                &format!("llmobs_ingest_bytes_total{{protocol=\"otlp_http\"}} {len}")
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_otlp_request_is_counted() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            "{\"resourceSpans\": ",
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
+        assert!(
+            has_line(
+                &text,
+                "llmobs_ingest_requests_total{protocol=\"otlp_http\",outcome=\"invalid\"} 1"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text
+                .lines()
+                .any(|line| line.starts_with("llmobs_ingest_spans_total{")),
+            "{text}"
+        );
     }
 }

@@ -18,6 +18,8 @@ defaults is in [spec 12 § Configuration](../spec/12-operations.md#configuration
 | `grpc_addr` | `LLMOBS_GRPC_ADDR` | `0.0.0.0:4317` | empty disables OTLP/gRPC |
 | `otlp_http_addr` | `LLMOBS_OTLP_HTTP_ADDR` | `0.0.0.0:4318` | empty disables it |
 | `trusted_proxies` | `LLMOBS_TRUSTED_PROXIES` | none | comma-separated CIDRs whose `X-Forwarded-For` is trusted |
+| `metrics_addr` | `LLMOBS_METRICS_ADDR` | unset (off) | Prometheus `/metrics` on its own listener, with no authentication: bind it privately ([monitoring.md](monitoring.md)) |
+| `restore_mode` | `LLMOBS_RESTORE_MODE` | `false` | no outbound calls, for restore drills ([backup.md](backup.md#restore-mode-restore-drills)) |
 | `smtp_url`, `email_from` | `LLMOBS_SMTP_URL`, `LLMOBS_EMAIL_FROM` | unset (email off) | invites, password reset |
 | `encryption_key` | `LLMOBS_ENCRYPTION_KEY` | `<data_dir>/secret.key`, generated | encrypts stored secrets |
 | `license_key` | `LLMOBS_LICENSE_KEY` | unset | enterprise features |

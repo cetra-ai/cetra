@@ -437,7 +437,10 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         trusted_proxies: Vec::new(),
         otlp_http_addr: None,
         grpc_addr: None,
+        metrics_addr: None,
+        restore_mode: false,
         storage: StorageConfig {
+            delete_objects: true,
             data_dir: data_dir.to_path_buf(),
             object_store: None,
             s3: S3Config::default(),

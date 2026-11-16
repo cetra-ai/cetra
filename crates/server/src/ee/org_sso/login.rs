@@ -28,6 +28,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
 use crate::http::client_ip::ClientIp;
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{NewUser, UserRow, normalize_email};
 use crate::meta::{
@@ -105,6 +106,7 @@ async fn authorize(
     headers: HeaderMap,
     error::Query(query): error::Query<SsoAuthorizeQuery>,
 ) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "external sign-in")?;
     let now = state.clock.now_ns();
     state
         .limits
@@ -1466,5 +1468,15 @@ mod tests {
         })
         .await;
         assert_eq!(location(&response), "/acme");
+    }
+
+    #[tokio::test]
+    async fn sso_authorize_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let response = app
+            .request(Method::GET, "/api/auth/sso/authorize?domain=acme.test")
+            .send()
+            .await;
+        crate::http::restore::tests::assert_refused(&response, "external sign-in");
     }
 }

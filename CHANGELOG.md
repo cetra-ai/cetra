@@ -25,6 +25,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 - An `LLMOBS_AUTH__OIDC__*` environment variable other than
   `LLMOBS_AUTH__OIDC__<NAME>__CLIENT_SECRET` for a provider of the config file now stops the
   server at start; such variables used to be ignored. Remove them.
+- `/readyz` can now fail on a full disk or an unreachable object store. Keep liveness probes on
+  `/healthz`; the Helm chart already does.
+- `/healthz` now fails on a storage failure that a restart clears (a WAL, object fsync or catalog
+  failure), so a liveness probe on it restarts the server.
 
 ### Added
 
@@ -56,6 +60,8 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
+- Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
+- Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.
 
 ### Changed
 
@@ -170,6 +176,9 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 ### Changed
 
 - A dropped organization's daily usage is kept 40 days after the drop, for billing, then deleted.
+- `/readyz` also checks the object store, free disk and storage failures; a full disk or an
+  unreachable bucket now makes the server not ready. `/healthz` is the liveness check and fails on
+  the storage failures a restart clears.
 
 ### Upgrade notes
 

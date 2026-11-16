@@ -686,6 +686,7 @@ mod tests {
     fn guarded(allow_private_network: bool) -> IdpHttp {
         let policy = llmobs_eval::EgressPolicy {
             allow_private_network,
+            restore_mode: false,
         };
         IdpHttp::guarded(
             llmobs_eval::identity_http_client(policy).expect("client"),

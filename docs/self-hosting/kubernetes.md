@@ -46,6 +46,7 @@ ingress if you need it from outside the cluster.
 
 The pod runs as uid/gid 65532 with a read-only root filesystem and no capabilities. Probes:
 startup and liveness on `/healthz` (the startup probe allows 10 minutes for WAL replay), readiness
-on `/readyz`. `terminationGracePeriodSeconds` is 60 so a stop can drain and flush.
+on `/readyz`. `terminationGracePeriodSeconds` is 60 so a stop can drain and flush. What each probe checks,
+and the Prometheus metrics (`metrics.enabled`), are in [monitoring.md](monitoring.md).
 
 Upgrades: [upgrade.md](upgrade.md#kubernetes). Backups: [backup.md](backup.md#kubernetes).

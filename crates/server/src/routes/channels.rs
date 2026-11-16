@@ -22,6 +22,7 @@ use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::http::restore::refuse_outbound;
 use crate::meta::alerts::{self, ChannelPatch, ChannelRow, LastDelivery, NewChannel};
 use crate::meta::members::verified_member_emails;
 use crate::meta::{MetaError, orgs};
@@ -249,6 +250,7 @@ async fn test_channel(
     Extension(access): Extension<ProjectAccess>,
     error::Path(ChannelPath { id }): error::Path<ChannelPath>,
 ) -> Result<error::Json<ChannelTestResult>, ApiError> {
+    refuse_outbound(&state, "channel test")?;
     let user_id = principal::session_user(&principal)?.id;
     let project = &access.project;
     let now = state.clock.now_ns();
@@ -1405,5 +1407,29 @@ mod tests {
         let seeded = app.seed().await;
         let channel = create_ok(&app, &seeded, email_body("Mail", &["eve@example.com"])).await;
         assert_eq!(channel.recipients, vec!["eve@example.com".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn test_channel_is_refused_in_restore_mode() {
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        let channel = create_ok(
+            &app,
+            &seeded,
+            json!({"name": "Hook", "kind": "webhook", "url": url, "secret": SECRET}),
+        )
+        .await;
+        let path = format!("{}/{}/test", channels(&seeded), channel.id);
+        let response = send(&app, Method::POST, &path, &seeded.cookie, None).await;
+        crate::http::restore::tests::assert_refused(&response, "channel test");
+        let reached =
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept()).await;
+        assert!(reached.is_err(), "a refused test reached the channel");
     }
 }

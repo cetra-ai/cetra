@@ -218,6 +218,8 @@ hmac = "0.13.0"
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 # Constant-time compare of token hashes.
 subtle = "2.6.1"
+# Prometheus metrics on `metrics_addr` (N M3, D-N-28). OpenMetrics text. Apache-2.0 OR MIT.
+prometheus-client = "0.26.0"
 # OpenAPI 3.1 schemas. `uuid` enables the `format: uuid` schema. Do not enable
 # `preserve_order` or `preserve_path_order`: default `BTreeMap`s keep the document sorted.
 utoipa = { version = "6.0.0", features = ["uuid"] }

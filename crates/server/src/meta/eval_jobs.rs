@@ -990,6 +990,29 @@ pub(crate) async fn counts_since(
     Ok(counts)
 }
 
+/// Open jobs across all projects, `[queued, running]`, for the `/metrics` queue gauge (N M3).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored status does not decode.
+pub(crate) async fn count_open(pool: &SqlitePool) -> Result<[i64; 2], MetaError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM eval_jobs \
+         WHERE status IN ('queued', 'running') GROUP BY status",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut open = [0; 2];
+    for (status, count) in rows {
+        match status.as_str() {
+            "queued" => open[0] = count,
+            "running" => open[1] = count,
+            _ => return Err(corrupt("status")),
+        }
+    }
+    Ok(open)
+}
+
 /// Sets the bound values of `usage` on `query`, in the order the statements name them.
 fn bind_usage<'q>(
     query: Query<'q, Sqlite, SqliteArguments>,

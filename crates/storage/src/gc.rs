@@ -155,6 +155,8 @@ pub(crate) async fn collect_once(
         {
             StagedRemoval::Deleted { bytes: size } => {
                 deleted += 1;
+                // Per deletion, not at the summary: a later error returns before the summary.
+                committer.counters().gc_deleted(1);
                 bytes = bytes.saturating_add(size);
                 tracing::debug!(path = %loggable_path(path), "deleted staged object");
             }
@@ -235,6 +237,8 @@ pub(crate) async fn collect_obsolete(
             match removal {
                 ObsoleteRemoval::Deleted { bytes } => {
                     report.deleted += 1;
+                    // Per deletion, not at the summary: a later error returns before the summary.
+                    committer.counters().gc_deleted(1);
                     report.bytes = report.bytes.saturating_add(bytes);
                     tracing::debug!(path = file.path, "deleted obsolete file");
                 }
@@ -392,6 +396,7 @@ mod tests {
 
     fn config_in(dir: &Path) -> StorageConfig {
         StorageConfig {
+            delete_objects: true,
             data_dir: dir.to_path_buf(),
             min_free_bytes: ByteSize::b(0),
             object_store: None,
@@ -750,6 +755,7 @@ mod tests {
                 in_use: 0,
             }
         );
+        assert_eq!(f.committer.counters().snapshot().gc_objects_deleted, 2);
         assert!(!object_exists(f.dir.path(), &spans_path));
         assert!(!object_exists(f.dir.path(), &traces_path));
         assert_eq!(
@@ -760,6 +766,50 @@ mod tests {
             scalar(f.dir.path(), "SELECT COUNT(*) FROM file_sources").await,
             0
         );
+    }
+
+    /// D-N-34: with deletion off, a collection deletes no object and keeps the rows obsolete.
+    #[tokio::test]
+    async fn no_object_is_deleted_when_delete_objects_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.delete_objects = false;
+        let committer = Committer::open(dir.path(), Hooks::default()).await.unwrap();
+        let objects = Arc::new(Objects::new(&config, Hooks::default()).await.unwrap());
+        let f = Fixture {
+            dir,
+            committer,
+            objects,
+        };
+        let (_ids, (spans_path, traces_path)) = obsolete_pair(&f).await;
+
+        let result = collect_obsolete(
+            &f.committer,
+            &f.objects,
+            &Hooks::default(),
+            now_ns(),
+            Duration::ZERO,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(GcError::Object(crate::error::ObjectError::DeletionOff))
+            ),
+            "{result:?}"
+        );
+        assert!(object_exists(f.dir.path(), &spans_path));
+        assert!(object_exists(f.dir.path(), &traces_path));
+        assert_eq!(
+            scalar(
+                f.dir.path(),
+                "SELECT COUNT(*) FROM data_files WHERE state = 'obsolete'"
+            )
+            .await,
+            2
+        );
+        assert_eq!(f.committer.counters().snapshot().gc_objects_deleted, 0);
     }
 
     #[tokio::test]
@@ -1235,6 +1285,33 @@ mod tests {
         for path in spans {
             assert!(object_exists(dir.path(), &path));
         }
+    }
+
+    /// D-N-34: `gc-orphans` deletes even when its config says object deletion is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn maintenance_deletes_even_when_delete_objects_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = crate::Storage::open(config_in(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        let orphan = unknown_spans_key("2026-01-01");
+        put_raw(&storage, &orphan, ORPHAN_BYTES).await;
+        storage.shutdown().await.unwrap();
+
+        let mut config = config_in(dir.path());
+        config.delete_objects = false;
+        let maintenance = crate::Maintenance::open(config).await.unwrap();
+        let report = maintenance
+            .collect_orphans(Duration::ZERO, false)
+            .await
+            .unwrap();
+        maintenance.close().await.unwrap();
+
+        assert_eq!(report.orphans, 1);
+        assert!(!object_exists(dir.path(), &orphan));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

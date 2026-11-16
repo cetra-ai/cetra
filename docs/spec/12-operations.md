@@ -14,6 +14,8 @@ GitHub and Google also accept the split form (`LLMOBS_AUTH__GITHUB__CLIENT_ID`, 
 | `trusted_proxies` | `LLMOBS_TRUSTED_PROXIES` | empty (comma-separated CIDRs, D142) |
 | `grpc_addr` | `LLMOBS_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `LLMOBS_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
+| `metrics_addr` | `LLMOBS_METRICS_ADDR` | unset (off). Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28) |
+| `restore_mode` | `LLMOBS_RESTORE_MODE` | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
 | `storage.object_store` | `LLMOBS_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
 | `storage.s3.region` | `AWS_REGION` | unset |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |
@@ -69,7 +71,7 @@ Track N builds, publishes and tests these (`docs/plans/n-packaging/`, D-N-1–D-
 | Artifact | Details |
 |---|---|
 | Binary | `llmobs` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (static) and `aarch64-apple-darwin` (D-N-1). Web UI embedded. Built natively per platform with `cargo auditable build --release --locked` (the workspace release profile: LTO thin, `codegen-units=1`, unwinding kept for task isolation). Shipped as `llmobs-<version>-<target>.tar.gz` with `LICENSE`, `LICENSE-ELASTIC` and `THIRD-PARTY-NOTICES.md` (D-N-8, D-N-16) on the GitHub release, with `SHA256SUMS`, an SPDX SBOM per binary, build provenance attestations and `install.sh` (D-N-7, D-N-15). |
-| Docker image | `ghcr.io/<owner>/llmobs:<version>`, `linux/amd64` and `linux/arm64`. `gcr.io/distroless/static-debian13:nonroot` pinned by digest, uid/gid 65532, `/data` owned by it, `VOLUME /data`, `EXPOSE 8080 4317 4318`, healthcheck `llmobs health` (`/readyz`). Built from the release archives (D-N-3, D-N-4). |
+| Docker image | `ghcr.io/<owner>/llmobs:<version>`, `linux/amd64` and `linux/arm64`. `gcr.io/distroless/static-debian13:nonroot` pinned by digest, uid/gid 65532, `/data` owned by it, `VOLUME /data`, `EXPOSE 8080 4317 4318 9464`, healthcheck `llmobs health` (`/readyz`). Built from the release archives (D-N-3, D-N-4). |
 | docker-compose | `deploy/compose/compose.yaml` (`llmobs` with a named volume) and the overlay `compose.s3.yaml` (a single-node Garage and its init, S3 mode). Compose settings in `.env`, server settings in `llmobs.env` (D-N-9). |
 | Helm chart | `deploy/helm/llmobs`, pushed to `oci://ghcr.io/<owner>/charts/llmobs`, chart version = app version. One `StatefulSet` (`replicas: 1`, not configurable), a `volumeClaimTemplates` volume for `/data` kept on delete, `Service` (8080, 4317, 4318), optional `Ingress`, config through `config` (rendered to `llmobs.toml`), `env`, a Secret (`existingSecret` or chart-made) and `s3.*`. `podManagementPolicy: OrderedReady`, `terminationGracePeriodSeconds: 60`, a rolling update that replaces the one pod (never two pods on one volume) (D-N-10). |
 
@@ -81,7 +83,7 @@ A file lock (`flock` on `<data_dir>/LOCK`) prevents two processes from opening t
 
 - **Startup:** load config → check that `meta.db` is not of a newer format or schema (04 § Format versions; the preflight, before anything else of the data directory opens) (SF1) → lock data dir and open storage (`catalog.db`, replay WAL) → open `meta.db` + migrations → (log the setup URL if no user exists) → start background tasks (among them the deletion worker, every 2 s and on each request, and the hourly retention task, D-M-3, D-M-10) → bind ports → `/readyz` = 200 (D137). After `meta.db`: finish an interrupted key rotation, load or generate the encryption key, and verify its check value (D-I-1, D-I-3). Then `running` eval jobs go back to `queued` (a job interrupted a fourth time fails), `running` backfills are marked `failed` (`interrupted`, D-I-39), and the eval dispatcher, janitor, pruner, budget ticker, the trigger's flusher and sweeper and the backfill runner start, each running one pass at once (D-I-12). Pending traces are loaded from `pending_traces` before the ports open (D-I-8); when the rules cannot be read, their rows are held until the first sweep sets the tracked projects.
 - **Shutdown (SIGTERM/SIGINT):** close live streams, stop accepting connections, drain in-flight requests (≤ 20 s), stop the usage loop (≤ 2 s; a flush in progress commits first), stop the eval loops (the backfill runner stops between pages; if a page read is still in flight when the eval loops' drain ends, the runner is aborted with them; either way the backfill stays `running` and the next start fails it as `interrupted`, D-I-39) and give eval workers 3 s, then abort them (their jobs stay `running` until the next start re-queues them, D-I-12), wait for detached OTLP commits (≤ 5 s, D-G-38) and flush the trigger's pending map in full, every take, so the traces those commits recorded are kept (D-I-8), flush `last_used` and usage counters, flush memtables (best effort ≤ 30 s), close SQLite. The bounded steps add up to 60 s, the whole grace period of the container and chart; the pending-map, `last_used` and usage flushes and the SQLite close are short meta writes outside that bound.
-- `/healthz`: process alive. `/readyz`: WAL writable, SQLite reachable, object store reachable (cached 10 s), free disk above threshold.
+- `/healthz`: the process is alive, and no storage failure that only a restart clears is set (a WAL, a local object fsync or a catalog commit failed, D-R-6); otherwise 503 `busy` naming them, so a liveness probe restarts the server (D-N-35). `/readyz`: `meta.db` answers, neither WAL has failed, no local object fsync or catalog commit has failed (D-R-6), free disk is above `storage.min_free_bytes`, and the object store answers (a HEAD of the marker `_probe/readyz`, or a PUT of it when the HEAD fails; 2 s timeout; the result is reused for 10 s; D-N-36). A failure answers 503 `busy` naming the failed checks (D182, D-N-30). Liveness probes use `/healthz`: a full disk or an unreachable bucket takes the server out of rotation but must not restart it.
 
 ## Licence keys, plans and entitlements (track P)
 
@@ -108,7 +110,12 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 
 ## Self-monitoring
 
-Deferred to just before release (D38). Placeholder decisions: Prometheus `/metrics` on a separate admin port, OTel self-traces opt-in.
+> **Built in N M3 (D-N-28 to D-N-30, D-N-33):**
+> - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
+> - `/readyz` as § Process lifecycle describes it.
+> - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work.
+>
+> OTel self-traces stay deferred (D38).
 
 ## Backups (documented procedure, D37)
 

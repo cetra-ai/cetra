@@ -319,6 +319,7 @@ impl Case {
 
 fn config(dir: &Path, env: &Env, prefix: &str, endpoint: &str) -> StorageConfig {
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store: Some(ObjectStoreUrl::S3 {

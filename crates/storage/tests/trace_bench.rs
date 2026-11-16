@@ -497,6 +497,7 @@ fn config(backend: &Backend, max_bytes: ByteSize, read_cache: Option<ByteSize>) 
         None => (None, S3Config::default()),
     };
     StorageConfig {
+        delete_objects: true,
         data_dir: backend.dir.clone(),
         min_free_bytes: ByteSize::b(0),
         object_store,

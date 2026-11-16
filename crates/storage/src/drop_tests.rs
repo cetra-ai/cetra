@@ -20,7 +20,7 @@ use crate::compaction::job::tests::{at, config_in, project, quiet_compaction, wa
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus};
 use crate::error::{AppendError, MediaError, StorageError};
 use crate::hooks::HookPoint;
-use crate::media::MediaBlob;
+use crate::media::{MediaBlob, MediaReport};
 use crate::objects::Objects;
 use crate::test_support::{rows, score_row, score_rows, span_row, span_rows};
 use crate::views::QueryContext;
@@ -694,6 +694,57 @@ async fn a_failed_media_delete_leaves_the_drop_unfinished() {
     storage.shutdown().await.unwrap();
 }
 
+// N M3 (D-N-34): with object deletion off, a drop removes no blob and stays `dropping`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drop_stays_dropping_when_delete_objects_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+    config.delete_objects = false;
+    let storage = two_projects(&config).await;
+    let p_sha = p_blob().sha256;
+
+    let error = storage.drop_project(project()).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StorageError::Media(MediaError::Object(crate::error::ObjectError::DeletionOff))
+        ),
+        "{error}"
+    );
+    assert_eq!(project_state(dir.path(), project()).await, "dropping");
+    assert!(
+        storage
+            .committer
+            .dropping_projects()
+            .await
+            .unwrap()
+            .contains(&project())
+    );
+    assert!(object_file(dir.path(), project(), &p_sha).is_file());
+    assert_eq!(media_rows(dir.path(), project()).await, 1);
+    storage.shutdown().await.unwrap();
+}
+
+// N M3 (D-N-34): with object deletion off, media collection of a stale, unreferenced blob
+// changes nothing: the row stays, nothing is staged and the blob stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn media_is_not_collected_when_delete_objects_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_in(dir.path(), quiet_compaction(8), Duration::from_secs(3_600));
+    config.delete_objects = false;
+    let storage = two_projects(&config).await;
+    let p_sha = p_blob().sha256;
+    // Two hours after the blobs were stored: both are stale and unreferenced.
+    let now = crate::catalog::now_ns() + 2 * 3_600 * 1_000_000_000;
+
+    let report = storage.collect_media(now).await.unwrap();
+    assert_eq!(report, MediaReport::default());
+    assert_eq!(media_rows(dir.path(), project()).await, 1);
+    assert!(storage.staged_paths().await.unwrap().is_empty());
+    assert!(object_file(dir.path(), project(), &p_sha).is_file());
+    storage.shutdown().await.unwrap();
+}
+
 // 8. Dropping twice is `Ok`, and retention of a dropped project writes
 //    nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -815,6 +866,14 @@ async fn a_compaction_started_before_the_drop_fails_and_is_collected() {
         let compacted = racing.await.unwrap().unwrap();
         if !with_kept {
             assert_eq!((compacted.jobs, compacted.failed), (0, 1), "{compacted:?}");
+            // The job is counted once, as a conflict or a failure, and never as committed.
+            let stats = storage.stats().await;
+            assert_eq!(
+                stats.compactions_conflict + stats.compactions_failed,
+                1,
+                "{stats:?}"
+            );
+            assert_eq!(stats.compactions_ok, 0, "{stats:?}");
         }
         assert!(
             active_files(&storage, project()).is_empty(),

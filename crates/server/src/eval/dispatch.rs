@@ -973,6 +973,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_counts_finished_jobs() {
+        let (app, seeded) = seeded_app(16).await;
+        let trace_id = trace(0x14);
+        store_trace(&app, &seeded, trace_id).await;
+        let evaluator = check(&app, &seeded).await;
+        manual_job(&app, &seeded, evaluator, trace_id, CHECK_MAPPING).await;
+        manual_job(&app, &seeded, evaluator, trace_id, "not json").await;
+
+        let mut running = JoinSet::new();
+        assert_eq!(pass(&app, &mut running).await, 2);
+        settle(&mut running).await;
+        let text = app
+            .state
+            .telemetry
+            .render(&app.state)
+            .await
+            .expect("metrics render");
+        for line in [
+            "llmobs_eval_jobs_finished_total{outcome=\"done\"} 1",
+            "llmobs_eval_jobs_finished_total{outcome=\"failed\"} 1",
+            "llmobs_eval_run_duration_seconds_count{kind=\"check\"} 1",
+        ] {
+            assert!(
+                text.lines().any(|candidate| candidate == line),
+                "{line}\n{text}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_respects_eval_workers() {
         let (app, seeded) = seeded_app(2).await;
         let trace_id = trace(0x11);

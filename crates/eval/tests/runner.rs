@@ -62,6 +62,7 @@ fn ingest() -> IngestContext {
 fn runner() -> EvalRunner {
     EvalRunner::new(llmobs_eval::EgressPolicy {
         allow_private_network: true,
+        restore_mode: false,
     })
     .expect("runner")
 }

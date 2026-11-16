@@ -31,6 +31,7 @@ pub(crate) mod retention;
 pub(crate) mod routes;
 pub(crate) mod scores;
 pub mod serve;
+pub(crate) mod telemetry;
 pub(crate) mod usage;
 
 #[cfg(test)]

@@ -59,6 +59,10 @@ pub struct StorageConfig {
     /// Deletion settings.
     #[serde(default)]
     pub deletion: DeletionConfig,
+    /// Restore mode (N M3, D-N-34): `false` makes every object deletion fail with
+    /// `ObjectError::DeletionOff`. Not a TOML key; the server sets it.
+    #[serde(skip, default = "default_true")]
+    pub delete_objects: bool,
 }
 
 impl StorageConfig {
@@ -315,6 +319,10 @@ where
 
 fn default_min_free_bytes() -> ByteSize {
     ByteSize::gib(2)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_sync() -> WalSync {

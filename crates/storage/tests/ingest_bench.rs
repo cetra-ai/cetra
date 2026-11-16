@@ -90,6 +90,7 @@ fn config(dir: &Path, s3: Option<&S3Env>, prefix: &str) -> StorageConfig {
         None => (None, S3Config::default()),
     };
     StorageConfig {
+        delete_objects: true,
         data_dir: dir.to_path_buf(),
         min_free_bytes: ByteSize::b(0),
         object_store,

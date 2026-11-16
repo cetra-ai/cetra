@@ -19409,6 +19409,7 @@
           "query_too_large",
           "too_many_traces",
           "busy",
+          "restore_mode",
           "unauthorized",
           "forbidden",
           "sso_required",
