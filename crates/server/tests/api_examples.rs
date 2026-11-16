@@ -21,12 +21,20 @@ use llmobs_server::api::common::Page;
 use llmobs_server::api::connections::{
     CreateLlmConnectionRequest, LlmConnection, LlmConnectionTestResult,
 };
+use llmobs_server::api::datasets::{
+    AddItemsRequest, CreateDatasetRequest, Dataset, DatasetItem, DatasetVersion, FromTraceRequest,
+    ImportMapping, ImportPreview, ImportResult,
+};
 use llmobs_server::api::deletions::{Deletion, DeletionPreview};
 use llmobs_server::api::entitlements::OrgEntitlements;
 use llmobs_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
 use llmobs_server::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorTemplateList, EvaluatorTestRequest,
     EvaluatorTestResult,
+};
+use llmobs_server::api::experiments::{
+    CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
+    ExperimentResultsRequest,
 };
 use llmobs_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use llmobs_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
@@ -415,6 +423,11 @@ fn static_files_match_their_types() {
     roundtrip::<Evaluator>("static/evaluator.json");
     roundtrip::<EvaluatorTemplateList>("static/evaluator-templates.json");
     roundtrip::<EvaluatorTestResult>("static/evaluator-test-result.json");
+    roundtrip::<Page<Experiment>>("static/experiments.json");
+    roundtrip::<Experiment>("static/experiment.json");
+    roundtrip::<CreateExperimentResponse>("static/experiment-created.json");
+    roundtrip::<ExperimentResults>("static/experiment-results.json");
+    roundtrip::<ExperimentComparison>("static/experiment-comparison.json");
     roundtrip::<Page<ScoreDefinition>>("static/score-definitions.json");
     roundtrip::<ScoreDefinition>("static/score-definition.json");
     roundtrip::<Page<ModelPrice>>("static/model-prices.json");
@@ -431,6 +444,9 @@ fn static_files_match_their_types() {
     roundtrip::<Page<Backfill>>("static/backfills.json");
     roundtrip::<Backfill>("static/backfill.json");
     roundtrip::<BackfillEstimate>("static/backfill-estimate.json");
+    roundtrip::<ImportPreview>("static/dataset-import-preview.json");
+    roundtrip::<ImportResult>("static/dataset-import-result.json");
+    roundtrip::<DatasetItem>("static/dataset-item-from-trace.json");
 }
 
 #[test]
@@ -441,6 +457,11 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
+    roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
+    roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
+    roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
+    roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
@@ -499,6 +520,16 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "post_score_definition",
             "requests/score-definition-create.json",
+        ),
+        ("post_dataset", "requests/dataset-create.json"),
+        ("post_dataset_items", "requests/dataset-items-add.json"),
+        (
+            "post_dataset_item_from_trace",
+            "requests/dataset-from-trace.json",
+        ),
+        (
+            "post_experiment_results",
+            "requests/experiment-results.json",
         ),
         ("post_backfill", "requests/backfill-create.json"),
         ("post_model_price", "requests/model-price-create.json"),
@@ -563,6 +594,11 @@ fn generated_files_roundtrip() {
             "list_users" => roundtrip::<Page<EndUserSummary>>(&example.file),
             "get_user" => roundtrip::<EndUserDetail>(&example.file),
             "list_scores" => roundtrip::<Page<Score>>(&example.file),
+            "list_datasets" => roundtrip::<Page<Dataset>>(&example.file),
+            "get_dataset" | "post_dataset" => roundtrip::<Dataset>(&example.file),
+            "list_dataset_versions" => roundtrip::<Page<DatasetVersion>>(&example.file),
+            "list_dataset_items" => roundtrip::<Page<DatasetItem>>(&example.file),
+            "get_dataset_item" => roundtrip::<DatasetItem>(&example.file),
             "list_api_keys" => roundtrip::<Page<ApiKey>>(&example.file),
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
@@ -625,9 +661,17 @@ fn generated_files_roundtrip() {
             "post_online_rule_preview" => roundtrip::<OnlineRulePreview>(&example.file),
             "list_eval_jobs" => roundtrip::<Page<EvalJob>>(&example.file),
             "get_eval_job" | "post_evaluator_run" => roundtrip::<EvalJob>(&example.file),
+            "list_experiments" => roundtrip::<Page<Experiment>>(&example.file),
+            "get_experiment" => roundtrip::<Experiment>(&example.file),
+            "post_experiment" => roundtrip::<CreateExperimentResponse>(&example.file),
+            "get_experiment_results" => roundtrip::<ExperimentResults>(&example.file),
+            "compare_experiments" => roundtrip::<ExperimentComparison>(&example.file),
             "list_backfills" => roundtrip::<Page<Backfill>>(&example.file),
             "post_backfill" => roundtrip::<Backfill>(&example.file),
             "post_backfill_estimate" => roundtrip::<BackfillEstimate>(&example.file),
+            "post_dataset_import_preview" => roundtrip::<ImportPreview>(&example.file),
+            "post_dataset_import" => roundtrip::<ImportResult>(&example.file),
+            "post_dataset_item_from_trace" => roundtrip::<DatasetItem>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }
@@ -656,10 +700,12 @@ fn manifest_covers_the_read_operations() {
             known.insert(id.to_owned());
             // Streams and the OAuth redirects have no JSON body to fixture.
             // Internal operations are called by the control plane and have no examples.
+            // A file download, not a JSON body.
             if method == "get"
                 && operation["tags"][0].as_str() != Some("internal")
                 && id != "stream_traces"
                 && id != "stream_trace"
+                && id != "get_dataset_export"
                 && id != "get_oauth_authorize"
                 && id != "get_sso_authorize"
                 && id != "get_oauth_callback"

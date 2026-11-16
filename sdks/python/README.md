@@ -303,6 +303,166 @@ llmobs.flush()  # also waits for pending scores
 - `flush()` waits for pending scores too. `llmobs.uuid7()` is exported if you
   need your own idempotent ids.
 
+## Datasets and experiments
+
+`llmobs.Client` is the REST client for datasets and experiments. It reads
+`api_key` and `base_url` the way `init()` does (argument, then
+`LLMOBS_API_KEY` / `LLMOBS_BASE_URL`, then the default), and raises
+`ConfigError` without a key. Unlike tracing and scoring, its calls raise on
+failure (see [Errors](#errors)).
+
+### Datasets
+
+```python
+import llmobs
+
+client = llmobs.Client()  # the key and URL come from the environment
+
+ds = client.datasets.create("faq-v1", description="FAQ questions")
+ds = ds.add_items(
+    [
+        {
+            "input": {"q": "How do I cancel?"},
+            "expected_output": {"a": "Settings > Billing > Cancel"},
+            "metadata": {"topic": "billing"},
+        }
+    ]
+)
+ds = client.datasets.get("faq-v1", version=1)  # the items of version 1
+print([info.name for info in client.datasets.list()])
+client.datasets.delete("faq-v1")  # the dataset and its items
+```
+
+- An item is `input` (any JSON value, required), `expected_output` (optional)
+  and `metadata` (a mapping, default `{}`). Any other key raises `ValueError`
+  before a request is sent.
+- `add_items` sends batches of 1,000 items, and each batch makes a new
+  version. Versions are integers: a new dataset is at version 0 and has no
+  items. `add_items` returns the dataset at its latest version. If a later
+  batch fails, the earlier batches are already stored (each made a version),
+  and the error is raised.
+- `get(name_or_id, version=...)` reads a version with all its items; without
+  `version` it reads the current one.
+- `create(..., input_schema=..., expected_schema=...)` takes JSON Schemas
+  (Draft 2020-12). The server checks every item written afterwards against
+  them; a refused item raises `ApiError`, and its `errors` list names the
+  failing fields.
+
+### Experiments
+
+`llmobs.evaluate` runs your task on every item of a dataset version, scores
+each run, and stores the results on the server. It needs `llmobs.init()`
+first.
+
+```python
+import llmobs
+
+llmobs.init()  # the key comes from LLMOBS_API_KEY
+
+
+def task(input: dict) -> str:  # receives item.input; may also take (input, item)
+    return my_app.answer(input["q"])
+
+
+def exact(output: str, expected: dict) -> bool:  # scorers take any of the names below
+    return output.strip() == expected["a"].strip()
+
+
+def length_ok(output: str) -> llmobs.Score:  # a Score carries a reason
+    return llmobs.Score(value=len(output) < 500, reason=f"{len(output)} chars")
+
+
+result = llmobs.evaluate(
+    dataset="faq-v1",
+    task=task,
+    scorers=[exact, length_ok],
+    experiment_name="gpt-5-mini prompt v3",
+    metadata={"model": "gpt-5-mini", "prompt": "v3"},
+    concurrency=8,
+    repetitions=1,
+)
+print(result.summary())
+result.assert_min("exact", 0.8)  # raises AssertionError when the mean is below 0.8
+```
+
+- **Dataset.** A name, an id or a `Dataset` object. A `Dataset` runs at the
+  version it holds; `dataset_version=` pins another one. A `Dataset` at
+  version 0 has no items, so no `dataset_version` is sent and the server uses
+  its current version.
+- **Task.** `task(input)` when it takes one positional parameter, or
+  `task(input, item)` when it takes two or more (`item` is the `DatasetItem`).
+  Async tasks go through `aevaluate`: `await llmobs.aevaluate(...)`.
+  `evaluate` refuses a coroutine function.
+- **Scorers.** Each scorer's name is its function's name; lambdas, partials
+  and duplicate names are refused before any request. Its parameters are
+  chosen by name from `input`, `output`, `expected` (the item's
+  `expected_output`), `metadata`, `trace_id` and `item`; a `**kwargs`
+  parameter receives all of them. A required parameter with another name is
+  refused.
+- **Scorer return values.** `bool` is a boolean score, `int` / `float` a
+  numeric one (finite), `str` a categorical label. `llmobs.Score(value=...,
+  reason=..., data_type=..., metadata=...)` adds the reason and metadata;
+  `None` means no score. Anything else counts as a scorer error.
+- **Concurrency and repetitions.** `concurrency` is 1 to 64 (default 8);
+  `repetitions` is 1 to 20 (default 1). Each row records its 0-based
+  `repetition`. `experiment_name` is 1 to 200 characters; by default it is the
+  dataset name and the UTC time.
+- **`summary()`** prints one block per experiment: the run and error counts,
+  then per scorer the mean of numeric and boolean values (booleans count as 0
+  and 1), or the label counts of a categorical one, and its scorer errors.
+- **`assert_min(name, threshold)`** raises `AssertionError` when the mean of a
+  numeric or boolean scorer is below `threshold`, or when it has no such
+  values. Use it to gate CI.
+- **`ExperimentResult`** holds `experiment_id`, `runs` (one `Run` per item and
+  repetition, in item order: `dataset_item_id`, `repetition`, `input`,
+  `expected_output`, `output`, `error`, `trace_id`, `latency_ns`, `scores`),
+  `error_count` and `scorer_errors`.
+
+### What gets recorded
+
+- Each run is one trace. Its root span is named after the experiment, has
+  kind `chain` and the item's input, and every span started inside it, the
+  instrumentors' included, carries the experiment and dataset item ids with
+  environment `experiment`, whatever `init()` set. Experiment traces are
+  excluded from the default trace lists.
+- A task exception ends that run's span with the error and sets the run's
+  `error` to `"<ExceptionName>: <message>"`; a scorer exception gives that run
+  no score. Neither aborts the experiment.
+- Scores go through the score queue, attached to the run's trace. A run
+  without a trace (sampling below 1 drops its root span) keeps its scores in
+  the local result only, and `evaluate` warns once.
+- Scorers run in your process; the server never scores experiments. A judge
+  is a scorer that calls a model (D-J-11).
+- Results are uploaded in batches of up to 500 rows or 32 MiB. An output over
+  256 KiB (its JSON) is cut to 260,000 bytes and marked as truncated.
+- When the monthly units cap pauses score uploads, the scores are dropped
+  with a warning; the run continues, and the local result still holds them.
+- `summary()` prints the experiment id, not a link to the UI.
+
+### Keys
+
+The key needs the `read`, `write` and `ingest` scopes. `read` covers listing
+and reading datasets and experiments, `write` creates datasets, items and
+experiments and uploads their results, and `ingest` sends spans and scores.
+A key without one of them gets a `403`, which raises `ApiError`.
+
+### Errors
+
+- `ConfigError`: no API key, or `evaluate` before `llmobs.init()`.
+- `ValueError` (`TypeError` for a wrong type) for a bad argument, named in the
+  message. Nothing is sent.
+- `ApiError` for an error answer from the API. Its `status`, `code` and
+  `detail` come from the server's problem, `errors` holds the field errors.
+  The message is the method, the route template (`/datasets/{dataset}/items`,
+  never a name), the status and, when the server sends them, the code and
+  the detail. The server never puts item content in a detail.
+- Retries: network errors, timeouts, `429` and `5xx` are retried up to three
+  times for reads, deletes, result uploads and `finish`. Creates and item
+  writes are sent once, so a failure there is never retried silently.
+- `evaluate` raises the first `ApiError` when a result upload fails. It stops
+  the new runs, finishes the experiment with the error `results upload
+  failed`, and raises.
+
 ## Instrumentation
 
 `init(instrument=[...])` enables [OpenInference](https://github.com/Arize-ai/openinference)

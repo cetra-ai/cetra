@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
+from opentelemetry import trace as trace_api
 from opentelemetry.baggage import get_all, set_baggage
 from opentelemetry.context import attach, detach, set_value
 from opentelemetry.sdk.trace import ReadableSpan
@@ -16,7 +17,13 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.util.types import AnyValue
 
 import llmobs
-from llmobs._context import CONTEXT_KEY, ContextValues, current_values
+from llmobs._context import (
+    CONTEXT_KEY,
+    ContextValues,
+    ExperimentLink,
+    current_values,
+    experiment_scope,
+)
 from llmobs._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
@@ -257,3 +264,21 @@ def test_metadata_masked_on_entry(memory: Memory, spans: Spans) -> None:
     attributes = attrs(spans(exporter)[0])
     assert attributes["llmobs.metadata.email"] == "[redacted]"
     assert attributes["llmobs.metadata.n"] == 1
+
+
+def test_experiment_scope_drops_the_callers_values(memory: Memory) -> None:
+    _, start = memory
+    runtime = start()
+    with (
+        llmobs.context(session_id="s", metadata={"a": 1}),
+        runtime.tracer.start_as_current_span("outer"),
+    ):
+        with experiment_scope("e", "i"):
+            assert current_values() == ContextValues(experiment=ExperimentLink("e", "i"))
+            assert not trace_api.get_current_span().get_span_context().is_valid
+        assert current_values().session_id == "s"
+
+
+def test_context_inside_a_scope_keeps_the_link() -> None:
+    with experiment_scope("e", "i"), llmobs.context(user_id="u"):
+        assert current_values() == ContextValues(user_id="u", experiment=ExperimentLink("e", "i"))

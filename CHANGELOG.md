@@ -32,6 +32,13 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 ### Added
 
+- Datasets: versioned datasets of input / expected output / metadata items with optional JSON Schemas, and their API (`/datasets`, items, versions) (track J).
+- Datasets: import items from CSV (with a column mapping) or JSONL, export a version as JSONL or CSV, and add an item from a trace or a span (track J).
+- Experiments API: create an experiment from a dataset version, store results and finish it; results with score summaries and a 2–4 experiment comparison; experiment scores; `dataset_items` and `experiment_items` in the SQL console and MCP; deleting a trace also deletes dataset items copied from it and experiment results about it (track J).
+- Python SDK: `llmobs.Client` for datasets and `llmobs.evaluate` / `aevaluate` to run experiments on your machine (track J).
+- TypeScript SDK: `new llmobs.Client()` for datasets and `llmobs.evaluate` to run experiments on your machine (track J).
+- Experiments: the experiments list, experiment page and compare view (2–4 experiments, deltas, regressions and a word-level output diff) in the web UI (track J).
+- Datasets: the dataset pages in the web UI, with items, versions, import, export and an Experiments tab (track J).
 - Settings → Model prices, for an organization and for a project: add, edit and delete custom prices, search the built-in prices, and check which price applies to a model.
 - Custom model prices per project: `/api/v1/projects/{project}/models` lists the effective price table, resolves which price applies, and adds, replaces and deletes project prices. New prices apply to spans received afterwards; stored costs are not recomputed (D-T-5). Org-wide prices under `/api/v1/orgs/{org}/models` apply to every project of the org; a project price beats an org price.
 - Auth: an `[[auth.oidc]]` provider's client secret can come from

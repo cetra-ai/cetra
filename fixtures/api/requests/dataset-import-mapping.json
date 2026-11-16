@@ -1,0 +1,16 @@
+{
+  "columns": [
+    {
+      "column": "question",
+      "target": "input.question"
+    },
+    {
+      "column": "answer",
+      "target": "expected"
+    },
+    {
+      "column": "topic",
+      "target": "metadata.topic"
+    }
+  ]
+}

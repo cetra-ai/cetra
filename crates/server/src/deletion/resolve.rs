@@ -16,6 +16,7 @@ use crate::meta::deletions::{
     DeletionKind, DeletionRow, FailReason, insert_sessions, insert_traces, scope_traces,
     store_counts,
 };
+use crate::meta::experiments::Cascade;
 
 /// Resolves the scope of `row` and stores it with its counts in one transaction. Returns
 /// `Ok(false)` when the row is no longer `resolving`, in which case nothing is handed over.
@@ -80,7 +81,10 @@ pub(super) async fn resolve(
     let id = row.id;
     let session_count = (row.kind == DeletionKind::User).then(|| count(sessions.len()));
     let trace_count = count(scope.len());
-    let stored = state
+    // J's cascade (D-J-9) reads the scope from `deletion_traces` in this transaction, so an item
+    // added from a trace before it is never missed; add-from-trace checks the guard in its own
+    // write, so one added after the guard is filled is refused.
+    let (stored, cascade) = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
@@ -90,12 +94,25 @@ pub(super) async fn resolve(
                 if stored {
                     // Running jobs are kept: the guard stops them (D-M-6).
                     crate::meta::eval_jobs::delete_jobs(conn, &jobs).await?;
+                    let cascade =
+                        crate::meta::experiments::delete_copies_of_tx(conn, id, project).await?;
+                    return Ok((true, cascade));
                 }
-                Ok(stored)
+                Ok((false, Cascade::default()))
             })
         })
         .await
         .map_err(|error| super::from_meta(&error))?;
+    if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 {
+        tracing::info!(
+            target: "audit",
+            deletion_id = %row.id,
+            project_id = %project,
+            dataset_item_revisions = cascade.dataset_item_revisions,
+            experiment_items = cascade.experiment_items,
+            "deletion removed dataset and experiment copies"
+        );
+    }
     Ok(stored)
 }
 

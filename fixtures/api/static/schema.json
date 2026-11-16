@@ -713,6 +713,156 @@
           "description": "Server receive time."
         }
       ]
+    },
+    {
+      "name": "experiment_items",
+      "description": "One row per experiment result (item × repetition) of the project's visible experiments.",
+      "columns": [
+        {
+          "name": "experiment_id",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Experiment id."
+        },
+        {
+          "name": "experiment_name",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Experiment name."
+        },
+        {
+          "name": "dataset_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Dataset the experiment ran on; null once the dataset is deleted."
+        },
+        {
+          "name": "dataset_version",
+          "column_type": "integer",
+          "nullable": false,
+          "description": "Dataset version the experiment pinned."
+        },
+        {
+          "name": "dataset_item_id",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Dataset item id, stable across versions."
+        },
+        {
+          "name": "repetition",
+          "column_type": "integer",
+          "nullable": false,
+          "description": "Repetition number, from 0."
+        },
+        {
+          "name": "trace_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Trace of the task run, lowercase hex; null when none was reported."
+        },
+        {
+          "name": "input",
+          "column_type": "json",
+          "nullable": false,
+          "description": "Item input at the pinned version, JSON text."
+        },
+        {
+          "name": "expected_output",
+          "column_type": "json",
+          "nullable": true,
+          "description": "Expected output at the pinned version, JSON text; null when absent."
+        },
+        {
+          "name": "output",
+          "column_type": "json",
+          "nullable": true,
+          "description": "Task output, JSON text; null when the run failed."
+        },
+        {
+          "name": "error",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Error text of the failed run; null when the run did not fail."
+        },
+        {
+          "name": "latency_ns",
+          "column_type": "integer",
+          "nullable": true,
+          "description": "Task run time in nanoseconds, as the SDK measured it."
+        },
+        {
+          "name": "created_at",
+          "column_type": "timestamp",
+          "nullable": false,
+          "description": "Time the result was stored."
+        }
+      ]
+    },
+    {
+      "name": "dataset_items",
+      "description": "Live items of each dataset at its current version.",
+      "columns": [
+        {
+          "name": "dataset_id",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Dataset id."
+        },
+        {
+          "name": "dataset_name",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Dataset name."
+        },
+        {
+          "name": "dataset_version",
+          "column_type": "integer",
+          "nullable": false,
+          "description": "Current version of the dataset, the version these rows belong to."
+        },
+        {
+          "name": "item_id",
+          "column_type": "string",
+          "nullable": false,
+          "description": "Dataset item id, stable across versions."
+        },
+        {
+          "name": "input",
+          "column_type": "json",
+          "nullable": false,
+          "description": "Item input, JSON text."
+        },
+        {
+          "name": "expected_output",
+          "column_type": "json",
+          "nullable": true,
+          "description": "Expected output, JSON text; null when absent."
+        },
+        {
+          "name": "metadata",
+          "column_type": "json",
+          "nullable": false,
+          "description": "Item metadata, JSON text."
+        },
+        {
+          "name": "source_trace_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Trace the item was created from, lowercase hex; null when none."
+        },
+        {
+          "name": "source_span_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Span the item was created from, lowercase hex; null when none."
+        },
+        {
+          "name": "created_at",
+          "column_type": "timestamp",
+          "nullable": false,
+          "description": "Time the item revision was stored."
+        }
+      ]
     }
   ],
   "functions": [

@@ -138,6 +138,8 @@ fn score_of(body: FeedbackRequest) -> ScoreCreate {
         reason: body.comment,
         source: Some(ScoreSource::EndUser),
         metadata: BTreeMap::new(),
+        experiment_id: None,
+        dataset_item_id: None,
     }
 }
 

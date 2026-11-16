@@ -1,11 +1,13 @@
 import {
   BellRing,
   Database,
+  FlaskConical,
   Gauge,
   LayoutDashboard,
   ListChecks,
   MessagesSquare,
   Rows3,
+  Table2,
   Users,
   Waypoints,
 } from "lucide-react";
@@ -21,4 +23,6 @@ export const projectNav = [
   { to: "/$org/$project/sql", label: "SQL", icon: Database },
   { to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
   { to: "/$org/$project/online-rules", label: "Online rules", icon: ListChecks },
+  { to: "/$org/$project/datasets", label: "Datasets", icon: Table2 },
+  { to: "/$org/$project/experiments", label: "Experiments", icon: FlaskConical },
 ] as const;

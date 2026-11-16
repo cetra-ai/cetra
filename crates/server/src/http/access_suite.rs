@@ -388,6 +388,8 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
         .replace("{org}", &world.org_slug)
         .replace("{org_id}", &world.org_id.to_string())
         .replace("{project}", &world.project_a)
+        .replace("{dataset}", "faq")
+        .replace("{item_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{score_id}", "01900000-0000-7000-8000-000000009999")
         .replace("{trace_id}", "a1000000000000000000000000000001")
         .replace("{span_id}", "b100000000000011")

@@ -6,7 +6,8 @@ provider. ``propagate=True`` also writes the session and user ids to W3C
 baggage, so they cross service boundaries; tags and metadata never do.
 """
 
-from collections.abc import Mapping, Sequence
+import contextlib
+from collections.abc import Iterator, Mapping, Sequence
 from contextvars import Token
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -33,6 +34,14 @@ _REENTERED_MESSAGE = "llmobs: context re-entered; this entry is a no-op"
 
 
 @dataclass(frozen=True, slots=True)
+class ExperimentLink:
+    """The experiment and dataset item of a run (D-J-16)."""
+
+    experiment_id: str
+    dataset_item_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContextValues:
     """The context values the processor stamps on spans (D-F-12)."""
 
@@ -42,6 +51,7 @@ class ContextValues:
     metadata: Mapping[str, object] = field(
         default_factory=dict
     )  # an immutable copy (MappingProxyType)
+    experiment: ExperimentLink | None = None
 
 
 def current_values(ctx: Context | None = None) -> ContextValues:
@@ -88,6 +98,22 @@ def _valid_metadata(metadata: object) -> dict[str, object]:
     return {key: value for key, value in metadata.items() if isinstance(key, str)}
 
 
+@contextlib.contextmanager
+def experiment_scope(experiment_id: str, dataset_item_id: str) -> Iterator[None]:
+    """Run the body in a fresh context holding only the experiment link.
+
+    The context starts from ``Context()``: no active span, no baggage and none of
+    the caller's session, user, tags or metadata, so the run's root span starts a
+    new trace. Internal (``evaluate``).
+    """
+    values = ContextValues(experiment=ExperimentLink(experiment_id, dataset_item_id))
+    token = attach(set_value(CONTEXT_KEY, values, Context()))
+    try:
+        yield
+    finally:
+        detach(token)
+
+
 class context:  # noqa: N801  # public API name from spec 10
     """Context manager applying session/user/tags/metadata to every span inside.
 
@@ -132,6 +158,7 @@ class context:  # noqa: N801  # public API name from spec 10
             user_id=self._user_id if self._user_id is not None else outer.user_id,
             tags=tuple(dict.fromkeys(outer.tags + self._tags)),
             metadata=MappingProxyType({**outer.metadata, **inner_metadata}),
+            experiment=outer.experiment,
         )
         ctx = set_value(CONTEXT_KEY, merged)
         if self._propagate:

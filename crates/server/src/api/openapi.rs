@@ -46,6 +46,13 @@ use super::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use super::datasets::{
+    AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
+    DatasetItemListParams, DatasetItemParams, DatasetListParams, DatasetVersion,
+    DatasetVersionListParams, ExportFormat, ExportParams, FromTraceRequest, ImportColumn,
+    ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
+    NewDatasetItem, PreviewParams, UpdateDatasetRequest, UpdateItemRequest,
+};
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
@@ -60,6 +67,13 @@ use super::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorTemplate, EvaluatorTemplateList,
     EvaluatorTestError, EvaluatorTestRequest, EvaluatorTestResult, EvaluatorTestUsage,
     OutputScoreBody, TemplateMapping, TestEvaluatorBody, UpdateEvaluatorRequest,
+};
+use super::experiments::{
+    CompareCell, CompareParams, CompareRow, CreateExperimentRequest, CreateExperimentResponse,
+    Experiment, ExperimentComparison, ExperimentListParams, ExperimentResult, ExperimentResults,
+    ExperimentResultsRequest, ExperimentResultsResponse, ExperimentStatus, ExperimentSummary,
+    FinishExperimentRequest, ResultRow, ResultScore, ResultsParams, ScoreDelta, ScoreDeltas,
+    ScoreSummary,
 };
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
@@ -293,6 +307,45 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateScoreDefinitionRequest>();
     set.insert::<UpdateScoreDefinitionRequest>();
     set.insert_page::<ScoreDefinition>("ScoreDefinitionPage");
+    set.insert::<Dataset>();
+    set.insert::<CreateDatasetRequest>();
+    set.insert::<UpdateDatasetRequest>();
+    set.insert_page::<Dataset>("DatasetPage");
+    set.insert::<DatasetVersion>();
+    set.insert::<DatasetItem>();
+    set.insert::<NewDatasetItem>();
+    set.insert::<AddItemsRequest>();
+    set.insert::<AddItemsResponse>();
+    set.insert::<UpdateItemRequest>();
+    set.insert::<FromTraceRequest>();
+    set.insert_page::<DatasetVersion>("DatasetVersionPage");
+    set.insert_page::<DatasetItem>("DatasetItemPage");
+    set.insert::<ImportFormat>();
+    set.insert::<ExportFormat>();
+    set.insert::<ImportColumn>();
+    set.insert::<ImportMapping>();
+    set.insert::<ImportRowError>();
+    set.insert::<ImportPreview>();
+    set.insert::<ImportResult>();
+    set.insert::<Experiment>();
+    set.insert::<ExperimentStatus>();
+    set.insert::<CreateExperimentRequest>();
+    set.insert::<CreateExperimentResponse>();
+    set.insert::<ExperimentResult>();
+    set.insert::<ExperimentResultsRequest>();
+    set.insert::<ExperimentResultsResponse>();
+    set.insert::<FinishExperimentRequest>();
+    set.insert_page::<Experiment>("ExperimentPage");
+    set.insert::<ExperimentSummary>();
+    set.insert::<ScoreSummary>();
+    set.insert::<ResultScore>();
+    set.insert::<ResultRow>();
+    set.insert::<ExperimentResults>();
+    set.insert::<CompareCell>();
+    set.insert::<CompareRow>();
+    set.insert::<ScoreDelta>();
+    set.insert::<ScoreDeltas>();
+    set.insert::<ExperimentComparison>();
     set.insert::<ModelPriceScope>();
     set.insert::<ModelPriceTier>();
     set.insert::<ModelPrice>();
@@ -432,6 +485,11 @@ pub fn openapi() -> OpenApi {
                 "score_definitions",
                 "Named score shapes that score writes and evaluators must fit.",
             ),
+            tag("datasets", "Versioned datasets and their items."),
+            tag(
+                "experiments",
+                "Experiments run by the SDK and their results.",
+            ),
             tag("model_prices", "Custom and built-in model prices"),
             tag("schema", "Filter and SQL catalog."),
             tag("saved_views", "Saved list views and SQL queries."),
@@ -499,6 +557,9 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
 const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
+    ("UpdateDatasetRequest", "description"),
+    ("UpdateDatasetRequest", "input_schema"),
+    ("UpdateDatasetRequest", "expected_schema"),
 ];
 
 /// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
@@ -754,6 +815,8 @@ fn paths() -> Paths {
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
+    let paths = dataset_paths(paths);
+    let paths = experiment_paths(paths);
     let paths = model_price_paths(paths);
     let paths = org_model_price_paths(paths);
     let paths = saved_view_paths(paths);
@@ -2941,6 +3004,436 @@ fn org_model_price_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/models/{id}",
             PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+const DATASET_READ: &str = "Any project member, or an API key with `read`.";
+const DATASET_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
+    let dataset = path_string("dataset", "Dataset id, or its name.");
+    let list = operation("list_datasets", "datasets", "List datasets")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<DatasetListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("DatasetPage", "One page of datasets."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_dataset", "datasets", "Create a dataset")
+        .description(Some(DATASET_WRITE))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateDatasetRequest")))
+        .responses(responses(
+            "201",
+            json_of::<Dataset>("The created dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let get = operation("get_dataset", "datasets", "Get a dataset")
+        .description(Some(DATASET_READ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The dataset."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_dataset", "datasets", "Update a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Setting a schema validates every live item first; up to 20 failures are listed (D-J-2).",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("UpdateDatasetRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Dataset>("The updated dataset."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let delete = operation("delete_dataset", "datasets", "Delete a dataset")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Experiments keep their results; their dataset link is cleared.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let item = path_uuid("item_id", "Item id, stable across versions.");
+    let version_list = operation(
+        "list_dataset_versions",
+        "datasets",
+        "List the versions of a dataset",
+    )
+    .description(Some(DATASET_READ))
+    .parameters(Some(with_query::<DatasetVersionListParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("DatasetVersionPage", "One page of versions, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let item_list = operation(
+        "list_dataset_items",
+        "datasets",
+        "List the items of a version",
+    )
+    .description(Some(DATASET_READ))
+    .parameters(Some(with_query::<DatasetItemListParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("DatasetItemPage", "One page of items, by item id."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let item_add = operation("post_dataset_items", "datasets", "Add items")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. A batch with any failing item writes nothing; the error lists the failing items.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone()]))
+        .request_body(Some(json_body("AddItemsRequest")))
+        .responses(responses(
+            "201",
+            json_of::<AddItemsResponse>("The new version and the new item ids."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let item_get = operation("get_dataset_item", "datasets", "Get an item")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<DatasetItemParams>(vec![
+            project_param(),
+            dataset.clone(),
+            item.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<DatasetItem>("The item's revision in the version."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let item_patch = operation("patch_dataset_item", "datasets", "Edit an item")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version. An edit that changes nothing creates none and answers the item as it is (D-J-3).",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone(), item.clone()]))
+        .request_body(Some(json_body("UpdateItemRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DatasetItem>("The item after the edit."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let item_delete = operation("delete_dataset_item", "datasets", "Delete an item")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Creates one new version in which the item is gone; older versions still hold it.",
+        ))
+        .parameters(Some(vec![project_param(), dataset.clone(), item]))
+        .responses(responses(
+            "200",
+            json_of::<DatasetVersion>("The new version."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let item_from_trace = operation(
+        "post_dataset_item_from_trace",
+        "datasets",
+        "Add an item copied from a trace or a span",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-8). Creates one new version holding one item copied from the trace root or from `span_id`; the request's fields replace the copied values. A trace that a pending deletion covers answers 404 and writes nothing (D-J-9).",
+    ))
+    .parameters(Some(vec![project_param(), dataset.clone()]))
+    .request_body(Some(json_body("FromTraceRequest")))
+    .responses(responses(
+        "201",
+        json_of::<DatasetItem>("The new item."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let import_preview = operation(
+        "post_dataset_import_preview",
+        "datasets",
+        "Preview the head of an import file",
+    )
+    .description(Some(
+        "Any project reader. Shows the columns and the first rows of a CSV or JSONL file and writes nothing (D-J-6).",
+    ))
+    .parameters(Some(with_query::<PreviewParams>(vec![
+        project_param(),
+        dataset.clone(),
+    ])))
+    .request_body(Some(import_preview_body()))
+    .responses(responses(
+        "200",
+        json_of::<ImportPreview>("The columns and the first rows."),
+        &[400, 401, 403, 404, 413, 429],
+    ))
+    .build();
+    let export = operation("get_dataset_export", "datasets", "Export a dataset version")
+        .description(Some(DATASET_READ))
+        .parameters(Some(with_query::<ExportParams>(vec![
+            project_param(),
+            dataset.clone(),
+        ])))
+        .responses(responses("200", export_result(), QUERY_ERRORS))
+        .build();
+    let import_op = operation(
+        "post_dataset_import",
+        "datasets",
+        "Import items from a CSV or JSONL file",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5, D-J-6). Creates one new version from the valid rows. A file with no valid row writes nothing; the error lists the rejected rows.",
+    ))
+    .parameters(Some(with_query::<ImportParams>(vec![
+        project_param(),
+        dataset,
+    ])))
+    .request_body(Some(import_upload_body()))
+    .responses(responses(
+        "201",
+        json_of::<ImportResult>("The version the import made."),
+        &[400, 401, 403, 404, 409, 413, 415, 429, 503],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/versions"),
+            PathItem::new(HttpMethod::Get, version_list),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Get, item_list),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items"),
+            PathItem::new(HttpMethod::Post, item_add),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Get, item_get),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Patch, item_patch),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Delete, item_delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/datasets"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/items/from-trace"),
+            PathItem::new(HttpMethod::Post, item_from_trace),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import/preview"),
+            PathItem::new(HttpMethod::Post, import_preview),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/import"),
+            PathItem::new(HttpMethod::Post, import_op),
+        )
+        .path(
+            format!("{PROJECT}/datasets/{{dataset}}/export"),
+            PathItem::new(HttpMethod::Get, export),
+        )
+}
+
+/// The body of an export: the items as JSONL or CSV, as a file download (D-J-7).
+fn export_result() -> Response {
+    ResponseBuilder::new()
+        .description("The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.")
+        .content("application/x-ndjson", Content::new(Some(string_schema())))
+        .content("text/csv", Content::new(Some(string_schema())))
+        .build()
+}
+
+/// The body of the preview: the first bytes of the file, raw.
+fn import_preview_body() -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some("The first bytes of the file, at most 1 MiB."))
+        .content(
+            "application/octet-stream",
+            Content::new(Some(binary_string())),
+        )
+        .build()
+}
+
+/// The body of an import: a `file` part and, for CSV, a `mapping` part.
+fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
+    let schema = ObjectBuilder::new()
+        .property("file", binary_string())
+        .property("mapping", Ref::from_schema_name("ImportMapping"))
+        .required("file");
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .description(Some(
+            "A file part (at most 100 MiB) and, for CSV, a mapping part.",
+        ))
+        .content("multipart/form-data", Content::new(Some(schema)))
+        .build()
+}
+
+const EXPERIMENT_READ: &str = "Any project member, or an API key with `read`.";
+const EXPERIMENT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
+
+fn experiment_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Experiment id.");
+    let list = operation("list_experiments", "experiments", "List experiments")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ExperimentListParams>(vec![
+            project_param(),
+        ])))
+        .responses(responses(
+            "200",
+            json_named("ExperimentPage", "One page of experiments, newest first."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_experiment", "experiments", "Create an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Pins the dataset's version and copies its items into the first page of the answer; the SDK pages the rest from the items list.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateExperimentRequest")))
+        .responses(responses(
+            "201",
+            json_of::<CreateExperimentResponse>(
+                "The experiment and the first page of its pinned items.",
+            ),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let get = operation("get_experiment", "experiments", "Get an experiment")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Experiment>("The experiment."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let delete = operation("delete_experiment", "experiments", "Delete an experiment")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5). Deletes the experiment and its results; the traces and scores in storage stay.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let results = operation("post_experiment_results", "experiments", "Post results")
+        .description(Some(EXPERIMENT_WRITE))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("ExperimentResultsRequest")))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResultsResponse>("The rows stored and skipped."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let experiment_results = operation("get_experiment_results", "experiments", "Get results")
+        .description(Some(EXPERIMENT_READ))
+        .parameters(Some(with_query::<ResultsParams>(vec![
+            project_param(),
+            id.clone(),
+        ])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentResults>("The summary of the experiment and one page of its rows."),
+            READ_ERRORS,
+        ))
+        .build();
+    let compare = operation("compare_experiments", "experiments", "Compare experiments")
+        .description(Some(
+            "Project members, a `read` personal access token or a `read` key (D-J-5). Two to four experiments of one dataset, the first the baseline: their summaries, the deltas of each candidate to the baseline, and one page of items with a cell per experiment.",
+        ))
+        .parameters(Some(with_query::<CompareParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_of::<ExperimentComparison>("The comparison and one page of its items."),
+            READ_ERRORS,
+        ))
+        .build();
+    let finish = operation(
+        "post_experiment_finish",
+        "experiments",
+        "Finish an experiment",
+    )
+    .description(Some(EXPERIMENT_WRITE))
+    .parameters(Some(vec![project_param(), id]))
+    .request_body(Some(json_body("FinishExperimentRequest")))
+    .responses(responses(
+        "200",
+        json_of::<Experiment>("The experiment after the finish."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/experiments"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/items"),
+            PathItem::new(HttpMethod::Post, results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/finish"),
+            PathItem::new(HttpMethod::Post, finish),
+        )
+        .path(
+            format!("{PROJECT}/experiments/{{id}}/results"),
+            PathItem::new(HttpMethod::Get, experiment_results),
+        )
+        .path(
+            format!("{PROJECT}/experiments/compare"),
+            PathItem::new(HttpMethod::Get, compare),
         )
 }
 

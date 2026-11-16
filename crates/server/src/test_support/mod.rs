@@ -51,6 +51,7 @@ use crate::config::{
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
 use crate::meta::api_keys::{self, NewApiKey};
+use crate::meta::datasets::{self as store, DatasetFields, NewRevision, VersionChange};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
@@ -680,6 +681,123 @@ impl TestApp {
     }
 }
 
+impl TestApp {
+    /// The example dataset `faq` of `fixtures/api/README.md` § Fixed identifiers, written
+    /// through the store into the example project. Call after `seed_examples`.
+    /// Not to be confused with `load_example_dataset`, which loads the example spans and
+    /// scores of `fixtures/api/dataset/` into storage.
+    pub(crate) async fn seed_example_faq_dataset(&self) {
+        const FAQ: &str = "01900000-0000-7000-8000-000000000c01";
+        const SCHEMA: &str = r#"{"type":"object","required":["question"],"properties":{"question":{"type":"string"}}}"#;
+        let now = self.state.clock.now_ns();
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let id: Uuid = FAQ.parse().unwrap();
+        let revision = |revision: &str,
+                        item: &str,
+                        input: serde_json::Value,
+                        expected: Option<serde_json::Value>,
+                        metadata: serde_json::Value| {
+            NewRevision {
+                revision_id: revision.parse().unwrap(),
+                item_id: item.parse().unwrap(),
+                input,
+                expected_output: expected,
+                metadata: metadata.as_object().cloned().unwrap_or_default(),
+                source_trace_id: None,
+                source_span_id: None,
+            }
+        };
+        let first = revision(
+            "01900000-0000-7000-8000-000000000d11",
+            "01900000-0000-7000-8000-000000000d01",
+            serde_json::json!({"question": "How do I reset my password?"}),
+            Some(serde_json::json!({"answer": "Use the Forgot password link on the login page."})),
+            serde_json::json!({"topic": "account"}),
+        );
+        let second_v1 = revision(
+            "01900000-0000-7000-8000-000000000d12",
+            "01900000-0000-7000-8000-000000000d02",
+            serde_json::json!({"question": "Can I export my traces?"}),
+            Some(serde_json::json!({"answer": "Yes, as CSV."})),
+            serde_json::json!({"topic": "data"}),
+        );
+        let mut third = revision(
+            "01900000-0000-7000-8000-000000000d13",
+            "01900000-0000-7000-8000-000000000d03",
+            serde_json::json!({"question": "Which plans include SSO?"}),
+            None,
+            serde_json::json!({}),
+        );
+        third.source_trace_id = Some("a1000000000000000000000000000001".parse().unwrap());
+        third.source_span_id = Some("b100000000000011".parse().unwrap());
+        let second_v2 = revision(
+            "01900000-0000-7000-8000-000000000d14",
+            "01900000-0000-7000-8000-000000000d02",
+            serde_json::json!({"question": "Can I export my traces?"}),
+            Some(serde_json::json!({"answer": "Yes, as JSONL or CSV."})),
+            serde_json::json!({"topic": "data"}),
+        );
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let fields = DatasetFields {
+                        name: "faq".to_owned(),
+                        description: Some("Support questions and expected answers".to_owned()),
+                        input_schema: Some(SCHEMA.to_owned()),
+                        expected_schema: None,
+                    };
+                    store::insert_dataset(conn, id, project, fields, now).await?;
+                    let v1 = VersionChange {
+                        close: Vec::new(),
+                        insert: vec![first, second_v1, third],
+                        description: "add 3 items".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, id, v1, now).await?;
+                    let v2 = VersionChange {
+                        close: vec!["01900000-0000-7000-8000-000000000d02".parse().unwrap()],
+                        insert: vec![second_v2],
+                        description: "edit item 01900000-0000-7000-8000-000000000d02".to_owned(),
+                        created_by: None,
+                    };
+                    store::write_version(conn, id, v2, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A `sk-llmobs-…` key with `["read", "write"]` on `seeded.project`, as its plaintext.
+    pub(crate) async fn write_key(&self, seeded: &Seeded) -> String {
+        let key = secret::new_key(KeyKind::Secret).unwrap();
+        let plaintext = key.plaintext.clone();
+        let now = self.state.clock.now_ns();
+        let project = seeded.project.id;
+        let user_id = seeded.user_id;
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_key(
+                        conn,
+                        project,
+                        key,
+                        "secret",
+                        vec![KeyScope::Read, KeyScope::Write],
+                        user_id,
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        plaintext
+    }
+}
+
 /// The spans of `fixtures/api/dataset/spans.json`, as written.
 fn dataset_spans() -> Vec<Span> {
     let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/dataset");
@@ -994,7 +1112,8 @@ impl TestRequest {
         let (router, request) = self.build();
         let response = router.oneshot(request).await.unwrap();
         let (parts, body) = response.into_parts();
-        let body = axum::body::to_bytes(body, 8 * 1024 * 1024)
+        // A results page may hold 16 MiB of text (D-J-13), so the cap is above that.
+        let body = axum::body::to_bytes(body, 32 * 1024 * 1024)
             .await
             .expect("response body");
         TestResponse {

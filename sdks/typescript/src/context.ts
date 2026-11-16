@@ -9,7 +9,13 @@
  * unchanged either way.
  */
 
-import { type Context, context, createContextKey, propagation } from "@opentelemetry/api";
+import {
+  type Context,
+  context,
+  createContextKey,
+  propagation,
+  ROOT_CONTEXT,
+} from "@opentelemetry/api";
 
 import { debug } from "./log.js";
 import { applyMask } from "./mask.js";
@@ -31,11 +37,18 @@ export interface ContextOptions {
   propagate?: boolean;
 }
 
+/** The experiment and dataset item of an `evaluate` run (D-J-16). Internal. */
+export interface ExperimentLink {
+  readonly experimentId: string;
+  readonly datasetItemId: string;
+}
+
 export interface ContextValues {
   readonly sessionId: string | undefined;
   readonly userId: string | undefined;
   readonly tags: readonly string[];
   readonly metadata: Readonly<Record<string, unknown>>;
+  readonly experiment: ExperimentLink | undefined;
 }
 
 const EMPTY_VALUES: ContextValues = Object.freeze({
@@ -43,7 +56,21 @@ const EMPTY_VALUES: ContextValues = Object.freeze({
   userId: undefined,
   tags: Object.freeze([]),
   metadata: Object.freeze({}) as Readonly<Record<string, unknown>>,
+  experiment: undefined,
 });
+
+/**
+ * A context holding only the experiment link, built on `ROOT_CONTEXT`: no
+ * active span, no baggage and none of the caller's values, so the run's root
+ * span starts a new trace. Internal (`evaluate`).
+ */
+export function experimentContext(experimentId: string, datasetItemId: string): Context {
+  const values: ContextValues = Object.freeze({
+    ...EMPTY_VALUES,
+    experiment: Object.freeze({ experimentId, datasetItemId }),
+  });
+  return ROOT_CONTEXT.setValue(CONTEXT_KEY, values);
+}
 
 /** The context values of `ctx` (the active context when omitted). Internal. */
 export function currentValues(ctx?: Context): ContextValues {
@@ -73,6 +100,7 @@ function contextFor(options: ContextOptions): Context {
       userId: inner.userId ?? outer.userId,
       tags: Object.freeze(unionTags(outer.tags, inner.tags)),
       metadata: Object.freeze({ ...outer.metadata, ...inner.metadata }),
+      experiment: outer.experiment,
     });
     let ctx = context.active().setValue(CONTEXT_KEY, merged);
     if (raw.propagate) {
@@ -172,7 +200,20 @@ function coerceValues(raw: unknown): ContextValues {
     userId: typeof record.userId === "string" ? record.userId : undefined,
     tags,
     metadata,
+    experiment: coerceLink(record.experiment),
   };
+}
+
+/** An experiment link with two string ids; anything else is no link. */
+function coerceLink(raw: unknown): ExperimentLink | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.experimentId !== "string" || typeof record.datasetItemId !== "string") {
+    return undefined;
+  }
+  return { experimentId: record.experimentId, datasetItemId: record.datasetItemId };
 }
 
 const skippedMetadataKeys = new Set<string>();

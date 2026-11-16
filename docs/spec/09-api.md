@@ -111,15 +111,15 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET /datasets/{dataset}/items?version=` · `GET /datasets/{dataset}/items/{item_id}?version=` | ordered by item id; default the latest version |
 | `POST /datasets/{dataset}/items` | batch add, 1–1,000 items (one new version); `201 {version, item_ids}` |
 | `PATCH/DELETE /datasets/{dataset}/items/{item_id}` | new version; an unchanged PATCH makes none |
-| `POST /datasets/{dataset}/import/preview` | `application/octet-stream` head of the file (≤ 1 MiB), `?format=csv\|jsonl&partial=` → columns, ≤ 20 rows and their errors; writes nothing (D-J-6) |
+| `POST /datasets/{dataset}/import/preview` | `application/octet-stream` head of the file (≤ 1 MiB), `?format=csv\|jsonl&partial=` → columns, ≤ 20 rows and their errors; writes nothing; a `read` key or read-only PAT is refused, since only `Query` routes read by `POST` (D-H-4, D-J-5) (D-J-6) |
 | `POST /datasets/{dataset}/import` | `?format=csv\|jsonl`; multipart `file` (≤ 100 MiB, ≤ 50,000 rows) + `mapping` JSON; `201 {version, imported, error_count, errors}`; at most 2 imports at once (503) (D-J-6) |
 | `GET /datasets/{dataset}/export?version=&format=jsonl\|csv` | streamed attachment (D-J-7) |
 | `POST /datasets/{dataset}/items/from-trace` | `{trace_id, span_id?, input?, expected_output?, metadata?}`; window and deletion guard apply (D-J-8) |
 | `GET/POST /experiments` · `GET/DELETE /experiments/{id}` | list `?dataset=`; create pins the version and answers the first 1,000 items (D-J-10); experiments older than the data window are 404, except to `DELETE` (D-J-14) |
 | `POST /experiments/{id}/items` | 1–500 results, outputs ≤ 32 MiB in total; a repost of `(item, repetition)` replaces it; `{stored, skipped}` (D-J-10) |
 | `POST /experiments/{id}/finish` | `{error?}` → `completed` or `failed`; later results are 409, a repeated finish with the same outcome answers the experiment (no server evaluators, D-J-11) |
-| `GET /experiments/{id}/results` | summary + rows (items × scores, cost from the trace), `?errors_only=` (D-J-13) |
-| `GET /experiments/compare?ids=a,b[,c[,d]]&threshold=` | 2–4 experiments of one dataset, the first is the baseline; deltas over the items both ran without error, one cell per experiment that ran the item (matched by id), regressions (D-J-13) |
+| `GET /experiments/{id}/results` | summary + rows (items × scores, cost from the trace), `?errors_only=`; a page holds at most 16 MiB of input, expected output and output text, and `next_cursor` continues it (D-J-13); an experiment with more than 500 000 scores or 100 000 traces cannot be summarized (400) |
+| `GET /experiments/compare?ids=a,b[,c[,d]]&threshold=` | 2–4 experiments of one dataset, the first is the baseline; deltas over the items both ran without error, one cell per experiment that ran the item (matched by id; the cell's output is its lowest repetition's), regressions; a page holds at most 16 MiB of text (D-J-13) |
 
 ### Evaluation & alerts
 

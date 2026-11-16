@@ -1,6 +1,23 @@
 export { type AiTelemetry, type AiTelemetryOptions, aiTelemetry } from "./ai.js";
+export { ApiError, Client, type ClientOptions } from "./client.js";
 export { ConfigError, type LlmobsOptions } from "./config.js";
 export { type ContextOptions, withContext } from "./context.js";
+export {
+  Dataset,
+  type DatasetInfo,
+  type DatasetItem,
+  type Datasets,
+  type NewDatasetItem,
+} from "./datasets.js";
+export {
+  type EvaluateOptions,
+  ExperimentResult,
+  evaluate,
+  type Run,
+  type Score,
+  type Scorer,
+  type ScorerArgs,
+} from "./experiments.js";
 export type { Instrumentation } from "./instrument.js";
 export {
   type LlmSpanHandle,

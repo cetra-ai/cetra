@@ -22,6 +22,7 @@ export interface RuntimeGlobals {
   setInterval?: (fn: () => void, ms: number) => unknown; // the handle may have unref()
   clearInterval?: (handle: unknown) => void;
   crypto?: { getRandomValues<T extends Uint8Array>(array: T): T };
+  performance?: { now(): number };
   fetch?: FetchLike;
   AbortSignal?: { timeout?(ms: number): unknown };
   CompressionStream?: new (format: "gzip") => unknown;
