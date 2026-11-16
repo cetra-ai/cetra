@@ -35,6 +35,10 @@ pub struct PayloadStats {
     pub chunk_refs: u64,
     /// Bytes written for the column: frames, refs pages, edge groups, filters and the header.
     pub bytes: u64,
+    /// Bytes of the frames.
+    pub frame_bytes: u64,
+    /// Bytes of the refs pages.
+    pub ref_bytes: u64,
     /// Bytes of the filters segment.
     pub filter_bytes: u64,
     /// Bytes of the edge group segments.
@@ -300,6 +304,8 @@ pub(crate) fn finish_payload_column(
             + edge_bytes
             + u64::from(filter_seg.len)
             + u64::from(header_seg.len),
+        frame_bytes: frames.stored_bytes,
+        ref_bytes,
         filter_bytes: u64::from(filter_seg.len),
         edge_bytes,
         frames_without_filter,

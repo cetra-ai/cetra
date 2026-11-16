@@ -305,6 +305,8 @@ fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
     println!("payload columns (KiB; st frames: total, without filter, percent with filter):");
     for n in names {
         let (mut st_bytes, mut frames, mut no_filter, mut has_payload) = (0u64, 0u64, 0u64, false);
+        let (mut filter_bytes, mut edge_bytes, mut unique_chunks, mut chunk_refs) = (0u64, 0u64, 0u64, 0u64);
+        let (mut frame_bytes, mut ref_bytes) = (0u64, 0u64);
         for s in summaries {
             if let Some(c) = s.columns.iter().find(|c| c.name == n) {
                 st_bytes += c.bytes;
@@ -312,6 +314,12 @@ fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
                     has_payload = true;
                     frames += u64::from(p.frames);
                     no_filter += u64::from(p.frames_without_filter);
+                    filter_bytes += p.filter_bytes;
+                    frame_bytes += p.frame_bytes;
+                    ref_bytes += p.ref_bytes;
+                    edge_bytes += p.edge_bytes;
+                    unique_chunks += u64::from(p.unique_chunks);
+                    chunk_refs += p.chunk_refs;
                 }
             }
         }
@@ -327,6 +335,16 @@ fn payload_table(dir: &Path, summaries: &[strata::FileSummary]) -> R<()> {
             line.push_str(&format!("  {v} {:>9}", b >> 10));
         }
         println!("{line}");
+        if has_payload {
+            println!(
+                "  {:22}    frames {:>9} KiB  refs {:>9} KiB  filters {:>9} KiB  edges {:>9} KiB  unique chunks {unique_chunks:>9}  chunk refs {chunk_refs:>10}",
+                "",
+                frame_bytes >> 10,
+                ref_bytes >> 10,
+                filter_bytes >> 10,
+                edge_bytes >> 10
+            );
+        }
     }
     Ok(())
 }

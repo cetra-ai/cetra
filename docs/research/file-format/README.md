@@ -44,7 +44,7 @@ LLM-trace data is the example dataset because it stresses all five.
    - The format adds a zero-parse footer, a sort-key index, one contiguous bloom section and shredded maps.
    - The design is below; the measured and projected gains are in § Expected gains.
    - Nothing in this research says to move off Parquet now. Today only the payload layer and the two existing formats are measured. That a full format built this way would beat both on every workload class is a projection, to be confirmed by an end-to-end prototype (§ Next steps).
-6. **The end-to-end prototype, Strata v0, does not confirm the projection on bytes** (§ Strata v0 results). Its cold lookups read 0.65–0.73× of the best Parquet's bytes, and its substring search 0.66×. Its real-data payload columns are 0.88× of Parquet's, against the 0.6× targeted. G1a, G6 and G7 fail, which makes the plan's provisional verdict **Stop**. Timings are not measured yet, and the size gap with the payload prototype is still to be explained.
+6. **The end-to-end prototype, Strata v0, does not confirm the projection on bytes** (§ Strata v0 results). Its cold lookups read 0.65–0.73× of the best Parquet's bytes, and its substring search 0.66×. Its real-data payload columns are 0.88× of Parquet's, against the 0.6× targeted. G1a, G6 and G7 fail, which makes the plan's provisional verdict **Stop**. Timings are not measured yet. The size gap with the payload prototype is explained: the prototype counted neither the trigram filters nor the `output` column, which has nothing to deduplicate.
 
 ## Method
 
@@ -307,10 +307,24 @@ On narrow queries, Strata reads as much as Parquet and Vortex, in a few large re
 | G7 | substring: cold bytes and warm time both ≤ 0.2 × best Parquet | cold bytes **0.66×** (100% of frames filtered) | **fail** (on bytes; time not measured) |
 | G2–G5, G8, G9 | wall time and throughput | not measured (machines loaded) | open |
 
-**Provisional outcome: Stop.** The plan's rule is "None of G1a, G6 and G7 pass → Stop". All three already fail on bytes, and no timing can change a byte count. Two things should be checked before the verdict is final:
+**Provisional outcome: Stop.** The plan's rule is "None of G1a, G6 and G7 pass → Stop". All three already fail on bytes, and no timing can change a byte count. Two points were checked before the verdict was written down:
 
-1. **The size gap with the payload prototype.** The prototype stored real SWE payloads in 17.1 MiB, against 27.8 MiB for 1 MiB zstd pages, with the same 64 KiB frames. In this run Strata is only 12% below Parquet, and its `output` column is 24% *above* pq_default. The two runs differ in three ways: the prototype deduplicated one stream per column, this run writes 4 files that each dedup on their own, and the span sets differ (47,198 LLM calls against 94,396 spans). This has not been investigated. If per-file dedup scope is the cause, G6 is a property of the file size, not of the format, and is worth one more run with 1 file.
-2. **The narrow layer in the lookup bytes.** A warm full lookup reads 1.2 MiB on `payload`. Payload frames and refs pages account for most of it. The 0.5 MB target assumed about 21 KiB per payload column.
+1. **The size gap with the payload prototype is explained, and it does not save G6.** A rerun of `swe` written as 2 files instead of 4 shows where Strata's payload bytes go. A single file is not possible here, because Arrow's 32-bit string offsets overflow at 2.16 GB. Sizes are in KiB:
+
+   | Column | Frames | Refs | Filters | Edges | Strata total | pq_default |
+   |---|---|---|---|---|---|---|
+   | `input` | 11,762 | 569 | 1,294 | 501 | 14,145 | 21,843 |
+   | `output` | 9,356 | 441 | 938 | 507 | 11,255 | 9,657 |
+   | both | 21,118 | 1,010 | 2,232 | 1,008 | **25,403 (0.81×)** | 31,500 |
+
+   - **`input` reproduces the prototype.** Its frames alone are 0.54× of Parquet, close to the prototype's 0.62×. Every agent step resends the history, so 2,237,498 chunk references resolve to only 69,730 unique chunks.
+   - **`output` has nothing to deduplicate.** Its 112,708 references point to 59,801 unique chunks, because each answer is new text. Its 64 KiB frames come out the same size as Parquet's 1 MiB pages, at 0.97×. Filters and edges then add 20% on top.
+   - **The prototype's "38–64% smaller" counted neither filters nor `output`.** Its own table gives 22.1 MiB against 27.8 MiB, or 0.79×, for 64 KiB frames *with* trigram filters. That matches this run's 0.81×. The 0.6× target in G6 was set from the figure without filters.
+   - **Dedup scope matters, but only a little.** Going from 4 files to 2 moves the ratio from 0.88× to 0.81×. Even with no filters, edges or refs at all, frames alone would be 0.67×, so G6 fails at any file count.
+2. **Where the lookup bytes go (not measured directly).**
+   - On `payload`, a warm full lookup reads 1,210 KiB, and a lookup of the light columns reads 141 KiB.
+   - So roughly 1 MiB goes to the payload columns and the remaining narrow columns, against the ~21 KiB per payload column that the 0.5 MB target assumed.
+   - Splitting that read by column, the way the size breakdown above does, is the next diagnostic if the lookup path is pursued.
 
 The timed runs (local, then S3 behind toxiproxy) can still settle G2–G5, G8 and G9. Under the decision table they can only change the write-up, not the Stop.
 
